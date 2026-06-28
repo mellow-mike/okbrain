@@ -346,6 +346,15 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-06-28 — **Frontmatter serialization uses the `yaml` package, not
+  `Bun.YAML`.** `Bun.YAML.parse` is fine and used for reads, but
+  `Bun.YAML.stringify` emits flow style (`{type: note,…}`), which is unfit for a
+  human-editable, git-diffable store. `core/okf/document.ts` uses `yaml` for both
+  parse and serialize (block style, `lineWidth: 0` to avoid folding long
+  values). One small pure-JS dep; correctness of the canonical format wins.
+- 2026-06-28 — **Default bundle path = cwd until `okb init`.** `resolveBundlePath`
+  is explicit-arg → `$OKB_BUNDLE` → cwd. Convention: run `okb` inside your brain.
+  Stage 1's `okb init` will persist a default into config.
 - 2026-06-28 — **AI posture: API-first default, easy switch to local.** `okb
   init` defaults to a hosted API provider when a key is present; switching to a
   local model (Ollama/llama.cpp/LM Studio) is one setting. Offline stays a

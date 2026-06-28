@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Build output
+bin/
+dist/
+
+# Logs / temp
+*.log
+.DS_Store
+
+# Local config / data (cross-platform dirs live outside the repo; this is a guard)
+.okbrain/
+
+# Derived index artifacts that may be written next to a bundle in tests
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Privacy: db_only concepts are gitignored per-bundle; this is a fallback marker
+**/db_only/
