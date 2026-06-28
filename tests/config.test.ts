@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   APP_NAME,
   configDir,
@@ -57,23 +57,32 @@ describe("configDir / dataDir", () => {
 });
 
 describe("resolveBundlePath", () => {
-  test("explicit absolute wins", () => {
-    const p = platform({ env: { OKB_BUNDLE: "/env" } });
-    expect(resolveBundlePath("/abs", p)).toBe("/abs");
+  // Build expectations through node:path so they're correct on every OS
+  // (on Windows `/work` resolves drive-anchored to e.g. `D:\work`).
+  const cwd = resolve("/work");
+  const base = (over: Partial<Platform> = {}) => platform({ cwd, ...over });
+
+  test("explicit wins over env and cwd", () => {
+    const p = base({ env: { OKB_BUNDLE: resolve("/env") } });
+    expect(resolveBundlePath(resolve("/abs"), p)).toBe(resolve("/abs"));
   });
 
   test("explicit relative resolves against cwd", () => {
-    const p = platform({ cwd: "/work" });
-    expect(resolveBundlePath("sub/brain", p)).toBe(join("/work", "sub", "brain"));
+    expect(resolveBundlePath(join("sub", "brain"), base())).toBe(
+      resolve(cwd, "sub", "brain"),
+    );
   });
 
   test("env override used when no explicit", () => {
-    const p = platform({ env: { OKB_BUNDLE: "/env/brain" } });
-    expect(resolveBundlePath(undefined, p)).toBe("/env/brain");
+    const p = base({ env: { OKB_BUNDLE: resolve("/env", "brain") } });
+    expect(resolveBundlePath(undefined, p)).toBe(resolve("/env", "brain"));
   });
 
   test("defaults to cwd", () => {
-    const p = platform({ cwd: "/work" });
-    expect(resolveBundlePath(undefined, p)).toBe("/work");
+    expect(resolveBundlePath(undefined, base())).toBe(cwd);
+  });
+
+  test("result is always absolute", () => {
+    expect(isAbsolute(resolveBundlePath("rel", base()))).toBe(true);
   });
 });
