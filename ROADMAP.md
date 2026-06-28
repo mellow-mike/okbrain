@@ -9,7 +9,9 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> Stage 0 — Format core + read-only viewer. Nothing built yet.
+> Stage 0 — Format core + read-only viewer. Done: 0.1 repo/tooling, 0.2 OKF
+> document model, 0.3 read-only graph extraction. Next: 0.4 engine (SQLite) +
+> index build.
 
 ---
 
@@ -18,23 +20,24 @@ Goal: open any OKF bundle, index it, search (keyword), see its graph, check
 conformance. Reuses OKF reference shapes directly.
 
 ### 0.1 Repo & tooling
-- [ ] `package.json` (name `okbrain`, bin `okb`), `tsconfig.json` (strict), Bun config
-- [ ] `.gitignore`, `LICENSE`, minimal `README.md`
-- [ ] `bunx tsc --noEmit` clean; `bun test` runs
-- [ ] CI matrix: macOS + Linux + Windows (install, typecheck, test)
-- [ ] `core/log.ts` — structured logger (levels, JSON option, stderr for progress)
-- [ ] `core/config.ts` — resolve bundle path + cross-platform config/data dirs
+- [x] `package.json` (name `okbrain`, bin `okb`), `tsconfig.json` (strict), Bun config
+- [x] `.gitignore`, `LICENSE`, minimal `README.md`
+- [x] `bunx tsc --noEmit` clean; `bun test` runs
+- [x] CI matrix: macOS + Linux + Windows (install, typecheck, test)
+- [x] `core/log.ts` — structured logger (levels, JSON option, stderr for progress)
+- [x] `core/config.ts` — resolve bundle path + cross-platform config/data dirs
+- [x] `src/cli.ts` — minimal entry stub so `bin` resolves (real CLI in 0.5)
 
 ### 0.2 OKF document model
-- [ ] `core/okf/document.ts` — parse (frontmatter + body), serialize, validate
-- [ ] `core/okf/paths.ts` — concept-id ⇄ path, segment validation
-- [ ] `core/okf/bundle.ts` — walk tree, list concepts, read concept, reserved-file handling
-- [ ] Tests: parse/serialize round-trip; missing/!malformed frontmatter; unknown-key preservation; permissive read
+- [x] `core/okf/document.ts` — parse (frontmatter + body), serialize, validate
+- [x] `core/okf/paths.ts` — concept-id ⇄ path, segment validation
+- [x] `core/okf/bundle.ts` — walk tree, list concepts, read concept, reserved-file handling
+- [x] Tests: parse/serialize round-trip; missing/!malformed frontmatter; unknown-key preservation; permissive read
 
 ### 0.3 Graph extraction (read-only)
-- [ ] `core/graph/links.ts` — extract md links → edges (resolve rel/abs, drop external/unresolved, dedupe)
-- [ ] `core/graph/backlinks.ts` — reverse edges
-- [ ] Tests: relative vs bundle-absolute resolution; broken-link tolerance; dedupe
+- [x] `core/graph/links.ts` — extract md links → edges (resolve rel/abs, drop external/unresolved, dedupe)
+- [x] `core/graph/backlinks.ts` — reverse edges
+- [x] Tests: relative vs bundle-absolute resolution; broken-link tolerance; dedupe
 
 ### 0.4 Engine (SQLite) + index build
 - [ ] `core/engine/interface.ts` — engine contract (open, migrate, upsert, query, wipe)
@@ -208,6 +211,7 @@ regression test; then mark `fixed` with the commit/PR ref.
 
 | id | date | sev | area | description / repro | suspected cause | status | fix |
 |----|------|-----|------|---------------------|-----------------|--------|-----|
+| B1 | 2026-06-28 | med | graph | `buildEdges` dedupe key was space-joined `${id} ${dst}` (and briefly held a literal NUL, marking the source binary); ids containing spaces could collide/merge distinct edges | non-unique separator for ids that may contain spaces | fixed | `JSON.stringify([id,dst])` key + regression test in `tests/graph.links.test.ts` |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -221,10 +225,17 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [ ] `okb stats` (concept/edge/tag counts, orphans, freshness)
 - [ ] Bundle templates / starter vocabularies
 - [ ] Export to other PKM formats (one-way) for portability checks
+- [ ] Link extraction is regex-based and code-fence-unaware — a `](x.md)` inside
+      a fenced code block is currently treated as an edge. Revisit if it bites.
+- [ ] Concept-id case sensitivity differs across filesystems (macOS/Windows
+      case-insensitive); decide on a canonical-casing policy before it matters.
 
 ---
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-06-28 — Stage 0.1–0.3: repo/tooling + CI matrix, log/config, OKF document
+  model (parse/serialize/validate, paths, bundle walk), read-only graph
+  extraction (links/backlinks). 44 tests green, tsc clean. Next: 0.4 engine.
 - 2026-06-28 — Closed AI-posture question: API-first default, easy local switch. Next: Stage 0.1.
 - 2026-06-28 — Repo docs authored (CLAUDE/CONTEXT/ROADMAP/PROMPT). Next: Stage 0.1.

@@ -1,0 +1,4 @@
+# Normalize to LF everywhere (CLAUDE.md: write UTF-8 with LF). Prevents Windows
+# checkouts from converting line endings and breaking the OKF round-trip tests.
+* text=auto eol=lf
+*.png binary
