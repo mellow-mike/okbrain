@@ -127,10 +127,18 @@ each link's relationship from its nearest heading/sentence (a link under
 stays a plain OKF link; okbrain just knows more.
 
 ### Storage & queries
-SQLite tables: `nodes(id, type, title, description, resource, body_len, …)`,
-`edges(src, dst, rel, evidence)`, `tags(node_id, tag)`. Neighborhoods, paths,
-and orphan detection use depth-bounded recursive CTEs. Enough for 1–2 hop
-retrieval expansion and the viewer's adjacency.
+SQLite tables: `nodes(id, type, title, description, resource, body_len,
+content_hash)`, `edges(src, dst)` (plus `rel`/`evidence` when typed edges land,
+Stage 4), `tags(node_id, tag)`, and an FTS5 table sharing `nodes.rowid`. The
+index lives at `<bundle>/.okb/index.db` — inside the bundle so it travels with
+context but gitignored and always disposable (`okb rebuild`). Neighborhoods,
+paths, and orphan detection use depth-bounded recursive CTEs; neighbor queries
+are undirected (links + backlinks). Enough for 1–2 hop retrieval expansion and
+the viewer's adjacency. Keyword search is BM25 with column weights
+title 10 / tags 5 / body 1; query terms are quoted so FTS5 operators in user
+input are inert. Index builds hash file content to skip unchanged concepts, and
+still index a concept whose frontmatter won't parse (empty metadata, raw text
+as body) — search never loses it; `okb doctor` flags it.
 
 ### Viewer (live + static)
 Adapted from OKF's self-contained `viz.html` (Cytoscape.js graph + marked.js
@@ -346,6 +354,17 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-02 — **Derived index lives at `<bundle>/.okb/index.db`.** Dot-dirs are
+  invisible to the bundle walker, so the DB can't be mistaken for content;
+  keeping it in the bundle needs no cross-bundle keying in the data dir and dies
+  with the bundle. `okb sync` (Stage 1.5) must gitignore `.okb/`.
+- 2026-07-02 — **Search ranking: BM25 with column weights title 10 / tags 5 /
+  body 1**, user query terms individually quoted (FTS5 syntax can't error or
+  inject). Unweighted BM25 let a tiny tags-only doc outrank a real title match.
+- 2026-07-02 — **Index build is tolerant where doctor is strict.** A concept
+  with unparseable frontmatter is indexed with empty metadata and its raw text
+  as body (warn-logged) instead of failing the build — the index must never be
+  the thing that hides a note; conformance complaints belong to `okb doctor`.
 - 2026-06-28 — **Frontmatter serialization uses the `yaml` package, not
   `Bun.YAML`.** `Bun.YAML.parse` is fine and used for reads, but
   `Bun.YAML.stringify` emits flow style (`{type: note,…}`), which is unfit for a

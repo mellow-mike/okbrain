@@ -13,6 +13,7 @@ dist/
 .okbrain/
 
 # Derived index artifacts that may be written next to a bundle in tests
+.okb/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
