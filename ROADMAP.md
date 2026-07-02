@@ -10,8 +10,8 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 
 ## Current focus
 > Stage 0 — Format core + read-only viewer. Done: 0.1 repo/tooling, 0.2 OKF
-> document model, 0.3 read-only graph extraction. Next: 0.4 engine (SQLite) +
-> index build.
+> document model, 0.3 read-only graph extraction, 0.4 engine (SQLite) + index
+> build. Next: 0.5 operations contract + CLI (read side).
 
 ---
 
@@ -40,12 +40,12 @@ conformance. Reuses OKF reference shapes directly.
 - [x] Tests: relative vs bundle-absolute resolution; broken-link tolerance; dedupe
 
 ### 0.4 Engine (SQLite) + index build
-- [ ] `core/engine/interface.ts` — engine contract (open, migrate, upsert, query, wipe)
-- [ ] `core/engine/sqlite.ts` — schema (`nodes`, `edges`, `tags`, FTS5), open/migrate
-- [ ] `core/engine/index-build.ts` — walk bundle → upsert nodes/edges/tags + FTS (idempotent)
-- [ ] Keyword search query (FTS5/BM25) over title/body/tags
-- [ ] Graph queries: neighbors + depth-bounded CTE
-- [ ] Tests: build is idempotent; re-index after edit; search hits; neighbor query
+- [x] `core/engine/interface.ts` — engine contract (open, migrate, upsert, query, wipe)
+- [x] `core/engine/sqlite.ts` — schema (`nodes`, `edges`, `tags`, FTS5), open/migrate
+- [x] `core/engine/index-build.ts` — walk bundle → upsert nodes/edges/tags + FTS (idempotent)
+- [x] Keyword search query (FTS5/BM25) over title/body/tags
+- [x] Graph queries: neighbors + depth-bounded CTE
+- [x] Tests: build is idempotent; re-index after edit; search hits; neighbor query
 
 ### 0.5 Operations contract + CLI (read side)
 - [ ] `core/operations.ts` — registry shape (name, params, handler, scope, trust); read ops: `search`, `read_concept`, `list_concepts`, `graph_neighbors`, `doctor`, `index`, `rebuild`, `export_viz`
@@ -94,7 +94,8 @@ Goal: a real PKM you can write to, conformant on every save, versioned in git.
 
 ### 1.5 Sync (git)
 - [ ] `core/sync.ts` — git init/commit/push/pull/status (portable spawn, no shell strings)
-- [ ] `okb sync`; `db_only`/gitignore handling for private concepts
+- [ ] `okb sync`; `db_only`/gitignore handling for private concepts; ensure the
+      bundle's `.okb/` (derived index) is gitignored
 - [ ] Tests: commit/status flow on a temp repo (skip push/pull in CI)
 
 ### 1.6 Optional
@@ -114,7 +115,9 @@ Goal: ask questions of your brain, offline or via API.
 
 ### 2.2 Embeddings + vector index
 - [ ] `core/retrieval/chunk.ts` — ~400-token chunker
-- [ ] `sqlite-vec` integration (cross-platform extension load + clear error)
+- [ ] `sqlite-vec` integration (cross-platform extension load + clear error).
+      Note: on macOS `bun:sqlite` links Apple's SQLite, which blocks extension
+      loading — needs `Database.setCustomSQLite()` with a real libsqlite3
 - [ ] Embed pipeline → store vectors; content-hash skip; provider+dim cache key
 - [ ] `okb embed` (incremental, paceable)
 - [ ] Tests: re-embed only on change; provider switch invalidates correctly
@@ -235,6 +238,10 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-02 — Stage 0.4: engine contract, SQLite engine (bun:sqlite, FTS5/BM25
+  weighted search, depth-bounded neighbor CTE), idempotent index build with
+  content-hash skip + removal. DB at `<bundle>/.okb/index.db`. 63 tests green,
+  tsc clean. Next: 0.5 ops contract + CLI.
 - 2026-06-28 — Stage 0.1–0.3: repo/tooling + CI matrix, log/config, OKF document
   model (parse/serialize/validate, paths, bundle walk), read-only graph
   extraction (links/backlinks). 44 tests green, tsc clean. Next: 0.4 engine.
