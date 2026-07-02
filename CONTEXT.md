@@ -212,10 +212,12 @@ write/admin gated; stdio + HTTP transports.
 ## Surfaces
 
 ### Contract-first ops (`core/operations.ts`)
-Every operation is declared once as data: name, params, handler,
-`scope: read|write|admin`, optional `localOnly`. Three adapters are generated:
-the CLI, the GUI's local HTTP API, and the MCP server. Add a capability once →
-it appears in all three. CLI/GUI can't drift.
+Every operation is declared once as data: name, typed param specs, handler,
+`scope: read|write|admin` (plus, for the CLI surface, `cliName` and a human
+`render`; `localOnly` arrives with MCP). `runOp` validates trust (fail-closed:
+untrusted ⇒ read-scope only) and params before any handler runs. Three adapters
+are generated: the CLI, the GUI's local HTTP API, and the MCP server. Add a
+capability once → it appears in all three. CLI/GUI can't drift.
 
 ### CLI surface (illustrative)
 | Command | Scope | Purpose |
@@ -354,6 +356,14 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-02 — **The op registry carries CLI presentation (`cliName` +
+  `render`).** Keeping the human rendering beside each op declaration lets the
+  CLI stay 100% generated (zero per-command code, so surfaces can't drift);
+  `--json` bypasses `render`, and non-CLI adapters ignore it.
+- 2026-07-02 — **`OpContext.engine()` is lazy and adapter-owned.** Ops that only
+  read the bundle (`read`, `list`) never open — or create — `.okb/index.db`;
+  the adapter opens on first use and owns close. Keeps bundle-only commands
+  side-effect-free on foreign bundles.
 - 2026-07-02 — **Derived index lives at `<bundle>/.okb/index.db`.** Dot-dirs are
   invisible to the bundle walker, so the DB can't be mistaken for content;
   keeping it in the bundle needs no cross-bundle keying in the data dir and dies

@@ -11,7 +11,8 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 ## Current focus
 > Stage 0 — Format core + read-only viewer. Done: 0.1 repo/tooling, 0.2 OKF
 > document model, 0.3 read-only graph extraction, 0.4 engine (SQLite) + index
-> build. Next: 0.5 operations contract + CLI (read side).
+> build, 0.5 operations contract + generated CLI. Next: 0.6 conformance
+> (`okb doctor`).
 
 ---
 
@@ -48,17 +49,19 @@ conformance. Reuses OKF reference shapes directly.
 - [x] Tests: build is idempotent; re-index after edit; search hits; neighbor query
 
 ### 0.5 Operations contract + CLI (read side)
-- [ ] `core/operations.ts` — registry shape (name, params, handler, scope, trust); read ops: `search`, `read_concept`, `list_concepts`, `graph_neighbors`, `doctor`, `index`, `rebuild`, `export_viz`
-- [ ] `cli.ts` — generate commands from ops; arg parsing; help; `--json`
-- [ ] Wire: `okb index`, `okb rebuild --confirm-destructive`, `okb search`, `okb read`, `okb graph`, `okb doctor`
+- [x] `core/operations.ts` — registry shape (name, cliName, params, handler, scope, render) + fail-closed trust check in `runOp`; ops: `search`, `read_concept`, `list_concepts`, `graph_neighbors`, `index`, `rebuild` (`doctor`/`export_viz` register with 0.6/0.7 when their handlers exist)
+- [x] `cli.ts` — commands/arg parsing/help all generated from ops; `--json`; `--bundle`; exit codes 0/1/2
+- [x] Wire: `okb index`, `okb rebuild --confirm-destructive`, `okb search`, `okb read`, `okb list`, `okb graph` (`okb doctor` → 0.6)
+- [x] Tests: registry uniqueness; trust gating; param validation/coercion; permissive read; rebuild confirmation; CLI help/exit codes/`--json`/persisted index
 
 ### 0.6 Conformance (`okb doctor`)
 - [ ] `core/okf/doctor.ts` — checklist (frontmatter parseable; non-empty `type`; index/log structure; permissive-consumer assertions) + report
+- [ ] Register `doctor` op (scope read) → `okb doctor` appears in the generated CLI
 - [ ] Tests: passing bundle; each failure class detected
 
 ### 0.7 Static graph viewer
 - [ ] `core/viz/export.ts` — walk bundle → graph JSON → self-contained HTML (Cytoscape + marked, type-colored nodes, directed edges, detail panel, backlinks, search, type filter, layouts)
-- [ ] `okb export viz` writes `<bundle>/viz.html`
+- [ ] Register `export_viz` op (scope read); `okb export-viz` writes `<bundle>/viz.html`
 - [ ] Tests: graph JSON node/edge counts; internal-link rewiring
 
 ### 0.8 Stage-0 acceptance
@@ -238,6 +241,10 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-02 — Stage 0.5: operations registry (scope + fail-closed trust in
+  `runOp`, typed param specs with coercion) and a fully generated CLI adapter
+  (commands/help/parsing from the registry; `--json`, `--bundle`, exit codes
+  0/1/2). 84 tests green, tsc clean. Next: 0.6 `okb doctor`.
 - 2026-07-02 — Stage 0.4: engine contract, SQLite engine (bun:sqlite, FTS5/BM25
   weighted search, depth-bounded neighbor CTE), idempotent index build with
   content-hash skip + removal. DB at `<bundle>/.okb/index.db`. 63 tests green,
