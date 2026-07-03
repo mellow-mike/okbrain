@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listConcepts, readConcept } from "../src/core/okf/bundle.ts";
+import { listConcepts, listMdFiles, readConcept } from "../src/core/okf/bundle.ts";
 
 let root: string;
 
@@ -26,6 +26,18 @@ afterAll(async () => {
 describe("listConcepts", () => {
   test("returns sorted ids, excluding reserved/hidden/non-md", async () => {
     expect(await listConcepts(root)).toEqual(["alpha", "notes/beta"]);
+  });
+});
+
+describe("listMdFiles", () => {
+  test("returns all md files including reserved, as sorted relative paths", async () => {
+    expect(await listMdFiles(root)).toEqual([
+      "alpha.md",
+      "index.md",
+      "log.md",
+      "notes/beta.md",
+      "notes/index.md",
+    ]);
   });
 });
 

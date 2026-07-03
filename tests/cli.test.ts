@@ -47,7 +47,7 @@ describe("okb CLI", () => {
     const io = capture();
     expect(await runCli([], io)).toBe(0);
     expect(io.stdout).toContain("usage: okb <command>");
-    for (const cmd of ["search", "read", "list", "graph", "index", "rebuild"])
+    for (const cmd of ["search", "read", "list", "graph", "doctor", "index", "rebuild"])
       expect(io.stdout).toContain(`\n  ${cmd} `);
   });
 
@@ -95,6 +95,23 @@ describe("okb CLI", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("--confirm-destructive");
     expect((await okb("rebuild", "--confirm-destructive")).code).toBe(0);
+  });
+
+  test("doctor exits 0 on a warnings-only bundle, 1 on conformance errors", async () => {
+    const ok = await okb("doctor");
+    expect(ok.code).toBe(0);
+    expect(ok.stdout).toContain("[missing-index]");
+    expect(ok.stdout).toContain("0 errors");
+
+    const bad = await mkdtemp(join(tmpdir(), "okb-cli-doctor-"));
+    try {
+      await writeFile(join(bad, "x.md"), "---\ntitle: no type\n---\nbody\n");
+      const io = capture();
+      expect(await runCli(["doctor", "--bundle", bad], io)).toBe(1);
+      expect(io.stdout).toContain("not conformant");
+    } finally {
+      await rm(bad, { recursive: true, force: true });
+    }
   });
 
   test("nonexistent bundle is a clear failure (exit 1)", async () => {

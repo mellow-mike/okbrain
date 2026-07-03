@@ -8,6 +8,7 @@ import { readFile } from "node:fs/promises";
 import { buildIndex, type IndexStats } from "./engine/index-build.ts";
 import type { Engine, Neighbor, SearchHit } from "./engine/interface.ts";
 import { listConcepts } from "./okf/bundle.ts";
+import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
 import { OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, validateId } from "./okf/paths.ts";
 
@@ -41,6 +42,8 @@ export interface Operation {
   handler(ctx: OpContext, params: Record<string, unknown>): Promise<unknown>;
   /** Human rendering of the result for the CLI (`--json` bypasses it). */
   render(result: unknown): string;
+  /** CLI exit status derived from a successful result (default 0). */
+  exitCode?(result: unknown): number;
 }
 
 export class OpError extends Error {
@@ -157,6 +160,24 @@ export const operations: readonly Operation[] = [
       if (ns.length === 0) return "(no neighbors)";
       return ns.map((n) => `${n.depth}  ${n.id} — ${n.title}`).join("\n");
     },
+  },
+  {
+    name: "doctor",
+    cliName: "doctor",
+    summary: "Check the bundle for OKF conformance issues",
+    scope: "read",
+    params: [],
+    handler: (ctx) => runDoctor(ctx.bundle),
+    render: (r) => {
+      const rep = r as DoctorReport;
+      return [
+        ...rep.findings.map(
+          (f) => `${f.severity === "error" ? "ERROR" : "warn "}  ${f.path}  ${f.message} [${f.check}]`,
+        ),
+        `${rep.ok ? "ok" : "not conformant"} — ${rep.files} files, ${rep.concepts} concepts, ${rep.errors} errors, ${rep.warnings} warnings`,
+      ].join("\n");
+    },
+    exitCode: (r) => ((r as DoctorReport).ok ? 0 : 1),
   },
   {
     name: "index",

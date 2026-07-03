@@ -2,7 +2,8 @@
 // Thin CLI adapter over the operations contract (CLAUDE.md invariant 2):
 // commands, arg parsing, and help are generated from `operations`; nothing here
 // reaches the bundle or engine except through an op. Local CLI calls are
-// trusted. Exit codes: 0 ok · 1 op failure · 2 usage error.
+// trusted. Exit codes: 0 ok · 1 op failure or unhealthy result (op-defined,
+// e.g. `doctor` on a non-conformant bundle) · 2 usage error.
 
 import { existsSync, statSync } from "node:fs";
 import { resolveBundlePath } from "./core/config.ts";
@@ -147,7 +148,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
   try {
     const result = await runOp(op, ctx, raw);
     io.out((json ? JSON.stringify(result, null, 2) : op.render(result)) + "\n");
-    return 0;
+    return op.exitCode?.(result) ?? 0;
   } catch (e) {
     if (e instanceof OpError) {
       io.err(e.message + "\n");

@@ -3,7 +3,7 @@
 // build forward-slash ids regardless of OS separator.
 
 import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { parse, type OkfDocument } from "./document.ts";
 import { idToAbsPath, isReservedName, relPathToId, validateId } from "./paths.ts";
 
@@ -15,7 +15,7 @@ export interface Concept {
 
 const SKIP_DIRS = new Set(["node_modules"]);
 
-// Yields forward-slash relative paths of concept files (reserved files excluded).
+// Yields forward-slash relative paths of all `.md` files (reserved included).
 async function* walk(root: string, rel: string): AsyncGenerator<string> {
   const dir = rel ? join(root, rel) : root;
   const entries = await readdir(dir, { withFileTypes: true });
@@ -25,17 +25,24 @@ async function* walk(root: string, rel: string): AsyncGenerator<string> {
     if (entry.isDirectory()) {
       if (name.startsWith(".") || SKIP_DIRS.has(name)) continue;
       yield* walk(root, childRel);
-    } else if (entry.isFile() && name.endsWith(".md") && !isReservedName(name)) {
+    } else if (entry.isFile() && name.endsWith(".md")) {
       yield childRel;
     }
   }
 }
 
+/** All `.md` files in the bundle as sorted forward-slash relative paths. */
+export async function listMdFiles(root: string): Promise<string[]> {
+  const paths: string[] = [];
+  for await (const relPath of walk(root, "")) paths.push(relPath);
+  return paths.sort();
+}
+
 /** All concept ids in the bundle, sorted; reserved and hidden files excluded. */
 export async function listConcepts(root: string): Promise<string[]> {
-  const ids: string[] = [];
-  for await (const relPath of walk(root, "")) ids.push(relPathToId(relPath));
-  return ids.sort();
+  return (await listMdFiles(root))
+    .filter((p) => !isReservedName(posix.basename(p)))
+    .map(relPathToId);
 }
 
 /** Read and parse one concept by id. Throws if the id is unsafe or absent. */
