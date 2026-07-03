@@ -11,8 +11,8 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 ## Current focus
 > Stage 0 — Format core + read-only viewer. Done: 0.1 repo/tooling, 0.2 OKF
 > document model, 0.3 read-only graph extraction, 0.4 engine (SQLite) + index
-> build, 0.5 operations contract + generated CLI. Next: 0.6 conformance
-> (`okb doctor`).
+> build, 0.5 operations contract + generated CLI, 0.6 conformance
+> (`okb doctor`). Next: 0.7 static graph viewer.
 
 ---
 
@@ -55,9 +55,9 @@ conformance. Reuses OKF reference shapes directly.
 - [x] Tests: registry uniqueness; trust gating; param validation/coercion; permissive read; rebuild confirmation; CLI help/exit codes/`--json`/persisted index
 
 ### 0.6 Conformance (`okb doctor`)
-- [ ] `core/okf/doctor.ts` — checklist (frontmatter parseable; non-empty `type`; index/log structure; permissive-consumer assertions) + report
-- [ ] Register `doctor` op (scope read) → `okb doctor` appears in the generated CLI
-- [ ] Tests: passing bundle; each failure class detected
+- [x] `core/okf/doctor.ts` — checklist (frontmatter parseable; non-empty `type`; index/log structure; permissive-consumer assertions) + report (error/warning severities; see CONTEXT §Conformance checklist)
+- [x] Register `doctor` op (scope read) → `okb doctor` appears in the generated CLI; optional `exitCode(result)` on ops maps a non-conformant report to exit 1
+- [x] Tests: passing bundle; each failure class detected; severity mapping; CLI exit codes
 
 ### 0.7 Static graph viewer
 - [ ] `core/viz/export.ts` — walk bundle → graph JSON → self-contained HTML (Cytoscape + marked, type-colored nodes, directed edges, detail panel, backlinks, search, type filter, layouts)
@@ -232,8 +232,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [ ] `okb stats` (concept/edge/tag counts, orphans, freshness)
 - [ ] Bundle templates / starter vocabularies
 - [ ] Export to other PKM formats (one-way) for portability checks
-- [ ] Link extraction is regex-based and code-fence-unaware — a `](x.md)` inside
-      a fenced code block is currently treated as an edge. Revisit if it bites.
+- [ ] Link extraction and doctor's `log.md` heading scan are regex-based and
+      code-fence-unaware — a `](x.md)` or `## heading` inside a fenced code
+      block is treated as real. Revisit if it bites.
 - [ ] Concept-id case sensitivity differs across filesystems (macOS/Windows
       case-insensitive); decide on a canonical-casing policy before it matters.
 
@@ -241,6 +242,10 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-03 — Stage 0.6: `okb doctor` — conformance checker with error/warning
+  severities (violations vs permissive-consumer tolerances), registered as a
+  read op; ops gained optional `exitCode(result)` so doctor exits 1 on a
+  non-conformant bundle. 91 tests green, tsc clean. Next: 0.7 static viewer.
 - 2026-07-02 — Stage 0.5: operations registry (scope + fail-closed trust in
   `runOp`, typed param specs with coercion) and a fully generated CLI adapter
   (commands/help/parsing from the registry; `--json`, `--bundle`, exit codes

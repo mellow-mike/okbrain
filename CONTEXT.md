@@ -91,11 +91,16 @@ Every write produces a conformant bundle:
   place frontmatter is allowed inside an `index.md`).
 
 ### Conformance checklist (`okb doctor` asserts)
-1. Every non-reserved `.md` has parseable YAML frontmatter.
-2. Every frontmatter has a non-empty `type`.
-3. `index.md` / `log.md` follow OKF structure when present.
-4. The consumer never rejects on missing optional fields, unknown types/keys,
-   broken links, or missing `index.md`.
+`core/okf/doctor.ts` walks every `.md` file and reports findings at two
+severities. **Errors** (conformance violations; CLI exits 1): unparseable YAML
+frontmatter; missing/empty `type` on a concept; frontmatter in a non-root
+`index.md`; a `log.md` heading that isn't `## YYYY-MM-DD`. **Warnings** (what a
+permissive consumer must tolerate anyway — flagged, never fatal): missing
+recommended keys (`title`/`description`/`timestamp`); broken internal links;
+root `index.md` without `okf_version`; `log.md` dates not newest-first; a
+directory with concepts (or the root) lacking `index.md`. Links to reserved
+files (`/index.md`, `/notes/log.md`) are valid targets. The consumer itself
+never rejects on any warning class — doctor is the only strict surface.
 
 ### System of record, sync, rebuild
 - The bundle is a git repo. `okb sync` = git init/commit/push/pull/status.
@@ -356,6 +361,14 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-03 — **Doctor severities: error = violation, warning = tolerated.**
+  `okb doctor` maps the permissive-consumer mandate onto two levels: only what
+  the OKF read contract actually requires (parseable YAML, non-empty `type`,
+  index/log structure) is an error; everything a consumer must tolerate (broken
+  links, missing recommended keys, missing `index.md`) is a warning. Ops can
+  now map a successful-but-unhealthy result to a CLI exit status via an
+  optional `exitCode(result)` on the registry entry — doctor exits 1 on errors
+  so it works as a CI gate; warnings alone exit 0.
 - 2026-07-02 — **The op registry carries CLI presentation (`cliName` +
   `render`).** Keeping the human rendering beside each op declaration lets the
   CLI stay 100% generated (zero per-command code, so surfaces can't drift);
