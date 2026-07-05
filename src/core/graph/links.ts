@@ -12,7 +12,7 @@ export interface Edge {
 }
 
 // Inline markdown link/image targets: the `(...)` after `](`.
-const LINK = /\]\(([^)]*)\)/g;
+export const LINK = /\]\(([^)]*)\)/g;
 
 /**
  * Resolve one raw link target to a bundle-relative concept id, or null if it is

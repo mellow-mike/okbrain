@@ -53,6 +53,16 @@ export function serialize(doc: OkfDocument): string {
   return `---\n${yaml}---\n${doc.body}`;
 }
 
+/** Coerce a frontmatter value to a string (`""` when absent or non-string). */
+export const fmString = (v: unknown): string => (typeof v === "string" ? v : "");
+
+/** Coerce frontmatter `tags` to a string array (a bare string is one tag). */
+export function fmTags(v: unknown): string[] {
+  if (typeof v === "string" && v.trim() !== "") return [v];
+  if (Array.isArray(v)) return v.filter((t): t is string => typeof t === "string");
+  return [];
+}
+
 export interface ValidationResult {
   ok: boolean;
   errors: string[];

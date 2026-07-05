@@ -153,8 +153,16 @@ title/id/tags, type filter, switchable layouts (cose / concentric /
 breadth-first / circle / grid).
 - **Live (GUI):** same component fed by the engine over the local API; reflects
   current DB, click-through to the editor.
-- **Static export:** `okb export viz` writes the exact OKF-style single HTML
-  file — no backend, shareable, committable next to the bundle.
+- **Static export:** `okb export-viz` writes the single HTML file to the fixed
+  path `<bundle>/viz.html` — no backend, shareable, committable next to the
+  bundle. Built straight from a bundle walk (works without an index). Cytoscape
+  and marked are vendored minified builds (`core/viz/vendor/`), inlined into
+  the page and embedded in the compiled binary via Bun text imports. Internal
+  `.md` links in bodies are rewired to `#concept:<encoded-id>` anchors the
+  viewer intercepts to focus the target node; external/broken links pass
+  through untouched (external ones open in a new tab). The op is scope `read`
+  despite writing a file: the output is derived, and the fixed path leaves no
+  caller-chosen destination to abuse.
 
 ---
 
@@ -242,7 +250,7 @@ capability once → it appears in all three. CLI/GUI can't drift.
 | `okb sync` | write | git commit/push/pull |
 | `okb serve` | admin | Start local GUI + API |
 | `okb mcp` | admin | Start MCP server |
-| `okb export viz` | read | Self-contained OKF-style graph HTML |
+| `okb export-viz` | read | Self-contained OKF-style graph HTML |
 
 ### GUI (local web app, `okb serve`)
 Views: **Graph** (live viewer), **Editor** (markdown + frontmatter, concept-id
@@ -361,6 +369,14 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-05 — **Viz export: vendored libs, fixed output path, `#concept:`
+  rewiring.** Cytoscape/marked are vendored files (their npm `exports` maps
+  don't expose the browser builds to import), inlined so `viz.html` makes zero
+  network requests. `export_viz` stays scope `read` per the surfaces table by
+  taking no parameters and always writing `<bundle>/viz.html`. Link rewiring
+  happens in the exported graph JSON (never on disk), turning resolvable
+  internal links into URI-encoded `#concept:` anchors so in-body navigation
+  survives markdown parsing even for ids with spaces.
 - 2026-07-03 — **Doctor severities: error = violation, warning = tolerated.**
   `okb doctor` maps the permissive-consumer mandate onto two levels: only what
   the OKF read contract actually requires (parseable YAML, non-empty `type`,

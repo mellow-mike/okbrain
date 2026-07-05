@@ -4,13 +4,18 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import { join, posix } from "node:path";
-import { parse, type OkfDocument } from "./document.ts";
+import { OkfParseError, parse, type OkfDocument } from "./document.ts";
 import { idToAbsPath, isReservedName, relPathToId, validateId } from "./paths.ts";
 
 export interface Concept {
   id: string;
   raw: string;
   doc: OkfDocument;
+}
+
+export interface PermissiveConcept extends Concept {
+  /** False when frontmatter was unparseable (doc holds `{}` + raw body). */
+  parsed: boolean;
 }
 
 const SKIP_DIRS = new Set(["node_modules"]);
@@ -50,4 +55,19 @@ export async function readConcept(root: string, id: string): Promise<Concept> {
   validateId(id);
   const raw = await readFile(idToAbsPath(root, id), "utf8");
   return { id, raw, doc: parse(raw) };
+}
+
+/** Permissive read: unparseable frontmatter yields `{}` + raw body, not a throw. */
+export async function readConceptPermissive(
+  root: string,
+  id: string,
+): Promise<PermissiveConcept> {
+  validateId(id);
+  const raw = await readFile(idToAbsPath(root, id), "utf8");
+  try {
+    return { id, raw, doc: parse(raw), parsed: true };
+  } catch (e) {
+    if (!(e instanceof OkfParseError)) throw e;
+    return { id, raw, doc: { frontmatter: {}, body: raw }, parsed: false };
+  }
 }
