@@ -9,10 +9,9 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> Stage 0 — Format core + read-only viewer. Done: 0.1 repo/tooling, 0.2 OKF
-> document model, 0.3 read-only graph extraction, 0.4 engine (SQLite) + index
-> build, 0.5 operations contract + generated CLI, 0.6 conformance
-> (`okb doctor`), 0.7 static graph viewer. Next: 0.8 Stage-0 acceptance.
+> **Stage 0 complete** (0.8 acceptance green; optional OKF-sample round-trip
+> blocked on a user-supplied sample bundle). Next: Stage 1.1 conformance
+> writer (`write_concept` through `document.ts`).
 
 ---
 
@@ -67,9 +66,14 @@ conformance. Reuses OKF reference shapes directly.
 - [x] Shared permissive read: `readConceptPermissive` in `bundle.ts`, `fmString`/`fmTags` in `document.ts` (index build + viz both use them)
 
 ### 0.8 Stage-0 acceptance
-- [ ] `bundles/example/` — tiny conformant bundle (a few linked concepts)
-- [ ] End-to-end: index example → search → graph → doctor → export viz
-- [ ] (Optional) round-trip an OKF sample bundle (GA4 / Stack Overflow / Bitcoin)
+- [x] `bundles/example/` — tiny conformant bundle (4 linked concepts, 8 edges;
+      doctor-clean: 0 errors **and** 0 warnings)
+- [x] End-to-end: index example → search → read → list → graph → doctor →
+      export viz → rebuild (`tests/acceptance.test.ts`, drives the real CLI on
+      a temp copy so `.okb/`/`viz.html` never dirty the repo bundle)
+- [!] (Optional) round-trip an OKF sample bundle (GA4 / Stack Overflow /
+      Bitcoin) — blocked on a user-supplied sample; drop one into
+      `docs/context/` (register in REFERENCES.md) to unblock
 
 ---
 
@@ -248,6 +252,11 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-05 — Stage 0.8: Stage-0 acceptance — committed `bundles/example/`
+  (self-describing, fully doctor-clean) + end-to-end CLI acceptance test over a
+  temp copy; deduped the CLI test harness into `tests/helpers.ts`; gitignored
+  `bundles/*/viz.html`. **Stage 0 complete.** 106 tests green, tsc clean.
+  Next: Stage 1.1 conformance writer.
 - 2026-07-05 — Stage 0.7: `okb export-viz` — self-contained graph viewer
   (vendored Cytoscape+marked inlined, graph JSON from a bundle walk, internal
   links rewired to `#concept:` anchors, fixed `<bundle>/viz.html` output);

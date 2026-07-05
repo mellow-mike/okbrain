@@ -2,30 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runCli, type Io } from "../src/cli.ts";
+import { runCli } from "../src/cli.ts";
+import { capture, okb as okbAt } from "./helpers.ts";
 
 let root: string;
 
-interface Capture extends Io {
-  stdout: string;
-  stderr: string;
-}
-
-function capture(): Capture {
-  const c = {
-    stdout: "",
-    stderr: "",
-    out: (t: string) => void (c.stdout += t),
-    err: (t: string) => void (c.stderr += t),
-  };
-  return c;
-}
-
-async function okb(...args: string[]): Promise<{ code: number } & Capture> {
-  const io = capture();
-  const code = await runCli([...args, "--bundle", root], io);
-  return Object.assign(io, { code });
-}
+const okb = (...args: string[]) => okbAt([...args, "--bundle", root]);
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "okb-cli-"));

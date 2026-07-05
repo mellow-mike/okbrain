@@ -369,6 +369,13 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-05 — **Example bundle is repo-committed; acceptance runs on a temp
+  copy.** `bundles/example/` is a fully conformant OKF bundle (doctor-clean
+  including warnings) that doubles as demo and acceptance fixture — it
+  describes okbrain itself so the demo graph is self-explanatory. The
+  acceptance test copies it to a temp dir before indexing/exporting so derived
+  artifacts (`.okb/`, `viz.html`) never land in the repo; `.gitignore` also
+  guards `bundles/*/viz.html` for manual demo runs.
 - 2026-07-05 — **Viz export: vendored libs, fixed output path, `#concept:`
   rewiring.** Cytoscape/marked are vendored files (their npm `exports` maps
   don't expose the browser builds to import), inlined so `viz.html` makes zero
