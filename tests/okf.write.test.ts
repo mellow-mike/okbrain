@@ -2,103 +2,147 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runCli } from "../src/cli.ts";
+import { normalizeLinks } from "../src/core/graph/links.ts";
 import { runDoctor } from "../src/core/okf/doctor.ts";
 import { parse } from "../src/core/okf/document.ts";
-import { InvalidIdError } from "../src/core/okf/paths.ts";
-import { normalizeLinks, writeConcept, WriteRefusedError } from "../src/core/okf/write.ts";
-import { okb } from "./helpers.ts";
+import { OkfWriteError, writeConcept } from "../src/core/okf/write.ts";
+import { getOp, runOp, type OpContext } from "../src/core/operations.ts";
 
 let root: string;
-const NOW = new Date("2026-07-05T10:00:00.000Z");
-const read = (rel: string) => readFile(join(root, ...rel.split("/")), "utf8");
+
+const ctx = (trusted = true): OpContext => ({
+  bundle: root,
+  trusted,
+  engine: () => {
+    throw new Error("write_concept must not touch the engine");
+  },
+});
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "okb-write-"));
 });
+
 afterEach(() => rm(root, { recursive: true, force: true }));
 
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
 describe("normalizeLinks", () => {
-  const at = (body: string) => normalizeLinks("notes/src", body);
-
-  test("relative links become bundle-absolute; absolute stay put", () => {
-    expect(at("see [x](foo.md)")).toBe("see [x](/notes/foo.md)");
-    expect(at("see [x](../top.md)")).toBe("see [x](/top.md)");
-    expect(at("see [x](/notes/foo.md)")).toBe("see [x](/notes/foo.md)");
+  test("relative links become bundle-absolute; anchors and titles survive", () => {
+    expect(normalizeLinks("notes/a", '[x](b.md) [y](../c.md#sec) [z](b.md "T")')).toBe(
+      '[x](/notes/b.md) [y](/c.md#sec) [z](/notes/b.md "T")',
+    );
   });
 
-  test("external, anchor-only, and non-md targets pass through", () => {
-    const body = "[a](https://x.io/p.md) [b](#h) [c](img.png)";
-    expect(at(body)).toBe(body);
+  test("already-absolute links are idempotent; unsafe destinations get wrapped", () => {
+    expect(normalizeLinks("a", "[x](/notes/b.md)")).toBe("[x](/notes/b.md)");
+    expect(normalizeLinks("a", "[s](<sp ace.md>)")).toBe("[s](</sp ace.md>)");
   });
 
-  test("fragments and link titles survive; spaced targets get <> wrapped", () => {
-    expect(at('[x](foo.md#sec "Foo")')).toBe('[x](/notes/foo.md#sec "Foo")');
-    expect(at('[x](<my note.md> "T")')).toBe('[x](</notes/my note.md> "T")');
-  });
-
-  test("idempotent", () => {
-    const once = at("see [x](foo.md#s) and [y](<a b.md>)");
-    expect(at(once)).toBe(once);
+  test("external, anchor-only, and non-md links pass through", () => {
+    const body = "[e](https://x.test/a.md) [a](#frag) [p](pic.png)";
+    expect(normalizeLinks("a", body)).toBe(body);
   });
 });
 
-describe("writeConcept", () => {
-  test("create scaffolds conformant frontmatter and passes doctor", async () => {
-    const r = await writeConcept(
-      root,
-      { id: "notes/alpha", type: "note", title: "Alpha", description: "First note.", body: "Hello [beta](beta.md)" },
-      NOW,
-    );
-    expect(r).toEqual({ id: "notes/alpha", created: true, changed: true });
+describe("writeConcept: create", () => {
+  test("scaffolds conformant frontmatter in canonical order and passes doctor", async () => {
+    await writeConcept(root, { id: "notes/beta", type: "note", title: "Beta", description: "Link target" });
+    const r = await writeConcept(root, {
+      id: "notes/alpha",
+      type: "note",
+      title: "Alpha",
+      description: "First note",
+      tags: ["t1"],
+      body: "Hello [beta](beta.md).",
+    });
+    expect(r).toMatchObject({ id: "notes/alpha", created: true });
 
-    const raw = await read("notes/alpha.md");
-    expect(raw).toBe(
-      "---\ntype: note\ntitle: Alpha\ndescription: First note.\ntimestamp: 2026-07-05T10:00:00Z\n---\nHello [beta](/notes/beta.md)\n",
-    );
+    const raw = await readFile(r.path, "utf8");
+    expect(raw.startsWith("---\ntype: note\ntitle: Alpha\ndescription: First note\ntimestamp: ")).toBe(true);
+    const { frontmatter, body } = parse(raw);
+    expect(frontmatter.timestamp).toMatch(ISO);
+    expect(frontmatter.tags).toEqual(["t1"]);
+    expect(body).toBe("Hello [beta](/notes/beta.md).\n"); // normalized + trailing LF
+
     const report = await runDoctor(root);
-    expect(report.errors).toBe(0);
+    expect(report.ok).toBe(true);
+    expect(report.findings.filter((f) => f.path === "notes/alpha.md")).toEqual([]);
   });
 
-  test("create defaults title to the id basename and requires type", async () => {
-    await writeConcept(root, { id: "ideas/spark", type: "idea" }, NOW);
-    expect(parse(await read("ideas/spark.md")).frontmatter.title).toBe("spark");
-    expect(writeConcept(root, { id: "ideas/untyped" }, NOW)).rejects.toThrow(WriteRefusedError);
-  });
-
-  test("edit preserves unknown keys, key order, and untouched fields", async () => {
-    await writeFile(
-      join(root, "keep.md"),
-      "---\ntype: note\ncustom_key: 42\ntitle: Old\ntimestamp: 2020-01-01T00:00:00Z\n---\nold body\n",
+  test("create requires type/title/description", async () => {
+    expect(writeConcept(root, { id: "a", title: "A", description: "d" })).rejects.toThrow(
+      OkfWriteError,
     );
-    const r = await writeConcept(root, { id: "keep", title: "New" }, NOW);
-    expect(r).toEqual({ id: "keep", created: false, changed: true });
-    const raw = await read("keep.md");
-    expect(raw).toBe(
-      "---\ntype: note\ncustom_key: 42\ntitle: New\ntimestamp: 2026-07-05T10:00:00Z\n---\nold body\n",
+    expect(writeConcept(root, { id: "a", type: "note", title: "A" })).rejects.toThrow(
+      "description is required",
     );
   });
 
-  test("byte-identical write is a no-op: file and timestamp untouched", async () => {
-    await writeConcept(root, { id: "same", type: "note", body: "stable" }, NOW);
-    const before = await read("same.md");
-    const r = await writeConcept(root, { id: "same", body: "stable" }, new Date("2027-01-01T00:00:00Z"));
-    expect(r.changed).toBe(false);
-    expect(await read("same.md")).toBe(before);
-  });
-
-  test("reserved ids and unparseable-frontmatter edits are refused", async () => {
-    expect(writeConcept(root, { id: "notes/index", type: "note" }, NOW)).rejects.toThrow(InvalidIdError);
-    await writeFile(join(root, "broken.md"), "---\n: [\n---\nbody\n");
-    expect(writeConcept(root, { id: "broken", title: "X" }, NOW)).rejects.toThrow(WriteRefusedError);
+  test("reserved names are refused", async () => {
+    expect(writeConcept(root, { id: "notes/index", type: "note", title: "x", description: "d" }))
+      .rejects.toThrow("reserved");
   });
 });
 
-describe("okb write (CLI over the op)", () => {
-  test("creates, updates, and reports no-ops", async () => {
-    const at = (...args: string[]) => okb([...args, "--bundle", root]);
-    expect((await at("write", "notes/n", "--type", "note", "--body", "hi")).stdout).toBe("created notes/n\n");
-    expect((await at("write", "notes/n", "--title", "N")).stdout).toBe("updated notes/n\n");
-    expect((await at("write", "notes/n", "--title", "N")).stdout).toBe("unchanged notes/n\n");
-    expect((await at("write", "nope")).code).toBe(1); // create without --type is refused
+describe("writeConcept: update", () => {
+  const seed = () =>
+    writeFile(
+      join(root, "a.md"),
+      "---\ntype: note\ntitle: Old\ndescription: Keep me\ntimestamp: 2020-01-01T00:00:00Z\ncustom_key: 42\ntags: [x]\n---\nOld body.\n",
+    );
+
+  test("preserves unknown keys and unspecified fields; refreshes timestamp", async () => {
+    await seed();
+    const r = await writeConcept(root, { id: "a", title: "New" });
+    expect(r.created).toBe(false);
+    const { frontmatter, body } = parse(await readFile(r.path, "utf8"));
+    expect(frontmatter).toMatchObject({
+      type: "note",
+      title: "New",
+      description: "Keep me",
+      custom_key: 42,
+      tags: ["x"],
+    });
+    expect(frontmatter.timestamp).toMatch(ISO);
+    expect(frontmatter.timestamp).not.toBe("2020-01-01T00:00:00Z");
+    expect(body).toBe("Old body.\n");
+  });
+
+  test("tags: [] clears; undefined keeps", async () => {
+    await seed();
+    await writeConcept(root, { id: "a", tags: [] });
+    expect(parse(await readFile(join(root, "a.md"), "utf8")).frontmatter.tags).toBeUndefined();
+  });
+
+  test("refuses to overwrite a concept whose frontmatter is unparseable", async () => {
+    await writeFile(join(root, "bad.md"), "---\n: [broken\n---\nbody\n");
+    expect(writeConcept(root, { id: "bad", title: "T" })).rejects.toThrow("unparseable");
+  });
+});
+
+describe("write_concept op", () => {
+  test("is gated for untrusted callers before the handler runs", async () => {
+    expect(
+      runOp(getOp("write_concept")!, ctx(false), { id: "a", type: "note", title: "A", description: "d" }),
+    ).rejects.toThrow("not available to untrusted callers");
+  });
+
+  test("okb write: CLI round-trip, comma tags, bad params exit 2", async () => {
+    let out = "";
+    const io = { out: (t: string) => void (out += t), err: (t: string) => void (out += t) };
+    expect(
+      await runCli(
+        ["write", "notes/n", "--type", "note", "--title", "N", "--description", "d",
+         "--tags", "a, b,", "--body", "See [x](x.md).", "--bundle", root],
+        io,
+      ),
+    ).toBe(0);
+    expect(out).toContain("created notes/n");
+    const { frontmatter, body } = parse(await readFile(join(root, "notes", "n.md"), "utf8"));
+    expect(frontmatter.tags).toEqual(["a", "b"]);
+    expect(body).toBe("See [x](/notes/x.md).\n");
+
+    expect(await runCli(["write", "notes/n2", "--title", "no type", "--bundle", root], io)).toBe(2);
   });
 });

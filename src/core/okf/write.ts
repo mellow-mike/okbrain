@@ -1,118 +1,90 @@
-// Conformance writer (Stage 1.1): every concept write goes through here so the
-// bundle stays OKF-conformant — frontmatter scaffold (type/title/description/
-// timestamp), unknown keys preserved on edit, internal links normalized to
-// bundle-absolute, UTF-8 LF output. A byte-identical write is a no-op (the
-// timestamp only refreshes on meaningful change).
+// Conformance writer (Stage 1.1): every concept write routes through here so
+// the bundle stays conformant (CLAUDE.md invariant 1). Emits the full
+// frontmatter scaffold (type/title/description/timestamp, plus resource/tags
+// when applicable) in canonical key order, preserves unknown keys on edit,
+// refreshes timestamp, and normalizes body links to bundle-absolute form.
+// index.md/log.md maintenance lands with Stage 1.2.
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, posix } from "node:path";
-import { LINK, resolveLinkTarget } from "../graph/links.ts";
-import { OkfParseError, parse, serialize, type OkfDocument } from "./document.ts";
-import { idToAbsPath, InvalidIdError, isReservedName, validateId } from "./paths.ts";
+import { normalizeLinks } from "../graph/links.ts";
+import { readConceptPermissive } from "./bundle.ts";
+import { fmString, serialize } from "./document.ts";
+import { idToAbsPath, isReservedName } from "./paths.ts";
 
-export class WriteRefusedError extends Error {}
+export class OkfWriteError extends Error {}
 
-export interface WriteParams {
+export interface WriteConceptInput {
   id: string;
-  /** Required when creating; optional (retype) on edit. */
   type?: string;
   title?: string;
   description?: string;
-  /** Replaces the whole body; omitted = keep the existing body. */
+  resource?: string;
+  /** `[]` removes existing tags; undefined keeps them. */
+  tags?: string[];
+  /** Markdown body; undefined keeps the existing body on update. */
   body?: string;
 }
 
 export interface WriteResult {
   id: string;
+  path: string;
   created: boolean;
-  /** False when the write was a byte-identical no-op (file untouched). */
-  changed: boolean;
 }
 
-/**
- * Rewrite internal `.md` link targets to bundle-absolute (`/dir/x.md`) form,
- * preserving fragments and link titles. External/anchor/non-`.md` targets and
- * links that escape the bundle root pass through untouched. Pure, idempotent.
- */
-export function normalizeLinks(srcId: string, body: string): string {
-  return body.replace(LINK, (match, raw: string) => {
-    const id = resolveLinkTarget(srcId, raw);
-    if (id === null) return match;
-    let t = raw.trim();
-    let title = "";
-    if (t.startsWith("<") && t.includes(">")) {
-      title = t.slice(t.indexOf(">") + 1).trim();
-      t = t.slice(1, t.indexOf(">"));
-    } else {
-      const sp = t.search(/\s/);
-      if (sp >= 0) {
-        title = t.slice(sp + 1).trim();
-        t = t.slice(0, sp);
-      }
-    }
-    const hash = t.indexOf("#");
-    const target = `/${id}.md${hash >= 0 ? t.slice(hash) : ""}`;
-    const wrapped = /[\s()]/.test(target) ? `<${target}>` : target;
-    return `](${wrapped}${title ? ` ${title}` : ""})`;
-  });
-}
+/** Emitted `timestamp` format: ISO 8601 UTC, second precision. */
+export const nowTimestamp = (): string =>
+  new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 
-const isoSeconds = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, "Z");
+const SCAFFOLD = new Set(["type", "title", "description", "timestamp", "resource", "tags"]);
 
-/** Create or update one concept conformantly. Parent directories are created. */
+/** Create or update one concept. Returns the written path and created flag. */
 export async function writeConcept(
   root: string,
-  p: WriteParams,
-  now = new Date(),
+  input: WriteConceptInput,
 ): Promise<WriteResult> {
-  validateId(p.id);
-  if (isReservedName(`${posix.basename(p.id)}.md`))
-    throw new InvalidIdError(`reserved filename cannot be a concept: ${p.id}.md`);
+  const path = idToAbsPath(root, input.id); // validates the id
+  if (isReservedName(posix.basename(input.id) + ".md"))
+    throw new OkfWriteError(
+      `${input.id} is a reserved file, not a concept; index.md/log.md are maintained by okbrain`,
+    );
 
-  const abs = idToAbsPath(root, p.id);
-  let raw: string | null = null;
+  let existing;
   try {
-    raw = await readFile(abs, "utf8");
+    existing = await readConceptPermissive(root, input.id);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
-  let existing: OkfDocument | null = null;
-  if (raw !== null) {
-    try {
-      existing = parse(raw);
-    } catch (e) {
-      if (!(e instanceof OkfParseError)) throw e;
-      throw new WriteRefusedError(
-        `refusing to edit ${p.id}: unparseable frontmatter (fix it by hand; see okb doctor)`,
+  if (existing && !existing.parsed)
+    throw new OkfWriteError(
+      `refusing to overwrite ${input.id}: its frontmatter is unparseable (see okb doctor)`,
+    );
+  const prev = existing?.doc.frontmatter;
+  const prevBody = existing?.doc.body ?? "";
+
+  // Canonical key order; unknown keys from the existing doc follow, verbatim.
+  const fm: Record<string, unknown> = {
+    type: input.type ?? fmString(prev?.type),
+    title: input.title ?? fmString(prev?.title),
+    description: input.description ?? fmString(prev?.description),
+    timestamp: nowTimestamp(),
+  };
+  for (const k of ["type", "title", "description"] as const)
+    if ((fm[k] as string).trim() === "")
+      throw new OkfWriteError(
+        `${k} is required (conformant writes always carry type/title/description)`,
       );
-    }
-  }
+  const resource = input.resource ?? prev?.resource;
+  if (resource !== undefined && resource !== "") fm.resource = resource;
+  const tags = input.tags ?? prev?.tags;
+  if (Array.isArray(tags) ? tags.length > 0 : tags !== undefined) fm.tags = tags;
+  for (const [k, v] of Object.entries(prev ?? {}))
+    if (!SCAFFOLD.has(k)) fm[k] = v;
 
-  let fm: Record<string, unknown>;
-  if (existing) {
-    fm = { ...existing.frontmatter }; // unknown keys + key order preserved
-    if (p.type !== undefined) fm.type = p.type;
-    if (p.title !== undefined) fm.title = p.title;
-    if (p.description !== undefined) fm.description = p.description;
-  } else {
-    if (!p.type) throw new WriteRefusedError(`creating ${p.id} requires --type`);
-    fm = {
-      type: p.type,
-      title: p.title ?? posix.basename(p.id),
-      description: p.description ?? "",
-      timestamp: "",
-    };
-  }
-
-  let body = normalizeLinks(p.id, p.body ?? existing?.body ?? "");
+  let body = normalizeLinks(input.id, input.body ?? prevBody).replace(/\r\n?/g, "\n");
   if (body !== "" && !body.endsWith("\n")) body += "\n";
 
-  // No meaningful change (old timestamp still in fm) → leave the file alone.
-  if (existing && serialize({ frontmatter: fm, body }) === raw)
-    return { id: p.id, created: false, changed: false };
-
-  fm.timestamp = isoSeconds(now);
-  await mkdir(dirname(abs), { recursive: true });
-  await writeFile(abs, serialize({ frontmatter: fm, body }), "utf8");
-  return { id: p.id, created: existing === null, changed: true };
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, serialize({ frontmatter: fm, body }), "utf8");
+  return { id: input.id, path, created: prev === undefined };
 }

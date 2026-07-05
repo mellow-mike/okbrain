@@ -9,8 +9,8 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> Stage 1 — Authoring + graph + sync. Done: 1.1 conformance writer
-> (`okb write`). Also: static viewer redesigned (dark default, validated
+> Stage 1 — authoring + graph + sync (Stage 0 complete). Done: 1.1 conformance
+> writer (`okb write`); static viewer redesigned (dark default, validated
 > palettes, tooltips). Next: 1.2 index.md / log.md generation.
 
 ---
@@ -66,11 +66,8 @@ conformance. Reuses OKF reference shapes directly.
 - [x] Shared permissive read: `readConceptPermissive` in `bundle.ts`, `fmString`/`fmTags` in `document.ts` (index build + viz both use them)
 
 ### 0.8 Stage-0 acceptance
-- [x] `bundles/example/` — tiny conformant bundle (4 linked concepts, 8 edges;
-      doctor-clean: 0 errors **and** 0 warnings)
-- [x] End-to-end: index example → search → read → list → graph → doctor →
-      export viz → rebuild (`tests/acceptance.test.ts`, drives the real CLI on
-      a temp copy so `.okb/`/`viz.html` never dirty the repo bundle)
+- [x] `bundles/example/` — tiny conformant bundle (4 cross-linked concepts in 3 dirs; doctor-clean incl. warnings)
+- [x] End-to-end: index example → search → graph → doctor → export viz (`tests/e2e.stage0.test.ts` drives the real CLI on a temp copy)
 - [!] (Optional) round-trip an OKF sample bundle (GA4 / Stack Overflow /
       Bitcoin) — blocked on a user-supplied sample; drop one into
       `docs/context/` (register in REFERENCES.md) to unblock
@@ -81,9 +78,10 @@ conformance. Reuses OKF reference shapes directly.
 Goal: a real PKM you can write to, conformant on every save, versioned in git.
 
 ### 1.1 Conformance writer
-- [x] `write_concept` op (`core/okf/write.ts`, CLI `okb write`, scope `write`); frontmatter scaffold (`type/title/description/timestamp`); refresh `timestamp` on meaningful change only (byte-identical write = no-op)
-- [x] Link normalization to bundle-absolute on write (fragments/titles preserved; idempotent)
-- [x] Tests: written docs pass `doctor`; unknown keys + key order preserved on edit; reserved ids and unparseable-frontmatter edits refused; untrusted callers gated
+- [x] `write_concept` op → through `document.ts`; frontmatter scaffold (`type/title/description/timestamp`); refresh `timestamp`
+- [x] Link normalization to bundle-absolute on write (`normalizeLinks`; anchors + `"title"` suffixes preserved, `<...>`-wrap when needed)
+- [x] Tests: written docs pass `doctor`; unknown keys preserved on edit
+- [x] Guardrails: reserved ids refused; unparseable existing frontmatter refused (no clobber); `tags: []` clears; write op untrusted-gated
 
 ### 1.2 index.md / log.md generation
 - [ ] `core/okf/indexmd.ts` — regenerate `index.md` per touched dir (group by `type`, entries carry `description`, synthesize dir descriptions)
@@ -235,6 +233,9 @@ Severity: `crit` (data loss / corruption / non-conformant write) · `high`
 ## Backlog (unscheduled ideas)
 Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [ ] Full-text snippet highlighting in `okb search` output
+- [ ] Writer no-op detection: skip the write (and the `timestamp` refresh) when
+      the result would be byte-identical, so re-running imports/agent passes
+      never churns git history
 - [ ] `okb stats` (concept/edge/tag counts, orphans, freshness)
 - [ ] Bundle templates / starter vocabularies
 - [ ] Export to other PKM formats (one-way) for portability checks
@@ -252,17 +253,24 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
-- 2026-07-05 — Stage 1.1: conformance writer (`okb write` — scaffold, unknown-key
-  preservation, absolute-link normalization, no-op detection) + viewer redesign
-  (dark default with persisted toggle, CSS-var token bridge into Cytoscape,
-  per-mode CVD-validated palettes, hover tooltips, Links to/Cited by, type
-  counts); verified in Chromium both themes, zero JS errors/external requests.
-  116 tests green, tsc clean. Next: 1.2 index.md/log.md generation.
-- 2026-07-05 — Stage 0.8: Stage-0 acceptance — committed `bundles/example/`
-  (self-describing, fully doctor-clean) + end-to-end CLI acceptance test over a
-  temp copy; deduped the CLI test harness into `tests/helpers.ts`; gitignored
-  `bundles/*/viz.html`. **Stage 0 complete.** 106 tests green, tsc clean.
-  Next: Stage 1.1 conformance writer.
+- 2026-07-05 — Merged parallel sessions: two branches independently built 0.8
+  and 1.1; kept main's example bundle, writer, and e2e test, kept this branch's
+  viewer redesign (dark default with persisted toggle, CSS-var token bridge
+  into Cytoscape, per-mode CVD-validated palettes, hover tooltips, Links
+  to/Cited by, type counts; verified in Chromium both themes — zero JS
+  errors/external requests) and `tests/helpers.ts` dedupe. Backlogged the
+  dropped writer's no-op detection idea.
+- 2026-07-05 — Stage 1.1: conformance writer — `okb write` creates/updates
+  concepts with the full scaffold in canonical key order, refreshes
+  `timestamp` (ISO-8601 UTC), preserves unknown keys, normalizes links to
+  bundle-absolute (anchors/titles preserved), refuses reserved ids and
+  unparseable-frontmatter overwrites. 116 tests green, tsc clean. Next: 1.2
+  index.md/log.md generation.
+- 2026-07-05 — Stage 0.8: `bundles/example/` (tiny fully-conformant bundle,
+  0 errors 0 warnings) + end-to-end acceptance test through the real CLI
+  (index → search → read → graph → doctor → export-viz → rebuild); gitignored
+  the bundle's derived `viz.html`. **Stage 0 complete.** 105 tests green, tsc
+  clean. Next: Stage 1.1 conformance writer.
 - 2026-07-05 — Stage 0.7: `okb export-viz` — self-contained graph viewer
   (vendored Cytoscape+marked inlined, graph JSON from a bundle walk, internal
   links rewired to `#concept:` anchors, fixed `<bundle>/viz.html` output);

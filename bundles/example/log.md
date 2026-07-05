@@ -2,7 +2,4 @@
 
 ## 2026-07-05
 
-- **Creation** Seeded the bundle with [okbrain](/okbrain.md),
-  [Open Knowledge Format](/concepts/okf.md),
-  [knowledge graph](/concepts/knowledge-graph.md), and
-  [local-first](/concepts/local-first.md).
+**Creation**: [Zettelkasten](/notes/zettelkasten.md), [Evergreen notes](/notes/evergreen-notes.md), [okbrain](/projects/okbrain.md), [Open Knowledge Format](/references/open-knowledge-format.md) — seeded the example bundle.

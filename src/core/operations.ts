@@ -11,7 +11,7 @@ import { listConcepts } from "./okf/bundle.ts";
 import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
 import { OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, validateId } from "./okf/paths.ts";
-import { writeConcept, WriteRefusedError, type WriteResult } from "./okf/write.ts";
+import { OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
 import { exportViz, type VizExport } from "./viz/export.ts";
 
 export type Scope = "read" | "write" | "admin";
@@ -182,6 +182,45 @@ export const operations: readonly Operation[] = [
     exitCode: (r) => ((r as DoctorReport).ok ? 0 : 1),
   },
   {
+    name: "write_concept",
+    cliName: "write",
+    summary: "Create or update a concept through the conformance writer",
+    scope: "write",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "concept id, e.g. notes/foo" },
+      { name: "type", type: "string", description: "concept type (required on create)" },
+      { name: "title", type: "string", description: "title (required on create)" },
+      { name: "description", type: "string", description: "one-line description (required on create)" },
+      { name: "body", type: "string", description: "markdown body; links are normalized to bundle-absolute" },
+      { name: "tags", type: "string", description: "comma-separated tags (empty string clears)" },
+      { name: "resource", type: "string", description: "canonical URI for reference concepts" },
+    ],
+    handler: async (ctx, p) => {
+      const tags = p.tags as string | undefined;
+      try {
+        return await writeConcept(ctx.bundle, {
+          id: p.id as string,
+          type: p.type as string | undefined,
+          title: p.title as string | undefined,
+          description: p.description as string | undefined,
+          body: p.body as string | undefined,
+          resource: p.resource as string | undefined,
+          tags: tags === undefined
+            ? undefined
+            : tags.split(",").map((t) => t.trim()).filter((t) => t !== ""),
+        });
+      } catch (e) {
+        if (e instanceof OkfWriteError || e instanceof InvalidIdError)
+          throw new OpError(e.message, "bad_params");
+        throw e;
+      }
+    },
+    render: (r) => {
+      const w = r as WriteResult;
+      return `${w.created ? "created" : "updated"} ${w.id}`;
+    },
+  },
+  {
     // Scope read despite writing a file: output is derived (never canonical
     // knowledge) and the path is fixed to <bundle>/viz.html — no caller-chosen
     // destination an untrusted caller could abuse.
@@ -194,32 +233,6 @@ export const operations: readonly Operation[] = [
     render: (r) => {
       const v = r as VizExport;
       return `wrote ${v.path} (${v.nodes} concepts, ${v.edges} links)`;
-    },
-  },
-  {
-    name: "write_concept",
-    cliName: "write",
-    summary: "Create or update a concept conformantly (frontmatter scaffold, absolute links)",
-    scope: "write",
-    params: [
-      { name: "id", type: "string", required: true, positional: true, description: "concept id, e.g. notes/foo" },
-      { name: "type", type: "string", description: "concept type (required when creating)" },
-      { name: "title", type: "string", description: "title (defaults to the id basename on create)" },
-      { name: "description", type: "string", description: "one-line description" },
-      { name: "body", type: "string", description: "markdown body (replaces the existing body)" },
-    ],
-    handler: async (ctx, p) => {
-      try {
-        return await writeConcept(ctx.bundle, p as { id: string } & Record<string, string>);
-      } catch (e) {
-        if (e instanceof InvalidIdError) throw new OpError(e.message, "bad_params");
-        if (e instanceof WriteRefusedError) throw new OpError(e.message, "refused");
-        throw e;
-      }
-    },
-    render: (r) => {
-      const w = r as WriteResult;
-      return `${w.created ? "created" : w.changed ? "updated" : "unchanged"} ${w.id}`;
     },
   },
   {

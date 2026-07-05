@@ -82,16 +82,15 @@ be mirrored as first-class concepts under `references/`.
 Every write produces a conformant bundle (`writeConcept`, exposed as the
 `write_concept` op / `okb write`):
 - Valid delimited YAML; body preserved where possible; unknown frontmatter keys
-  and key order preserved on edit.
-- Required keys present (create scaffolds `type`/`title`/`description`/
-  `timestamp`; `type` is required, `title` defaults to the id basename);
-  `timestamp` refreshed on meaningful change only — a byte-identical write is a
-  no-op that leaves the file untouched.
-- Links normalized to bundle-absolute form (fragments and link titles survive;
-  spaced targets get `<…>` wrapped).
-- Reserved basenames (`index`, `log`) are rejected as concept ids; a concept
-  whose frontmatter won't parse is refused for edit (fix by hand, per doctor)
-  rather than silently rewritten.
+  preserved verbatim on edit (canonical scaffold keys first, unknowns after).
+- Full scaffold present: create requires `type`/`title`/`description`;
+  `timestamp` (ISO-8601 UTC, second precision) is refreshed on every write;
+  `resource`/`tags` included when applicable (`tags: []` clears).
+- Links normalized to bundle-absolute form (`#anchors` and `"title"` suffixes
+  survive; destinations with spaces/parens get `<…>` wrapped).
+- Reserved ids (`index`, `log` basenames) are refused — those files belong to
+  the Stage-1.2 generators; a concept whose frontmatter won't parse is never
+  overwritten (fix by hand, per doctor).
 - (Stage 1.2, not yet built) `index.md` regenerated for touched directories
   (grouped by `type`, entries carry each concept's `description`; directory
   descriptions synthesized); `log.md` appended (`## YYYY-MM-DD` headings,
@@ -387,14 +386,6 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
-- 2026-07-05 — **Writer semantics: no-op writes don't touch the file; broken
-  frontmatter is refused, not repaired.** `writeConcept` compares the would-be
-  serialization (old timestamp still in place) against the file and returns
-  `changed: false` without writing when identical — so re-running an import or
-  agent pass never churns `timestamp`/git history. Editing a concept whose
-  frontmatter won't parse is refused with a pointer to doctor: silently
-  re-serializing would fold the broken frontmatter text into the body and
-  destroy the user's intent. Reserved basenames are invalid concept ids.
 - 2026-07-05 — **Viewer theming: dark default, CSS-variable token bridge,
   per-mode validated palettes.** The static viewer defaults to dark with a
   persisted light toggle. All chrome colors are defined once as CSS custom
@@ -404,13 +395,18 @@ sections above as current truth; this log says *why/when*.
   from two 8-slot categorical palettes (one per surface, fixed CVD-safe order,
   validated for contrast/CVD separation); types beyond 8 share a muted
   overflow gray rather than cycling hues.
-- 2026-07-05 — **Example bundle is repo-committed; acceptance runs on a temp
-  copy.** `bundles/example/` is a fully conformant OKF bundle (doctor-clean
-  including warnings) that doubles as demo and acceptance fixture — it
-  describes okbrain itself so the demo graph is self-explanatory. The
-  acceptance test copies it to a temp dir before indexing/exporting so derived
-  artifacts (`.okb/`, `viz.html`) never land in the repo; `.gitignore` also
-  guards `bundles/*/viz.html` for manual demo runs.
+- 2026-07-05 — **Writer semantics (`core/okf/write.ts`).** `timestamp` is
+  ISO-8601 UTC at second precision and is always refreshed on write (no
+  caller override). Canonical frontmatter key order: type, title,
+  description, timestamp, resource?, tags?, then unknown keys verbatim in
+  original order. Create requires type/title/description (the full scaffold —
+  conformant-on-write is strict even though reads stay permissive); updates
+  may set any subset. Reserved ids (`index`, `*/log`) are refused — those
+  files belong to the generators (1.2). A concept whose existing frontmatter
+  won't parse is never overwritten. Link normalization preserves `#anchors`
+  and `"title"` suffixes and `<...>`-wraps destinations containing
+  spaces/parens. `tags: []` clears tags; index/log regeneration and
+  incremental DB update land with 1.2/1.4.
 - 2026-07-05 — **Viz export: vendored libs, fixed output path, `#concept:`
   rewiring.** Cytoscape/marked are vendored files (their npm `exports` maps
   don't expose the browser builds to import), inlined so `viz.html` makes zero
