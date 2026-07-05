@@ -369,6 +369,18 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-05 — **Writer semantics (`core/okf/write.ts`).** `timestamp` is
+  ISO-8601 UTC at second precision and is always refreshed on write (no
+  caller override). Canonical frontmatter key order: type, title,
+  description, timestamp, resource?, tags?, then unknown keys verbatim in
+  original order. Create requires type/title/description (the full scaffold —
+  conformant-on-write is strict even though reads stay permissive); updates
+  may set any subset. Reserved ids (`index`, `*/log`) are refused — those
+  files belong to the generators (1.2). A concept whose existing frontmatter
+  won't parse is never overwritten. Link normalization preserves `#anchors`
+  and `"title"` suffixes and `<...>`-wraps destinations containing
+  spaces/parens. `tags: []` clears tags; index/log regeneration and
+  incremental DB update land with 1.2/1.4.
 - 2026-07-05 — **Viz export: vendored libs, fixed output path, `#concept:`
   rewiring.** Cytoscape/marked are vendored files (their npm `exports` maps
   don't expose the browser builds to import), inlined so `viz.html` makes zero

@@ -9,9 +9,8 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stage 0 complete** (0.1–0.8): format core, engine, ops contract + CLI,
-> doctor, static viewer, example bundle + end-to-end acceptance. Next:
-> Stage 1 — authoring, starting with 1.1 conformance writer.
+> Stage 1 — authoring + graph + sync (Stage 0 complete). Done: 1.1 conformance
+> writer (`okb write`). Next: 1.2 index.md / log.md generation.
 
 ---
 
@@ -76,9 +75,10 @@ conformance. Reuses OKF reference shapes directly.
 Goal: a real PKM you can write to, conformant on every save, versioned in git.
 
 ### 1.1 Conformance writer
-- [ ] `write_concept` op → through `document.ts`; frontmatter scaffold (`type/title/description/timestamp`); refresh `timestamp`
-- [ ] Link normalization to bundle-absolute on write
-- [ ] Tests: written docs pass `doctor`; unknown keys preserved on edit
+- [x] `write_concept` op → through `document.ts`; frontmatter scaffold (`type/title/description/timestamp`); refresh `timestamp`
+- [x] Link normalization to bundle-absolute on write (`normalizeLinks`; anchors + `"title"` suffixes preserved, `<...>`-wrap when needed)
+- [x] Tests: written docs pass `doctor`; unknown keys preserved on edit
+- [x] Guardrails: reserved ids refused; unparseable existing frontmatter refused (no clobber); `tags: []` clears; write op untrusted-gated
 
 ### 1.2 index.md / log.md generation
 - [ ] `core/okf/indexmd.ts` — regenerate `index.md` per touched dir (group by `type`, entries carry `description`, synthesize dir descriptions)
@@ -247,6 +247,12 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-05 — Stage 1.1: conformance writer — `okb write` creates/updates
+  concepts with the full scaffold in canonical key order, refreshes
+  `timestamp` (ISO-8601 UTC), preserves unknown keys, normalizes links to
+  bundle-absolute (anchors/titles preserved), refuses reserved ids and
+  unparseable-frontmatter overwrites. 116 tests green, tsc clean. Next: 1.2
+  index.md/log.md generation.
 - 2026-07-05 — Stage 0.8: `bundles/example/` (tiny fully-conformant bundle,
   0 errors 0 warnings) + end-to-end acceptance test through the real CLI
   (index → search → read → graph → doctor → export-viz → rebuild); gitignored
