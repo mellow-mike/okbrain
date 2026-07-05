@@ -9,10 +9,9 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> Stage 0 — Format core + read-only viewer. Done: 0.1 repo/tooling, 0.2 OKF
-> document model, 0.3 read-only graph extraction, 0.4 engine (SQLite) + index
-> build, 0.5 operations contract + generated CLI, 0.6 conformance
-> (`okb doctor`), 0.7 static graph viewer. Next: 0.8 Stage-0 acceptance.
+> **Stage 0 complete** (0.1–0.8): format core, engine, ops contract + CLI,
+> doctor, static viewer, example bundle + end-to-end acceptance. Next:
+> Stage 1 — authoring, starting with 1.1 conformance writer.
 
 ---
 
@@ -67,8 +66,8 @@ conformance. Reuses OKF reference shapes directly.
 - [x] Shared permissive read: `readConceptPermissive` in `bundle.ts`, `fmString`/`fmTags` in `document.ts` (index build + viz both use them)
 
 ### 0.8 Stage-0 acceptance
-- [ ] `bundles/example/` — tiny conformant bundle (a few linked concepts)
-- [ ] End-to-end: index example → search → graph → doctor → export viz
+- [x] `bundles/example/` — tiny conformant bundle (4 cross-linked concepts in 3 dirs; doctor-clean incl. warnings)
+- [x] End-to-end: index example → search → graph → doctor → export viz (`tests/e2e.stage0.test.ts` drives the real CLI on a temp copy)
 - [ ] (Optional) round-trip an OKF sample bundle (GA4 / Stack Overflow / Bitcoin)
 
 ---
@@ -248,6 +247,11 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-05 — Stage 0.8: `bundles/example/` (tiny fully-conformant bundle,
+  0 errors 0 warnings) + end-to-end acceptance test through the real CLI
+  (index → search → read → graph → doctor → export-viz → rebuild); gitignored
+  the bundle's derived `viz.html`. **Stage 0 complete.** 105 tests green, tsc
+  clean. Next: Stage 1.1 conformance writer.
 - 2026-07-05 — Stage 0.7: `okb export-viz` — self-contained graph viewer
   (vendored Cytoscape+marked inlined, graph JSON from a bundle walk, internal
   links rewired to `#concept:` anchors, fixed `<bundle>/viz.html` output);
