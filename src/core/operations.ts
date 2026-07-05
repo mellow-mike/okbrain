@@ -11,6 +11,7 @@ import { listConcepts } from "./okf/bundle.ts";
 import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
 import { OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, validateId } from "./okf/paths.ts";
+import { exportViz, type VizExport } from "./viz/export.ts";
 
 export type Scope = "read" | "write" | "admin";
 
@@ -178,6 +179,21 @@ export const operations: readonly Operation[] = [
       ].join("\n");
     },
     exitCode: (r) => ((r as DoctorReport).ok ? 0 : 1),
+  },
+  {
+    // Scope read despite writing a file: output is derived (never canonical
+    // knowledge) and the path is fixed to <bundle>/viz.html — no caller-chosen
+    // destination an untrusted caller could abuse.
+    name: "export_viz",
+    cliName: "export-viz",
+    summary: "Write a self-contained HTML graph viewer to <bundle>/viz.html",
+    scope: "read",
+    params: [],
+    handler: (ctx) => exportViz(ctx.bundle),
+    render: (r) => {
+      const v = r as VizExport;
+      return `wrote ${v.path} (${v.nodes} concepts, ${v.edges} links)`;
+    },
   },
   {
     name: "index",

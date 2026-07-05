@@ -5,12 +5,10 @@
 // body) so search never loses it — `okb doctor` is where it gets flagged.
 
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { buildEdges } from "../graph/links.ts";
 import { log } from "../log.ts";
-import { listConcepts } from "../okf/bundle.ts";
-import { OkfParseError, parse, type OkfDocument } from "../okf/document.ts";
-import { idToAbsPath } from "../okf/paths.ts";
+import { listConcepts, readConceptPermissive } from "../okf/bundle.ts";
+import { fmString, fmTags } from "../okf/document.ts";
 import type { Engine } from "./interface.ts";
 
 export interface IndexStats {
@@ -18,14 +16,6 @@ export interface IndexStats {
   skipped: number;
   removed: number;
   edges: number;
-}
-
-const str = (v: unknown): string => (typeof v === "string" ? v : "");
-
-function tagList(v: unknown): string[] {
-  if (typeof v === "string" && v.trim() !== "") return [v];
-  if (Array.isArray(v)) return v.filter((t): t is string => typeof t === "string");
-  return [];
 }
 
 /** (Re)index the bundle at `root` into `engine`. Safe to run repeatedly. */
@@ -37,15 +27,8 @@ export async function buildIndex(root: string, engine: Engine): Promise<IndexSta
   let skipped = 0;
 
   for (const id of ids) {
-    const raw = await readFile(idToAbsPath(root, id), "utf8");
-    let doc: OkfDocument;
-    try {
-      doc = parse(raw);
-    } catch (e) {
-      if (!(e instanceof OkfParseError)) throw e;
-      log.warn("indexing concept with unparseable frontmatter", { id });
-      doc = { frontmatter: {}, body: raw };
-    }
+    const { raw, doc, parsed } = await readConceptPermissive(root, id);
+    if (!parsed) log.warn("indexing concept with unparseable frontmatter", { id });
     docs.push({ id, body: doc.body });
 
     const hash = createHash("sha256").update(raw, "utf8").digest("hex");
@@ -56,14 +39,14 @@ export async function buildIndex(root: string, engine: Engine): Promise<IndexSta
     const fm = doc.frontmatter;
     engine.upsertNode({
       id,
-      type: str(fm.type),
-      title: str(fm.title),
-      description: str(fm.description),
+      type: fmString(fm.type),
+      title: fmString(fm.title),
+      description: fmString(fm.description),
       resource: typeof fm.resource === "string" ? fm.resource : null,
       bodyLen: doc.body.length,
       contentHash: hash,
       body: doc.body,
-      tags: tagList(fm.tags),
+      tags: fmTags(fm.tags),
     });
     indexed++;
   }

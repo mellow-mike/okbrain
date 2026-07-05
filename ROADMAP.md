@@ -12,7 +12,7 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 > Stage 0 — Format core + read-only viewer. Done: 0.1 repo/tooling, 0.2 OKF
 > document model, 0.3 read-only graph extraction, 0.4 engine (SQLite) + index
 > build, 0.5 operations contract + generated CLI, 0.6 conformance
-> (`okb doctor`). Next: 0.7 static graph viewer.
+> (`okb doctor`), 0.7 static graph viewer. Next: 0.8 Stage-0 acceptance.
 
 ---
 
@@ -60,9 +60,11 @@ conformance. Reuses OKF reference shapes directly.
 - [x] Tests: passing bundle; each failure class detected; severity mapping; CLI exit codes
 
 ### 0.7 Static graph viewer
-- [ ] `core/viz/export.ts` — walk bundle → graph JSON → self-contained HTML (Cytoscape + marked, type-colored nodes, directed edges, detail panel, backlinks, search, type filter, layouts)
-- [ ] Register `export_viz` op (scope read); `okb export-viz` writes `<bundle>/viz.html`
-- [ ] Tests: graph JSON node/edge counts; internal-link rewiring
+- [x] `core/viz/export.ts` — walk bundle → graph JSON → self-contained HTML (Cytoscape + marked, type-colored nodes, directed edges, detail panel, backlinks, search, type filter, layouts)
+- [x] Register `export_viz` op (scope read); `okb export-viz` writes `<bundle>/viz.html`
+- [x] Tests: graph JSON node/edge counts; internal-link rewiring
+- [x] Vendor `cytoscape.min.js` + `marked.umd.js` under `core/viz/vendor/` (their `exports` maps hide the browser builds; Bun text imports embed them in the binary)
+- [x] Shared permissive read: `readConceptPermissive` in `bundle.ts`, `fmString`/`fmTags` in `document.ts` (index build + viz both use them)
 
 ### 0.8 Stage-0 acceptance
 - [ ] `bundles/example/` — tiny conformant bundle (a few linked concepts)
@@ -237,11 +239,20 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       block is treated as real. Revisit if it bites.
 - [ ] Concept-id case sensitivity differs across filesystems (macOS/Windows
       case-insensitive); decide on a canonical-casing policy before it matters.
+- [ ] `viz.html` renders concept bodies with marked, which passes raw HTML
+      through — fine for your own notes, but a shared export could carry
+      scripted HTML from ingested content. Consider sanitizing (e.g. vendored
+      DOMPurify) before Stage 4 ingestion lands.
 
 ---
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-05 — Stage 0.7: `okb export-viz` — self-contained graph viewer
+  (vendored Cytoscape+marked inlined, graph JSON from a bundle walk, internal
+  links rewired to `#concept:` anchors, fixed `<bundle>/viz.html` output);
+  verified interactively in Chromium (zero JS errors / external requests);
+  added project verify skill. 98 tests green, tsc clean. Next: 0.8 acceptance.
 - 2026-07-03 — Stage 0.6: `okb doctor` — conformance checker with error/warning
   severities (violations vs permissive-consumer tolerances), registered as a
   read op; ops gained optional `exitCode(result)` so doctor exits 1 on a
