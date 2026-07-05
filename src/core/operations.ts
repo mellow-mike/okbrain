@@ -11,6 +11,7 @@ import { listConcepts } from "./okf/bundle.ts";
 import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
 import { OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, validateId } from "./okf/paths.ts";
+import { writeConcept, WriteRefusedError, type WriteResult } from "./okf/write.ts";
 import { exportViz, type VizExport } from "./viz/export.ts";
 
 export type Scope = "read" | "write" | "admin";
@@ -193,6 +194,32 @@ export const operations: readonly Operation[] = [
     render: (r) => {
       const v = r as VizExport;
       return `wrote ${v.path} (${v.nodes} concepts, ${v.edges} links)`;
+    },
+  },
+  {
+    name: "write_concept",
+    cliName: "write",
+    summary: "Create or update a concept conformantly (frontmatter scaffold, absolute links)",
+    scope: "write",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "concept id, e.g. notes/foo" },
+      { name: "type", type: "string", description: "concept type (required when creating)" },
+      { name: "title", type: "string", description: "title (defaults to the id basename on create)" },
+      { name: "description", type: "string", description: "one-line description" },
+      { name: "body", type: "string", description: "markdown body (replaces the existing body)" },
+    ],
+    handler: async (ctx, p) => {
+      try {
+        return await writeConcept(ctx.bundle, p as { id: string } & Record<string, string>);
+      } catch (e) {
+        if (e instanceof InvalidIdError) throw new OpError(e.message, "bad_params");
+        if (e instanceof WriteRefusedError) throw new OpError(e.message, "refused");
+        throw e;
+      }
+    },
+    render: (r) => {
+      const w = r as WriteResult;
+      return `${w.created ? "created" : w.changed ? "updated" : "unchanged"} ${w.id}`;
     },
   },
   {

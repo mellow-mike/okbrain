@@ -9,9 +9,9 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stage 0 complete** (0.8 acceptance green; optional OKF-sample round-trip
-> blocked on a user-supplied sample bundle). Next: Stage 1.1 conformance
-> writer (`write_concept` through `document.ts`).
+> Stage 1 — Authoring + graph + sync. Done: 1.1 conformance writer
+> (`okb write`). Also: static viewer redesigned (dark default, validated
+> palettes, tooltips). Next: 1.2 index.md / log.md generation.
 
 ---
 
@@ -81,9 +81,9 @@ conformance. Reuses OKF reference shapes directly.
 Goal: a real PKM you can write to, conformant on every save, versioned in git.
 
 ### 1.1 Conformance writer
-- [ ] `write_concept` op → through `document.ts`; frontmatter scaffold (`type/title/description/timestamp`); refresh `timestamp`
-- [ ] Link normalization to bundle-absolute on write
-- [ ] Tests: written docs pass `doctor`; unknown keys preserved on edit
+- [x] `write_concept` op (`core/okf/write.ts`, CLI `okb write`, scope `write`); frontmatter scaffold (`type/title/description/timestamp`); refresh `timestamp` on meaningful change only (byte-identical write = no-op)
+- [x] Link normalization to bundle-absolute on write (fragments/titles preserved; idempotent)
+- [x] Tests: written docs pass `doctor`; unknown keys + key order preserved on edit; reserved ids and unparseable-frontmatter edits refused; untrusted callers gated
 
 ### 1.2 index.md / log.md generation
 - [ ] `core/okf/indexmd.ts` — regenerate `index.md` per touched dir (group by `type`, entries carry `description`, synthesize dir descriptions)
@@ -252,6 +252,12 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-05 — Stage 1.1: conformance writer (`okb write` — scaffold, unknown-key
+  preservation, absolute-link normalization, no-op detection) + viewer redesign
+  (dark default with persisted toggle, CSS-var token bridge into Cytoscape,
+  per-mode CVD-validated palettes, hover tooltips, Links to/Cited by, type
+  counts); verified in Chromium both themes, zero JS errors/external requests.
+  116 tests green, tsc clean. Next: 1.2 index.md/log.md generation.
 - 2026-07-05 — Stage 0.8: Stage-0 acceptance — committed `bundles/example/`
   (self-describing, fully doctor-clean) + end-to-end CLI acceptance test over a
   temp copy; deduped the CLI test harness into `tests/helpers.ts`; gitignored

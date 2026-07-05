@@ -29,7 +29,7 @@ describe("okb CLI", () => {
     const io = capture();
     expect(await runCli([], io)).toBe(0);
     expect(io.stdout).toContain("usage: okb <command>");
-    for (const cmd of ["search", "read", "list", "graph", "doctor", "export-viz", "index", "rebuild"])
+    for (const cmd of ["search", "read", "list", "graph", "doctor", "export-viz", "write", "index", "rebuild"])
       expect(io.stdout).toContain(`\n  ${cmd} `);
   });
 

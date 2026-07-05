@@ -55,7 +55,11 @@ describe("registry", () => {
 });
 
 describe("trust gating (fail-closed)", () => {
-  test("untrusted callers are refused admin ops before the handler runs", async () => {
+  test("untrusted callers are refused write/admin ops before the handler runs", async () => {
+    await expectOpError(
+      runOp(op("write_concept"), ctx(false), { id: "x", type: "note" }),
+      "untrusted",
+    );
     await expectOpError(runOp(op("index"), ctx(false), {}), "untrusted");
     await expectOpError(
       runOp(op("rebuild"), ctx(false), { "confirm-destructive": true }),
