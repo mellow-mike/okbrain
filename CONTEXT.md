@@ -78,17 +78,25 @@ be mirrored as first-class concepts under `references/`.
   round-trip. This is the permissive consumer OKF mandates, so bundles authored
   by other tools open cleanly.
 
-### Writer guarantees (`core/okf/document.ts` + helpers)
-Every write produces a conformant bundle:
-- Valid delimited YAML; body preserved where possible.
-- Required keys present; `timestamp` refreshed on meaningful change.
-- Links normalized to bundle-absolute form.
-- `index.md` regenerated for touched directories (grouped by `type`, entries
-  carry each concept's `description`; directory descriptions synthesized).
-- `log.md` appended (`## YYYY-MM-DD` headings, newest first; leading bold marker
-  `**Creation**`/`**Update**`/`**Deprecation**`).
-- `okf_version: "0.1"` maintained in the root `index.md` frontmatter (the only
-  place frontmatter is allowed inside an `index.md`).
+### Writer guarantees (`core/okf/write.ts` over `document.ts`)
+Every write produces a conformant bundle (`writeConcept`, exposed as the
+`write_concept` op / `okb write`):
+- Valid delimited YAML; body preserved where possible; unknown frontmatter keys
+  preserved verbatim on edit (canonical scaffold keys first, unknowns after).
+- Full scaffold present: create requires `type`/`title`/`description`;
+  `timestamp` (ISO-8601 UTC, second precision) is refreshed on every write;
+  `resource`/`tags` included when applicable (`tags: []` clears).
+- Links normalized to bundle-absolute form (`#anchors` and `"title"` suffixes
+  survive; destinations with spaces/parens get `<…>` wrapped).
+- Reserved ids (`index`, `log` basenames) are refused — those files belong to
+  the Stage-1.2 generators; a concept whose frontmatter won't parse is never
+  overwritten (fix by hand, per doctor).
+- (Stage 1.2, not yet built) `index.md` regenerated for touched directories
+  (grouped by `type`, entries carry each concept's `description`; directory
+  descriptions synthesized); `log.md` appended (`## YYYY-MM-DD` headings,
+  newest first; leading bold marker `**Creation**`/`**Update**`/
+  `**Deprecation**`); `okf_version: "0.1"` maintained in the root `index.md`
+  frontmatter (the only place frontmatter is allowed inside an `index.md`).
 
 ### Conformance checklist (`okb doctor` asserts)
 `core/okf/doctor.ts` walks every `.md` file and reports findings at two
@@ -147,10 +155,19 @@ as body) — search never loses it; `okb doctor` flags it.
 
 ### Viewer (live + static)
 Adapted from OKF's self-contained `viz.html` (Cytoscape.js graph + marked.js
-body rendering): type-colored nodes, directed edges, detail panel with rendered
-body and rewired internal links, "Cited by" backlinks, search over
-title/id/tags, type filter, switchable layouts (cose / concentric /
-breadth-first / circle / grid).
+body rendering): type-colored nodes, directed edges, node hover tooltips
+(title/type/description), detail panel with rendered body and rewired internal
+links, "Links to" + "Cited by" lists, search over title/id/tags (dims
+non-matches), type filter with per-type counts, switchable layouts (cose /
+concentric / breadth-first / circle / grid), fit-to-view. Theming: **dark mode
+default**, light via a persisted toggle (`localStorage`); chrome colors live
+once as CSS custom properties on `:root[data-theme=…]` and the Cytoscape
+styles read them back via `getComputedStyle`, so both surfaces render from one
+token set. Node colors are per-mode categorical palettes in a fixed CVD-safe
+slot order (validated for lightness/chroma/CVD-separation/contrast against
+each surface); a bundle with more than 8 types folds the overflow into a muted
+gray, and every node keeps a visible text label so identity is never
+color-alone.
 - **Live (GUI):** same component fed by the engine over the local API; reflects
   current DB, click-through to the editor.
 - **Static export:** `okb export-viz` writes the single HTML file to the fixed
@@ -369,6 +386,15 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-05 — **Viewer theming: dark default, CSS-variable token bridge,
+  per-mode validated palettes.** The static viewer defaults to dark with a
+  persisted light toggle. All chrome colors are defined once as CSS custom
+  properties per theme; Cytoscape styles use function values that read the
+  vars via `getComputedStyle`, so a theme switch is set-attribute +
+  `cy.style().update()` — no duplicated color tables in JS. Node colors come
+  from two 8-slot categorical palettes (one per surface, fixed CVD-safe order,
+  validated for contrast/CVD separation); types beyond 8 share a muted
+  overflow gray rather than cycling hues.
 - 2026-07-05 — **Writer semantics (`core/okf/write.ts`).** `timestamp` is
   ISO-8601 UTC at second precision and is always refreshed on write (no
   caller override). Canonical frontmatter key order: type, title,

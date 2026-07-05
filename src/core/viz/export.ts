@@ -78,76 +78,148 @@ export async function exportViz(root: string): Promise<VizExport> {
   return { path, nodes: graph.nodes.length, edges: graph.edges.length };
 }
 
-/** Render the single-file page: data + vendored libs + viewer, no network. */
+/**
+ * Render the single-file page: data + vendored libs + viewer, no network.
+ * Theme: dark default, light via toggle (persisted); chrome colors live once as
+ * CSS custom properties and the graph reads them back via getComputedStyle.
+ * Node colors are per-mode categorical palettes (validated: CVD-safe order,
+ * contrast vs each surface); types beyond 8 share the muted overflow color, and
+ * every node keeps a visible text label so identity is never color-alone.
+ */
 export function renderHtml(graph: VizGraph): string {
   // <-escape so no `</script>` (or any tag) can break out of the block.
   const data = JSON.stringify(graph).replace(/</g, "\\u003c");
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>okbrain graph — ${graph.nodes.length} concepts</title>
 <style>
+  :root {
+    color-scheme: dark;
+    --plane: #0d0d0d; --surface: #1a1a19;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --line: #2c2c2a; --edge-line: #383835; --accent: #3987e5;
+    --code-bg: #242422; --chip-bg: rgba(255, 255, 255, 0.06);
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --plane: #f9f9f7; --surface: #fcfcfb;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --line: #e1e0d9; --edge-line: #c3c2b7; --accent: #2a78d6;
+    --code-bg: #f0efec; --chip-bg: rgba(11, 11, 11, 0.05);
+  }
   * { box-sizing: border-box; margin: 0; }
-  body { font: 13px/1.5 system-ui, sans-serif; color: #24292f; height: 100vh;
-         display: grid; grid-template-columns: 220px 1fr minmax(280px, 26%); }
-  #side { padding: 12px; border-right: 1px solid #d8dee4; overflow-y: auto; }
-  #side h1 { font-size: 15px; margin-bottom: 2px; }
-  #side .stats { color: #57606a; margin-bottom: 12px; }
-  #search, #layout { width: 100%; padding: 4px 6px; margin-bottom: 12px;
-    border: 1px solid #d8dee4; border-radius: 4px; font: inherit; }
-  #side .group { font-weight: 600; margin-bottom: 4px; }
-  #filters label { display: flex; align-items: center; gap: 6px; padding: 2px 0;
-    cursor: pointer; }
+  body { font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+         color: var(--ink); background: var(--surface); height: 100vh;
+         display: grid; grid-template-columns: 240px 1fr minmax(300px, 27%); }
+  #side { background: var(--plane); padding: 14px; border-right: 1px solid var(--line);
+          overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  #brand { display: flex; align-items: center; justify-content: space-between; }
+  #brand h1 { font-size: 15px; letter-spacing: 0.2px; }
+  #brand h1 span { color: var(--muted); font-weight: 400; }
+  button, select, input { font: inherit; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 6px; }
+  button { cursor: pointer; padding: 3px 9px; }
+  button:hover, select:hover { border-color: var(--muted); }
+  input:focus-visible, select:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px; }
+  .stats { color: var(--muted); font-size: 12px; margin-top: -8px; }
+  #search { width: 100%; padding: 6px 9px; }
+  #search::placeholder { color: var(--muted); }
+  .row { display: flex; gap: 6px; }
+  #layout { flex: 1; padding: 5px 6px; }
+  .group { font-size: 11px; font-weight: 600; letter-spacing: 0.5px;
+           text-transform: uppercase; color: var(--muted); margin-bottom: -6px; }
+  #filters label { display: flex; align-items: center; gap: 7px; padding: 3px 0;
+    cursor: pointer; color: var(--ink-2); }
+  #filters .count { margin-left: auto; color: var(--muted); font-size: 11px; }
+  #filters input { accent-color: var(--accent); }
   .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-  #graph { min-width: 0; }
-  #detail { padding: 14px; border-left: 1px solid #d8dee4; overflow-y: auto; }
-  #detail .empty { color: #57606a; }
-  #detail h2 { font-size: 16px; margin-bottom: 4px; }
-  #detail h3 { font-size: 13px; margin: 14px 0 4px; }
-  #detail .meta { display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
+  #graph { min-width: 0; position: relative; }
+  #tip { position: absolute; z-index: 2; max-width: 260px; pointer-events: none;
+    background: var(--plane); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); display: none; }
+  #tip .t { font-weight: 600; }
+  #tip .d { color: var(--ink-2); font-size: 12px; }
+  #tip .meta { display: flex; align-items: center; gap: 5px; color: var(--muted);
+    font-size: 11px; }
+  #detail { background: var(--plane); padding: 16px; border-left: 1px solid var(--line);
+            overflow-y: auto; overflow-wrap: break-word; }
+  #detail .empty { color: var(--muted); text-align: center; margin-top: 40vh; }
+  #detail h2 { font-size: 16px; margin-bottom: 6px; }
+  #detail h3 { font-size: 11px; font-weight: 600; letter-spacing: 0.5px;
+               text-transform: uppercase; color: var(--muted); margin: 16px 0 4px; }
+  #detail .meta { display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
     flex-wrap: wrap; }
-  #detail .meta code { font-size: 11px; color: #57606a; overflow-wrap: anywhere; }
-  .badge { color: #fff; border-radius: 10px; padding: 1px 8px; font-size: 11px; }
-  .tag { background: #eef1f4; border-radius: 10px; padding: 1px 8px; font-size: 11px; }
-  #detail .desc { color: #57606a; margin-bottom: 8px; }
-  #detail .body { border-top: 1px solid #d8dee4; margin-top: 8px; padding-top: 8px; }
-  #detail .body h1, #detail .body h2, #detail .body h3 { font-size: 14px; margin: 10px 0 4px; }
+  #detail .meta code { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2);
+    background: var(--chip-bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1px 8px; font-size: 11px; }
+  #detail .desc { color: var(--ink-2); margin-bottom: 8px; }
+  #detail .body { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px;
+    color: var(--ink-2); }
+  #detail .body h1, #detail .body h2, #detail .body h3 { font-size: 13px; color: var(--ink);
+    letter-spacing: normal; text-transform: none; margin: 12px 0 4px; }
   #detail .body p, #detail .body ul, #detail .body ol { margin-bottom: 8px; }
   #detail .body ul, #detail .body ol, #detail ul { padding-left: 20px; }
-  #detail .body pre { background: #f6f8fa; padding: 8px; border-radius: 4px;
+  #detail .body pre { background: var(--code-bg); padding: 8px; border-radius: 6px;
     overflow-x: auto; margin-bottom: 8px; }
-  #detail .body code { font-size: 12px; }
+  #detail .body code { font-size: 12px; background: var(--code-bg); border-radius: 4px;
+    padding: 0 3px; }
+  #detail .body pre code { padding: 0; }
   #detail .body img { max-width: 100%; }
-  #detail a { color: #0969da; }
+  #detail .body blockquote { border-left: 2px solid var(--line); padding-left: 10px;
+    color: var(--muted); margin-bottom: 8px; }
+  #detail a { color: var(--accent); text-decoration: none; }
+  #detail a:hover { text-decoration: underline; }
+  #detail li { margin: 2px 0; }
 </style>
 </head>
 <body>
 <div id="side">
-  <h1>okbrain graph</h1>
+  <div id="brand">
+    <h1>okbrain <span>graph</span></h1>
+    <button id="theme" title="toggle light/dark"></button>
+  </div>
   <div class="stats">${graph.nodes.length} concepts · ${graph.edges.length} links</div>
-  <input id="search" type="search" placeholder="search title / id / tags">
+  <input id="search" type="search" placeholder="Search title / id / tags…  ( / )">
   <div class="group">Layout</div>
-  <select id="layout">
-    <option value="cose" selected>cose</option>
-    <option value="concentric">concentric</option>
-    <option value="breadthfirst">breadth-first</option>
-    <option value="circle">circle</option>
-    <option value="grid">grid</option>
-  </select>
+  <div class="row">
+    <select id="layout">
+      <option value="cose" selected>cose</option>
+      <option value="concentric">concentric</option>
+      <option value="breadthfirst">breadth-first</option>
+      <option value="circle">circle</option>
+      <option value="grid">grid</option>
+    </select>
+    <button id="fit" title="fit graph to view">Fit</button>
+  </div>
   <div class="group">Types</div>
   <div id="filters"></div>
 </div>
-<div id="graph"></div>
+<div id="graph"><div id="tip"></div></div>
 <div id="detail"><p class="empty">Click a node to see its details.</p></div>
 <script id="okb-graph" type="application/json">${data}</script>
+<script>
+try { if (localStorage.getItem('okb-viz-theme') === 'light')
+  document.documentElement.setAttribute('data-theme', 'light'); } catch (e) {}
+</script>
 <script>${cytoscapeJs}</script>
 <script>${markedJs}</script>
 <script>
 var G = JSON.parse(document.getElementById('okb-graph').textContent);
-var PALETTE = ['#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f', '#edc948',
-  '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac', '#86bcb6', '#d37295'];
+// Categorical palettes per surface (validated: fixed CVD-safe slot order, never
+// cycled); types beyond 8 fold into the muted overflow color.
+var PALETTE = {
+  dark: ['#3987e5', '#199e70', '#c98500', '#008300', '#9085e9', '#e66767', '#d55181', '#d95926'],
+  light: ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7', '#e34948', '#e87ba4', '#eb6834']
+};
+var OVERFLOW = '#898781';
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
 function typeName(t) { return t || '(untyped)'; }
 function esc(s) {
   return String(s).replace(/[&<>"]/g, function (c) {
@@ -155,35 +227,47 @@ function esc(s) {
   });
 }
 
-var byId = {}, citedBy = {}, types = [];
+var byId = {}, citedBy = {}, linksTo = {}, typeCount = {}, types = [];
 G.nodes.forEach(function (n) {
   byId[n.id] = n;
   var t = typeName(n.type);
+  typeCount[t] = (typeCount[t] || 0) + 1;
   if (types.indexOf(t) < 0) types.push(t);
 });
-G.edges.forEach(function (e) { (citedBy[e.dst] = citedBy[e.dst] || []).push(e.src); });
+G.edges.forEach(function (e) {
+  (citedBy[e.dst] = citedBy[e.dst] || []).push(e.src);
+  (linksTo[e.src] = linksTo[e.src] || []).push(e.dst);
+});
 types.sort();
 var colorOf = {};
-types.forEach(function (t, i) { colorOf[t] = PALETTE[i % PALETTE.length]; });
+function applyPalette() {
+  var mode = document.documentElement.getAttribute('data-theme');
+  types.forEach(function (t, i) { colorOf[t] = i < 8 ? PALETTE[mode][i] : OVERFLOW; });
+}
+applyPalette();
 
 var cy = cytoscape({
   container: document.getElementById('graph'),
   elements: G.nodes.map(function (n) {
     return { data: { id: n.id, label: n.title || n.id, type: typeName(n.type),
-      color: colorOf[typeName(n.type)],
       size: 16 + 4 * Math.sqrt(Math.min(n.bodyLen, 20000) / 100) } };
   }).concat(G.edges.map(function (e) {
     return { data: { id: JSON.stringify([e.src, e.dst]), source: e.src, target: e.dst } };
   })),
   style: [
-    { selector: 'node', style: { 'background-color': 'data(color)',
+    { selector: 'node', style: {
+      'background-color': function (ele) { return colorOf[ele.data('type')]; },
       width: 'data(size)', height: 'data(size)', label: 'data(label)',
-      'font-size': 9, color: '#333', 'text-valign': 'bottom', 'text-margin-y': 4,
+      'font-size': 9, color: function () { return cssVar('--ink-2'); },
+      'text-outline-color': function () { return cssVar('--surface'); },
+      'text-outline-width': 2, 'text-valign': 'bottom', 'text-margin-y': 4,
       'text-wrap': 'ellipsis', 'text-max-width': '120px' } },
-    { selector: 'edge', style: { width: 1.2, 'line-color': '#b9c2cc',
-      'target-arrow-color': '#b9c2cc', 'target-arrow-shape': 'triangle',
-      'arrow-scale': 0.8, 'curve-style': 'bezier' } },
-    { selector: 'node:selected', style: { 'border-width': 3, 'border-color': '#1a73e8' } },
+    { selector: 'edge', style: {
+      width: 1.2, 'line-color': function () { return cssVar('--edge-line'); },
+      'target-arrow-color': function () { return cssVar('--edge-line'); },
+      'target-arrow-shape': 'triangle', 'arrow-scale': 0.8, 'curve-style': 'bezier' } },
+    { selector: 'node:selected', style: {
+      'border-width': 3, 'border-color': function () { return cssVar('--accent'); } } },
     { selector: '.dim', style: { opacity: 0.15 } }
   ],
   layout: { name: 'cose', animate: false },
@@ -192,6 +276,28 @@ var cy = cytoscape({
 
 var searchEl = document.getElementById('search');
 var detailEl = document.getElementById('detail');
+var tipEl = document.getElementById('tip');
+var themeEl = document.getElementById('theme');
+var currentId = null;
+
+function setThemeButton() {
+  themeEl.textContent =
+    document.documentElement.getAttribute('data-theme') === 'dark' ? '\\u263C light' : '\\u263E dark';
+}
+setThemeButton();
+themeEl.addEventListener('click', function () {
+  var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('okb-viz-theme', next); } catch (e) {}
+  applyPalette();
+  setThemeButton();
+  cy.style().update();
+  document.querySelectorAll('.swatch[data-type]').forEach(function (sw) {
+    sw.style.background = colorOf[sw.getAttribute('data-type')];
+  });
+  if (currentId) showDetail(currentId);
+});
+
 var checked = {};
 var filtersEl = document.getElementById('filters');
 types.forEach(function (t) {
@@ -203,10 +309,15 @@ types.forEach(function (t) {
   cb.addEventListener('change', function () { checked[t] = cb.checked; applyFilters(); });
   var sw = document.createElement('span');
   sw.className = 'swatch';
+  sw.setAttribute('data-type', t);
   sw.style.background = colorOf[t];
+  var count = document.createElement('span');
+  count.className = 'count';
+  count.textContent = typeCount[t];
   label.appendChild(cb);
   label.appendChild(sw);
   label.appendChild(document.createTextNode(t));
+  label.appendChild(count);
   filtersEl.appendChild(label);
 });
 
@@ -230,30 +341,47 @@ function applyFilters() {
   });
 }
 searchEl.addEventListener('input', applyFilters);
+document.addEventListener('keydown', function (e) {
+  if (e.key === '/' && document.activeElement !== searchEl) {
+    e.preventDefault();
+    searchEl.focus();
+    searchEl.select();
+  }
+});
 
 document.getElementById('layout').addEventListener('change', function (e) {
   cy.layout({ name: e.target.value, animate: false }).run();
 });
+document.getElementById('fit').addEventListener('click', function () {
+  cy.fit(undefined, 40);
+});
 
 function conceptHref(id) { return '#concept:' + encodeURIComponent(id); }
+function typeChip(t) {
+  return '<span class="chip"><span class="swatch" data-type="' + esc(t) +
+    '" style="background:' + colorOf[t] + '"></span>' + esc(t) + '</span>';
+}
+function conceptList(ids) {
+  return '<ul>' + ids.map(function (id) {
+    return '<li><a href="' + conceptHref(id) + '">' +
+      esc((byId[id] && byId[id].title) || id) + '</a></li>';
+  }).join('') + '</ul>';
+}
 
 function showDetail(id) {
   var n = byId[id];
   if (!n) return;
+  currentId = id;
   var h = '<h2>' + esc(n.title || n.id) + '</h2>' +
-    '<div class="meta"><span class="badge" style="background:' +
-    colorOf[typeName(n.type)] + '">' + esc(typeName(n.type)) + '</span><code>' +
-    esc(n.id) + '</code></div>';
+    '<div class="meta">' + typeChip(typeName(n.type)) + '<code>' + esc(n.id) + '</code></div>';
   if (n.description) h += '<p class="desc">' + esc(n.description) + '</p>';
-  if (n.tags.length) h += '<div>' + n.tags.map(function (t) {
-    return '<span class="tag">' + esc(t) + '</span>';
+  if (n.tags.length) h += '<div class="meta">' + n.tags.map(function (t) {
+    return '<span class="chip">' + esc(t) + '</span>';
   }).join(' ') + '</div>';
   h += '<div class="body">' + marked.parse(n.body) + '</div>';
-  var back = citedBy[id] || [];
-  if (back.length) h += '<h3>Cited by</h3><ul>' + back.map(function (src) {
-    return '<li><a href="' + conceptHref(src) + '">' +
-      esc((byId[src] && byId[src].title) || src) + '</a></li>';
-  }).join('') + '</ul>';
+  var out = linksTo[id] || [], back = citedBy[id] || [];
+  if (out.length) h += '<h3>Links to</h3>' + conceptList(out);
+  if (back.length) h += '<h3>Cited by</h3>' + conceptList(back);
   detailEl.innerHTML = h;
   detailEl.querySelectorAll('a[href]').forEach(function (a) {
     if (a.getAttribute('href').indexOf('#concept:') !== 0) {
@@ -281,6 +409,24 @@ detailEl.addEventListener('click', function (e) {
 });
 
 cy.on('tap', 'node', function (e) { showDetail(e.target.id()); });
+cy.on('mouseover', 'node', function (e) {
+  var n = byId[e.target.id()];
+  var t = typeName(n.type);
+  tipEl.innerHTML = '<div class="t">' + esc(n.title || n.id) + '</div>' +
+    '<div class="meta"><span class="swatch" style="background:' + colorOf[t] +
+    '"></span>' + esc(t) + '</div>' +
+    (n.description ? '<div class="d">' + esc(n.description) + '</div>' : '');
+  var p = e.renderedPosition, box = e.cy.container().getBoundingClientRect();
+  tipEl.style.left = Math.min(p.x + 14, box.width - 270) + 'px';
+  tipEl.style.top = Math.min(p.y + 14, box.height - 90) + 'px';
+  tipEl.style.display = 'block';
+  e.cy.container().style.cursor = 'pointer';
+});
+cy.on('mouseout tap', 'node', function (e) {
+  tipEl.style.display = 'none';
+  e.cy.container().style.cursor = '';
+});
+cy.on('pan zoom', function () { tipEl.style.display = 'none'; });
 </script>
 </body>
 </html>

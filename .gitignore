@@ -14,7 +14,7 @@ dist/
 
 # Derived index artifacts that may be written next to a bundle in tests
 .okb/
-bundles/example/viz.html
+bundles/*/viz.html
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

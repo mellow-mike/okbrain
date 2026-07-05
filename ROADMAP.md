@@ -10,7 +10,8 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 
 ## Current focus
 > Stage 1 — authoring + graph + sync (Stage 0 complete). Done: 1.1 conformance
-> writer (`okb write`). Next: 1.2 index.md / log.md generation.
+> writer (`okb write`); static viewer redesigned (dark default, validated
+> palettes, tooltips). Next: 1.2 index.md / log.md generation.
 
 ---
 
@@ -67,7 +68,9 @@ conformance. Reuses OKF reference shapes directly.
 ### 0.8 Stage-0 acceptance
 - [x] `bundles/example/` — tiny conformant bundle (4 cross-linked concepts in 3 dirs; doctor-clean incl. warnings)
 - [x] End-to-end: index example → search → graph → doctor → export viz (`tests/e2e.stage0.test.ts` drives the real CLI on a temp copy)
-- [ ] (Optional) round-trip an OKF sample bundle (GA4 / Stack Overflow / Bitcoin)
+- [!] (Optional) round-trip an OKF sample bundle (GA4 / Stack Overflow /
+      Bitcoin) — blocked on a user-supplied sample; drop one into
+      `docs/context/` (register in REFERENCES.md) to unblock
 
 ---
 
@@ -230,6 +233,9 @@ Severity: `crit` (data loss / corruption / non-conformant write) · `high`
 ## Backlog (unscheduled ideas)
 Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [ ] Full-text snippet highlighting in `okb search` output
+- [ ] Writer no-op detection: skip the write (and the `timestamp` refresh) when
+      the result would be byte-identical, so re-running imports/agent passes
+      never churns git history
 - [ ] `okb stats` (concept/edge/tag counts, orphans, freshness)
 - [ ] Bundle templates / starter vocabularies
 - [ ] Export to other PKM formats (one-way) for portability checks
@@ -247,6 +253,13 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-05 — Merged parallel sessions: two branches independently built 0.8
+  and 1.1; kept main's example bundle, writer, and e2e test, kept this branch's
+  viewer redesign (dark default with persisted toggle, CSS-var token bridge
+  into Cytoscape, per-mode CVD-validated palettes, hover tooltips, Links
+  to/Cited by, type counts; verified in Chromium both themes — zero JS
+  errors/external requests) and `tests/helpers.ts` dedupe. Backlogged the
+  dropped writer's no-op detection idea.
 - 2026-07-05 — Stage 1.1: conformance writer — `okb write` creates/updates
   concepts with the full scaffold in canonical key order, refreshes
   `timestamp` (ISO-8601 UTC), preserves unknown keys, normalizes links to
