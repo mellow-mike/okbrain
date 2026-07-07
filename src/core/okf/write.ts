@@ -3,13 +3,16 @@
 // frontmatter scaffold (type/title/description/timestamp, plus resource/tags
 // when applicable) in canonical key order, preserves unknown keys on edit,
 // refreshes timestamp, and normalizes body links to bundle-absolute form.
-// index.md/log.md maintenance lands with Stage 1.2.
+// Each write also regenerates index.md up the touched dir chain and appends
+// a log.md entry (Stage 1.2).
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, posix } from "node:path";
 import { normalizeLinks } from "../graph/links.ts";
 import { readConceptPermissive } from "./bundle.ts";
 import { fmString, serialize } from "./document.ts";
+import { regenerateIndexes } from "./indexmd.ts";
+import { appendLog } from "./logmd.ts";
 import { idToAbsPath, isReservedName } from "./paths.ts";
 
 export class OkfWriteError extends Error {}
@@ -86,5 +89,9 @@ export async function writeConcept(
 
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, serialize({ frontmatter: fm, body }), "utf8");
+  const dir = posix.dirname(input.id);
+  await regenerateIndexes(root, dir === "." ? "" : dir);
+  const kind = prev === undefined ? "Creation" : "Update";
+  await appendLog(root, kind, input.id, fm.title as string, fm.description as string);
   return { id: input.id, path, created: prev === undefined };
 }
