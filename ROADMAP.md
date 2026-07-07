@@ -10,8 +10,8 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 
 ## Current focus
 > Stage 1 — authoring + graph + sync (Stage 0 complete). Done: 1.1 conformance
-> writer (`okb write`); static viewer redesigned (dark default, validated
-> palettes, tooltips). Next: 1.2 index.md / log.md generation.
+> writer (`okb write`); 1.2 index.md/log.md generation on every write.
+> Next: 1.3 authoring ops/CLI (`okb new` / `capture` / `import`).
 
 ---
 
@@ -84,10 +84,11 @@ Goal: a real PKM you can write to, conformant on every save, versioned in git.
 - [x] Guardrails: reserved ids refused; unparseable existing frontmatter refused (no clobber); `tags: []` clears; write op untrusted-gated
 
 ### 1.2 index.md / log.md generation
-- [ ] `core/okf/indexmd.ts` — regenerate `index.md` per touched dir (group by `type`, entries carry `description`, synthesize dir descriptions)
-- [ ] `core/okf/logmd.ts` — append `## YYYY-MM-DD` + `**Creation**/**Update**`
-- [ ] `okf_version` maintained in root `index.md` frontmatter
-- [ ] Tests: index regen grouping; log append ordering
+- [x] `core/okf/indexmd.ts` — regenerate `index.md` per touched dir + ancestors (group by `type`, entries carry `description`, H1/intro preserved, placeholder descriptions synthesized)
+- [x] `core/okf/logmd.ts` — append `## YYYY-MM-DD` (UTC, newest-first) + `**Creation**/**Update**/**Deprecation**`
+- [x] `okf_version` maintained in root `index.md` frontmatter (unknown root keys preserved)
+- [x] Wired into `writeConcept`: every write regenerates the index chain + logs
+- [x] Tests: index regen grouping; H1/intro preservation; root fm; ancestor chain; log append ordering; writer-built bundle doctor-clean
 
 ### 1.3 Authoring ops/CLI
 - [ ] `okb new <type> <title>`, `okb capture`, `okb import <path>`
@@ -253,6 +254,14 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-07 — Stage 1.2: index.md/log.md generation — every `okb write`
+  regenerates `index.md` for the touched dir + ancestors (type-grouped rows,
+  H1/intro preserved as the human-editable head, `## Directories` from child
+  intros, root `okf_version` maintained) and appends a `**Creation**/**Update**`
+  entry to root `log.md` (UTC `## YYYY-MM-DD`, newest-first). Writer-only
+  bundles are doctor-clean (0 errors 0 warnings); regenerating the example
+  bundle reproduces it verbatim. 123 tests green, tsc clean. Next: 1.3
+  authoring ops/CLI.
 - 2026-07-05 — Merged parallel sessions: two branches independently built 0.8
   and 1.1; kept main's example bundle, writer, and e2e test, kept this branch's
   viewer redesign (dark default with persisted toggle, CSS-var token bridge
