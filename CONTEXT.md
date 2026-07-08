@@ -173,14 +173,25 @@ SQLite tables: `nodes(id, type, title, description, resource, body_len,
 content_hash)`, `edges(src, dst)` (plus `rel`/`evidence` when typed edges land,
 Stage 4), `tags(node_id, tag)`, and an FTS5 table sharing `nodes.rowid`. The
 index lives at `<bundle>/.okb/index.db` — inside the bundle so it travels with
-context but gitignored and always disposable (`okb rebuild`). Neighborhoods,
-paths, and orphan detection use depth-bounded recursive CTEs; neighbor queries
-are undirected (links + backlinks). Enough for 1–2 hop retrieval expansion and
-the viewer's adjacency. Keyword search is BM25 with column weights
-title 10 / tags 5 / body 1; query terms are quoted so FTS5 operators in user
-input are inert. Index builds hash file content to skip unchanged concepts, and
-still index a concept whose frontmatter won't parse (empty metadata, raw text
-as body) — search never loses it; `okb doctor` flags it.
+context but gitignored and always disposable (`okb rebuild`). **Edges are
+stored as extracted, dangling targets included**; every edge-reading query
+resolves against `nodes`, so a link to a not-yet-written concept is invisible
+until that concept exists — at which point its backlinks appear with no
+rebuild. That is what makes the **incremental update on write** sound: every
+write op refreshes just the written concept (node + its outgoing edges) via
+`updateIndexFor` when an index already exists (a write never *creates* the
+index — a fresh partial index would silently truncate search). Neighborhoods
+use a depth-bounded recursive CTE (undirected: links + backlinks, never
+stepping through dangling targets); `okb graph` tags depth-1 rows `→` links-to
+/ `←` cited-by / `↔` both from the materialized edge set. Shortest paths
+(`okb path`, per-hop direction arrows) and orphan detection (`okb orphans`)
+are pure BFS in `core/graph/queries.ts` over `listEdges()` — engine-agnostic,
+and path reconstruction wants parent tracking anyway. Keyword search is BM25
+with column weights title 10 / tags 5 / body 1; query terms are quoted so FTS5
+operators in user input are inert. Index builds hash file content to skip
+unchanged concepts, and still index a concept whose frontmatter won't parse
+(empty metadata, raw text as body) — search never loses it; `okb doctor`
+flags it.
 
 ### Viewer (live + static)
 Adapted from OKF's self-contained `viz.html` (Cytoscape.js graph + marked.js
@@ -288,7 +299,9 @@ capability once → it appears in all three. CLI/GUI can't drift.
 | `okb enrich [--web-seed …]` | write | Run the enrichment agent (guardrailed) |
 | `okb search <query>` | read | Hybrid + graph retrieval (`--json` for agents) |
 | `okb ask <question>` | read | Retrieval-augmented answer with citations |
-| `okb graph <id> [--depth N]` | read | Neighborhood / paths around a concept |
+| `okb graph <id> [--depth N]` | read | Neighborhood with `→`/`←`/`↔` direction tags |
+| `okb path <from> <to>` | read | Shortest link chain between two concepts |
+| `okb orphans` | read | Concepts with no links in or out |
 | `okb links suggest` | write | Propose cross-links for review |
 | `okb index` / `okb embed` | admin | (Re)build FTS / vectors incrementally |
 | `okb rebuild --confirm-destructive` | admin | Wipe + regenerate index from bundle |
@@ -415,6 +428,19 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-08 — **Write-aware graph (1.4): store dangling edges, resolve at
+  query time.** The alternative — only storing resolved edges — makes
+  incremental updates wrong: concept A links to not-yet-written X; writing X
+  can't recover the A→X edge without rescanning every body. Storing all
+  extracted edges and joining `nodes` in every edge query keeps
+  `updateIndexFor` a strict single-concept operation (upsert node + replace
+  its out-edges) while backlinks to new concepts appear by themselves.
+  `IndexStats.edges` and `listEdges()` keep reporting *resolved* edges, so
+  nothing user-visible counts phantoms. Write ops refresh an *existing* index
+  only — never create one, since a one-concept index would silently truncate
+  search until the next `okb index`. Paths/orphans are pure BFS over the
+  resolved edge list (`core/graph/queries.ts`) rather than SQL CTEs: engine-
+  agnostic for the Postgres drop-in, and BFS needs parent tracking anyway.
 - 2026-07-08 — **Authoring conventions (1.3).** `okb new` derives ids as
   `<type>s/<slug>` (naive plural, `--id` escape hatch) rather than asking for a
   directory; `okb capture` always lands in `inbox/` (triage later, by design);

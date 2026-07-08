@@ -6,8 +6,9 @@
 
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { buildIndex, type IndexStats } from "./engine/index-build.ts";
+import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
 import type { Engine, Neighbor, SearchHit } from "./engine/interface.ts";
+import { orphans, shortestPath } from "./graph/queries.ts";
 import { captureNote } from "./ingest/capture.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
 import { listConcepts } from "./okf/bundle.ts";
@@ -25,6 +26,8 @@ export interface OpContext {
   trusted: boolean;
   /** Open (or return the already-open) engine; the adapter owns its lifecycle. */
   engine(): Engine;
+  /** True when a derived index already exists (write ops refresh it, never create it). */
+  hasIndex(): boolean;
 }
 
 export interface ParamSpec {
@@ -69,8 +72,32 @@ interface ConceptView {
   raw: string;
 }
 
+type Dir = "out" | "in" | "both";
+
 interface TitledNeighbor extends Neighbor {
   title: string;
+  /** Link direction relative to the center; only meaningful at depth 1. */
+  dir?: Dir;
+}
+
+interface PathHop {
+  id: string;
+  title: string;
+  /** Traversal direction from the previous hop; absent on the first. */
+  dir?: Dir;
+}
+
+const DIR_MARK: Record<Dir, string> = { out: "→", in: "←", both: "↔" };
+
+/** Incrementally refresh written concepts in the index — if one exists. */
+async function reindex(ctx: OpContext, ids: string[]): Promise<void> {
+  if (!ctx.hasIndex()) return;
+  for (const id of ids) await updateIndexFor(ctx.bundle, id, ctx.engine());
+}
+
+function requireNode(eng: Engine, id: string): void {
+  if (!eng.getNode(id))
+    throw new OpError(`concept not in index: ${id} (run \`okb index\`?)`, "not_found");
 }
 
 async function readConceptView(bundle: string, id: string): Promise<ConceptView> {
@@ -169,7 +196,7 @@ export const operations: readonly Operation[] = [
   {
     name: "graph_neighbors",
     cliName: "graph",
-    summary: "Show the link neighborhood (links + backlinks) of a concept",
+    summary: "Show the link neighborhood of a concept (→ links to, ← cited by)",
     scope: "read",
     params: [
       { name: "id", type: "string", required: true, positional: true, description: "concept id at the center" },
@@ -178,16 +205,83 @@ export const operations: readonly Operation[] = [
     handler: async (ctx, p) => {
       const id = p.id as string;
       const eng = ctx.engine();
-      if (!eng.getNode(id))
-        throw new OpError(`concept not in index: ${id} (run \`okb index\`?)`, "not_found");
+      requireNode(eng, id);
+      const { out, in: cited } = eng.edgesOf(id);
+      const dirOf = (n: Neighbor): Dir | undefined =>
+        n.depth !== 1
+          ? undefined
+          : out.includes(n.id)
+            ? cited.includes(n.id)
+              ? "both"
+              : "out"
+            : "in";
       return eng
         .neighbors(id, (p.depth as number | undefined) ?? 1)
-        .map((n): TitledNeighbor => ({ ...n, title: eng.getNode(n.id)?.title ?? "" }));
+        .map((n): TitledNeighbor => ({ ...n, title: eng.getNode(n.id)?.title ?? "", dir: dirOf(n) }));
     },
     render: (r) => {
       const ns = r as TitledNeighbor[];
       if (ns.length === 0) return "(no neighbors)";
-      return ns.map((n) => `${n.depth}  ${n.id} — ${n.title}`).join("\n");
+      return ns
+        .map((n) => `${n.depth} ${n.dir ? DIR_MARK[n.dir] : " "} ${n.id} — ${n.title}`)
+        .join("\n");
+    },
+  },
+  {
+    name: "graph_path",
+    cliName: "path",
+    summary: "Shortest chain of links (either direction) between two concepts",
+    scope: "read",
+    params: [
+      { name: "from", type: "string", required: true, positional: true, description: "start concept id" },
+      { name: "to", type: "string", required: true, positional: true, description: "end concept id" },
+      { name: "max-depth", type: "int", description: "hop limit for the search (default 10)" },
+    ],
+    handler: async (ctx, p) => {
+      const eng = ctx.engine();
+      const [from, to] = [p.from as string, p.to as string];
+      requireNode(eng, from);
+      requireNode(eng, to);
+      const edges = eng.listEdges();
+      const ids = shortestPath(edges, from, to, (p["max-depth"] as number | undefined) ?? 10);
+      if (!ids) return null;
+      const fwd = new Set(edges.map((e) => JSON.stringify([e.src, e.dst])));
+      const has = (a: string, b: string) => fwd.has(JSON.stringify([a, b]));
+      return ids.map((id, i): PathHop => {
+        const hop: PathHop = { id, title: eng.getNode(id)?.title ?? "" };
+        if (i > 0) {
+          const prev = ids[i - 1]!;
+          hop.dir = has(prev, id) ? (has(id, prev) ? "both" : "out") : "in";
+        }
+        return hop;
+      });
+    },
+    render: (r) => {
+      const hops = r as PathHop[] | null;
+      if (!hops) return "(no path)";
+      return hops
+        .map((h, i) => (i === 0 ? h.id : ` ${DIR_MARK[h.dir!]} ${h.id}`))
+        .join("");
+    },
+    exitCode: (r) => (r === null ? 1 : 0),
+  },
+  {
+    name: "orphans",
+    cliName: "orphans",
+    summary: "List concepts with no links in or out",
+    scope: "read",
+    params: [],
+    handler: async (ctx) => {
+      const eng = ctx.engine();
+      return orphans(eng.listNodeIds(), eng.listEdges()).map((id) => ({
+        id,
+        title: eng.getNode(id)!.title,
+      }));
+    },
+    render: (r) => {
+      const os = r as { id: string; title: string }[];
+      if (os.length === 0) return "(no orphans)";
+      return os.map((o) => `${o.id} — ${o.title}`).join("\n");
     },
   },
   {
@@ -222,8 +316,8 @@ export const operations: readonly Operation[] = [
       { name: "tags", type: "string", description: "comma-separated tags (empty string clears)" },
       { name: "resource", type: "string", description: "canonical URI for reference concepts" },
     ],
-    handler: (ctx, p) =>
-      writing(() =>
+    handler: async (ctx, p) => {
+      const r = await writing(() =>
         writeConcept(ctx.bundle, {
           id: p.id as string,
           type: p.type as string | undefined,
@@ -233,7 +327,10 @@ export const operations: readonly Operation[] = [
           resource: p.resource as string | undefined,
           tags: parseTags(p.tags),
         }),
-      ),
+      );
+      await reindex(ctx, [r.id]);
+      return r;
+    },
     render: renderWrite,
   },
   {
@@ -250,8 +347,8 @@ export const operations: readonly Operation[] = [
       { name: "resource", type: "string", description: "canonical URI for reference concepts" },
       { name: "id", type: "string", description: "override the derived id (default <type>s/<title-slug>)" },
     ],
-    handler: (ctx, p) =>
-      writing(async () => {
+    handler: async (ctx, p) => {
+      const r = await writing(async () => {
         const id = (p.id as string | undefined) ?? `${p.type}s/${slugify(p.title as string)}`;
         if (existsSync(idToAbsPath(ctx.bundle, id)))
           throw new OpError(`concept exists: ${id} (update it with \`okb write\`)`, "refused");
@@ -264,7 +361,10 @@ export const operations: readonly Operation[] = [
           resource: p.resource as string | undefined,
           tags: parseTags(p.tags),
         });
-      }),
+      });
+      await reindex(ctx, [r.id]);
+      return r;
+    },
     render: renderWrite,
   },
   {
@@ -277,14 +377,17 @@ export const operations: readonly Operation[] = [
       { name: "title", type: "string", description: "title (default: first line of the text)" },
       { name: "tags", type: "string", description: "comma-separated tags" },
     ],
-    handler: (ctx, p) =>
-      writing(() =>
+    handler: async (ctx, p) => {
+      const r = await writing(() =>
         captureNote(ctx.bundle, {
           text: p.text as string,
           title: p.title as string | undefined,
           tags: parseTags(p.tags),
         }),
-      ),
+      );
+      await reindex(ctx, [r.id]);
+      return r;
+    },
     render: renderWrite,
   },
   {
@@ -298,15 +401,18 @@ export const operations: readonly Operation[] = [
       { name: "dest", type: "string", description: "bundle directory to import into (default: mirror the source layout at the root)" },
       { name: "overwrite", type: "boolean", description: "update concepts whose id already exists (default: skip)" },
     ],
-    handler: (ctx, p) =>
-      writing(() =>
+    handler: async (ctx, p) => {
+      const r = await writing(() =>
         importPath(ctx.bundle, {
           path: p.path as string,
           type: p.type as string | undefined,
           dest: p.dest as string | undefined,
           overwrite: p.overwrite as boolean | undefined,
         }),
-      ),
+      );
+      await reindex(ctx, r.imported);
+      return r;
+    },
     render: (r) => {
       const res = r as ImportResult;
       return [

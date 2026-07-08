@@ -1,53 +1,69 @@
 // Bundle → engine index build. Idempotent: unchanged files (by content hash)
 // skip node writes, vanished concepts are removed, and the edge set is replaced
-// wholesale from freshly extracted links. Permissive on read: a concept with
-// unparseable frontmatter is still indexed (empty frontmatter, raw text as
-// body) so search never loses it — `okb doctor` is where it gets flagged.
+// wholesale from freshly extracted links. All extracted edges are stored —
+// including dangling ones (target concept doesn't exist yet); the engine's
+// queries resolve against nodes, so a dangling edge surfaces on its own once
+// its target is written, which is what makes `updateIndexFor` sound.
+// Permissive on read: a concept with unparseable frontmatter is still indexed
+// (empty frontmatter, raw text as body) so search never loses it — `okb
+// doctor` is where it gets flagged.
 
 import { createHash } from "node:crypto";
-import { buildEdges } from "../graph/links.ts";
+import { extractTargets } from "../graph/links.ts";
 import { log } from "../log.ts";
-import { listConcepts, readConceptPermissive } from "../okf/bundle.ts";
+import { listConcepts, readConceptPermissive, type PermissiveConcept } from "../okf/bundle.ts";
 import { fmString, fmTags } from "../okf/document.ts";
-import type { Engine } from "./interface.ts";
+import type { EdgeRecord, Engine } from "./interface.ts";
 
 export interface IndexStats {
   indexed: number;
   skipped: number;
   removed: number;
+  /** Resolved edges (both endpoints indexed) after the build. */
   edges: number;
 }
+
+const hashOf = (raw: string): string =>
+  createHash("sha256").update(raw, "utf8").digest("hex");
+
+function upsertConcept(engine: Engine, { id, doc, parsed }: PermissiveConcept, hash: string): void {
+  if (!parsed) log.warn("indexing concept with unparseable frontmatter", { id });
+  const fm = doc.frontmatter;
+  engine.upsertNode({
+    id,
+    type: fmString(fm.type),
+    title: fmString(fm.title),
+    description: fmString(fm.description),
+    resource: typeof fm.resource === "string" ? fm.resource : null,
+    bodyLen: doc.body.length,
+    contentHash: hash,
+    body: doc.body,
+    tags: fmTags(fm.tags),
+  });
+}
+
+/** Extracted targets minus self-links (dangling targets kept; see header). */
+const outgoing = (id: string, body: string): string[] =>
+  extractTargets(id, body).filter((dst) => dst !== id);
 
 /** (Re)index the bundle at `root` into `engine`. Safe to run repeatedly. */
 export async function buildIndex(root: string, engine: Engine): Promise<IndexStats> {
   const ids = await listConcepts(root);
   const have = engine.contentHashes();
-  const docs: { id: string; body: string }[] = [];
+  const edges: EdgeRecord[] = [];
   let indexed = 0;
   let skipped = 0;
 
   for (const id of ids) {
-    const { raw, doc, parsed } = await readConceptPermissive(root, id);
-    if (!parsed) log.warn("indexing concept with unparseable frontmatter", { id });
-    docs.push({ id, body: doc.body });
+    const concept = await readConceptPermissive(root, id);
+    for (const dst of outgoing(id, concept.doc.body)) edges.push({ src: id, dst });
 
-    const hash = createHash("sha256").update(raw, "utf8").digest("hex");
+    const hash = hashOf(concept.raw);
     if (have.get(id) === hash) {
       skipped++;
       continue;
     }
-    const fm = doc.frontmatter;
-    engine.upsertNode({
-      id,
-      type: fmString(fm.type),
-      title: fmString(fm.title),
-      description: fmString(fm.description),
-      resource: typeof fm.resource === "string" ? fm.resource : null,
-      bodyLen: doc.body.length,
-      contentHash: hash,
-      body: doc.body,
-      tags: fmTags(fm.tags),
-    });
+    upsertConcept(engine, concept, hash);
     indexed++;
   }
 
@@ -59,7 +75,13 @@ export async function buildIndex(root: string, engine: Engine): Promise<IndexSta
     removed++;
   }
 
-  const edges = buildEdges(docs);
   engine.replaceEdges(edges);
-  return { indexed, skipped, removed, edges: edges.length };
+  return { indexed, skipped, removed, edges: engine.listEdges().length };
+}
+
+/** Refresh one concept in an existing index after a write (node + its out-edges). */
+export async function updateIndexFor(root: string, id: string, engine: Engine): Promise<void> {
+  const concept = await readConceptPermissive(root, id);
+  upsertConcept(engine, concept, hashOf(concept.raw));
+  engine.replaceEdgesFor(id, outgoing(id, concept.doc.body));
 }

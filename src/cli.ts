@@ -151,6 +151,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     bundle,
     trusted: true,
     engine: () => (engine ??= openSqliteEngine(defaultDbPath(bundle))),
+    hasIndex: () => existsSync(defaultDbPath(bundle)),
   };
   try {
     const result = await runOp(op, ctx, raw);

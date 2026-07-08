@@ -11,9 +11,9 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 ## Current focus
 > Stage 1 — authoring + graph + sync (Stage 0 complete). Done: 1.1 conformance
 > writer (`okb write`); 1.2 index.md/log.md generation on every write; 1.3
-> authoring ops (`okb new` / `capture` / `import`).
-> Next: 1.4 write-aware graph (materialized backlinks, paths/orphans,
-> incremental index on write).
+> authoring ops (`okb new` / `capture` / `import`); 1.4 write-aware graph
+> (`okb graph` direction tags, `okb path`, `okb orphans`, incremental index).
+> Next: 1.5 git sync (`okb sync`, `.okb/` gitignore, db_only).
 
 ---
 
@@ -99,9 +99,11 @@ Goal: a real PKM you can write to, conformant on every save, versioned in git.
 - [x] Tests: new/capture/import produce conformant (doctor-clean) concepts; slugify; dedupe; stdin path
 
 ### 1.4 Graph (write-aware)
-- [ ] Materialized backlinks in DB; `okb graph` shows "cited by"
-- [ ] `core/graph/queries.ts` — paths between concepts; orphan detection
-- [ ] Incremental index update on single-concept write
+- [x] Materialized backlinks: `Engine.edgesOf` over the edges table; `okb graph` tags depth-1 rows `→` links-to / `←` cited-by / `↔` both
+- [x] `core/graph/queries.ts` — `okb path <from> <to>` (BFS shortest, per-hop arrows, exit 1 on no path) + `okb orphans`
+- [x] Incremental index update on single-concept write (`updateIndexFor`; all write ops refresh an existing index, never create one)
+- [x] Dangling edges stored, resolved against `nodes` at query time — backlinks to a newly written concept appear without a rebuild
+- [x] Tests: dangling-edge visibility/walking, incremental update (incl. backlink-appears regression), path/orphans pure + CLI
 
 ### 1.5 Sync (git)
 - [ ] `core/sync.ts` — git init/commit/push/pull/status (portable spawn, no shell strings)
@@ -262,6 +264,13 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-08 — Stage 1.4 write-aware graph: edges now stored dangling-inclusive
+  and resolved against `nodes` in every query, so `updateIndexFor` (run by all
+  write ops when an index exists) keeps the graph exact without rebuilds —
+  backlinks to a just-written concept appear on their own. `okb graph` gained
+  `→`/`←`/`↔` direction tags; new `okb path` (BFS shortest chain with per-hop
+  arrows) and `okb orphans` over pure `core/graph/queries.ts`. 150 tests
+  green, tsc clean. Next: 1.5 git sync.
 - 2026-07-08 — Corrected the OKF reference (repo links were hallucinated; real
   source registered as R1 in REFERENCES.md — spec confirms current design) and
   shipped Stage 1.3 authoring: `okb new` (derived `<type>s/<slug>` id,

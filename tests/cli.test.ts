@@ -69,7 +69,7 @@ describe("okb CLI", () => {
 
     const graph = await okb("graph", "alpha");
     expect(graph.code).toBe(0);
-    expect(graph.stdout).toBe("1  notes/beta — Beta\n");
+    expect(graph.stdout).toBe("1 → notes/beta — Beta\n");
   });
 
   test("rebuild without --confirm-destructive fails with guidance (exit 1)", async () => {

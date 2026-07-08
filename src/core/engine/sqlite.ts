@@ -134,7 +134,13 @@ export function openSqliteEngine(dbPath: string): Engine {
   const replaceEdges = db.transaction((edges: EdgeRecord[]) => {
     db.query("DELETE FROM edges").run();
     for (const { src, dst } of edges)
-      db.query("INSERT INTO edges (src, dst) VALUES (?, ?)").run(src, dst);
+      db.query("INSERT OR IGNORE INTO edges (src, dst) VALUES (?, ?)").run(src, dst);
+  });
+
+  const replaceEdgesFor = db.transaction((src: string, dsts: string[]) => {
+    db.query("DELETE FROM edges WHERE src = ?").run(src);
+    for (const dst of dsts)
+      db.query("INSERT OR IGNORE INTO edges (src, dst) VALUES (?, ?)").run(src, dst);
   });
 
   const toRecord = (r: NodeRow): NodeRecord => ({
@@ -176,12 +182,38 @@ export function openSqliteEngine(dbPath: string): Engine {
       return new Map(rows.map((r) => [r.id, r.content_hash]));
     },
 
+    listNodeIds() {
+      return db
+        .query<{ id: string }, []>("SELECT id FROM nodes ORDER BY id")
+        .all()
+        .map((r) => r.id);
+    },
+
     replaceEdges: (edges) => replaceEdges(edges),
+    replaceEdgesFor: (src, dsts) => replaceEdgesFor(src, dsts),
 
     listEdges() {
+      // Dangling edges (unindexed endpoint) stay stored but never surface.
       return db
-        .query<EdgeRecord, []>("SELECT src, dst FROM edges ORDER BY src, dst")
+        .query<EdgeRecord, []>(
+          `SELECT e.src, e.dst FROM edges e
+           JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst
+           ORDER BY e.src, e.dst`,
+        )
         .all();
+    },
+
+    edgesOf(id) {
+      const ids = (sql: string) =>
+        db.query<{ id: string }, [string]>(sql).all(id).map((r) => r.id);
+      return {
+        out: ids(
+          "SELECT e.dst AS id FROM edges e JOIN nodes n ON n.id = e.dst WHERE e.src = ? ORDER BY e.dst",
+        ),
+        in: ids(
+          "SELECT e.src AS id FROM edges e JOIN nodes n ON n.id = e.src WHERE e.dst = ? ORDER BY e.src",
+        ),
+      };
     },
 
     search(query, limit = 20) {
@@ -203,8 +235,9 @@ export function openSqliteEngine(dbPath: string): Engine {
           `WITH RECURSIVE walk(id, depth) AS (
              SELECT ?, 0
              UNION
-             SELECT CASE WHEN e.src = w.id THEN e.dst ELSE e.src END, w.depth + 1
+             SELECT n.id, w.depth + 1
              FROM edges e JOIN walk w ON w.id IN (e.src, e.dst)
+             JOIN nodes n ON n.id = CASE WHEN e.src = w.id THEN e.dst ELSE e.src END
              WHERE w.depth < ?
            )
            SELECT id, MIN(depth) AS depth FROM walk
