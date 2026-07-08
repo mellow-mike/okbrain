@@ -28,6 +28,18 @@ export function validateId(id: string): void {
   }
 }
 
+/** Text → id-segment slug (`Café Notes!` → `cafe-notes`). Throws if nothing survives. */
+export function slugify(text: string): string {
+  const slug = text
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (slug === "") throw new InvalidIdError(`cannot derive an id segment from: ${JSON.stringify(text)}`);
+  return slug;
+}
+
 /** `notes/foo` → OS-relative `notes/foo.md`. */
 export function idToRelPath(id: string): string {
   validateId(id);

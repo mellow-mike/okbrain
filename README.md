@@ -1,7 +1,7 @@
 # okbrain
 
 A self-hosted, cross-platform personal knowledge manager. Its on-disk store is a
-conformant **[Open Knowledge Format](https://openknowledge.foundation/) (OKF)**
+conformant **[Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) (OKF)**
 bundle — markdown + YAML frontmatter in git — and the database is a derived,
 fully-rebuildable cache. Lightweight and correct over feature-rich; runs offline
 on a laptop and grows for years.

@@ -27,6 +27,8 @@ export interface WriteConceptInput {
   tags?: string[];
   /** Markdown body; undefined keeps the existing body on update. */
   body?: string;
+  /** Extra frontmatter to carry (import path); overrides existing unknown keys, never scaffold keys. */
+  extra?: Record<string, unknown>;
 }
 
 export interface WriteResult {
@@ -81,7 +83,7 @@ export async function writeConcept(
   if (resource !== undefined && resource !== "") fm.resource = resource;
   const tags = input.tags ?? prev?.tags;
   if (Array.isArray(tags) ? tags.length > 0 : tags !== undefined) fm.tags = tags;
-  for (const [k, v] of Object.entries(prev ?? {}))
+  for (const [k, v] of Object.entries({ ...prev, ...input.extra }))
     if (!SCAFFOLD.has(k)) fm[k] = v;
 
   let body = normalizeLinks(input.id, input.body ?? prevBody).replace(/\r\n?/g, "\n");

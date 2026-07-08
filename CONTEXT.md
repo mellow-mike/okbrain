@@ -105,6 +105,28 @@ Every write produces a conformant bundle (`writeConcept`, exposed as the
   `**Creation**`/`**Update**`/`**Deprecation**`: `[Title](/id.md) — summary`,
   same-day entries sharing one section.
 
+### Authoring ops (`okb new` / `okb capture` / `okb import`)
+All three are thin front-ends over `writeConcept`:
+- **`new <type> <title> <description>`** — creates at `<type>s/<slugify(title)>`
+  (naive plural matches OKF reference layouts: `notes/`, `references/`,
+  `tables/`; `--id` overrides for irregular cases). Create-only: an existing id
+  is refused (`okb write` is the update path).
+- **`capture [text]`** — zero-metadata capture; reads piped stdin when no
+  argument (declared via `stdinFallback` on the param spec, filled generically
+  by the CLI adapter). Type `note`, id `inbox/<YYYY-MM-DD>-<slug(title)>` with
+  a numeric suffix on collision; title/description derived from the first line
+  (leading `#` stripped, clipped at 80/120 chars).
+- **`import <path>`** (`core/ingest/import.ts`) — maps a markdown file or tree
+  onto concepts: ids mirror the source's relative layout with each segment
+  slugified (optionally under `--dest`); `type`/`title`/`description`/
+  `resource`/`tags` come from source frontmatter when present, else are
+  derived (first H1 → title, first prose line → description, `--type` default
+  `note`); unknown source frontmatter keys are carried via the writer's
+  `extra` input (overrides existing unknown keys, never scaffold keys);
+  reserved files are skipped, unparseable frontmatter becomes body. Dedupe is
+  by id: existing concepts are skipped unless `--overwrite`, and when two
+  sources slugify to one id the first (sorted) wins.
+
 ### Conformance checklist (`okb doctor` asserts)
 `core/okf/doctor.ts` walks every `.md` file and reports findings at two
 severities. **Errors** (conformance violations; CLI exits 1): unparseable YAML
@@ -260,9 +282,9 @@ capability once → it appears in all three. CLI/GUI can't drift.
 | Command | Scope | Purpose |
 |---|---|---|
 | `okb init` | admin | Create/attach a bundle; pick engine + AI provider; write config |
-| `okb new <type> <title>` | write | Create a conformant concept |
-| `okb capture` | write | Quick-capture a note/clip → concept (+ link suggestions) |
-| `okb import <path>` | write | Ingest existing markdown/notes |
+| `okb new <type> <title> <description>` | write | Create a conformant concept at `<type>s/<slug>` |
+| `okb capture [text]` | write | Quick-capture text/stdin → `inbox/` concept (link suggestions later) |
+| `okb import <path>` | write | Map existing markdown (file/tree) → concepts; dedupe by id |
 | `okb enrich [--web-seed …]` | write | Run the enrichment agent (guardrailed) |
 | `okb search <query>` | read | Hybrid + graph retrieval (`--json` for agents) |
 | `okb ask <question>` | read | Retrieval-augmented answer with citations |
@@ -393,6 +415,20 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-08 — **Authoring conventions (1.3).** `okb new` derives ids as
+  `<type>s/<slug>` (naive plural, `--id` escape hatch) rather than asking for a
+  directory; `okb capture` always lands in `inbox/` (triage later, by design);
+  `okb import` dedupes by id with first-wins + `--overwrite`, and the writer
+  gained an `extra` input so imports can round-trip unknown frontmatter keys.
+  Stdin support is a generic `stdinFallback` flag on param specs, kept in the
+  CLI adapter so the ops contract stays surface-neutral.
+- 2026-07-08 — **Canonical OKF reference corrected.** The OKF links previously
+  in the repo (openknowledge.foundation, a deepset-ai repo) were hallucinated;
+  the real source is `github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf`
+  (registered as R1 in `docs/context/REFERENCES.md`). Its SPEC.md confirms the
+  existing design: only `type` required, recommended keys as we emit them,
+  bundle-absolute links recommended, reserved `index.md`/`log.md` without
+  frontmatter, permissive readers. No design change needed.
 - 2026-07-07 — **index.md/log.md generation is deterministic, with a preserved
   human head.** No AI in the generators: an `index.md`'s H1 + pre-`##` intro
   is the user's (preserved verbatim and reused as the directory's description

@@ -4,13 +4,16 @@
 // Trust is fail-closed (invariant 3): `runOp` refuses write/admin scope for any
 // caller not explicitly trusted, before the handler is ever reached.
 
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { buildIndex, type IndexStats } from "./engine/index-build.ts";
 import type { Engine, Neighbor, SearchHit } from "./engine/interface.ts";
+import { captureNote } from "./ingest/capture.ts";
+import { importPath, type ImportResult } from "./ingest/import.ts";
 import { listConcepts } from "./okf/bundle.ts";
 import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
 import { OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
-import { idToAbsPath, InvalidIdError, validateId } from "./okf/paths.ts";
+import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
 import { OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
 import { exportViz, type VizExport } from "./viz/export.ts";
 
@@ -31,6 +34,8 @@ export interface ParamSpec {
   required?: boolean;
   /** Filled from bare CLI arguments, in declaration order. */
   positional?: boolean;
+  /** CLI adapter may fill a missing value from piped stdin. */
+  stdinFallback?: boolean;
   description: string;
 }
 
@@ -97,6 +102,28 @@ const renderStats = (r: unknown): string => {
   const s = r as IndexStats;
   return `indexed ${s.indexed}, skipped ${s.skipped}, removed ${s.removed}, edges ${s.edges}`;
 };
+
+const renderWrite = (r: unknown): string => {
+  const w = r as WriteResult;
+  return `${w.created ? "created" : "updated"} ${w.id}`;
+};
+
+/** Comma-separated CLI tags → array (`""` clears, undefined keeps). */
+const parseTags = (v: unknown): string[] | undefined =>
+  v === undefined
+    ? undefined
+    : (v as string).split(",").map((t) => t.trim()).filter((t) => t !== "");
+
+/** Writer/id errors are caller mistakes → bad_params; the rest propagate. */
+async function writing<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e instanceof OkfWriteError || e instanceof InvalidIdError)
+      throw new OpError(e.message, "bad_params");
+    throw e;
+  }
+}
 
 export const operations: readonly Operation[] = [
   {
@@ -195,29 +222,98 @@ export const operations: readonly Operation[] = [
       { name: "tags", type: "string", description: "comma-separated tags (empty string clears)" },
       { name: "resource", type: "string", description: "canonical URI for reference concepts" },
     ],
-    handler: async (ctx, p) => {
-      const tags = p.tags as string | undefined;
-      try {
-        return await writeConcept(ctx.bundle, {
+    handler: (ctx, p) =>
+      writing(() =>
+        writeConcept(ctx.bundle, {
           id: p.id as string,
           type: p.type as string | undefined,
           title: p.title as string | undefined,
           description: p.description as string | undefined,
           body: p.body as string | undefined,
           resource: p.resource as string | undefined,
-          tags: tags === undefined
-            ? undefined
-            : tags.split(",").map((t) => t.trim()).filter((t) => t !== ""),
+          tags: parseTags(p.tags),
+        }),
+      ),
+    render: renderWrite,
+  },
+  {
+    name: "new_concept",
+    cliName: "new",
+    summary: "Create a concept; its id is derived from type and title",
+    scope: "write",
+    params: [
+      { name: "type", type: "string", required: true, positional: true, description: "concept type, e.g. note" },
+      { name: "title", type: "string", required: true, positional: true, description: "concept title" },
+      { name: "description", type: "string", required: true, positional: true, description: "one-line description" },
+      { name: "body", type: "string", description: "markdown body" },
+      { name: "tags", type: "string", description: "comma-separated tags" },
+      { name: "resource", type: "string", description: "canonical URI for reference concepts" },
+      { name: "id", type: "string", description: "override the derived id (default <type>s/<title-slug>)" },
+    ],
+    handler: (ctx, p) =>
+      writing(async () => {
+        const id = (p.id as string | undefined) ?? `${p.type}s/${slugify(p.title as string)}`;
+        if (existsSync(idToAbsPath(ctx.bundle, id)))
+          throw new OpError(`concept exists: ${id} (update it with \`okb write\`)`, "refused");
+        return writeConcept(ctx.bundle, {
+          id,
+          type: p.type as string,
+          title: p.title as string,
+          description: p.description as string,
+          body: p.body as string | undefined,
+          resource: p.resource as string | undefined,
+          tags: parseTags(p.tags),
         });
-      } catch (e) {
-        if (e instanceof OkfWriteError || e instanceof InvalidIdError)
-          throw new OpError(e.message, "bad_params");
-        throw e;
-      }
-    },
+      }),
+    render: renderWrite,
+  },
+  {
+    name: "capture",
+    cliName: "capture",
+    summary: "Quick-capture text (or piped stdin) as a note under inbox/",
+    scope: "write",
+    params: [
+      { name: "text", type: "string", required: true, positional: true, stdinFallback: true, description: "text to capture (or pipe it on stdin)" },
+      { name: "title", type: "string", description: "title (default: first line of the text)" },
+      { name: "tags", type: "string", description: "comma-separated tags" },
+    ],
+    handler: (ctx, p) =>
+      writing(() =>
+        captureNote(ctx.bundle, {
+          text: p.text as string,
+          title: p.title as string | undefined,
+          tags: parseTags(p.tags),
+        }),
+      ),
+    render: renderWrite,
+  },
+  {
+    name: "import",
+    cliName: "import",
+    summary: "Import existing markdown (file or directory) as OKF concepts",
+    scope: "write",
+    params: [
+      { name: "path", type: "string", required: true, positional: true, description: "markdown file or directory to import" },
+      { name: "type", type: "string", description: "type for sources without one (default note)" },
+      { name: "dest", type: "string", description: "bundle directory to import into (default: mirror the source layout at the root)" },
+      { name: "overwrite", type: "boolean", description: "update concepts whose id already exists (default: skip)" },
+    ],
+    handler: (ctx, p) =>
+      writing(() =>
+        importPath(ctx.bundle, {
+          path: p.path as string,
+          type: p.type as string | undefined,
+          dest: p.dest as string | undefined,
+          overwrite: p.overwrite as boolean | undefined,
+        }),
+      ),
     render: (r) => {
-      const w = r as WriteResult;
-      return `${w.created ? "created" : "updated"} ${w.id}`;
+      const res = r as ImportResult;
+      return [
+        ...res.imported.map((id) => `imported ${id}`),
+        ...res.skipped.map((s) => `skipped ${s.path} — ${s.reason}`),
+        `${res.imported.length} imported, ${res.skipped.length} skipped`,
+      ].join("\n");
     },
   },
   {
