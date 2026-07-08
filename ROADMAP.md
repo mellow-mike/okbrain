@@ -10,8 +10,10 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 
 ## Current focus
 > Stage 1 — authoring + graph + sync (Stage 0 complete). Done: 1.1 conformance
-> writer (`okb write`); 1.2 index.md/log.md generation on every write.
-> Next: 1.3 authoring ops/CLI (`okb new` / `capture` / `import`).
+> writer (`okb write`); 1.2 index.md/log.md generation on every write; 1.3
+> authoring ops (`okb new` / `capture` / `import`); 1.4 write-aware graph
+> (`okb graph` direction tags, `okb path`, `okb orphans`, incremental index).
+> Next: 1.5 git sync (`okb sync`, `.okb/` gitignore, db_only).
 
 ---
 
@@ -91,14 +93,17 @@ Goal: a real PKM you can write to, conformant on every save, versioned in git.
 - [x] Tests: index regen grouping; H1/intro preservation; root fm; ancestor chain; log append ordering; writer-built bundle doctor-clean
 
 ### 1.3 Authoring ops/CLI
-- [ ] `okb new <type> <title>`, `okb capture`, `okb import <path>`
-- [ ] Import: map existing md/dirs → OKF; dedupe
-- [ ] Tests: new/capture/import produce conformant concepts
+- [x] `okb new <type> <title> <description>` — id derived `<type>s/<slug>` (`--id` override); create-only
+- [x] `okb capture [text]` — stdin fallback (generic `stdinFallback` param flag); `inbox/<date>-<slug>` with collision suffix; title/description from first line
+- [x] `okb import <path>` — map existing md/dirs → OKF (frontmatter derived or carried, unknown keys preserved via writer `extra`); dedupe by id (`--overwrite`, in-run first-wins); `--dest`/`--type`
+- [x] Tests: new/capture/import produce conformant (doctor-clean) concepts; slugify; dedupe; stdin path
 
 ### 1.4 Graph (write-aware)
-- [ ] Materialized backlinks in DB; `okb graph` shows "cited by"
-- [ ] `core/graph/queries.ts` — paths between concepts; orphan detection
-- [ ] Incremental index update on single-concept write
+- [x] Materialized backlinks: `Engine.edgesOf` over the edges table; `okb graph` tags depth-1 rows `→` links-to / `←` cited-by / `↔` both
+- [x] `core/graph/queries.ts` — `okb path <from> <to>` (BFS shortest, per-hop arrows, exit 1 on no path) + `okb orphans`
+- [x] Incremental index update on single-concept write (`updateIndexFor`; all write ops refresh an existing index, never create one)
+- [x] Dangling edges stored, resolved against `nodes` at query time — backlinks to a newly written concept appear without a rebuild
+- [x] Tests: dangling-edge visibility/walking, incremental update (incl. backlink-appears regression), path/orphans pure + CLI
 
 ### 1.5 Sync (git)
 - [ ] `core/sync.ts` — git init/commit/push/pull/status (portable spawn, no shell strings)
@@ -234,6 +239,11 @@ Severity: `crit` (data loss / corruption / non-conformant write) · `high`
 ## Backlog (unscheduled ideas)
 Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [ ] Full-text snippet highlighting in `okb search` output
+- [ ] Bulk import performance: each imported file regenerates its whole
+      `index.md` ancestor chain + appends `log.md`; batch the regeneration for
+      large trees if it gets slow
+- [ ] `okb capture` triage flow: promote `inbox/` notes to a proper home
+      (`okb move`? skill?) once graph tooling (1.4) exists
 - [ ] Writer no-op detection: skip the write (and the `timestamp` refresh) when
       the result would be byte-identical, so re-running imports/agent passes
       never churns git history
@@ -254,6 +264,20 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-08 — Stage 1.4 write-aware graph: edges now stored dangling-inclusive
+  and resolved against `nodes` in every query, so `updateIndexFor` (run by all
+  write ops when an index exists) keeps the graph exact without rebuilds —
+  backlinks to a just-written concept appear on their own. `okb graph` gained
+  `→`/`←`/`↔` direction tags; new `okb path` (BFS shortest chain with per-hop
+  arrows) and `okb orphans` over pure `core/graph/queries.ts`. 150 tests
+  green, tsc clean. Next: 1.5 git sync.
+- 2026-07-08 — Corrected the OKF reference (repo links were hallucinated; real
+  source registered as R1 in REFERENCES.md — spec confirms current design) and
+  shipped Stage 1.3 authoring: `okb new` (derived `<type>s/<slug>` id,
+  create-only), `okb capture` (piped-stdin fallback, `inbox/<date>-<slug>`,
+  collision suffix), `okb import` (md file/tree → concepts, frontmatter
+  derived/carried incl. unknown keys via new writer `extra` input, dedupe by
+  id + `--overwrite`). 138 tests green, tsc clean. Next: 1.4 write-aware graph.
 - 2026-07-07 — Stage 1.2: index.md/log.md generation — every `okb write`
   regenerates `index.md` for the touched dir + ancestors (type-grouped rows,
   H1/intro preserved as the human-editable head, `## Directories` from child

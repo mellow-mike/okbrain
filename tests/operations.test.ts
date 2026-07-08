@@ -9,7 +9,12 @@ import { getOp, OpError, operations, runOp, type OpContext } from "../src/core/o
 let root: string;
 let engine: Engine;
 
-const ctx = (trusted = true): OpContext => ({ bundle: root, trusted, engine: () => engine });
+const ctx = (trusted = true): OpContext => ({
+  bundle: root,
+  trusted,
+  engine: () => engine,
+  hasIndex: () => true,
+});
 const op = (name: string) => getOp(name)!;
 
 const expectOpError = async (p: Promise<unknown>, code: OpError["code"]) => {
@@ -123,9 +128,9 @@ describe("read ops", () => {
     ]);
   });
 
-  test("graph_neighbors returns titled neighbors; unknown id is not_found", async () => {
+  test("graph_neighbors returns titled, direction-tagged neighbors; unknown id is not_found", async () => {
     expect(await runOp(op("graph_neighbors"), ctx(), { id: "alpha" })).toEqual([
-      { id: "notes/beta", depth: 1, title: "Beta" },
+      { id: "notes/beta", depth: 1, title: "Beta", dir: "out" },
     ]);
     await expectOpError(runOp(op("graph_neighbors"), ctx(), { id: "ghost" }), "not_found");
   });

@@ -43,11 +43,22 @@ export interface Engine {
   removeNode(id: string): void;
   getNode(id: string): NodeRecord | null;
   getTags(id: string): string[];
+  /** All indexed node ids, sorted. */
+  listNodeIds(): string[];
   /** id → contentHash for every indexed node (drives skip/removal logic). */
   contentHashes(): Map<string, string>;
-  /** Atomically replace the whole edge set (edges are derived per build). */
+  /**
+   * Atomically replace the whole edge set. Stored edges may dangle (target not
+   * indexed yet); every edge-reading query resolves against `nodes`, so a
+   * dangling edge surfaces by itself once its target is written (1.4).
+   */
   replaceEdges(edges: EdgeRecord[]): void;
+  /** Replace one concept's outgoing edges (incremental update on write). */
+  replaceEdgesFor(src: string, dsts: string[]): void;
+  /** Resolved edges only (both endpoints indexed), sorted by src then dst. */
   listEdges(): EdgeRecord[];
+  /** One concept's resolved links (`out`) and backlinks (`in`), sorted. */
+  edgesOf(id: string): { out: string[]; in: string[] };
   /** Keyword search (BM25) over title/body/tags. */
   search(query: string, limit?: number): SearchHit[];
   /** Undirected neighborhood (links + backlinks) out to `depth` hops. */

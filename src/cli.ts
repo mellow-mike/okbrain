@@ -21,11 +21,14 @@ import {
 export interface Io {
   out(text: string): void;
   err(text: string): void;
+  /** Read piped stdin for `stdinFallback` params; absent in tests. */
+  stdin?(): Promise<string>;
 }
 
 const defaultIo: Io = {
   out: (t) => process.stdout.write(t),
   err: (t) => process.stderr.write(t),
+  stdin: () => Bun.stdin.text(),
 };
 
 const paramUsage = (s: ParamSpec): string => {
@@ -133,6 +136,10 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     }
   }
 
+  for (const spec of op.params)
+    if (spec.stdinFallback && raw[spec.name] === undefined && io.stdin && !process.stdin.isTTY)
+      raw[spec.name] = await io.stdin();
+
   const bundle = resolveBundlePath(bundleArg);
   if (!existsSync(bundle) || !statSync(bundle).isDirectory()) {
     io.err(`bundle directory not found: ${bundle}\n`);
@@ -144,6 +151,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     bundle,
     trusted: true,
     engine: () => (engine ??= openSqliteEngine(defaultDbPath(bundle))),
+    hasIndex: () => existsSync(defaultDbPath(bundle)),
   };
   try {
     const result = await runOp(op, ctx, raw);

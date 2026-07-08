@@ -17,6 +17,7 @@ const ctx = (trusted = true): OpContext => ({
   engine: () => {
     throw new Error("write_concept must not touch the engine");
   },
+  hasIndex: () => false,
 });
 
 beforeEach(async () => {
