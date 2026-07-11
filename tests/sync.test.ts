@@ -20,8 +20,11 @@ const dir = async (name: string): Promise<string> => {
   await mkdir(d, { recursive: true });
   return d;
 };
+// Explicit env: Bun's execFileSync hands children the *startup* environment,
+// so the identity/config vars set in beforeAll would otherwise be dropped
+// (B4 — masked locally by the developer's global gitconfig).
 const g = (cwd: string, ...args: string[]): string =>
-  execFileSync("git", args, { cwd, encoding: "utf8" });
+  execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env } });
 
 const ENV_KEYS = [
   "GIT_AUTHOR_NAME",
@@ -127,9 +130,12 @@ describe("syncBundle", () => {
     expect(pushRun.pushed).toBe(true);
     expect(g(bare, "rev-parse", "main").trim()).toHaveLength(40);
 
-    // "Other device": clone, add a concept, push back.
+    // "Other device": clone, add a concept, push back. Identity via local
+    // repo config so this commit can't depend on env propagation at all.
     const other = join(base, "b4-other");
     g(base, "clone", bare, other);
+    g(other, "config", "user.name", "Other Device");
+    g(other, "config", "user.email", "other@test.local");
     await writeFile(join(other, "elsewhere.md"), NOTE, "utf8");
     g(other, "add", "-A");
     g(other, "commit", "-m", "from the other device");
