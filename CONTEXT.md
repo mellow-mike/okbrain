@@ -318,7 +318,9 @@ with or without an index; offline it fails fast (no queue in v1).
    (`utm_*`, `fbclid`, `gclid`, …), lowercase scheme/host, drop default
    ports, sort remaining params — compared (both sides normalized) against
    every concept's `resource`. Existing concept → append the new
-   quote/note under `# Highlights` and refresh `timestamp`; no new file.
+   quote/note under `# Highlights` and refresh `timestamp`; no new file. An
+   input URL that is already stored short-circuits *before* any fetch, so
+   re-clipping known pages also works offline.
 4. **Write** via the conformance writer: `references/<slug(title)>` (numeric
    suffix when a different URL collides on slug), `type: reference`,
    `resource:` canonical URL, description from page metadata, tags = user
@@ -551,6 +553,17 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-11 — **Clip extraction trio verified on Bun — no swaps (F-A.2).**
+  linkedom (parse), @mozilla/readability (article isolation), turndown
+  (HTML→md, `remove(["script","style","noscript"])`) all run clean on Bun;
+  all pure JS, so they compile into the single binary. Readability's content
+  HTML is re-parsed once to absolutize `a[href]`/`img[src]` against the page
+  URL (serialize via `document.toString()` — linkedom's `document.body` is
+  unreliable for wrapped fragments). When Readability returns null (thin
+  pages), the whole `<body>` is converted and the description falls back to
+  "Clipped from <host>". The fetch guard exposes `allowPrivate` (default
+  off, never set by the CLI) so tests can exercise mechanics against a
+  127.0.0.1 stub and a future config could permit intranet wikis.
 - 2026-07-11 — **Engine schema migrations are rebuilds (v2 for Resurface).**
   The DB is a disposable cache, so v1→v2 doesn't get ALTER-TABLE migrations
   (backfilling new columns would defeat the content-hash skip and reproduce

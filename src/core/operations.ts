@@ -10,10 +10,12 @@ import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-buil
 import type { Engine, Neighbor, SearchHit } from "./engine/interface.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
 import { captureNote } from "./ingest/capture.ts";
+import { clipUrl, type ClipResult } from "./ingest/clip.ts";
+import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
 import { listConcepts } from "./okf/bundle.ts";
 import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
-import { OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
+import { fmTags, OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
 import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
@@ -165,13 +167,14 @@ function resolveReviewTarget(eng: Engine, raw: string): string {
   return raw;
 }
 
-/** Writer/id errors are caller mistakes → bad_params; the rest propagate. */
+/** Writer/id errors are caller mistakes → bad_params; guard blocks → refused. */
 async function writing<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (e) {
     if (e instanceof OkfWriteError || e instanceof InvalidIdError)
       throw new OpError(e.message, "bad_params");
+    if (e instanceof FetchGuardError) throw new OpError(e.message, "refused");
     throw e;
   }
 }
@@ -585,6 +588,94 @@ export const operations: readonly Operation[] = [
     render: (r) => {
       const s = r as { id: string; snoozeUntil: string };
       return `snoozed ${s.id} until ${s.snoozeUntil.slice(0, 10)} (cleared by okb rebuild)`;
+    },
+  },
+  {
+    name: "clip",
+    cliName: "clip",
+    summary: "Clip a web page into references/ as a readable, cited concept",
+    scope: "write",
+    params: [
+      { name: "url", type: "string", required: true, positional: true, description: "page to clip (http/https)" },
+      { name: "quote", type: "string", description: "passage to save under # Highlights" },
+      { name: "note", type: "string", description: "your comment, saved with the quote" },
+      { name: "tags", type: "string", description: "comma-separated extra tags" },
+      { name: "read", type: "boolean", description: "skip the inbox tag (already read)" },
+    ],
+    handler: async (ctx, p) => {
+      const r = await writing(() =>
+        clipUrl(
+          ctx.bundle,
+          {
+            url: p.url as string,
+            quote: p.quote as string | undefined,
+            note: p.note as string | undefined,
+            tags: parseTags(p.tags),
+            read: p.read as boolean | undefined,
+          },
+          { resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined },
+        ),
+      );
+      await reindex(ctx, [r.id]);
+      return r;
+    },
+    render: (r) => {
+      const c = r as ClipResult;
+      if (c.deduped)
+        return `already clipped as ${c.id}${c.appended ? " — highlight appended" : ""}`;
+      return `clipped ${c.id}${c.truncated ? " (body truncated at the 100 KB cap)" : ""}`;
+    },
+  },
+  {
+    name: "inbox_list",
+    cliName: "inbox",
+    summary: "List unread clips and notes (concepts tagged inbox), newest first",
+    scope: "read",
+    params: [],
+    handler: async (ctx) => {
+      const rows = ctx
+        .engine()
+        .listReviewRows()
+        .filter((r) => r.inbox)
+        .map(({ id, title, timestamp }) => ({ id, title, timestamp }));
+      rows.sort((a, b) => {
+        const [x, y] = [a.timestamp ?? "", b.timestamp ?? ""];
+        return x === y ? (a.id < b.id ? -1 : 1) : x > y ? -1 : 1;
+      });
+      return rows;
+    },
+    render: (r) => {
+      const rows = r as { id: string; title: string }[];
+      if (rows.length === 0) return "(inbox is empty)";
+      return [...rows.map((x) => `${x.id} — ${x.title}`), `${rows.length} unread`].join("\n");
+    },
+  },
+  {
+    name: "inbox_read",
+    cliName: "inbox read",
+    summary: "Mark a concept read (removes its inbox tag; content untouched)",
+    scope: "write",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "concept id to mark read" },
+    ],
+    handler: async (ctx, p) => {
+      const id = p.id as string;
+      const view = await readConceptView(ctx.bundle, id); // not_found on missing
+      const tags = fmTags(view.frontmatter.tags);
+      if (!tags.includes("inbox")) return { id, removed: false };
+      await writing(() =>
+        writeConcept(ctx.bundle, {
+          id,
+          tags: tags.filter((t) => t !== "inbox"),
+          metadataOnly: true,
+        }),
+      );
+      await reindex(ctx, [id]);
+      return { id, removed: true };
+    },
+    render: (r) => {
+      const x = r as { id: string; removed: boolean };
+      return x.removed ? `marked ${x.id} read` : `${x.id} was not in the inbox`;
     },
   },
 ];

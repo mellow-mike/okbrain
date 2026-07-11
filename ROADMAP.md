@@ -9,10 +9,10 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stage 1 complete** (1.1–1.5; 1.6 watch deferred). Feature interlude before
-> Stage 2, in this decided order: merge the Resurface (F-B) + Clip (F-A)
-> frameworks into the docs → build F-B → build F-A (GUI items fold into 3.2,
-> bookmarklet endpoint into 3.1, cron into 4.5) → then Stage 2.1 gateway.
+> **Stage 1 complete**; **Resurface (F-B) and Clip (F-A) shipped** CLI-first
+> (their GUI pieces live at 3.2, bookmarklet endpoint at 3.1, cron at 4.5).
+> Now: Stage 2.1 — AI gateway + recipes + `okb init` (the config file that
+> also wires `review.*`/`clip.*` keys).
 
 ---
 
@@ -156,19 +156,28 @@ URL → conformant `references/` concept in seconds; feeds search/graph/review.
 Design: `docs/features/FEATURE-CLIP.md` + CONTEXT §Clip. Scope guard:
 bookmarklet + token endpoint → 3.1, GUI inbox view → 3.2; embed hook → 2.2,
 link-suggest hook → 4.4, autoTag → 2.3 (clip runs zero-AI by construction).
-- [ ] F-A.1 `core/ingest/fetch-guard.ts` — http/https only, SSRF guard (each
-      redirect hop re-checked), size cap, timeout (shared with Stage 4.2)
-- [ ] F-A.2 Extraction: linkedom + @mozilla/readability + turndown on Bun
-      (verify; record swaps in CONTEXT Decisions Log)
-- [ ] F-A.3 Canonical-URL normalize + dedupe against `resource` (append
-      `# Highlights` on re-clip); works with or without an index
-- [ ] F-A.4 `clip` op + writer path: `references/<slug>`, type `reference`,
-      `# Citations`, `inbox` tag, body cap noted on truncation
-- [ ] F-A.5 CLI: `okb clip <url> [--note] [--quote] [--tags] [--read]`,
-      `okb inbox`, `okb inbox read <id>`; `--json`
-- [ ] F-A.9 Tests: extraction on local HTML fixtures; guard against a stub
-      server (no live network in CI); dedupe incl. tracking-param variants;
-      clipped doc passes doctor; inbox flow
+- [x] F-A.1 `core/ingest/fetch-guard.ts` — http/https only, SSRF guard (DNS
+      lookup; private/link-local/CGNAT/loopback + IPv6/mapped forms; each
+      redirect hop re-checked), size cap, timeout; `allowPrivate` opt-in
+      exists for tests/future intranet config (never set by the CLI)
+- [x] F-A.2 Extraction verified on Bun: linkedom + @mozilla/readability +
+      turndown all run clean — **no swaps needed**; relative links/images
+      absolutized against the page URL post-extraction
+- [x] F-A.3 Canonical-URL normalize (strip fragment/tracking params, sort
+      query) + dedupe against `resource`, both sides normalized; a known
+      input URL dedupes before any fetch (offline re-clip append); works
+      with or without an index (engine rows or bundle scan)
+- [x] F-A.4 `clip` op + writer path: `references/<slug>` (numeric suffix on
+      collisions), type `reference`, `# Citations`, `# Highlights` for
+      quote/note, `inbox` tag, `author`/`published` extras, 100 KB body cap
+      noted on truncation
+- [x] F-A.5 CLI: `okb clip <url> [--quote] [--note] [--tags] [--read]`,
+      `okb inbox`, `okb inbox read <id>` (metadata-only: timestamp/log
+      untouched); `--json`
+- [x] F-A.9 Tests: extraction on a local fixture; guard policy with zero
+      packets + mechanics against a 127.0.0.1 stub (no live network in CI);
+      tracking-param dedupe; doctor-clean clips; truncation; inbox flow;
+      also verified once against a live article locally (doctor-clean)
 
 ---
 
@@ -335,6 +344,16 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-11 — F-A Clip shipped: `okb clip <url>` → guarded fetch
+  (`fetch-guard.ts`: SSRF checks incl. per-redirect-hop re-resolution, size
+  cap, timeout — the module Stage 4.2 will reuse), readable-article
+  extraction (linkedom + @mozilla/readability + turndown, verified on Bun,
+  no swaps; relative links absolutized), canonical-URL dedupe (append
+  `# Highlights` on re-clip, no fetch when the URL is already stored),
+  conformant `references/<slug>` writes with citations + `inbox` tag;
+  `okb inbox` / `okb inbox read` (metadata-only tag clear). Three pure-JS
+  deps added (linkedom, @mozilla/readability, turndown). Live-article smoke
+  test doctor-clean. 196 tests green, tsc clean. Next: Stage 2.1.
 - 2026-07-11 — F-B Resurface shipped: pure deterministic scorer
   (`core/review/score.ts`, six signals with reason strings), engine schema v2
   (`timestamp`/`last_reviewed` columns, `review_state` snooze table,

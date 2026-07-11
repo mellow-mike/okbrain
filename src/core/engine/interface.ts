@@ -81,6 +81,8 @@ export interface Engine {
   neighbors(id: string, depth?: number): Neighbor[];
   /** Every node's review fields (Resurface), sorted by id. */
   listReviewRows(): ReviewRow[];
+  /** id + resource for every node that has one (clip dedupe), sorted by id. */
+  listResources(): { id: string; resource: string }[];
   /** Snooze a concept out of the review queue until `untilIso`. */
   setSnooze(id: string, untilIso: string): void;
   clearSnooze(id: string): void;

@@ -298,6 +298,14 @@ export function openSqliteEngine(dbPath: string): Engine {
         .map((r) => ({ ...r, inbox: r.inbox === 1 })),
     ),
 
+    listResources: fresh(() =>
+      db
+        .query<{ id: string; resource: string }, []>(
+          "SELECT id, resource FROM nodes WHERE resource IS NOT NULL AND resource != '' ORDER BY id",
+        )
+        .all(),
+    ),
+
     setSnooze: fresh((id, untilIso) => {
       db.query(
         "INSERT INTO review_state (node_id, snooze_until) VALUES (?, ?) ON CONFLICT(node_id) DO UPDATE SET snooze_until=excluded.snooze_until",
