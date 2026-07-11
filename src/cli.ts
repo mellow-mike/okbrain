@@ -6,7 +6,8 @@
 // e.g. `doctor` on a non-conformant bundle) · 2 usage error.
 
 import { existsSync, statSync } from "node:fs";
-import { resolveBundlePath } from "./core/config.ts";
+import { ConfigError, loadConfig, resolveBundlePath, type OkbConfig } from "./core/config.ts";
+import { AiError } from "./core/ai/gateway.ts";
 import type { Engine } from "./core/engine/interface.ts";
 import { defaultDbPath, EngineError, openSqliteEngine } from "./core/engine/sqlite.ts";
 import { SyncError } from "./core/sync.ts";
@@ -58,9 +59,18 @@ function helpText(): string {
     "  --bundle <path>    bundle root (default: $OKB_BUNDLE or cwd)",
     "",
     "`okb help <command>` shows a command's options.",
-    `current bundle: ${resolveBundlePath()}`,
+    `current bundle: ${currentBundleLabel()}`,
   ];
   return lines.join("\n");
+}
+
+function currentBundleLabel(): string {
+  try {
+    return resolveBundlePath();
+  } catch (e) {
+    if (e instanceof ConfigError) return `(unreadable config: ${e.message})`;
+    throw e;
+  }
 }
 
 function opHelp(op: Operation): string {
@@ -145,7 +155,15 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     if (spec.stdinFallback && raw[spec.name] === undefined && io.stdin && !process.stdin.isTTY)
       raw[spec.name] = await io.stdin();
 
-  const bundle = resolveBundlePath(bundleArg);
+  let bundle: string;
+  let cfg: OkbConfig | undefined;
+  try {
+    bundle = resolveBundlePath(bundleArg);
+  } catch (e) {
+    if (!(e instanceof ConfigError)) throw e;
+    io.err(e.message + "\n");
+    return 1;
+  }
   if (!existsSync(bundle) || !statSync(bundle).isDirectory()) {
     io.err(`bundle directory not found: ${bundle}\n`);
     return 1;
@@ -167,6 +185,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
       return engine;
     },
     hasIndex: () => existsSync(defaultDbPath(bundle)),
+    config: () => (cfg ??= loadConfig()),
   };
   try {
     const result = await runOp(op, ctx, raw);
@@ -177,7 +196,12 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
       io.err(e.message + "\n");
       return e.code === "bad_params" ? 2 : 1;
     }
-    if (e instanceof EngineError || e instanceof SyncError) {
+    if (
+      e instanceof EngineError ||
+      e instanceof SyncError ||
+      e instanceof ConfigError ||
+      e instanceof AiError
+    ) {
       io.err(e.message + "\n");
       return 1;
     }

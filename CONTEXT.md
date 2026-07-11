@@ -350,19 +350,36 @@ Code defaults until the 2.1 config file: `maxBodyBytes` 100KB, `stripParams`
 
 ## AI integration
 
-### Gateway (`core/ai/gateway.ts`)
-One interface, three capabilities: `embed(texts)`, `chat(messages, tools?)`,
-`rerank(query, docs)`. Implemented by pluggable recipes:
-- **Local:** Ollama, llama.cpp / `llama-server`, LM Studio (OpenAI-compatible).
-  Embeddings via `nomic-embed-text` / `mxbai-embed-large`; chat via any local
-  instruct model.
+### Gateway (`core/ai/gateway.ts` + `recipes.ts`)
+One interface, three capabilities: `chat(messages)`, `embed(texts)`,
+`rerank(query, docs)` — plain `fetch`, no provider SDKs. Three HTTP dialects
+cover every recipe (openai-compatible / anthropic / gemini):
+- **Local (no keys):** Ollama, llama.cpp / `llama-server`, LM Studio — all one
+  OpenAI-compatible dialect; `local` is an alias for ollama. Defaults:
+  `llama3.2` chat, `nomic-embed-text` embed.
 - **API:** Anthropic / OpenAI / Gemini / OpenRouter for chat; OpenAI / Voyage /
-  Gemini for embeddings.
-- **Resolution:** per-call override → env → config → `init` default. The `init`
-  default is **API-first** when a key is present; switching to a local model
-  (Ollama / llama.cpp / LM Studio) is a one-setting change (config key or
-  `okb init --provider local`). Fully-offline (local, no keys) remains
-  first-class and tested.
+  Gemini for embeddings; Voyage for rerank (the only rerank recipe in v1).
+  Keys come only from env vars (`ANTHROPIC_API_KEY`, …) — never stored in
+  config; a missing key fails naming the exact var.
+- **Resolution (per capability, per call):** per-call override →
+  `OKB_CHAT_/EMBED_/RERANK_PROVIDER|MODEL|BASE_URL` (generic
+  `OKB_AI_PROVIDER` only wins capabilities it has) → `config.json` → key
+  detection. Detection is **API-first** when a key is present, local
+  otherwise; a chat-only provider (anthropic) can never hijack the embed
+  slot. Fully-offline (local, no keys) is first-class and is the tested path
+  (stub local server in CI).
+
+### User config (`config.json`, written by `okb init`)
+Lives in the per-user config dir (`core/config.ts`; XDG / %APPDATA%). `okb
+init` is non-interactive: it detects providers from present keys (API-first),
+persists the choice explicitly, records the current bundle as
+`defaultBundle` (bundle resolution: explicit → `$OKB_BUNDLE` → config → cwd;
+skip with `--no-default-bundle`), and validates `--provider`/`--embed-provider`
+against the recipe table. Unknown config keys are preserved on rewrite.
+`review.*` (queueSize, cooldownDays, weights) and `clip.*` (maxBodyBytes,
+defaultTags, stripParams) are read from here by their ops; ops receive config
+via `OpContext.config()`. Tests are hermetic: a bun-test preload pins the
+config dir to a temp directory and strips provider keys from the env.
 
 ### Retrieval profiles (cost knobs)
 `lean` (small payload, no query expansion), `balanced` (default; relational arm
@@ -553,6 +570,22 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-11 — **Gateway (2.1): three dialects, per-capability slots, no
+  SDKs.** All providers speak one of three HTTP dialects (openai-compatible /
+  anthropic / gemini), so recipes are data rows, not classes, and the binary
+  gains zero SDK weight. Resolution runs per capability with the rule that a
+  provider only wins a slot it can serve — configuring anthropic for chat
+  must not break embeddings (they fall through to detection → local). API
+  keys are env-only, never persisted, and the missing-key error names the
+  var. Rerank ships with a single recipe (Voyage); local/chat-based rerank is
+  a 2.3 concern. `okb init` is deliberately non-interactive (flags +
+  detection persisted explicitly) — the CLI has no prompt infrastructure and
+  scripted setup should behave identically to manual setup. It also persists
+  `defaultBundle`, completing the Stage-0 promise ("cwd until okb init");
+  test hermeticity comes from a bun-test preload pinning the config dir and
+  stripping provider keys, so a developer's real config/keys can't sway CI
+  or local runs. Zero-weighted review signals now also drop their reason
+  string — a config-disabled signal disappears from the UX entirely.
 - 2026-07-11 — **Clip extraction trio verified on Bun — no swaps (F-A.2).**
   linkedom (parse), @mozilla/readability (article isolation), turndown
   (HTML→md, `remove(["script","style","noscript"])`) all run clean on Bun;

@@ -9,10 +9,12 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stage 1 complete**; **Resurface (F-B) and Clip (F-A) shipped** CLI-first
-> (their GUI pieces live at 3.2, bookmarklet endpoint at 3.1, cron at 4.5).
-> Now: Stage 2.1 — AI gateway + recipes + `okb init` (the config file that
-> also wires `review.*`/`clip.*` keys).
+> **Stage 1 complete**; **Resurface (F-B) + Clip (F-A) shipped** CLI-first
+> (GUI pieces at 3.2, bookmarklet endpoint at 3.1, cron at 4.5). **2.1
+> shipped**: gateway (chat/embed/rerank, all recipes), `okb init`,
+> `config.json` with `review.*`/`clip.*` wired. Next: 2.2 embeddings +
+> `sqlite-vec` (note the macOS `Database.setCustomSQLite()` caveat), then
+> 2.3 hybrid retrieval + `okb ask`.
 
 ---
 
@@ -130,8 +132,8 @@ providers required. Design: `docs/features/FEATURE-RESURFACE.md` + CONTEXT
 §Resurface. Scope guard: GUI card stack → 3.2, cron recompute → 4.5,
 daily-note section → 4.6, AI garnish → 2.3 (items live at those stages).
 - [x] F-B.1 `core/review/score.ts` — signals + weighted score + reason strings
-      (weights/cooldown/queue-size defaults in code; `review.*` config keys
-      wire up when the 2.1 config file lands)
+      (`review.*` config keys wired since 2.1; zero-weighted signals drop
+      their reason too)
 - [x] F-B.2 Engine schema v2: `timestamp`/`last_reviewed` node columns +
       `review_state` (snooze) table; degrees computed from resolved edges in
       the scorer; queue recomputed on demand (no cache table at CLI scale).
@@ -185,11 +187,24 @@ link-suggest hook → 4.4, autoTag → 2.3 (clip runs zero-AI by construction).
 Goal: ask questions of your brain, offline or via API.
 
 ### 2.1 Gateway + recipes
-- [ ] `core/ai/gateway.ts` — `embed` / `chat` / `rerank`; resolution (per-call → env → config → default)
-- [ ] Local recipes: Ollama, llama.cpp/`llama-server`, LM Studio (OpenAI-compatible)
-- [ ] API recipes: OpenAI, Anthropic, Gemini, OpenRouter (chat); OpenAI, Voyage, Gemini (embed)
-- [ ] `okb init` provider/model picker — API-first default (when a key is present); one-setting switch to local (`--provider local`)
-- [ ] Tests: gateway resolution; offline path with a stub local server
+- [x] `core/ai/gateway.ts` + `recipes.ts` — `embed`/`chat`/`rerank`; resolution
+      per capability: per-call → env (`OKB_CHAT_/EMBED_/RERANK_PROVIDER|MODEL|
+      BASE_URL`, generic `OKB_AI_PROVIDER`) → config → key detection; a
+      chat-only provider can never hijack the embed slot; plain fetch, no SDKs
+- [x] Local recipes: Ollama, llama.cpp/`llama-server`, LM Studio (one
+      OpenAI-compatible dialect; `local` alias → ollama; no keys needed)
+- [x] API recipes: OpenAI, Anthropic, Gemini, OpenRouter (chat); OpenAI,
+      Voyage, Gemini (embed); Voyage (rerank — the only rerank recipe in v1)
+- [x] `okb init` — non-interactive picker: detects API-first from present
+      keys, persists the choice + the default bundle into `config.json`
+      (resolution now explicit → `$OKB_BUNDLE` → config → cwd); flags for
+      provider/model/embed-*; `--no-default-bundle`
+- [x] Config file (`config.json` in the per-user config dir): load/save with
+      unknown keys preserved; `review.*` + `clip.*` now wired into their ops;
+      tests hermetic via a preload that pins the config dir + strips keys
+- [x] Tests: resolution precedence + detection; all three dialects and rerank
+      against a stub local server (the offline path); missing-key errors;
+      init detect/merge/validate; config wiring for review/clip
 
 ### 2.2 Embeddings + vector index
 - [ ] `core/retrieval/chunk.ts` — ~400-token chunker
@@ -344,6 +359,17 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-11 — Stage 2.1 shipped: provider-agnostic gateway
+  (`core/ai/gateway.ts` + `recipes.ts`; chat/embed/rerank over three HTTP
+  dialects, plain fetch, no SDKs), per-capability resolution (per-call → env
+  → config → key detection; chat-only providers can't claim embed), local
+  recipes (Ollama/llama.cpp/LM Studio) + API recipes (OpenAI/Anthropic/
+  Gemini/OpenRouter chat; OpenAI/Voyage/Gemini embed; Voyage rerank),
+  `okb init` (detects API-first, persists provider + default bundle to
+  `config.json`, validates flags), `review.*`/`clip.*` config wired, tests
+  hermetic via preload (temp config dir, provider keys stripped). Compiled
+  binary verified. 213 tests green, tsc clean. Next: 2.2 embeddings +
+  sqlite-vec.
 - 2026-07-11 — F-A Clip shipped: `okb clip <url>` → guarded fetch
   (`fetch-guard.ts`: SSRF checks incl. per-redirect-hop re-resolution, size
   cap, timeout — the module Stage 4.2 will reuse), readable-article

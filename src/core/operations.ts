@@ -6,6 +6,8 @@
 
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { RECIPES, resolveCall } from "./ai/gateway.ts";
+import { loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
 import type { Engine, Neighbor, SearchHit } from "./engine/interface.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
@@ -36,6 +38,8 @@ export interface OpContext {
   engine(createIfMissing?: boolean): Engine;
   /** True when a derived index already exists (write ops refresh it, never create it). */
   hasIndex(): boolean;
+  /** User config (config.json via okb init); adapter-loaded, {} when absent. */
+  config(): OkbConfig;
 }
 
 export interface ParamSpec {
@@ -149,21 +153,31 @@ const parseTags = (v: unknown): string[] | undefined =>
     ? undefined
     : (v as string).split(",").map((t) => t.trim()).filter((t) => t !== "");
 
-const queueFor = (eng: Engine, limit?: number): ReviewItem[] =>
-  reviewQueue(eng.listReviewRows(), eng.listEdges(), new Date(), {
-    ...defaultReviewConfig,
-    queueSize: limit ?? defaultReviewConfig.queueSize,
+/** Effective review config: code defaults overlaid with `review.*` from config.json. */
+const reviewCfg = (c: OkbConfig) => ({
+  ...defaultReviewConfig,
+  ...c.review,
+  weights: { ...defaultReviewConfig.weights, ...c.review?.weights },
+});
+
+const queueFor = (ctx: OpContext, limit?: number): ReviewItem[] => {
+  const cfg = reviewCfg(ctx.config());
+  const eng = ctx.engine();
+  return reviewQueue(eng.listReviewRows(), eng.listEdges(), new Date(), {
+    ...cfg,
+    queueSize: limit ?? cfg.queueSize,
   });
+};
 
 /** Review target: a 1-based queue position (pure integer in range) or a concept id. */
-function resolveReviewTarget(eng: Engine, raw: string): string {
+function resolveReviewTarget(ctx: OpContext, raw: string): string {
   if (/^\d+$/.test(raw)) {
     // Rank without the display limit so positions match any `--limit` listing.
-    const q = queueFor(eng, Number.MAX_SAFE_INTEGER);
+    const q = queueFor(ctx, Number.MAX_SAFE_INTEGER);
     const n = Number(raw);
     if (n >= 1 && n <= q.length) return q[n - 1]!.id;
   }
-  requireNode(eng, raw);
+  requireNode(ctx.engine(), raw);
   return raw;
 }
 
@@ -530,9 +544,9 @@ export const operations: readonly Operation[] = [
     summary: "Today's review queue: concepts worth another look, with reasons",
     scope: "read",
     params: [
-      { name: "limit", type: "int", description: "queue size (default 5)" },
+      { name: "limit", type: "int", description: "queue size (default 5, config review.queueSize)" },
     ],
-    handler: async (ctx, p) => queueFor(ctx.engine(), p.limit as number | undefined),
+    handler: async (ctx, p) => queueFor(ctx, p.limit as number | undefined),
     render: (r) => {
       const q = r as ReviewItem[];
       if (q.length === 0) return "(queue is empty — nothing needs review)";
@@ -553,14 +567,13 @@ export const operations: readonly Operation[] = [
       { name: "id", type: "string", required: true, positional: true, description: "concept id or queue position" },
     ],
     handler: async (ctx, p) => {
-      const eng = ctx.engine();
-      const id = resolveReviewTarget(eng, p.id as string);
+      const id = resolveReviewTarget(ctx, p.id as string);
       const lastReviewed = nowTimestamp();
       await writing(() =>
         writeConcept(ctx.bundle, { id, extra: { last_reviewed: lastReviewed }, metadataOnly: true }),
       );
       await reindex(ctx, [id]);
-      eng.clearSnooze(id);
+      ctx.engine().clearSnooze(id);
       return { id, lastReviewed };
     },
     render: (r) => `reviewed ${(r as { id: string }).id}`,
@@ -577,12 +590,11 @@ export const operations: readonly Operation[] = [
     handler: async (ctx, p) => {
       const days = (p.days as number | undefined) ?? 7;
       if (days < 1) throw new OpError("days must be at least 1", "bad_params");
-      const eng = ctx.engine();
-      const id = resolveReviewTarget(eng, p.id as string);
+      const id = resolveReviewTarget(ctx, p.id as string);
       const snoozeUntil = new Date(Date.now() + days * 86_400_000)
         .toISOString()
         .replace(/\.\d{3}Z$/, "Z");
-      eng.setSnooze(id, snoozeUntil);
+      ctx.engine().setSnooze(id, snoozeUntil);
       return { id, snoozeUntil };
     },
     render: (r) => {
@@ -603,6 +615,7 @@ export const operations: readonly Operation[] = [
       { name: "read", type: "boolean", description: "skip the inbox tag (already read)" },
     ],
     handler: async (ctx, p) => {
+      const clip = ctx.config().clip;
       const r = await writing(() =>
         clipUrl(
           ctx.bundle,
@@ -613,7 +626,12 @@ export const operations: readonly Operation[] = [
             tags: parseTags(p.tags),
             read: p.read as boolean | undefined,
           },
-          { resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined },
+          {
+            resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined,
+            maxBodyBytes: clip?.maxBodyBytes,
+            defaultTags: clip?.defaultTags,
+            stripParams: clip?.stripParams,
+          },
         ),
       );
       await reindex(ctx, [r.id]);
@@ -676,6 +694,74 @@ export const operations: readonly Operation[] = [
     render: (r) => {
       const x = r as { id: string; removed: boolean };
       return x.removed ? `marked ${x.id} read` : `${x.id} was not in the inbox`;
+    },
+  },
+  {
+    name: "init",
+    cliName: "init",
+    summary: "Attach this bundle as the default and pick AI providers (config.json)",
+    scope: "admin",
+    params: [
+      { name: "provider", type: "string", description: "chat provider: anthropic|openai|gemini|openrouter|ollama|llamacpp|lmstudio|local" },
+      { name: "model", type: "string", description: "chat model (default: the provider's default)" },
+      { name: "embed-provider", type: "string", description: "embedding provider: openai|voyage|gemini|ollama|llamacpp|lmstudio|local" },
+      { name: "embed-model", type: "string", description: "embedding model" },
+      { name: "no-default-bundle", type: "boolean", description: "don't change which bundle okb uses by default" },
+    ],
+    handler: async (ctx, p) => {
+      const local = (v: unknown): string | undefined =>
+        v === "local" ? "ollama" : (v as string | undefined);
+      const cfg = loadConfig();
+      const ai: AiSettings = { ...cfg.ai };
+      if (p.provider !== undefined) ai.provider = local(p.provider);
+      if (p.model !== undefined) ai.model = p.model as string;
+      if (p["embed-provider"] !== undefined) ai.embedProvider = local(p["embed-provider"]);
+      if (p["embed-model"] !== undefined) ai.embedModel = p["embed-model"] as string;
+      for (const [name, cap] of [
+        [ai.provider, "chat"],
+        [ai.embedProvider, "embed"],
+      ] as const)
+        if (name !== undefined && RECIPES[name]?.[cap] === undefined)
+          throw new OpError(
+            `${name} is not a known ${cap} provider (see okb help init)`,
+            "bad_params",
+          );
+
+      // Persist what detection picked, so the choice is explicit from now on.
+      const chat = resolveCall("chat", ai, process.env);
+      const embed = resolveCall("embed", ai, process.env);
+      ai.provider ??= chat.provider;
+      ai.embedProvider ??= embed.provider;
+      cfg.ai = ai;
+      if (p["no-default-bundle"] !== true) cfg.defaultBundle = ctx.bundle;
+      const path = saveConfig(cfg);
+      const describe = (r: typeof chat) => ({
+        provider: r.provider,
+        model: r.model,
+        offline: r.recipe.kind === "local",
+        keyStatus: r.apiKeyEnv ? `${r.apiKeyEnv} ${r.apiKey ? "present" : "MISSING"}` : "no key needed",
+      });
+      return {
+        path,
+        defaultBundle: cfg.defaultBundle ?? null,
+        chat: describe(chat),
+        embed: describe(embed),
+      };
+    },
+    render: (r) => {
+      const x = r as {
+        path: string;
+        defaultBundle: string | null;
+        chat: { provider: string; model: string; keyStatus: string };
+        embed: { provider: string; model: string; keyStatus: string };
+      };
+      return [
+        `wrote ${x.path}`,
+        ...(x.defaultBundle ? [`default bundle: ${x.defaultBundle}`] : []),
+        `chat:  ${x.chat.provider} / ${x.chat.model} (${x.chat.keyStatus})`,
+        `embed: ${x.embed.provider} / ${x.embed.model} (${x.embed.keyStatus})`,
+        "switch anytime: okb init --provider local | --provider anthropic …",
+      ].join("\n");
     },
   },
 ];

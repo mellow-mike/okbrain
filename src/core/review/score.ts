@@ -83,34 +83,26 @@ export function reviewQueue(
     const d = staleDays.get(r.id) ?? null;
     let score = 0;
     const reasons: string[] = [];
-    if (d !== null && d > 0) {
-      score += (w.staleness * Math.min(d, 365)) / 365;
-      reasons.push(`untouched ${age(d)}`);
-    }
-    if ((degree.get(r.id) ?? 0) === 0) {
-      score += w.orphan;
-      reasons.push(d !== null ? `orphan for ${age(d)}` : "orphan");
-    }
+    // A signal only adds its reason when it actually contributes — so a
+    // zero-weighted (config-disabled) signal disappears from the UX too.
+    const add = (points: number, reason: string): void => {
+      if (points <= 0) return;
+      score += points;
+      reasons.push(reason);
+    };
+    if (d !== null) add((w.staleness * Math.min(d, 365)) / 365, `untouched ${age(d)}`);
+    if ((degree.get(r.id) ?? 0) === 0)
+      add(w.orphan, d !== null ? `orphan for ${age(d)}` : "orphan");
     const cited = inDegree.get(r.id) ?? 0;
-    if (cited >= 3 && d !== null && d > 90) {
-      score += w.staleHub;
-      reasons.push(`cited by ${cited}, untouched ${age(d)}`);
-    }
+    if (cited >= 3 && d !== null && d > 90)
+      add(w.staleHub, `cited by ${cited}, untouched ${age(d)}`);
     const nb = freshestNeighbor.get(r.id);
-    if (nb !== undefined && nb <= 7 && d !== null && d > 30) {
-      score += w.neighborActivity;
-      reasons.push(`a neighbor changed ${age(nb)} ago`);
-    }
-    if (r.inbox) {
-      score += w.inbox;
-      reasons.push("in inbox");
-    }
+    if (nb !== undefined && nb <= 7 && d !== null && d > 30)
+      add(w.neighborActivity, `a neighbor changed ${age(nb)} ago`);
+    if (r.inbox) add(w.inbox, "in inbox");
     if (d !== null && d >= 364) {
       const years = Math.round(d / 365);
-      if (Math.abs(d - years * 365) <= 1) {
-        score += w.anniversary;
-        reasons.push(`${years}y today`);
-      }
+      if (Math.abs(d - years * 365) <= 1) add(w.anniversary, `${years}y today`);
     }
     if (score > 0)
       ranked.push({

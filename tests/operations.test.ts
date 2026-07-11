@@ -14,6 +14,7 @@ const ctx = (trusted = true): OpContext => ({
   trusted,
   engine: () => engine,
   hasIndex: () => true,
+  config: () => ({}),
 });
 const op = (name: string) => getOp(name)!;
 

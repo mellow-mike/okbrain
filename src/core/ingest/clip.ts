@@ -19,11 +19,11 @@ export const CLIP_MAX_BODY_BYTES = 100_000;
 const TRACKING = [/^utm_/i, /^fbclid$/i, /^gclid$/i, /^mc_[ce]id$/i, /^igshid$/i];
 
 /** Canonical comparison form: no fragment/tracking params, sorted query, lowercase host. */
-export function normalizeUrl(raw: string): string {
+export function normalizeUrl(raw: string, stripParams: string[] = []): string {
   const u = new URL(raw); // lowercases scheme+host, drops default ports
   u.hash = "";
   const kept = [...u.searchParams.entries()]
-    .filter(([k]) => !TRACKING.some((re) => re.test(k)))
+    .filter(([k]) => !TRACKING.some((re) => re.test(k)) && !stripParams.includes(k))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   u.search = "";
   for (const [k, v] of kept) u.searchParams.append(k, v);
@@ -44,6 +44,10 @@ export interface ClipOptions {
   fetcher?: (url: string) => Promise<FetchedPage>;
   /** id+resource pairs from the engine; omitted → the bundle is scanned. */
   resources?: { id: string; resource: string }[];
+  /** `clip.*` config overrides (okb init config.json). */
+  maxBodyBytes?: number;
+  defaultTags?: string[];
+  stripParams?: string[];
 }
 
 export interface ClipResult {
@@ -65,18 +69,18 @@ async function allResources(root: string): Promise<{ id: string; resource: strin
   return out;
 }
 
-const tryNormalize = (raw: string): string | null => {
-  try {
-    return normalizeUrl(raw);
-  } catch {
-    return null;
-  }
-};
-
 function findByResource(
   resources: { id: string; resource: string }[],
   normalized: string,
+  stripParams: string[],
 ): string | null {
+  const tryNormalize = (raw: string): string | null => {
+    try {
+      return normalizeUrl(raw, stripParams);
+    } catch {
+      return null;
+    }
+  };
   for (const { id, resource } of resources)
     if (tryNormalize(resource) === normalized) return id;
   return null;
@@ -119,6 +123,7 @@ export async function clipUrl(
 ): Promise<ClipResult> {
   const fetcher = opts.fetcher ?? guardedFetch;
   const resources = opts.resources ?? (await allResources(root));
+  const strip = opts.stripParams ?? [];
   const entry = highlightEntry(input.quote, input.note);
 
   const finish = async (id: string): Promise<ClipResult> => {
@@ -127,21 +132,21 @@ export async function clipUrl(
   };
 
   // Known input URL → no fetch needed (also lets a re-clip work offline).
-  const asGiven = normalizeUrl(input.url);
-  const known = findByResource(resources, asGiven);
+  const asGiven = normalizeUrl(input.url, strip);
+  const known = findByResource(resources, asGiven, strip);
   if (known !== null) return finish(known);
 
   const page = await fetcher(input.url);
   const art = extractArticle(page.body, page.url);
-  const canonical = normalizeUrl(art.canonicalUrl ?? page.url);
-  const byCanonical = findByResource(resources, canonical);
+  const canonical = normalizeUrl(art.canonicalUrl ?? page.url, strip);
+  const byCanonical = findByResource(resources, canonical, strip);
   if (byCanonical !== null) return finish(byCanonical);
 
   const base = `references/${slugify(art.title)}`;
   let id = base;
   for (let n = 2; existsSync(idToAbsPath(root, id)); n++) id = `${base}-${n}`;
 
-  const { text, truncated } = capBytes(art.markdown, CLIP_MAX_BODY_BYTES);
+  const { text, truncated } = capBytes(art.markdown, opts.maxBodyBytes ?? CLIP_MAX_BODY_BYTES);
   const cite = `- [${art.title}](${canonical})${art.byline ? ` — ${art.byline}` : ""}`;
   const body = [
     text,
@@ -162,7 +167,13 @@ export async function clipUrl(
     title: art.title,
     description: art.description || `Clipped from ${host}`,
     resource: canonical,
-    tags: [...new Set([...(input.tags ?? []), ...(input.read ? [] : ["inbox"])])],
+    tags: [
+      ...new Set([
+        ...(opts.defaultTags ?? []),
+        ...(input.tags ?? []),
+        ...(input.read ? [] : ["inbox"]),
+      ]),
+    ],
     body,
     extra,
   });
