@@ -241,6 +241,106 @@ color-alone.
 
 ---
 
+## Resurface — review queue
+
+The default fate of a PKM is write-only memory. Resurface makes stored
+knowledge come back on its own: a small daily queue of concepts worth another
+look, each with a stated human-readable reason — the reasons are the UX.
+Deterministic, zero new dependencies, works with zero AI providers configured.
+
+### Scoring (deterministic)
+Computed on demand from data the engine already holds (nodes + resolved
+edges + tags):
+
+| Signal | Trigger | Default weight |
+|---|---|---|
+| staleness | `min(days_since_timestamp, 365)/365` | 1.0 |
+| orphan | degree == 0 | 2.0 |
+| stale hub | in-degree ≥ 3 and stale > 90d | 1.5 |
+| neighbor activity | a neighbor changed ≤ 7d, self stale > 30d | 1.0 |
+| inbox | has `inbox` tag (Clip synergy) | 1.5 |
+| anniversary | `timestamp` ≈ n·365d ago (±1d) | 0.5 |
+
+Exclusions: `last_reviewed` within the cooldown (default 30d) or an active
+snooze. Queue size defaults to 5. Ordering is fully deterministic: score
+desc, then older `timestamp`, then id. Anniversary uses `timestamp` (last
+content change) — creation dates aren't tracked in frontmatter. Weights,
+cooldown, and queue size are code defaults until the 2.1 config file wires
+`review.*` keys. A signal only adds its reason string when it contributes.
+
+### State — what survives a rebuild
+- **`last_reviewed`** (ISO 8601 UTC) is user knowledge → frontmatter, via the
+  conformance writer in **metadata-only mode**: `timestamp` is *not* refreshed
+  (it means content change) and no `log.md` entry is appended (less churn).
+  It's an okbrain extension key — OKF-safe because consumers tolerate and
+  preserve unknown keys.
+- **Snooze** is an ephemeral scheduling preference → DB-only (`review_state`
+  table), lost on `okb rebuild` by design.
+- The queue itself is recomputed on every call; no cache table at CLI scale.
+
+### Ops & surfaces
+`review_queue` (read) → top-N with scores + reasons; `review_done` /
+`review_snooze` (write). CLI: `okb review`, `okb review done <id|n>`,
+`okb review snooze <id|n> [--days 7]` — `n` is a 1-based queue position;
+a pure-integer argument within queue range is read as a position, otherwise
+as an id. GUI card stack lands with 3.2, cron recompute with 4.5, the
+daily-note section with 4.6, optional AI garnish with 2.3 (off in `lean`).
+
+Non-goals (v1): no spaced repetition (SM-2), no flashcards, no archive action
+(moving files rewrites inbound links — future Gardener territory).
+
+---
+
+## Clip — web clipper & reading inbox
+
+The fastest path from "I'm reading this page" into the bundle: one command →
+fetch, extract the readable article, dedupe, write a conformant
+`references/<slug>` concept tagged `inbox`. Works with zero AI providers and
+with or without an index; offline it fails fast (no queue in v1).
+
+### Pipeline (`clip` op, scope `write`)
+1. **Fetch** through `core/ingest/fetch-guard.ts` — the one guarded fetcher,
+   extracted early on purpose: Stage 4.2's web pass reuses it (one guard, two
+   callers). Guards: http/https only; private/link-local/loopback IPs
+   rejected (every redirect hop re-resolved and re-checked); response size
+   cap; timeout. Residual DNS-rebinding TOCTOU risk is accepted for v1 (a
+   personal clipping tool fetches a URL the user chose); revisit for the
+   Stage-4 crawler.
+2. **Extract** readable article + metadata (title, byline, published,
+   canonical URL, description) with `linkedom` + `@mozilla/readability`,
+   HTML→markdown via `turndown`.
+3. **Dedupe** by normalized canonical URL — strip fragment + tracking params
+   (`utm_*`, `fbclid`, `gclid`, …), lowercase scheme/host, drop default
+   ports, sort remaining params — compared (both sides normalized) against
+   every concept's `resource`. Existing concept → append the new
+   quote/note under `# Highlights` and refresh `timestamp`; no new file.
+4. **Write** via the conformance writer: `references/<slug(title)>` (numeric
+   suffix when a different URL collides on slug), `type: reference`,
+   `resource:` canonical URL, description from page metadata, tags = user
+   tags + `inbox` (`--read` skips it), body = extracted markdown capped at
+   100KB (truncation noted in the body), `# Citations` with the source link.
+5. Later stages hook in without changing clip: embedding (2.2),
+   link-suggest (4.4), autoTag (2.3, off in `lean`).
+
+### Reading inbox
+Read-state is user knowledge → it lives in the bundle as the `inbox` **tag**
+(OKF-optional frontmatter; no format extension), so it survives `okb rebuild`.
+The inbox is just the tag query: `okb inbox` lists, `okb inbox read <id>`
+clears the tag through the writer. Resurface scores `inbox` as a signal.
+
+### Bookmarklet security (design decided now, built with 3.1)
+Any web page can fire requests at localhost, so a naive clip endpoint is a
+CSRF hole into the brain. The endpoint (Stage 3.1, with the local API) demands
+a per-install secret token — generated at first `okb serve`, embedded by
+`okb bookmarklet`, validated server-side; tokenless requests are rejected.
+CORS stays locked to localhost; the token is required regardless.
+
+### Config (`clip.*`)
+Code defaults until the 2.1 config file: `maxBodyBytes` 100KB, `stripParams`
+(utm_* etc.), `defaultTags` [], `autoTag` off in `lean`.
+
+---
+
 ## AI integration
 
 ### Gateway (`core/ai/gateway.ts`)
@@ -446,6 +546,39 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-11 — **Feature interlude order + scope guard (decided).** After
+  Stage 1: Resurface (F-B) then Clip (F-A), then Stage 2.1. Both features ship
+  CLI-first and must run with zero AI providers configured; their GUI pieces
+  fold into 3.2, the clip bookmarklet + token endpoint into 3.1 (an endpoint
+  without the local API would be dead code), cron into 4.5, AI garnish/autoTag
+  into Stage 2. No Stage 3/4 work starts early.
+- 2026-07-11 — **Resurface state split: reviewed → bundle, snooze → DB.**
+  "I reviewed this" is user knowledge, so `review done` stamps a
+  `last_reviewed` frontmatter key (okbrain extension; OKF-safe since consumers
+  tolerate + preserve unknown keys) and survives `okb rebuild`. A snooze is a
+  scheduling preference, so it lives only in the engine's `review_state` table
+  and dies on rebuild — documented, acceptable. The stamp goes through the
+  conformance writer in a new **metadata-only mode** that skips the `timestamp`
+  refresh and the `log.md` entry: `timestamp` means *content* change, and a
+  daily review of 5 items must not churn the log (resolves the framework's
+  open question: frontmatter key only). This is the single exception to the
+  1.1 "timestamp always refreshed" rule, available only to internal callers —
+  the `write` op's surface is unchanged. Queue determinism: score desc → older
+  `timestamp` → id; anniversary is computed on `timestamp` because creation
+  dates aren't tracked in frontmatter.
+- 2026-07-11 — **Clip conventions.** Type is lowercase `reference` (the
+  codebase's type convention — capture writes `note`), landing at
+  `references/<slug>` per the `<type>s/` scheme. Inbox = the `inbox` tag, not
+  a new frontmatter key: read-state is user knowledge and must survive
+  rebuild, and a tag is already OKF-optional vocabulary. Dedupe compares
+  *normalized* canonical URLs on both sides (stored `resource` values may be
+  hand-written), so the engine exposes id+resource pairs and normalization
+  stays in TS; without an index clip falls back to a bundle scan — clip never
+  requires an index. Slug collisions between different URLs get numeric
+  suffixes (capture's pattern). `fetch-guard.ts` is extracted before Stage 4
+  on purpose: one SSRF/size/timeout guard, two callers (clip now, crawler
+  later); redirects are re-checked per hop; the DNS-rebinding TOCTOU residual
+  is accepted for v1 and revisited with the crawler.
 - 2026-07-11 — **Sync (1.5): bundle repos are self-contained; seed files are
   append-only.** `okb sync` manages the bundle as its own repo and refuses a
   bundle nested inside another repository (a nested `git init` would leave the

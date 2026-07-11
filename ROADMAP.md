@@ -124,6 +124,48 @@ Goal: a real PKM you can write to, conformant on every save, versioned in git.
 
 ---
 
+## Feature: Resurface — review queue (F-B, after Stage 1)
+Deterministic daily "worth another look" queue with stated reasons; zero AI
+providers required. Design: `docs/features/FEATURE-RESURFACE.md` + CONTEXT
+§Resurface. Scope guard: GUI card stack → 3.2, cron recompute → 4.5,
+daily-note section → 4.6, AI garnish → 2.3 (items live at those stages).
+- [ ] F-B.1 `core/review/score.ts` — signals + weighted score + reason strings
+      (weights/cooldown/queue-size defaults in code; `review.*` config keys
+      wire up when the 2.1 config file lands)
+- [ ] F-B.2 Engine schema v2: `timestamp`/`last_reviewed` node columns +
+      `review_state` (snooze) table; degrees from resolved edges; queue
+      recomputed on demand (no cache table at CLI scale)
+- [ ] F-B.3 Ops: `review_queue` (read); `review_done`/`review_snooze` (write) —
+      `last_reviewed` stamped via the conformance writer in metadata-only mode
+      (no `timestamp` refresh, no log.md entry)
+- [ ] F-B.4 CLI: `okb review`, `okb review done <id|n>`,
+      `okb review snooze <id|n> [--days 7]`; `--json`
+- [ ] F-B.5 Tests: each signal in isolation; exclusion windows; deterministic
+      ordering on a fixture bundle; done survives rebuild, snooze doesn't
+
+---
+
+## Feature: Clip — web clipper & reading inbox (F-A, after F-B)
+URL → conformant `references/` concept in seconds; feeds search/graph/review.
+Design: `docs/features/FEATURE-CLIP.md` + CONTEXT §Clip. Scope guard:
+bookmarklet + token endpoint → 3.1, GUI inbox view → 3.2; embed hook → 2.2,
+link-suggest hook → 4.4, autoTag → 2.3 (clip runs zero-AI by construction).
+- [ ] F-A.1 `core/ingest/fetch-guard.ts` — http/https only, SSRF guard (each
+      redirect hop re-checked), size cap, timeout (shared with Stage 4.2)
+- [ ] F-A.2 Extraction: linkedom + @mozilla/readability + turndown on Bun
+      (verify; record swaps in CONTEXT Decisions Log)
+- [ ] F-A.3 Canonical-URL normalize + dedupe against `resource` (append
+      `# Highlights` on re-clip); works with or without an index
+- [ ] F-A.4 `clip` op + writer path: `references/<slug>`, type `reference`,
+      `# Citations`, `inbox` tag, body cap noted on truncation
+- [ ] F-A.5 CLI: `okb clip <url> [--note] [--quote] [--tags] [--read]`,
+      `okb inbox`, `okb inbox read <id>`; `--json`
+- [ ] F-A.9 Tests: extraction on local HTML fixtures; guard against a stub
+      server (no live network in CI); dedupe incl. tracking-param variants;
+      clipped doc passes doctor; inbox flow
+
+---
+
 ## Stage 2 — AI gateway + semantic retrieval
 Goal: ask questions of your brain, offline or via API.
 
@@ -141,6 +183,8 @@ Goal: ask questions of your brain, offline or via API.
       loading — needs `Database.setCustomSQLite()` with a real libsqlite3
 - [ ] Embed pipeline → store vectors; content-hash skip; provider+dim cache key
 - [ ] `okb embed` (incremental, paceable)
+- [ ] Embed-on-write hook: writes/clips refresh their vectors incrementally
+      (F-A.7 — until here, clip/write simply don't embed)
 - [ ] Tests: re-embed only on change; provider switch invalidates correctly
 
 ### 2.3 Retrieval pipeline
@@ -149,6 +193,8 @@ Goal: ask questions of your brain, offline or via API.
 - [ ] `core/retrieval/rerank.ts` — optional rerank (local/API)
 - [ ] `core/retrieval/profiles.ts` — `lean` / `balanced` / `max` (budget + arms)
 - [ ] `okb search` upgraded to hybrid; `okb ask` (RAG synthesis with citations, no fabrication)
+- [ ] Review garnish (F-B.8): optional one-liner per queue item connecting it
+      to recent captures; clip autoTag (F-A) — both off in `lean`
 - [ ] Tests: RRF fusion; citation integrity; profile budget enforced
 
 ---
@@ -159,12 +205,18 @@ Goal: a real GUI, and "my agent can use my brain."
 ### 3.1 Local API
 - [ ] `api.ts` — local HTTP over ops (trusted); bind localhost only; CORS locked to localhost
 - [ ] Streaming endpoint for `ask`
+- [ ] Clip endpoint + per-install secret token + `okb bookmarklet` (F-A.6):
+      token generated at first serve, embedded in the bookmarklet, validated
+      server-side; tokenless requests rejected (CSRF fail-closed, CONTEXT §Clip)
 
 ### 3.2 GUI app (`okb serve`)
 - [ ] GUI build setup (minimal bundler) + static asset embedding into the binary
 - [ ] Graph view — live Cytoscape via API; click-through to editor
 - [ ] Editor — md + frontmatter; concept-id link autocomplete; live backlinks; citation helper; suggested-link inbox; save via conformance writer
 - [ ] Ask view — chat; streamed cited answers; "open in graph"
+- [ ] Review view — card stack for today's queue; done / snooze / open /
+      suggest-links (F-B.6)
+- [ ] Inbox view — clipped items; open / mark-read / suggest-links (F-A.8)
 - [ ] Settings — engine, provider/model, retrieval profile, sync, enrichment guardrails
 - [ ] `okb serve` starts API + GUI
 
@@ -200,12 +252,14 @@ Goal: the brain improves itself on a schedule.
 
 ### 4.5 Jobs / cron
 - [ ] `core/jobs/worker.ts` — single background worker + file/SQLite lock
-- [ ] Scheduled: embed backfill, enrich stale, regenerate index/backlinks, `doctor`
+- [ ] Scheduled: embed backfill, enrich stale, regenerate index/backlinks,
+      `doctor`, nightly review-queue recompute (F-B.7)
 - [ ] Progress to stderr; clean shutdown
 - [ ] Tests: lock prevents double-run; jobs idempotent
 
 ### 4.6 Skills
 - [ ] `skills/RESOLVER.md` (thin router) + `capture/enrich/ingest/query/daily-note/link-suggest` SKILL.md
+- [ ] daily-note embeds a "worth revisiting" section from the review queue (F-B.7)
 - [ ] Each parameterized; brain-first where applicable
 
 ---
@@ -275,6 +329,12 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-11 — Merged the Resurface (F-B) and Clip (F-A) feature frameworks
+  into the docs: roadmap blocks inserted after Stage 1 with the scope guard
+  applied (GUI → 3.2, bookmarklet endpoint → 3.1, cron → 4.5, AI garnish/
+  autoTag/embed hooks → Stage 2 — items added at those stages), CONTEXT
+  gained §Resurface + §Clip and Decisions Log entries (state split,
+  metadata-only writes, inbox-as-tag, fetch-guard-first). Next: build F-B.
 - 2026-07-11 — Stage 1.5 git sync: `core/sync.ts` (argv-only git, credential
   prompts disabled, nested-repo refusal), `okb sync [--status|--message]` —
   init + seed (`.gitignore`: `.okb/` `/viz.html` `db_only/`; `.gitattributes`:
