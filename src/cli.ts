@@ -9,6 +9,7 @@ import { existsSync, statSync } from "node:fs";
 import { resolveBundlePath } from "./core/config.ts";
 import type { Engine } from "./core/engine/interface.ts";
 import { defaultDbPath, EngineError, openSqliteEngine } from "./core/engine/sqlite.ts";
+import { SyncError } from "./core/sync.ts";
 import {
   OpError,
   operations,
@@ -150,7 +151,17 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
   const ctx: OpContext = {
     bundle,
     trusted: true,
-    engine: () => (engine ??= openSqliteEngine(defaultDbPath(bundle))),
+    engine: (createIfMissing = false) => {
+      if (!engine) {
+        const db = defaultDbPath(bundle);
+        // Opening a fresh, empty index for a read would silently truncate
+        // search — and hasIndex() would treat it as real forever after (B3).
+        if (!createIfMissing && !existsSync(db))
+          throw new EngineError("no index for this bundle yet — run `okb index` first");
+        engine = openSqliteEngine(db);
+      }
+      return engine;
+    },
     hasIndex: () => existsSync(defaultDbPath(bundle)),
   };
   try {
@@ -162,7 +173,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
       io.err(e.message + "\n");
       return e.code === "bad_params" ? 2 : 1;
     }
-    if (e instanceof EngineError) {
+    if (e instanceof EngineError || e instanceof SyncError) {
       io.err(e.message + "\n");
       return 1;
     }

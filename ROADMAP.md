@@ -9,11 +9,10 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> Stage 1 — authoring + graph + sync (Stage 0 complete). Done: 1.1 conformance
-> writer (`okb write`); 1.2 index.md/log.md generation on every write; 1.3
-> authoring ops (`okb new` / `capture` / `import`); 1.4 write-aware graph
-> (`okb graph` direction tags, `okb path`, `okb orphans`, incremental index).
-> Next: 1.5 git sync (`okb sync`, `.okb/` gitignore, db_only).
+> **Stage 1 complete** (1.1–1.5; 1.6 watch deferred). Feature interlude before
+> Stage 2, in this decided order: merge the Resurface (F-B) + Clip (F-A)
+> frameworks into the docs → build F-B → build F-A (GUI items fold into 3.2,
+> bookmarklet endpoint into 3.1, cron into 4.5) → then Stage 2.1 gateway.
 
 ---
 
@@ -106,13 +105,22 @@ Goal: a real PKM you can write to, conformant on every save, versioned in git.
 - [x] Tests: dangling-edge visibility/walking, incremental update (incl. backlink-appears regression), path/orphans pure + CLI
 
 ### 1.5 Sync (git)
-- [ ] `core/sync.ts` — git init/commit/push/pull/status (portable spawn, no shell strings)
-- [ ] `okb sync`; `db_only`/gitignore handling for private concepts; ensure the
-      bundle's `.okb/` (derived index) is gitignored
-- [ ] Tests: commit/status flow on a temp repo (skip push/pull in CI)
+- [x] `core/sync.ts` — git init/commit/push/pull/status (argv-only spawn, no
+      shell strings; `GIT_TERMINAL_PROMPT=0` so nothing hangs on credentials;
+      refuses a bundle nested inside another repo; `main` via `symbolic-ref`)
+- [x] `okb sync` (`--message`, `--status`); seeds bundle `.gitignore` (`.okb/`,
+      `/viz.html`, `db_only/`) and `.gitattributes` (`* text=auto eol=lf`) by
+      appending missing lines only — user lines never touched
+- [x] db_only privacy made real, not just gitignored: writes under `db_only/`
+      skip the committed root `log.md` entry and parent `index.md` listings
+      (`inDbOnlyDir` in `paths.ts`); per-page db_only → Backlog
+- [x] Tests: init/seed/commit/no-op; push+pull against a local **bare** remote
+      (multi-device flow, zero network in CI); nested-repo refusal; LF pinned
+      under `core.autocrlf=true`; db_only end-to-end; CLI `--status`/`--json`
 
 ### 1.6 Optional
-- [ ] `okb watch` — re-index on file change (cross-platform watcher)
+- [ ] `okb watch` — re-index on file change (cross-platform watcher) —
+      **deferred**: recursive watching differs per OS; revisit when it hurts
 
 ---
 
@@ -229,6 +237,7 @@ regression test; then mark `fixed` with the commit/PR ref.
 |----|------|-----|------|---------------------|-----------------|--------|-----|
 | B1 | 2026-06-28 | med | graph | `buildEdges` dedupe key was space-joined `${id} ${dst}` (and briefly held a literal NUL, marking the source binary); ids containing spaces could collide/merge distinct edges | non-unique separator for ids that may contain spaces | fixed | `JSON.stringify([id,dst])` key + regression test in `tests/graph.links.test.ts` |
 | B2 | 2026-06-28 | low | tests | `config.test.ts` failed on Windows CI: hardcoded POSIX absolute paths (`/abs`, `/work`) — `resolve("/work")` is drive-anchored to `D:\work` on win32. Production code was correct | test baked in POSIX path assumptions | fixed | rebuild expectations via `node:path` `resolve`/`join` so they're OS-correct |
+| B3 | 2026-07-11 | high | engine/CLI | engine-backed reads (`okb search`/`graph`/…) on a never-indexed bundle silently created an empty `.okb/index.db`; `hasIndex()` then trusted it, so later writes refreshed a near-empty index — silent search truncation | lazy `ctx.engine()` always opened with create | fixed | `OpContext.engine(createIfMissing)` — only `index`/`rebuild` create; other ops fail with "run `okb index` first"; regression test in `tests/cli.test.ts` |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -255,6 +264,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       block is treated as real. Revisit if it bites.
 - [ ] Concept-id case sensitivity differs across filesystems (macOS/Windows
       case-insensitive); decide on a canonical-casing policy before it matters.
+- [ ] Per-page `db_only` (frontmatter flag → sync appends the path to
+      `.gitignore`); v1 privacy is per-directory only.
 - [ ] `viz.html` renders concept bodies with marked, which passes raw HTML
       through — fine for your own notes, but a shared export could carry
       scripted HTML from ingested content. Consider sanitizing (e.g. vendored
@@ -264,6 +275,16 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-11 — Stage 1.5 git sync: `core/sync.ts` (argv-only git, credential
+  prompts disabled, nested-repo refusal), `okb sync [--status|--message]` —
+  init + seed (`.gitignore`: `.okb/` `/viz.html` `db_only/`; `.gitattributes`:
+  `* text=auto eol=lf` so Windows autocrlf can't rewrite bundle bytes and
+  invalidate Stage-2 content-hashes), commit, `pull --rebase` + push when
+  `origin` exists. db_only privacy enforced in the generators (no private
+  titles in committed index/log). Fixed B3 (unindexed reads created an empty
+  index). 161 tests green (push/pull vs a local bare remote — no network in
+  CI), tsc clean. **Stage 1 complete**; 1.6 watch deferred. Next: merge
+  Resurface/Clip frameworks into docs, then build F-B.
 - 2026-07-08 — Stage 1.4 write-aware graph: edges now stored dangling-inclusive
   and resolved against `nodes` in every query, so `updateIndexFor` (run by all
   write ops when an index exists) keeps the graph exact without rebuilds —

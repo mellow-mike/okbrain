@@ -13,6 +13,15 @@ export function isReservedName(basename: string): boolean {
 
 export class InvalidIdError extends Error {}
 
+/**
+ * True when the concept lives under a `db_only/` directory: on disk and in the
+ * index, but kept out of git (`okb sync` gitignores `db_only/`) — so the
+ * committed root `log.md` and parent `index.md` listings must not name it.
+ */
+export function inDbOnlyDir(id: string): boolean {
+  return id.split("/").slice(0, -1).includes("db_only");
+}
+
 /** Reject empty, absolute, or traversing ids before they touch the filesystem. */
 export function validateId(id: string): void {
   if (id.length === 0) throw new InvalidIdError("empty concept id");

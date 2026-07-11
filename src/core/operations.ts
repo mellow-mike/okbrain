@@ -16,6 +16,7 @@ import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
 import { OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
 import { OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
+import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
 import { exportViz, type VizExport } from "./viz/export.ts";
 
 export type Scope = "read" | "write" | "admin";
@@ -24,8 +25,12 @@ export type Scope = "read" | "write" | "admin";
 export interface OpContext {
   bundle: string;
   trusted: boolean;
-  /** Open (or return the already-open) engine; the adapter owns its lifecycle. */
-  engine(): Engine;
+  /**
+   * Open (or return the already-open) engine; the adapter owns its lifecycle.
+   * Without `createIfMissing`, a bundle with no index yet must fail loudly —
+   * silently opening an empty index would truncate search (see 1.4 decision).
+   */
+  engine(createIfMissing?: boolean): Engine;
   /** True when a derived index already exists (write ops refresh it, never create it). */
   hasIndex(): boolean;
 }
@@ -443,7 +448,7 @@ export const operations: readonly Operation[] = [
     summary: "(Re)index the bundle incrementally (unchanged files skipped)",
     scope: "admin",
     params: [],
-    handler: (ctx) => buildIndex(ctx.bundle, ctx.engine()),
+    handler: (ctx) => buildIndex(ctx.bundle, ctx.engine(true)),
     render: renderStats,
   },
   {
@@ -460,11 +465,42 @@ export const operations: readonly Operation[] = [
           "rebuild wipes the derived index; pass --confirm-destructive to proceed",
           "refused",
         );
-      const eng = ctx.engine();
+      const eng = ctx.engine(true);
       eng.wipe();
       return buildIndex(ctx.bundle, eng);
     },
     render: renderStats,
+  },
+  {
+    name: "sync",
+    cliName: "sync",
+    summary: "Commit bundle changes to git; pull+push when a remote is configured",
+    scope: "write",
+    params: [
+      { name: "message", type: "string", description: "commit message (default: okb sync <timestamp>)" },
+      { name: "status", type: "boolean", description: "report repo state without changing anything" },
+    ],
+    handler: (ctx, p) =>
+      p.status === true
+        ? syncStatus(ctx.bundle)
+        : syncBundle(ctx.bundle, p.message as string | undefined),
+    render: (r) => {
+      if ("repo" in (r as object)) {
+        const s = r as SyncStatus;
+        if (!s.repo) return "not a git repo (okb sync initializes one)";
+        const up = s.ahead === null ? "no upstream" : `ahead ${s.ahead}, behind ${s.behind}`;
+        return `on ${s.branch ?? "(detached)"} — ${s.dirty} dirty, remote ${s.remote ?? "none"}, ${up}`;
+      }
+      const s = r as SyncResult;
+      const parts: string[] = [];
+      if (s.initialized) parts.push("initialized git repo");
+      if (s.seeded.length > 0) parts.push(`seeded ${s.seeded.join(", ")}`);
+      parts.push(s.committed ? `committed ${s.committed}` : "nothing to commit");
+      if (s.pulled) parts.push("pulled");
+      if (s.pushed) parts.push("pushed");
+      else if (s.remote === null) parts.push("no remote configured (local-only)");
+      return parts.join("; ");
+    },
   },
 ];
 

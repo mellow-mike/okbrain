@@ -140,12 +140,30 @@ files (`/index.md`, `/notes/log.md`) are valid targets. The consumer itself
 never rejects on any warning class — doctor is the only strict surface.
 
 ### System of record, sync, rebuild
-- The bundle is a git repo. `okb sync` = git init/commit/push/pull/status.
-  Multi-device "sync" is git; the other machine rebuilds its index on open.
+- The bundle is a git repo; multi-device "sync" IS git (the other machine
+  rebuilds its index on open). `okb sync` = ensure repo (init + `main` via
+  `symbolic-ref`; a bundle nested inside another repository is refused —
+  nested `git init` would corrupt the outer repo's view), ensure seed lines,
+  commit everything (`--message` or a timestamped default), then, when an
+  `origin` remote is configured, `pull --rebase` + `push` (upstream set on
+  first push). `okb sync --status` reports repo/branch/dirty/remote/
+  ahead/behind without side effects. Git is spawned by argv only, with
+  `GIT_TERMINAL_PROMPT=0` (a missing credential fails fast, never hangs);
+  missing identity fails with the exact `git config` commands to run.
+- Seeding is append-only "ensure these lines exist" (user lines are never
+  rewritten): `.gitignore` gets `.okb/`, `/viz.html`, `db_only/`;
+  `.gitattributes` gets `* text=auto eol=lf` — Windows `autocrlf` must never
+  rewrite bundle bytes, or diffs churn and Stage-2 embedding content-hashes
+  silently invalidate.
 - The DB is never the backup. `okb rebuild --confirm-destructive` wipes the
   index and regenerates it from the bundle.
-- Privacy: per-directory/per-page `db_only` (gitignored) keeps sensitive
-  concepts on disk + in the index but out of git history.
+- Privacy: any directory named `db_only/` keeps its concepts on disk + in the
+  index but out of git — gitignored by sync **and** invisible to the committed
+  surfaces: root `log.md` entries are skipped and parent `index.md` listings
+  omit the directory (its own `index.md`, inside the ignored dir, still lists
+  its concepts for local browsing). Scope is "under a `db_only/` directory"
+  (`inDbOnlyDir`), matching git's directory-pattern semantics. Per-page
+  `db_only` is Backlog.
 
 ---
 
@@ -428,6 +446,30 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-11 — **Sync (1.5): bundle repos are self-contained; seed files are
+  append-only.** `okb sync` manages the bundle as its own repo and refuses a
+  bundle nested inside another repository (a nested `git init` would leave the
+  outer repo seeing a broken gitlink). Initial branch is `main` via
+  `symbolic-ref` (portable below git 2.28). Seeding means "ensure these lines
+  exist", so user entries in `.gitignore`/`.gitattributes` survive every sync.
+  `* text=auto eol=lf` is seeded because a Windows `autocrlf` checkout that
+  rewrites LF would churn every diff and silently invalidate Stage-2 embedding
+  content-hashes. Git spawns by argv with `GIT_TERMINAL_PROMPT=0`; push/pull
+  are CI-tested against a local bare remote, so no network is ever needed.
+- 2026-07-11 — **db_only privacy is enforced by the generators, not only by
+  gitignore (1.5).** Ignoring `db_only/` alone still leaked private titles and
+  descriptions into the *committed* root `log.md` and parent `index.md`.
+  Writes under a `db_only/` directory now skip the root log entry, and parent
+  indexes omit the directory row; the directory's own (never-committed)
+  `index.md` still lists its concepts. A root concept literally named
+  `db_only.md` stays public (`inDbOnlyDir` checks directory segments only),
+  matching git's `db_only/` pattern semantics.
+- 2026-07-11 — **Engine access can't implicitly create an index (B3).**
+  `OpContext.engine()` takes `createIfMissing`, passed only by
+  `index`/`rebuild`. Any other engine-backed op on a never-indexed bundle now
+  fails with "run `okb index` first" instead of opening an empty DB that
+  `hasIndex()` would forever after treat as real — the same silent-truncation
+  failure mode the 1.4 write-refresh decision guards against.
 - 2026-07-08 — **Write-aware graph (1.4): store dangling edges, resolve at
   query time.** The alternative — only storing resolved edges — makes
   incremental updates wrong: concept A links to not-yet-written X; writing X

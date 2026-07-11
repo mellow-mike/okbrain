@@ -13,7 +13,7 @@ import { readConceptPermissive } from "./bundle.ts";
 import { fmString, serialize } from "./document.ts";
 import { regenerateIndexes } from "./indexmd.ts";
 import { appendLog } from "./logmd.ts";
-import { idToAbsPath, isReservedName } from "./paths.ts";
+import { idToAbsPath, inDbOnlyDir, isReservedName } from "./paths.ts";
 
 export class OkfWriteError extends Error {}
 
@@ -94,6 +94,8 @@ export async function writeConcept(
   const dir = posix.dirname(input.id);
   await regenerateIndexes(root, dir === "." ? "" : dir);
   const kind = prev === undefined ? "Creation" : "Update";
-  await appendLog(root, kind, input.id, fm.title as string, fm.description as string);
+  if (!inDbOnlyDir(input.id))
+    // Private concepts never leak titles into the committed root log.md.
+    await appendLog(root, kind, input.id, fm.title as string, fm.description as string);
   return { id: input.id, path, created: prev === undefined };
 }

@@ -62,6 +62,7 @@ export async function generateIndexMd(root: string, dir: string): Promise<void> 
   const dirRows: string[] = [];
   const subdirs = entries.filter((e) => e.isDirectory() && !skipDir(e.name));
   for (const name of subdirs.map((e) => e.name).sort()) {
+    if (name === "db_only") continue; // private: never listed in a committed parent index
     const child = await readExisting(join(abs, name, "index.md"));
     if (!child) continue;
     const desc = child.intro?.split("\n")[0]?.replace(/\.$/, "");

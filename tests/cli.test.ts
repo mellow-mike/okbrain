@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -100,5 +101,28 @@ describe("okb CLI", () => {
     const io = capture();
     expect(await runCli(["list", "--bundle", join(root, "nope")], io)).toBe(1);
     expect(io.stderr).toContain("bundle directory not found");
+  });
+});
+
+// B3: engine-backed reads on a never-indexed bundle must fail loudly instead
+// of creating an empty index.db (which hasIndex() would then trust forever,
+// silently truncating search to post-hoc writes).
+describe("unindexed bundle (B3)", () => {
+  test("search refuses with guidance and leaves no .okb behind", async () => {
+    const fresh = await mkdtemp(join(tmpdir(), "okb-cli-b3-"));
+    try {
+      await writeFile(join(fresh, "a.md"), "---\ntype: note\ntitle: A\n---\nhello\n");
+      const io = capture();
+      expect(await runCli(["search", "hello", "--bundle", fresh], io)).toBe(1);
+      expect(io.stderr).toContain("run `okb index` first");
+      expect(existsSync(join(fresh, ".okb"))).toBe(false);
+
+      expect(await runCli(["index", "--bundle", fresh], capture())).toBe(0);
+      const hit = capture();
+      expect(await runCli(["search", "hello", "--bundle", fresh], hit)).toBe(0);
+      expect(hit.stdout).toContain("a — A");
+    } finally {
+      await rm(fresh, { recursive: true, force: true });
+    }
   });
 });
