@@ -9,6 +9,10 @@ export interface NodeRecord {
   title: string;
   description: string;
   resource: string | null;
+  /** Frontmatter `timestamp` (last content change); null when absent/unparseable. */
+  timestamp: string | null;
+  /** Frontmatter `last_reviewed` (Resurface stamp); null when never reviewed. */
+  lastReviewed: string | null;
   bodyLen: number;
   /** Hash of the raw concept file; lets index builds skip unchanged files. */
   contentHash: string;
@@ -38,6 +42,18 @@ export interface Neighbor {
   depth: number;
 }
 
+/** One node's review-relevant fields (Resurface feeds these to the scorer). */
+export interface ReviewRow {
+  id: string;
+  type: string;
+  title: string;
+  timestamp: string | null;
+  lastReviewed: string | null;
+  inbox: boolean;
+  /** DB-only snooze (`review_state`); gone after a rebuild, by design. */
+  snoozeUntil: string | null;
+}
+
 export interface Engine {
   upsertNode(node: NodeUpsert): void;
   removeNode(id: string): void;
@@ -63,7 +79,16 @@ export interface Engine {
   search(query: string, limit?: number): SearchHit[];
   /** Undirected neighborhood (links + backlinks) out to `depth` hops. */
   neighbors(id: string, depth?: number): Neighbor[];
-  /** Drop all derived state; the next index build repopulates it. */
+  /** Every node's review fields (Resurface), sorted by id. */
+  listReviewRows(): ReviewRow[];
+  /** Snooze a concept out of the review queue until `untilIso`. */
+  setSnooze(id: string, untilIso: string): void;
+  clearSnooze(id: string): void;
+  /**
+   * Drop all derived state; the next index build repopulates it. Also the
+   * only escape from a stale schema: it recreates tables at the current
+   * version, so `okb rebuild` works no matter how old the index file is.
+   */
   wipe(): void;
   close(): void;
 }

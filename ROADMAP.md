@@ -129,19 +129,25 @@ Deterministic daily "worth another look" queue with stated reasons; zero AI
 providers required. Design: `docs/features/FEATURE-RESURFACE.md` + CONTEXT
 §Resurface. Scope guard: GUI card stack → 3.2, cron recompute → 4.5,
 daily-note section → 4.6, AI garnish → 2.3 (items live at those stages).
-- [ ] F-B.1 `core/review/score.ts` — signals + weighted score + reason strings
+- [x] F-B.1 `core/review/score.ts` — signals + weighted score + reason strings
       (weights/cooldown/queue-size defaults in code; `review.*` config keys
       wire up when the 2.1 config file lands)
-- [ ] F-B.2 Engine schema v2: `timestamp`/`last_reviewed` node columns +
-      `review_state` (snooze) table; degrees from resolved edges; queue
-      recomputed on demand (no cache table at CLI scale)
-- [ ] F-B.3 Ops: `review_queue` (read); `review_done`/`review_snooze` (write) —
+- [x] F-B.2 Engine schema v2: `timestamp`/`last_reviewed` node columns +
+      `review_state` (snooze) table; degrees computed from resolved edges in
+      the scorer; queue recomputed on demand (no cache table at CLI scale).
+      Stale-schema handling: data methods refuse with guidance, `wipe()`
+      (= `okb rebuild`) recreates the current schema
+- [x] F-B.3 Ops: `review_queue` (read); `review_done`/`review_snooze` (write) —
       `last_reviewed` stamped via the conformance writer in metadata-only mode
-      (no `timestamp` refresh, no log.md entry)
-- [ ] F-B.4 CLI: `okb review`, `okb review done <id|n>`,
-      `okb review snooze <id|n> [--days 7]`; `--json`
-- [ ] F-B.5 Tests: each signal in isolation; exclusion windows; deterministic
-      ordering on a fixture bundle; done survives rebuild, snooze doesn't
+      (no `timestamp` refresh, no log.md entry); done clears any snooze
+- [x] F-B.4 CLI: `okb review`, `okb review done <id|n>`,
+      `okb review snooze <id|n> [--days 7]`; `--json`; two-word commands are
+      a generic CLI-adapter feature (positions resolve against the unlimited
+      ranking so any `--limit` listing's numbering stays valid)
+- [x] F-B.5 Tests: each signal in isolation; exclusion windows; deterministic
+      ordering (score → older timestamp → id) on a fixture bundle; done
+      survives rebuild, snooze doesn't; metadata-only writer semantics;
+      stale-schema refuse/repair
 
 ---
 
@@ -329,6 +335,14 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-11 — F-B Resurface shipped: pure deterministic scorer
+  (`core/review/score.ts`, six signals with reason strings), engine schema v2
+  (`timestamp`/`last_reviewed` columns, `review_state` snooze table,
+  stale-schema refuse + wipe-repairs), `okb review` / `review done <id|n>` /
+  `review snooze <id|n> [--days]` over three ops (two-word CLI commands are a
+  generic adapter feature), writer metadata-only mode (stamp `last_reviewed`
+  without touching `timestamp`/log.md). Zero AI required. 180 tests green,
+  tsc clean. Next: F-A Clip.
 - 2026-07-11 — Merged the Resurface (F-B) and Clip (F-A) feature frameworks
   into the docs: roadmap blocks inserted after Stage 1 with the scope guard
   applied (GUI → 3.2, bookmarklet endpoint → 3.1, cron → 4.5, AI garnish/

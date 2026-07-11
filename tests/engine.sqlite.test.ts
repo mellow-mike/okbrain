@@ -9,6 +9,8 @@ function node(id: string, over: Partial<NodeUpsert> = {}): NodeUpsert {
     title: id,
     description: "",
     resource: null,
+    timestamp: null,
+    lastReviewed: null,
     bodyLen: 0,
     contentHash: `hash-${id}`,
     body: "",

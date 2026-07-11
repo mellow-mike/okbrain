@@ -97,7 +97,11 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     io.out(helpText() + "\n");
     return 0;
   }
-  const op = operations.find((o) => o.cliName === cmd);
+  // Two-word commands ("review done", "inbox read") win over a one-word op
+  // reading the second word as a positional.
+  let op = operations.find((o) => o.cliName === `${cmd} ${rest[0]}`);
+  if (op) rest.shift();
+  else op = operations.find((o) => o.cliName === cmd);
   if (!op) {
     io.err(`unknown command: ${cmd} (see \`okb help\`)\n`);
     return 2;

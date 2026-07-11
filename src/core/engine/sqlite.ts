@@ -2,6 +2,9 @@
 // `.okb/index.db` (dot-dirs are invisible to the bundle walker and gitignored),
 // so deleting it — or `okb rebuild` — is always safe. FTS rows share the nodes
 // table's rowid, so node and index stay paired without a mapping table.
+// Schema migrations ARE rebuilds (the DB is a disposable cache): a version
+// mismatch makes every data method fail with guidance, and wipe() — what
+// `okb rebuild` runs — recreates the current schema unconditionally.
 
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
@@ -12,12 +15,13 @@ import type {
   Neighbor,
   NodeRecord,
   NodeUpsert,
+  ReviewRow,
   SearchHit,
 } from "./interface.ts";
 
 export class EngineError extends Error {}
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE nodes(
@@ -26,6 +30,8 @@ CREATE TABLE nodes(
   title TEXT NOT NULL,
   description TEXT NOT NULL,
   resource TEXT,
+  timestamp TEXT,
+  last_reviewed TEXT,
   body_len INTEGER NOT NULL,
   content_hash TEXT NOT NULL
 );
@@ -39,6 +45,10 @@ CREATE TABLE tags(
   node_id TEXT NOT NULL,
   tag TEXT NOT NULL,
   PRIMARY KEY (node_id, tag)
+) WITHOUT ROWID;
+CREATE TABLE review_state(
+  node_id TEXT PRIMARY KEY,
+  snooze_until TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE VIRTUAL TABLE fts USING fts5(title, body, tags);
 `;
@@ -67,19 +77,13 @@ interface NodeRow {
   title: string;
   description: string;
   resource: string | null;
+  timestamp: string | null;
+  last_reviewed: string | null;
   body_len: number;
   content_hash: string;
 }
 
-function migrate(db: Database): void {
-  const { user_version } = db
-    .query<{ user_version: number }, []>("PRAGMA user_version")
-    .get()!;
-  if (user_version === SCHEMA_VERSION) return;
-  if (user_version !== 0)
-    throw new EngineError(
-      `index schema v${user_version} is newer than supported v${SCHEMA_VERSION}; run \`okb rebuild\` with a matching okb`,
-    );
+function createSchema(db: Database): void {
   try {
     db.exec(SCHEMA);
   } catch (e) {
@@ -90,21 +94,54 @@ function migrate(db: Database): void {
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
+/** True when the schema is current; false = stale, only wipe() may repair. */
+function migrate(db: Database): boolean {
+  const { user_version } = db
+    .query<{ user_version: number }, []>("PRAGMA user_version")
+    .get()!;
+  if (user_version === SCHEMA_VERSION) return true;
+  if (user_version !== 0) return false;
+  createSchema(db);
+  return true;
+}
+
 /** Open (creating/migrating as needed) a SQLite engine at `dbPath`. */
 export function openSqliteEngine(dbPath: string): Engine {
   if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
   const db = new Database(dbPath, { create: true });
   db.exec("PRAGMA journal_mode = WAL");
-  migrate(db);
+  let schemaOk = migrate(db);
+
+  // Data methods refuse a stale schema so a v1 index can't half-answer.
+  const fresh =
+    <A extends unknown[], R>(fn: (...a: A) => R) =>
+    (...a: A): R => {
+      if (!schemaOk)
+        throw new EngineError(
+          "index schema is from a different okb version — run `okb rebuild --confirm-destructive` to regenerate it",
+        );
+      return fn(...a);
+    };
 
   const upsert = db.transaction((n: NodeUpsert) => {
     db.query(
-      `INSERT INTO nodes (id, type, title, description, resource, body_len, content_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO nodes (id, type, title, description, resource, timestamp, last_reviewed, body_len, content_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET type=excluded.type, title=excluded.title,
          description=excluded.description, resource=excluded.resource,
+         timestamp=excluded.timestamp, last_reviewed=excluded.last_reviewed,
          body_len=excluded.body_len, content_hash=excluded.content_hash`,
-    ).run(n.id, n.type, n.title, n.description, n.resource, n.bodyLen, n.contentHash);
+    ).run(
+      n.id,
+      n.type,
+      n.title,
+      n.description,
+      n.resource,
+      n.timestamp,
+      n.lastReviewed,
+      n.bodyLen,
+      n.contentHash,
+    );
     const { rowid } = db
       .query<{ rowid: number }, [string]>("SELECT rowid FROM nodes WHERE id = ?")
       .get(n.id)!;
@@ -128,6 +165,7 @@ export function openSqliteEngine(dbPath: string): Engine {
     db.query("DELETE FROM fts WHERE rowid = ?").run(row.rowid);
     db.query("DELETE FROM tags WHERE node_id = ?").run(id);
     db.query("DELETE FROM edges WHERE src = ? OR dst = ?").run(id, id);
+    db.query("DELETE FROM review_state WHERE node_id = ?").run(id);
     db.query("DELETE FROM nodes WHERE id = ?").run(id);
   });
 
@@ -149,61 +187,63 @@ export function openSqliteEngine(dbPath: string): Engine {
     title: r.title,
     description: r.description,
     resource: r.resource,
+    timestamp: r.timestamp,
+    lastReviewed: r.last_reviewed,
     bodyLen: r.body_len,
     contentHash: r.content_hash,
   });
 
   return {
-    upsertNode: (n) => upsert(n),
-    removeNode: (id) => remove(id),
+    upsertNode: fresh((n) => upsert(n)),
+    removeNode: fresh((id) => remove(id)),
 
-    getNode(id) {
+    getNode: fresh((id) => {
       const row = db
         .query<NodeRow, [string]>("SELECT * FROM nodes WHERE id = ?")
         .get(id);
       return row ? toRecord(row) : null;
-    },
+    }),
 
-    getTags(id) {
-      return db
+    getTags: fresh((id) =>
+      db
         .query<{ tag: string }, [string]>(
           "SELECT tag FROM tags WHERE node_id = ? ORDER BY tag",
         )
         .all(id)
-        .map((r) => r.tag);
-    },
+        .map((r) => r.tag),
+    ),
 
-    contentHashes() {
+    contentHashes: fresh(() => {
       const rows = db
         .query<{ id: string; content_hash: string }, []>(
           "SELECT id, content_hash FROM nodes",
         )
         .all();
       return new Map(rows.map((r) => [r.id, r.content_hash]));
-    },
+    }),
 
-    listNodeIds() {
-      return db
+    listNodeIds: fresh(() =>
+      db
         .query<{ id: string }, []>("SELECT id FROM nodes ORDER BY id")
         .all()
-        .map((r) => r.id);
-    },
+        .map((r) => r.id),
+    ),
 
-    replaceEdges: (edges) => replaceEdges(edges),
-    replaceEdgesFor: (src, dsts) => replaceEdgesFor(src, dsts),
+    replaceEdges: fresh((edges) => replaceEdges(edges)),
+    replaceEdgesFor: fresh((src, dsts) => replaceEdgesFor(src, dsts)),
 
-    listEdges() {
+    listEdges: fresh(() =>
       // Dangling edges (unindexed endpoint) stay stored but never surface.
-      return db
+      db
         .query<EdgeRecord, []>(
           `SELECT e.src, e.dst FROM edges e
            JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst
            ORDER BY e.src, e.dst`,
         )
-        .all();
-    },
+        .all(),
+    ),
 
-    edgesOf(id) {
+    edgesOf: fresh((id) => {
       const ids = (sql: string) =>
         db.query<{ id: string }, [string]>(sql).all(id).map((r) => r.id);
       return {
@@ -214,9 +254,9 @@ export function openSqliteEngine(dbPath: string): Engine {
           "SELECT e.src AS id FROM edges e JOIN nodes n ON n.id = e.src WHERE e.dst = ? ORDER BY e.src",
         ),
       };
-    },
+    }),
 
-    search(query, limit = 20) {
+    search: fresh((query, limit = 20) => {
       const expr = toMatchExpr(query);
       if (expr === "") return [];
       // Column weights (title, body, tags): a title hit should beat a body hit.
@@ -227,10 +267,10 @@ export function openSqliteEngine(dbPath: string): Engine {
            WHERE fts MATCH ? ORDER BY score DESC, n.id LIMIT ?`,
         )
         .all(expr, limit);
-    },
+    }),
 
-    neighbors(id, depth = 1) {
-      return db
+    neighbors: fresh((id, depth = 1) =>
+      db
         .query<Neighbor, [string, number, string]>(
           `WITH RECURSIVE walk(id, depth) AS (
              SELECT ?, 0
@@ -243,11 +283,38 @@ export function openSqliteEngine(dbPath: string): Engine {
            SELECT id, MIN(depth) AS depth FROM walk
            WHERE id <> ? GROUP BY id ORDER BY depth, id`,
         )
-        .all(id, depth, id);
-    },
+        .all(id, depth, id),
+    ),
+
+    listReviewRows: fresh(() =>
+      db
+        .query<Omit<ReviewRow, "inbox"> & { inbox: number }, []>(
+          `SELECT n.id, n.type, n.title, n.timestamp, n.last_reviewed AS lastReviewed,
+             EXISTS(SELECT 1 FROM tags t WHERE t.node_id = n.id AND t.tag = 'inbox') AS inbox,
+             (SELECT snooze_until FROM review_state r WHERE r.node_id = n.id) AS snoozeUntil
+           FROM nodes n ORDER BY n.id`,
+        )
+        .all()
+        .map((r) => ({ ...r, inbox: r.inbox === 1 })),
+    ),
+
+    setSnooze: fresh((id, untilIso) => {
+      db.query(
+        "INSERT INTO review_state (node_id, snooze_until) VALUES (?, ?) ON CONFLICT(node_id) DO UPDATE SET snooze_until=excluded.snooze_until",
+      ).run(id, untilIso);
+    }),
+
+    clearSnooze: fresh((id) => {
+      db.query("DELETE FROM review_state WHERE node_id = ?").run(id);
+    }),
 
     wipe() {
-      db.exec("DELETE FROM fts; DELETE FROM tags; DELETE FROM edges; DELETE FROM nodes;");
+      // Drop + recreate rather than DELETE FROM: this is also the upgrade
+      // path from any older schema version (`okb rebuild`).
+      for (const t of ["fts", "nodes", "edges", "tags", "review_state"])
+        db.exec(`DROP TABLE IF EXISTS ${t}`);
+      createSchema(db);
+      schemaOk = true;
     },
 
     close: () => db.close(),

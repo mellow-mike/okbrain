@@ -35,6 +35,8 @@ function upsertConcept(engine: Engine, { id, doc, parsed }: PermissiveConcept, h
     title: fmString(fm.title),
     description: fmString(fm.description),
     resource: typeof fm.resource === "string" ? fm.resource : null,
+    timestamp: fmString(fm.timestamp) || null,
+    lastReviewed: fmString(fm.last_reviewed) || null,
     bodyLen: doc.body.length,
     contentHash: hash,
     body: doc.body,

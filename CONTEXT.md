@@ -187,11 +187,16 @@ each link's relationship from its nearest heading/sentence (a link under
 stays a plain OKF link; okbrain just knows more.
 
 ### Storage & queries
-SQLite tables: `nodes(id, type, title, description, resource, body_len,
-content_hash)`, `edges(src, dst)` (plus `rel`/`evidence` when typed edges land,
-Stage 4), `tags(node_id, tag)`, and an FTS5 table sharing `nodes.rowid`. The
-index lives at `<bundle>/.okb/index.db` — inside the bundle so it travels with
-context but gitignored and always disposable (`okb rebuild`). **Edges are
+SQLite tables: `nodes(id, type, title, description, resource, timestamp,
+last_reviewed, body_len, content_hash)`, `edges(src, dst)` (plus
+`rel`/`evidence` when typed edges land, Stage 4), `tags(node_id, tag)`,
+`review_state(node_id, snooze_until)` (Resurface's DB-only snooze), and an
+FTS5 table sharing `nodes.rowid`. The index lives at `<bundle>/.okb/index.db`
+— inside the bundle so it travels with context but gitignored and always
+disposable (`okb rebuild`). Schema migrations ARE rebuilds: on a version
+mismatch every data method fails with "run `okb rebuild`", and `wipe()` —
+what rebuild calls — drops and recreates the current schema, so rebuild works
+against any old index file and no read can half-answer from a stale shape. **Edges are
 stored as extracted, dangling targets included**; every edge-reading query
 resolves against `nodes`, so a link to a not-yet-written concept is invisible
 until that concept exists — at which point its backlinks appear with no
@@ -546,6 +551,18 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-11 — **Engine schema migrations are rebuilds (v2 for Resurface).**
+  The DB is a disposable cache, so v1→v2 doesn't get ALTER-TABLE migrations
+  (backfilling new columns would defeat the content-hash skip and reproduce
+  the truncation risk). Instead: a version mismatch flips the engine into a
+  refuse state where every data method throws "run `okb rebuild`", and
+  `wipe()` — the first thing rebuild calls — drops and recreates the current
+  schema unconditionally. Rebuild therefore works against any old index file,
+  and nothing can half-answer from a stale shape. Review-queue positions
+  (`review done 3`) resolve against the unlimited ranking, so numbering from
+  any `--limit` listing stays valid; two-word CLI commands (`review done`)
+  are a generic adapter feature over `cliName`, keeping the ops contract
+  surface-neutral.
 - 2026-07-11 — **Feature interlude order + scope guard (decided).** After
   Stage 1: Resurface (F-B) then Clip (F-A), then Stage 2.1. Both features ship
   CLI-first and must run with zero AI providers configured; their GUI pieces

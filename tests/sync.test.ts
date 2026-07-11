@@ -145,8 +145,8 @@ describe("syncBundle", () => {
     const outer = await dir("b5");
     g(outer, "init");
     const inner = await dir("b5/brain");
-    expect(syncBundle(inner)).rejects.toThrow(SyncError);
-    expect(syncBundle(inner)).rejects.toThrow(/inside another git repository/);
+    await expect(syncBundle(inner)).rejects.toThrow(SyncError);
+    await expect(syncBundle(inner)).rejects.toThrow(/inside another git repository/);
   });
 
   test(".gitattributes pins LF in the working tree even under core.autocrlf=true", async () => {

@@ -29,6 +29,12 @@ export interface WriteConceptInput {
   body?: string;
   /** Extra frontmatter to carry (import path); overrides existing unknown keys, never scaffold keys. */
   extra?: Record<string, unknown>;
+  /**
+   * Metadata-only write (internal; e.g. Resurface's `last_reviewed` stamp):
+   * the existing `timestamp` is kept — it means *content* change — and no
+   * log.md entry is appended. Requires the concept to exist.
+   */
+  metadataOnly?: boolean;
 }
 
 export interface WriteResult {
@@ -64,15 +70,18 @@ export async function writeConcept(
     throw new OkfWriteError(
       `refusing to overwrite ${input.id}: its frontmatter is unparseable (see okb doctor)`,
     );
+  if (input.metadataOnly && !existing)
+    throw new OkfWriteError(`metadata-only write requires an existing concept: ${input.id}`);
   const prev = existing?.doc.frontmatter;
   const prevBody = existing?.doc.body ?? "";
 
+  const prevTs = fmString(prev?.timestamp);
   // Canonical key order; unknown keys from the existing doc follow, verbatim.
   const fm: Record<string, unknown> = {
     type: input.type ?? fmString(prev?.type),
     title: input.title ?? fmString(prev?.title),
     description: input.description ?? fmString(prev?.description),
-    timestamp: nowTimestamp(),
+    timestamp: input.metadataOnly && prevTs !== "" ? prevTs : nowTimestamp(),
   };
   for (const k of ["type", "title", "description"] as const)
     if ((fm[k] as string).trim() === "")
@@ -94,8 +103,9 @@ export async function writeConcept(
   const dir = posix.dirname(input.id);
   await regenerateIndexes(root, dir === "." ? "" : dir);
   const kind = prev === undefined ? "Creation" : "Update";
-  if (!inDbOnlyDir(input.id))
-    // Private concepts never leak titles into the committed root log.md.
+  if (!inDbOnlyDir(input.id) && !input.metadataOnly)
+    // Private concepts never leak titles into the committed root log.md;
+    // metadata-only stamps aren't content changes worth a log entry.
     await appendLog(root, kind, input.id, fm.title as string, fm.description as string);
   return { id: input.id, path, created: prev === undefined };
 }

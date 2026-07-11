@@ -15,7 +15,8 @@ import { listConcepts } from "./okf/bundle.ts";
 import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
 import { OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
-import { OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
+import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
+import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
 import { exportViz, type VizExport } from "./viz/export.ts";
 
@@ -145,6 +146,24 @@ const parseTags = (v: unknown): string[] | undefined =>
   v === undefined
     ? undefined
     : (v as string).split(",").map((t) => t.trim()).filter((t) => t !== "");
+
+const queueFor = (eng: Engine, limit?: number): ReviewItem[] =>
+  reviewQueue(eng.listReviewRows(), eng.listEdges(), new Date(), {
+    ...defaultReviewConfig,
+    queueSize: limit ?? defaultReviewConfig.queueSize,
+  });
+
+/** Review target: a 1-based queue position (pure integer in range) or a concept id. */
+function resolveReviewTarget(eng: Engine, raw: string): string {
+  if (/^\d+$/.test(raw)) {
+    // Rank without the display limit so positions match any `--limit` listing.
+    const q = queueFor(eng, Number.MAX_SAFE_INTEGER);
+    const n = Number(raw);
+    if (n >= 1 && n <= q.length) return q[n - 1]!.id;
+  }
+  requireNode(eng, raw);
+  return raw;
+}
 
 /** Writer/id errors are caller mistakes → bad_params; the rest propagate. */
 async function writing<T>(fn: () => Promise<T>): Promise<T> {
@@ -500,6 +519,72 @@ export const operations: readonly Operation[] = [
       if (s.pushed) parts.push("pushed");
       else if (s.remote === null) parts.push("no remote configured (local-only)");
       return parts.join("; ");
+    },
+  },
+  {
+    name: "review_queue",
+    cliName: "review",
+    summary: "Today's review queue: concepts worth another look, with reasons",
+    scope: "read",
+    params: [
+      { name: "limit", type: "int", description: "queue size (default 5)" },
+    ],
+    handler: async (ctx, p) => queueFor(ctx.engine(), p.limit as number | undefined),
+    render: (r) => {
+      const q = r as ReviewItem[];
+      if (q.length === 0) return "(queue is empty — nothing needs review)";
+      return q
+        .map(
+          (it, i) =>
+            `${i + 1}. ${it.id} — ${it.title} (${it.score.toFixed(2)}) — ${it.reasons.join("; ")}`,
+        )
+        .join("\n");
+    },
+  },
+  {
+    name: "review_done",
+    cliName: "review done",
+    summary: "Mark a concept reviewed (stamps last_reviewed; content untouched)",
+    scope: "write",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "concept id or queue position" },
+    ],
+    handler: async (ctx, p) => {
+      const eng = ctx.engine();
+      const id = resolveReviewTarget(eng, p.id as string);
+      const lastReviewed = nowTimestamp();
+      await writing(() =>
+        writeConcept(ctx.bundle, { id, extra: { last_reviewed: lastReviewed }, metadataOnly: true }),
+      );
+      await reindex(ctx, [id]);
+      eng.clearSnooze(id);
+      return { id, lastReviewed };
+    },
+    render: (r) => `reviewed ${(r as { id: string }).id}`,
+  },
+  {
+    name: "review_snooze",
+    cliName: "review snooze",
+    summary: "Hide a concept from the review queue for a few days (DB-only)",
+    scope: "write",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "concept id or queue position" },
+      { name: "days", type: "int", description: "days to snooze (default 7)" },
+    ],
+    handler: async (ctx, p) => {
+      const days = (p.days as number | undefined) ?? 7;
+      if (days < 1) throw new OpError("days must be at least 1", "bad_params");
+      const eng = ctx.engine();
+      const id = resolveReviewTarget(eng, p.id as string);
+      const snoozeUntil = new Date(Date.now() + days * 86_400_000)
+        .toISOString()
+        .replace(/\.\d{3}Z$/, "Z");
+      eng.setSnooze(id, snoozeUntil);
+      return { id, snoozeUntil };
+    },
+    render: (r) => {
+      const s = r as { id: string; snoozeUntil: string };
+      return `snoozed ${s.id} until ${s.snoozeUntil.slice(0, 10)} (cleared by okb rebuild)`;
     },
   },
 ];
