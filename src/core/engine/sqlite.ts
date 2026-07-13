@@ -9,6 +9,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { ensureExtensionCapableSqlite } from "./custom-sqlite.ts";
 import type {
   EdgeRecord,
   Engine,
@@ -107,6 +108,9 @@ function migrate(db: Database): boolean {
 
 /** Open (creating/migrating as needed) a SQLite engine at `dbPath`. */
 export function openSqliteEngine(dbPath: string): Engine {
+  // On macOS the extension-capable SQLite must be set before ANY Database
+  // opens — including this one — or the vector store can never load vec0.
+  ensureExtensionCapableSqlite();
   if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
   const db = new Database(dbPath, { create: true });
   db.exec("PRAGMA journal_mode = WAL");

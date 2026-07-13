@@ -14,6 +14,10 @@ const ctx = (trusted = true): OpContext => ({
   trusted,
   engine: () => engine,
   hasIndex: () => true,
+  vectors: () => {
+    throw new Error("no vector store in this test");
+  },
+  hasVectors: () => false,
   config: () => ({}),
 });
 const op = (name: string) => getOp(name)!;

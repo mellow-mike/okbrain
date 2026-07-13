@@ -18,6 +18,10 @@ const ctx = (trusted = true): OpContext => ({
     throw new Error("write_concept must not touch the engine");
   },
   hasIndex: () => false,
+  vectors: () => {
+    throw new Error("write_concept must not touch the vector store");
+  },
+  hasVectors: () => false,
   config: () => ({}),
 });
 

@@ -10,11 +10,12 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 
 ## Current focus
 > **Stage 1 complete**; **Resurface (F-B) + Clip (F-A) shipped** CLI-first
-> (GUI pieces at 3.2, bookmarklet endpoint at 3.1, cron at 4.5). **2.1
-> shipped**: gateway (chat/embed/rerank, all recipes), `okb init`,
-> `config.json` with `review.*`/`clip.*` wired. Next: 2.2 embeddings +
-> `sqlite-vec` (note the macOS `Database.setCustomSQLite()` caveat), then
-> 2.3 hybrid retrieval + `okb ask`.
+> (GUI pieces at 3.2, bookmarklet endpoint at 3.1, cron at 4.5). **2.1 +
+> 2.2 shipped**: gateway + `okb init`; chunker, `sqlite-vec` vector store
+> (own `.okb/vectors.db`, cosine, macOS custom-SQLite handled), `okb embed`
+> (incremental/paceable, provider+model+dim cache key), embed-on-write hook.
+> Next: **2.3 hybrid retrieval + `okb ask`** (RRF fusion over vec+FTS, graph
+> expansion, rerank, profiles).
 
 ---
 
@@ -207,15 +208,29 @@ Goal: ask questions of your brain, offline or via API.
       init detect/merge/validate; config wiring for review/clip
 
 ### 2.2 Embeddings + vector index
-- [ ] `core/retrieval/chunk.ts` — ~400-token chunker
-- [ ] `sqlite-vec` integration (cross-platform extension load + clear error).
-      Note: on macOS `bun:sqlite` links Apple's SQLite, which blocks extension
-      loading — needs `Database.setCustomSQLite()` with a real libsqlite3
-- [ ] Embed pipeline → store vectors; content-hash skip; provider+dim cache key
-- [ ] `okb embed` (incremental, paceable)
-- [ ] Embed-on-write hook: writes/clips refresh their vectors incrementally
-      (F-A.7 — until here, clip/write simply don't embed)
-- [ ] Tests: re-embed only on change; provider switch invalidates correctly
+- [x] `core/retrieval/chunk.ts` — ~400-token chunker (chars/4 approximation;
+      paragraph packing, line/hard splits; no tokenizer dep)
+- [x] `sqlite-vec` integration (`core/engine/vectors.ts`): vec0 + cosine in a
+      separate `.okb/vectors.db` (rebuild-safe, extension-optional; see
+      CONTEXT decision 2026-07-13); macOS handled via
+      `core/engine/custom-sqlite.ts` (`Database.setCustomSQLite`,
+      `$OKB_SQLITE_LIB` → Homebrew → MacPorts; CI installs brew sqlite);
+      clear actionable errors on load failure
+- [x] Embed pipeline (`core/retrieval/embed.ts`) → store vectors; hash skip
+      over title+description+body (metadata-only stamps don't re-embed);
+      provider+model+dim cache key, mismatch = visible full reset
+- [x] `okb embed` (incremental, `--limit` paces, interrupted runs resume,
+      stale concepts removed)
+- [x] Embed-on-write hook: writes/clips refresh their vectors when a store
+      exists (F-A.7); best-effort — failure warns, never fails the write;
+      never resets the cache key
+- [x] Tests: re-embed only on change; provider switch invalidates correctly;
+      store mechanics + persistence; batch-boundary assembly; CLI + hook
+      end-to-end vs a stub embed server (no network in CI)
+- [ ] Compiled binary can't self-locate the vec0 extension (node_modules
+      isn't shipped) — `$OKB_SQLITE_VEC` is the documented escape hatch;
+      embed the platform extension into the binary at build time (or ship it
+      alongside) before packaging (Stage 5)
 
 ### 2.3 Retrieval pipeline
 - [ ] `core/retrieval/hybrid.ts` — vector + FTS recall fused via RRF
@@ -323,6 +338,7 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B2 | 2026-06-28 | low | tests | `config.test.ts` failed on Windows CI: hardcoded POSIX absolute paths (`/abs`, `/work`) — `resolve("/work")` is drive-anchored to `D:\work` on win32. Production code was correct | test baked in POSIX path assumptions | fixed | rebuild expectations via `node:path` `resolve`/`join` so they're OS-correct |
 | B3 | 2026-07-11 | high | engine/CLI | engine-backed reads (`okb search`/`graph`/…) on a never-indexed bundle silently created an empty `.okb/index.db`; `hasIndex()` then trusted it, so later writes refreshed a near-empty index — silent search truncation | lazy `ctx.engine()` always opened with create | fixed | `OpContext.engine(createIfMissing)` — only `index`/`rebuild` create; other ops fail with "run `okb index` first"; regression test in `tests/cli.test.ts` |
 | B4 | 2026-07-11 | low | tests | sync tests failed on ubuntu/windows CI only: the clone-side `git commit` saw no identity ("empty ident name" / "unable to auto-detect email") though `beforeAll` set `GIT_AUTHOR_*` in `process.env`; local runs masked it via the developer's global gitconfig, macOS via runner ident auto-detect | Bun's `execFileSync` without an `env` option passes the *startup* environment, not mutated `process.env` (production `runGit` already spreads it explicitly) | fixed | test helper passes `env: { ...process.env }`; the clone sets local `user.name`/`user.email` so its commit is env-independent |
+| B5 | 2026-07-13 | med | tests | 3 `okb review` CLI tests fail from 2026-07-12 onward (green when written on 07-11): "fresh" notes a/b/c enter the queue. The fixture stamped timestamps relative to a **pinned** `NOW = 2026-07-11`, but the real CLI scores with `new Date()` — one real day later the notes gain staleness > 0 and rank | date-relative fixture pinned to the authoring date; only the pure-scorer tests may pin `now` (they inject it) | fixed | CLI fixture timestamps now derive from `Date.now()` (captured once as `TS.*` so asserts match); pure-scorer tests keep the pinned `NOW` |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -360,6 +376,17 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-13 — Stage 2.2 shipped: chunker (`core/retrieval/chunk.ts`),
+  sqlite-vec vector store in its own `.okb/vectors.db` (vec0 + cosine;
+  rebuild-safe; `VectorStore` interface; macOS custom-SQLite shim +
+  Homebrew-sqlite CI step; actionable load errors, `$OKB_SQLITE_VEC`
+  override for the compiled binary), embed pipeline with hash skip over
+  title+description+body and a (provider, model, dim) cache key,
+  `okb embed [--limit]` (incremental, paceable, resumable), embed-on-write
+  hook (best-effort, never fails a write, never resets the key). Compiled
+  binary verified end-to-end against a stub. Fixed B5 (review CLI fixture
+  date rot). Registered R2 (KM textbook preview — background only).
+  243 tests green, tsc clean. Next: 2.3 hybrid retrieval + `okb ask`.
 - 2026-07-11 — Stage 2.1 shipped: provider-agnostic gateway
   (`core/ai/gateway.ts` + `recipes.ts`; chat/embed/rerank over three HTTP
   dialects, plain fetch, no SDKs), per-capability resolution (per-call → env
