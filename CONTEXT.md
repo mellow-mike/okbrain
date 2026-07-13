@@ -387,10 +387,28 @@ on), `max` (multi-query expansion, larger payload). A profile sets the context
 budget and which recall arms run; `lean` keeps a local model comfortable.
 
 ### Embeddings & vector index
-Chunk concept bodies (~400 tokens), embed, store vectors in `sqlite-vec`.
-Re-embed on content-hash change. Fold provider + dimension into the vector
-cache key so switching providers can't serve stale vectors. Backfill is
-incremental and paceable.
+Chunk concept bodies (~400 tokens ≈ 1600 chars, no tokenizer dep —
+`core/retrieval/chunk.ts`), embed via the gateway, store in a `sqlite-vec`
+vec0 table (cosine metric) in **its own DB file** `.okb/vectors.db`
+(`core/engine/vectors.ts`, behind the `VectorStore` interface) — separate
+from the keyword index so `okb rebuild` never discards paid-for embeddings
+and machines without extension support keep a fully working keyword index.
+The store's cache key is `(provider, model, dim)`: `okb embed` resets the
+whole store when the key changes; otherwise it re-embeds only concepts whose
+hash changed and drops vanished ones. The hash covers exactly what feeds the
+embedding — title, description, body — so metadata-only stamps
+(`last_reviewed`, inbox tag clears) never re-embed. Each chunk embeds as
+`title\n\nchunk`; an empty body falls back to description/title. `okb embed
+[--limit n]` paces spend; interrupted runs resume (whole concepts commit
+atomically). Write ops refresh their own vectors when a store exists
+(embed-on-write hook), best-effort — a failure warns and never fails the
+write, and the hook never resets the cache key. Extension loading: Linux and
+Windows Bun load `vec0` natively; on macOS `bun:sqlite` links Apple's SQLite
+(no extensions), so `core/engine/custom-sqlite.ts` swaps in a real
+libsqlite3 (`$OKB_SQLITE_LIB` → Homebrew → MacPorts) via
+`Database.setCustomSQLite()` before any DB opens. A compiled binary can't
+self-locate the extension yet — `$OKB_SQLITE_VEC` points at it (Backlog:
+embed it).
 
 ### Retrieval pipeline (brain-first)
 1. Vector recall (sqlite-vec) + keyword recall (FTS5/BM25), fused with
@@ -570,6 +588,24 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-13 — **Vectors live in their own DB file, keyed by
+  (provider, model, dim) (2.2).** Two forcing facts: a vec0 virtual table
+  can't even be `DROP`ped without the extension loaded, so putting it in
+  `index.db` would break `okb rebuild` on any machine where sqlite-vec can't
+  load (notably stock macOS); and embeddings cost real money/time, so the
+  rebuild escape hatch must not discard them. Hence `.okb/vectors.db` behind
+  a small `VectorStore` interface (Postgres later implements both it and
+  `Engine`). Skip logic hashes title+description+body — not the raw file —
+  so Resurface's metadata-only stamps don't trigger paid re-embeds. The
+  embed-on-write hook only refreshes under a matching cache key and never
+  resets it (resets are `okb embed`'s job, visibly reported); hook failures
+  warn and never fail the write. A vector-store schema change auto-discards
+  (it's a cache of a cache; the next `okb embed` reports the full re-embed),
+  unlike `index.db` which refuses and demands a rebuild — the difference is
+  that a stale keyword index silently truncates *reads*, while an empty
+  vector store just means re-embedding. macOS CI installs Homebrew sqlite;
+  `custom-sqlite.ts` must run before *any* Database opens, so both engine
+  and vector store call it first.
 - 2026-07-11 — **Gateway (2.1): three dialects, per-capability slots, no
   SDKs.** All providers speak one of three HTTP dialects (openai-compatible /
   anthropic / gemini), so recipes are data rows, not classes, and the binary

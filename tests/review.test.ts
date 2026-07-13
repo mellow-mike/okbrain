@@ -242,6 +242,12 @@ describe("okb review (CLI on a fixture bundle)", () => {
   const at = (id: string) => join(root, ...id.split("/")) + ".md";
   const concept = (title: string, ts: string, body = "Body.", tags = ""): string =>
     `---\ntype: note\ntitle: ${title}\ndescription: d\ntimestamp: ${ts}\n${tags}---\n${body}\n`;
+  // The real CLI scores against the real clock, so fixture timestamps must be
+  // relative to Date.now(), not the pinned NOW — or these tests rot a day
+  // after they're written (B5). Captured once so asserts see the same values.
+  const liveDaysAgo = (d: number): string =>
+    new Date(Date.now() - d * DAY).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const TS = { hub: liveDaysAgo(400), fresh: liveDaysAgo(0), lonely: liveDaysAgo(200), clip: liveDaysAgo(40) };
 
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), "okb-review-"));
@@ -249,19 +255,19 @@ describe("okb review (CLI on a fixture bundle)", () => {
     await mkdir(join(root, "orphans"), { recursive: true });
     await mkdir(join(root, "inbox"), { recursive: true });
     // hub: 400d old, cited by three fresh notes → staleness 1.0 + hub 1.5 + neighbor 1.0 = 3.5
-    await writeFile(at("hubs/hub"), concept("Hub", daysAgo(400)), "utf8");
+    await writeFile(at("hubs/hub"), concept("Hub", TS.hub), "utf8");
     for (const n of ["a", "b", "c"])
       await writeFile(
         at(n),
-        concept(n.toUpperCase(), daysAgo(0), `Links [hub](/hubs/hub.md).`),
+        concept(n.toUpperCase(), TS.fresh, `Links [hub](/hubs/hub.md).`),
         "utf8",
       );
     // lonely orphan: 200d → 200/365 + 2.0 ≈ 2.548
-    await writeFile(at("orphans/lonely"), concept("Lonely", daysAgo(200)), "utf8");
+    await writeFile(at("orphans/lonely"), concept("Lonely", TS.lonely), "utf8");
     // inbox clip: 40d, orphan, tagged inbox → 40/365 + 2.0 + 1.5 ≈ 3.61
     await writeFile(
       at("inbox/clip"),
-      concept("Clip", daysAgo(40), "Body.", "tags:\n  - inbox\n"),
+      concept("Clip", TS.clip, "Body.", "tags:\n  - inbox\n"),
       "utf8",
     );
     expect((await okb(["index", "--bundle", root])).code).toBe(0);
@@ -288,7 +294,7 @@ describe("okb review (CLI on a fixture bundle)", () => {
     expect(r.stdout).toContain("reviewed orphans/lonely");
 
     const after = await readFile(at("orphans/lonely"), "utf8");
-    expect(after).toContain(`timestamp: ${daysAgo(200)}`); // content timestamp kept
+    expect(after).toContain(`timestamp: ${TS.lonely}`); // content timestamp kept
     expect(after).toMatch(/last_reviewed: \d{4}-/);
     expect((await okb(["doctor", "--bundle", root])).code).toBe(0);
 

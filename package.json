@@ -24,6 +24,7 @@
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
     "linkedom": "^0.18.13",
+    "sqlite-vec": "^0.1.9",
     "turndown": "^7.2.4",
     "yaml": "^2.9.0"
   }

@@ -9,8 +9,9 @@ import { readFile } from "node:fs/promises";
 import { RECIPES, resolveCall } from "./ai/gateway.ts";
 import { loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
-import type { Engine, Neighbor, SearchHit } from "./engine/interface.ts";
+import type { Engine, Neighbor, SearchHit, VectorStore } from "./engine/interface.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
+import { log } from "./log.ts";
 import { captureNote } from "./ingest/capture.ts";
 import { clipUrl, type ClipResult } from "./ingest/clip.ts";
 import { FetchGuardError } from "./ingest/fetch-guard.ts";
@@ -20,6 +21,7 @@ import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
 import { fmTags, OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
 import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
+import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./retrieval/embed.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
 import { exportViz, type VizExport } from "./viz/export.ts";
@@ -38,6 +40,10 @@ export interface OpContext {
   engine(createIfMissing?: boolean): Engine;
   /** True when a derived index already exists (write ops refresh it, never create it). */
   hasIndex(): boolean;
+  /** Open (or return) the vector store; same create semantics as `engine`. */
+  vectors(createIfMissing?: boolean): VectorStore;
+  /** True when a vector store exists (write ops refresh it, never create it). */
+  hasVectors(): boolean;
   /** User config (config.json via okb init); adapter-loaded, {} when absent. */
   config(): OkbConfig;
 }
@@ -101,10 +107,19 @@ interface PathHop {
 
 const DIR_MARK: Record<Dir, string> = { out: "→", in: "←", both: "↔" };
 
-/** Incrementally refresh written concepts in the index — if one exists. */
+/** Incrementally refresh written concepts in the derived caches — where they exist. */
 async function reindex(ctx: OpContext, ids: string[]): Promise<void> {
-  if (!ctx.hasIndex()) return;
-  for (const id of ids) await updateIndexFor(ctx.bundle, id, ctx.engine());
+  if (ctx.hasIndex()) for (const id of ids) await updateIndexFor(ctx.bundle, id, ctx.engine());
+  if (!ctx.hasVectors()) return;
+  try {
+    const emb = gatewayEmbedder(ctx.config().ai ?? {});
+    for (const id of ids) await embedConcept(ctx.bundle, id, ctx.vectors(), emb);
+  } catch (e) {
+    // Never fail a write over a derived cache; `okb embed` reconciles later.
+    log.warn("vector refresh failed — run `okb embed` to catch up", {
+      error: (e as Error).message,
+    });
+  }
 }
 
 function requireNode(eng: Engine, id: string): void {
@@ -506,6 +521,35 @@ export const operations: readonly Operation[] = [
       return buildIndex(ctx.bundle, eng);
     },
     render: renderStats,
+  },
+  {
+    name: "embed",
+    cliName: "embed",
+    summary: "Embed concepts into the vector index (incremental; unchanged skipped)",
+    scope: "admin",
+    params: [
+      { name: "limit", type: "int", description: "max concepts to (re)embed this run (paces API spend)" },
+      { name: "provider", type: "string", description: "embedding provider override (default: config/env)" },
+      { name: "model", type: "string", description: "embedding model override" },
+    ],
+    handler: async (ctx, p) => {
+      const emb = gatewayEmbedder(ctx.config().ai ?? {}, {
+        provider: p.provider as string | undefined,
+        model: p.model as string | undefined,
+      });
+      return embedBundle(ctx.bundle, ctx.vectors(true), emb, {
+        limit: p.limit as number | undefined,
+      });
+    },
+    render: (r) => {
+      const s = r as EmbedStats;
+      const parts = [
+        `embedded ${s.embedded} (${s.chunks} chunks), skipped ${s.skipped}, removed ${s.removed} — ${s.provider}/${s.model}${s.dim === null ? "" : ` dim ${s.dim}`}`,
+      ];
+      if (s.reset) parts.push("vector cache rebuilt from scratch (new provider/model key)");
+      if (s.pending > 0) parts.push(`${s.pending} still pending — rerun \`okb embed\` to continue`);
+      return parts.join("\n");
+    },
   },
   {
     name: "sync",

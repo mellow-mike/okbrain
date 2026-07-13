@@ -8,8 +8,9 @@
 import { existsSync, statSync } from "node:fs";
 import { ConfigError, loadConfig, resolveBundlePath, type OkbConfig } from "./core/config.ts";
 import { AiError } from "./core/ai/gateway.ts";
-import type { Engine } from "./core/engine/interface.ts";
+import type { Engine, VectorStore } from "./core/engine/interface.ts";
 import { defaultDbPath, EngineError, openSqliteEngine } from "./core/engine/sqlite.ts";
+import { defaultVectorsPath, openVectorStore } from "./core/engine/vectors.ts";
 import { SyncError } from "./core/sync.ts";
 import {
   OpError,
@@ -170,6 +171,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
   }
 
   let engine: Engine | undefined;
+  let vectors: VectorStore | undefined;
   const ctx: OpContext = {
     bundle,
     trusted: true,
@@ -185,6 +187,16 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
       return engine;
     },
     hasIndex: () => existsSync(defaultDbPath(bundle)),
+    vectors: (createIfMissing = false) => {
+      if (!vectors) {
+        const path = defaultVectorsPath(bundle);
+        if (!createIfMissing && !existsSync(path))
+          throw new EngineError("no vector index for this bundle yet — run `okb embed` first");
+        vectors = openVectorStore(path);
+      }
+      return vectors;
+    },
+    hasVectors: () => existsSync(defaultVectorsPath(bundle)),
     config: () => (cfg ??= loadConfig()),
   };
   try {
@@ -208,6 +220,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     throw e;
   } finally {
     engine?.close();
+    vectors?.close();
   }
 }
 

@@ -54,6 +54,52 @@ export interface ReviewRow {
   snoozeUntil: string | null;
 }
 
+/** Vector-store cache key: any change invalidates every stored vector. */
+export interface EmbedMeta {
+  provider: string;
+  model: string;
+  dim: number;
+}
+
+export interface ChunkVector {
+  seq: number;
+  text: string;
+  vector: number[];
+}
+
+export interface VecHit {
+  nodeId: string;
+  seq: number;
+  text: string;
+  /** Cosine distance; lower is closer. */
+  distance: number;
+}
+
+/**
+ * Derived vector cache, separate from the keyword index (own DB file): it
+ * survives `okb rebuild` (embeddings cost real money) and machines without
+ * vector support keep a fully working keyword index. Rebuildable from the
+ * bundle via `okb embed` at any time.
+ */
+export interface VectorStore {
+  /** Current cache key; null when nothing was ever embedded. */
+  meta(): EmbedMeta | null;
+  /** Wipe everything and pin a new cache key (vec table created at `dim`). */
+  reset(meta: EmbedMeta): void;
+  /** Wipe everything including the key (back to the never-embedded state). */
+  clear(): void;
+  /** node_id → embed-input hash for every tracked concept (drives skip logic). */
+  embeddedHashes(): Map<string, string>;
+  /** Atomically swap one concept's chunks (empty = tracked, nothing to embed). */
+  replace(nodeId: string, embedHash: string, chunks: ChunkVector[]): void;
+  remove(nodeId: string): void;
+  /** k nearest chunks by cosine distance; [] when nothing is embedded. */
+  search(vector: number[], k?: number): VecHit[];
+  /** Total stored chunks. */
+  count(): number;
+  close(): void;
+}
+
 export interface Engine {
   upsertNode(node: NodeUpsert): void;
   removeNode(id: string): void;
