@@ -26,13 +26,13 @@ import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./o
 import { askBrain, type AskResult } from "./retrieval/ask.ts";
 import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./retrieval/embed.ts";
 import { hybridRetrieve, type HybridArms, type HybridHit } from "./retrieval/hybrid.ts";
-import { ProfileError, resolveProfile, type RetrievalProfile } from "./retrieval/profiles.ts";
+import { PROFILES, ProfileError, resolveProfile, type RetrievalProfile } from "./retrieval/profiles.ts";
 import { rerankConfigured, rerankHits } from "./retrieval/rerank.ts";
 import { garnishQueue, pickRecent, type GarnishNote } from "./review/garnish.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
 import { bookmarkletJs, DEFAULT_PORT, ensureServeToken } from "./serve-token.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
-import { exportViz, type VizExport } from "./viz/export.ts";
+import { buildVizGraph, exportViz, type VizExport, type VizGraph } from "./viz/export.ts";
 
 export type Scope = "read" | "write" | "admin";
 
@@ -635,6 +635,18 @@ export const operations: readonly Operation[] = [
     },
   },
   {
+    name: "graph_data",
+    cliName: "graph-data",
+    summary: "The whole graph (nodes + edges) as data — for the GUI and agents",
+    scope: "read",
+    params: [],
+    handler: (ctx) => buildVizGraph(ctx.bundle),
+    render: (r) => {
+      const g = r as VizGraph;
+      return `${g.nodes.length} concepts, ${g.edges.length} links (use --json for the data)`;
+    },
+  },
+  {
     // Scope read despite writing a file: output is derived (never canonical
     // knowledge) and the path is fixed to <bundle>/viz.html — no caller-chosen
     // destination an untrusted caller could abuse.
@@ -939,6 +951,7 @@ export const operations: readonly Operation[] = [
       { name: "model", type: "string", description: "chat model (default: the provider's default)" },
       { name: "embed-provider", type: "string", description: "embedding provider: openai|voyage|gemini|ollama|llamacpp|lmstudio|local" },
       { name: "embed-model", type: "string", description: "embedding model" },
+      { name: "retrieval-profile", type: "string", description: "default retrieval profile: lean|balanced|max" },
       { name: "no-default-bundle", type: "boolean", description: "don't change which bundle okb uses by default" },
     ],
     handler: async (ctx, p) => {
@@ -950,6 +963,14 @@ export const operations: readonly Operation[] = [
       if (p.model !== undefined) ai.model = p.model as string;
       if (p["embed-provider"] !== undefined) ai.embedProvider = local(p["embed-provider"]);
       if (p["embed-model"] !== undefined) ai.embedModel = p["embed-model"] as string;
+      if (p["retrieval-profile"] !== undefined) {
+        if (!PROFILES[p["retrieval-profile"] as string])
+          throw new OpError(
+            `unknown retrieval profile: ${p["retrieval-profile"]} (known: ${Object.keys(PROFILES).join(", ")})`,
+            "bad_params",
+          );
+        cfg.retrieval = { ...cfg.retrieval, profile: p["retrieval-profile"] as string };
+      }
       for (const [name, cap] of [
         [ai.provider, "chat"],
         [ai.embedProvider, "embed"],

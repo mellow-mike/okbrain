@@ -532,13 +532,32 @@ over the registry, trusted like the CLI but defended like a network surface:
   server never holds the index hostage from a concurrent CLI.
 
 ### GUI (local web app, `okb serve`)
-Views: **Graph** (live viewer), **Editor** (markdown + frontmatter, concept-id
-link autocomplete, live backlinks, citation helper, suggested-link inbox; saves
-route through the conformance writer), **Ask** (chat over the brain with
-streamed, cited answers and "open in graph"), **Settings** (engine, provider,
-retrieval profile, sync, enrichment guardrails). It's a web app → cross-platform
-free; an optional Tauri wrapper later gives a native desktop app over the same
-local API.
+A vanilla single-page app (`src/gui/`: index.html + app.js + style.css) —
+no framework, no build step; api.ts serves the files and Bun text imports
+embed them into the compiled binary (the viz-vendor pattern). Presentation
+only: every data access is a `/api/op/*` call. Hash routing; dark default +
+persisted light toggle using the viewer's token system and validated
+palettes. Views:
+- **Graph** — live Cytoscape fed by the `graph_data` op (whole graph as
+  JSON; also `okb graph-data --json` for agents/scripts); search filter,
+  type-colored nodes, detail panel with rendered body (internal links
+  rewired to focus their node), click-through to the editor.
+- **Editor** — scaffold fields (type/title/description/tags/resource) + a
+  markdown body textarea; concept-id link picker inserting normalized
+  links; citation-section helper; live backlinks; saves via
+  `write_concept`, so every save is conformant. (Suggested-link inbox
+  arrives with 4.4.) Deliberately not a rich editor: the bundle is plain
+  markdown and external editors remain first-class.
+- **Ask** — SSE streaming: retrieved context appears as chips before the
+  answer arrives; verified citations link to graph and editor.
+- **Review** — card stack with scores + reasons, optional garnish toggle;
+  done / snooze / open / graph per card.
+- **Inbox** — unread clips/notes; open / mark-read.
+- **Settings** — AI providers + retrieval profile (backed by `init`, which
+  persists them), git sync (status / run), maintenance (re-index, embed,
+  doctor report). Enrichment guardrails join with Stage 4.
+Cross-platform free (it's a web app); an optional Tauri wrapper later gives
+a native desktop app over the same local API.
 
 ### Trust boundary
 Each op call carries a trust flag. CLI + local GUI are trusted; MCP/remote is
@@ -560,8 +579,8 @@ filesystem confinement tightens.
 - **MCP:** the MCP TypeScript SDK.
 - **AI:** HTTP clients per recipe (OpenAI-compatible for most local + several
   API providers).
-- **GUI build:** a lightweight bundler (e.g. Vite or Bun's bundler) — decide at
-  Stage 3; keep deps minimal.
+- **GUI build:** none — vanilla JS/CSS/HTML served as-is and embedded via Bun
+  text imports; Bun's compiler is the only "bundler" (decided at 3.2).
 
 ### Scale path (opt-in, behind the same interfaces)
 More files / faster search → swap engine to **Postgres + pgvector** (ops
@@ -648,6 +667,23 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-17 — **GUI (3.2): vanilla JS, zero build step; editor is a form,
+  not an IDE.** A framework + bundler would add the project's heaviest dev
+  dependency for six views of forms and lists — instead the GUI is three
+  static files served by api.ts and embedded into the binary with Bun text
+  imports (exactly how the viz vendor libs already ship), so `bun build
+  --compile` remains the entire build. All data access goes through
+  `/api/op/*`; the app holds no logic the ops don't provide. The graph view
+  gets its data from a new `graph_data` read op (the viz exporter's
+  `buildVizGraph` behind the contract) rather than a bespoke endpoint, so
+  the same JSON is available to the CLI (`okb graph-data --json`) and MCP.
+  This resolves the "GUI editor scope" open question: a scaffold-field +
+  textarea editor that saves through the conformance writer — the bundle is
+  plain markdown and Obsidian/VS Code stay first-class editors, so okbrain
+  competes on conformance (every save normalized + indexed), not on editing
+  chrome. Settings persist through `init` (which gained
+  `--retrieval-profile`) instead of a new config op. Verified end-to-end in
+  Chromium: every view driven, zero page errors, zero external requests.
 - 2026-07-17 — **Local API (3.1): one token gates everything; the
   bookmarklet navigates instead of fetching.** The per-install serve token
   is required on every `/api` and `/clip` request, not just clip: CORS only
@@ -928,8 +964,6 @@ sections above as current truth; this log says *why/when*.
 
 ### Open questions (decide as they come up; record the answer here)
 - Suggested links: auto-insert on capture vs always route through a review inbox?
-- GUI editor scope for v1: full editor vs read-only + capture (bundle is plain
-  markdown, so Obsidian/VS Code already edit it)?
 - Concept `type` vocabulary: ship a small non-binding default set (Note, Person,
   Project, Reference, Idea, Meeting…) vs fully free-form?
 - Acceptance test: round-trip the three OKF sample bundles (GA4, Stack Overflow,

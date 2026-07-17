@@ -111,6 +111,28 @@ describe("request guards", () => {
     expect(await (await fetch(base)).text()).toContain("okbrain");
   });
 
+  test("GET / serves the GUI shell with the token injected", async () => {
+    const page = await (await fetch(base)).text();
+    expect(page).toContain(`window.OKB_TOKEN = "${TOKEN}"`);
+    for (const link of ["#graph", "#ask", "#review", "#inbox", "#editor", "#settings"])
+      expect(page).toContain(`href="${link}"`);
+  });
+
+  test("GUI assets served tokenless with correct content types", async () => {
+    const cases: [string, string, string][] = [
+      ["gui/app.js", "application/javascript", "renderGraph"],
+      ["gui/style.css", "text/css", "--accent"],
+      ["gui/cytoscape.js", "application/javascript", "cytoscape"],
+      ["gui/marked.js", "application/javascript", "marked"],
+    ];
+    for (const [path, type, needle] of cases) {
+      const r = await fetch(base + path);
+      expect(r.status).toBe(200);
+      expect(r.headers.get("content-type")).toContain(type);
+      expect(await r.text()).toContain(needle);
+    }
+  });
+
   test("token also accepted as Bearer and as query param", async () => {
     const bearer = await fetch(base + "api/ops", {
       headers: { authorization: `Bearer ${TOKEN}` },
@@ -149,6 +171,15 @@ describe("op routes", () => {
     const r = await post("read_concept", { id: "notes/via-api" });
     const { result } = (await r.json()) as { result: { raw: string } };
     expect(result.raw).toContain("title: Via API");
+  });
+
+  test("graph_data returns the live graph for the GUI", async () => {
+    const r = await post("graph_data", {});
+    expect(r.status).toBe(200);
+    const { result } = (await r.json()) as {
+      result: { nodes: { id: string }[]; edges: unknown[] };
+    };
+    expect(result.nodes.some((n) => n.id === "notes/alpha")).toBe(true);
   });
 
   test("unknown op → 404; localOnly op → 404; bad params → 400; not_found → 404", async () => {

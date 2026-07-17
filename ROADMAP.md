@@ -9,11 +9,12 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 0–2 complete**; **3.1 local API shipped** (token-gated op routes,
-> SSE ask, clip endpoint + bookmarklet). Now: **3.2 GUI** (`okb serve` page:
-> graph / editor / ask / review / inbox / settings), then **3.3 MCP server**
-> (`okb mcp`). The 2.2 packaging note (ship the vec0 extension with the
-> compiled binary) stays parked at Stage 5.
+> **Stages 0–2 complete; 3.1 + 3.2 shipped** (local API with token-fail-closed
+> security; vanilla-JS GUI — graph/editor/ask/review/inbox/settings —
+> verified end-to-end in Chromium and embedded in the compiled binary).
+> Now: **3.3 MCP server** (`okb mcp` — untrusted by default, write/admin
+> gated). The 2.2 packaging note (ship the vec0 extension with the compiled
+> binary) stays parked at Stage 5.
 
 ---
 
@@ -277,15 +278,26 @@ Goal: a real GUI, and "my agent can use my brain."
       bookmarklet [--port]`, both `localOnly` admin ops
 
 ### 3.2 GUI app (`okb serve`)
-- [ ] GUI build setup (minimal bundler) + static asset embedding into the binary
-- [ ] Graph view — live Cytoscape via API; click-through to editor
-- [ ] Editor — md + frontmatter; concept-id link autocomplete; live backlinks; citation helper; suggested-link inbox; save via conformance writer
-- [ ] Ask view — chat; streamed cited answers; "open in graph"
-- [ ] Review view — card stack for today's queue; done / snooze / open /
-      suggest-links (F-B.6)
-- [ ] Inbox view — clipped items; open / mark-read / suggest-links (F-A.8)
-- [ ] Settings — engine, provider/model, retrieval profile, sync, enrichment guardrails
-- [ ] `okb serve` starts API + GUI
+- [x] No bundler at all: vanilla single-page app (`src/gui/` — index.html,
+      app.js, style.css), served by api.ts and embedded into the compiled
+      binary via Bun text imports (verified: binary serves all assets)
+- [x] Graph view — live Cytoscape over the new `graph_data` read op (also
+      `okb graph-data --json` for agents); search filter, type-colored nodes
+      (viz palettes), detail panel with rendered body + rewired `#concept:`
+      links, click-through to editor
+- [x] Editor — scaffold fields + markdown body textarea; concept-id link
+      picker (inserts normalized links); live backlinks; citation-section
+      helper; saves via `write_concept` (suggested-link inbox → 4.4)
+- [x] Ask view — SSE streamed: context chips appear before the answer,
+      verified citations link to graph/editor
+- [x] Review view — card stack with reasons + optional garnish toggle;
+      done / snooze / open / graph (suggest-links → 4.4)
+- [x] Inbox view — open / mark-read / graph (suggest-links → 4.4)
+- [x] Settings — provider/model + retrieval profile (via `init`, which
+      gained `--retrieval-profile`), sync status/run, maintenance
+      (re-index / embed / doctor); enrichment guardrails arrive with 4.2
+- [x] `okb serve` starts API + GUI; whole app driven end-to-end in Chromium
+      (all views, zero page errors, zero external requests)
 
 ### 3.3 MCP server (`okb mcp`)
 - [ ] `mcp/server.ts` — expose read/write ops via MCP TS SDK; stdio + HTTP transports
@@ -315,6 +327,7 @@ Goal: the brain improves itself on a schedule.
 
 ### 4.4 Link suggestion + review
 - [ ] `link_suggest` → propose cross-links; GUI review inbox; accept writes a normalized link
+- [ ] Wire suggest-links buttons into the GUI Review / Inbox / Editor views (deferred from 3.2)
 - [ ] Tests: suggestions ranked; accept produces conformant link
 
 ### 4.5 Jobs / cron
@@ -402,6 +415,18 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-17 — Stage 3.2 shipped: GUI (`src/gui/` — vanilla single-page app,
+  zero build step; Bun text imports embed all assets into the binary, same
+  pattern as the viz vendor libs). Views: Graph (live Cytoscape over the new
+  `graph_data` op, viz palettes, detail panel with rewired links,
+  click-through to editor), Editor (scaffold fields + body, concept link
+  picker, citation helper, live backlinks, saves via `write_concept`), Ask
+  (SSE — context chips stream in before the answer; citations link to
+  graph/editor), Review (cards + garnish toggle, done/snooze), Inbox
+  (open/mark-read), Settings (`init` — which gained `--retrieval-profile` —
+  plus sync + index/embed/doctor). Whole app driven in Chromium: all views
+  exercised, zero page errors, zero external requests; compiled binary
+  serves the embedded assets. 299 tests green, tsc clean. Next: 3.3 MCP.
 - 2026-07-17 — Stage 3.1 shipped: local API (`src/api.ts`) — op routes
   generated from the registry (`GET /api/ops`, `POST /api/op/<name>`,
   `localOnly` ops hidden), fail-closed security (127.0.0.1 bind, Host check

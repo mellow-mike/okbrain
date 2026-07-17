@@ -18,6 +18,19 @@ import {
   type Operation,
 } from "./core/operations.ts";
 import { DEFAULT_PORT, ensureServeToken, tokenMatches } from "./core/serve-token.ts";
+import cytoscapeJs from "./core/viz/vendor/cytoscape.min.js" with { type: "text" };
+import markedJs from "./core/viz/vendor/marked.umd.js" with { type: "text" };
+import guiAppJs from "./gui/app.js" with { type: "text" };
+import guiIndexHtml from "./gui/index.html" with { type: "text" };
+import guiStyleCss from "./gui/style.css" with { type: "text" };
+
+/** GUI static assets (tokenless, like `/`): body + content type per route. */
+const GUI_ASSETS: Record<string, [string, string]> = {
+  "/gui/app.js": [guiAppJs, "application/javascript; charset=utf-8"],
+  "/gui/style.css": [guiStyleCss, "text/css; charset=utf-8"],
+  "/gui/cytoscape.js": [cytoscapeJs, "application/javascript; charset=utf-8"],
+  "/gui/marked.js": [markedJs, "application/javascript; charset=utf-8"],
+};
 
 export interface ApiOptions {
   bundle: string;
@@ -80,12 +93,6 @@ const errBody = (e: unknown): { error: string; code?: string } =>
   e instanceof OpError
     ? { error: e.message, code: e.code }
     : { error: e instanceof Error ? e.message : String(e) };
-
-const PLACEHOLDER =
-  "<!doctype html><meta charset=utf-8><title>okbrain</title>" +
-  "<body style='font-family:system-ui;margin:3rem'><h1>okbrain</h1>" +
-  "<p>The GUI arrives with Stage 3.2. The local API is live under <code>/api</code> " +
-  "(per-install token required; see <code>okb bookmarklet</code> for clipping).</p>";
 
 const clipPage = (message: string, ok: boolean): string =>
   "<!doctype html><meta charset=utf-8><title>okb clip</title>" +
@@ -180,7 +187,18 @@ export async function handleRequest(
   const cors = corsHeaders(req.headers.get("origin"), opts.port);
   if (req.method === "OPTIONS")
     return new Response(null, { status: cors ? 204 : 403, headers: cors });
-  if (url.pathname === "/" && req.method === "GET") return html(200, PLACEHOLDER);
+  if (req.method === "GET") {
+    // The GUI bootstrap: `/` embeds the token for the app's API calls (local
+    // processes can read the token file anyway; remote pages can't read this
+    // response). The assets are static code — tokenless like `/`.
+    if (url.pathname === "/")
+      return html(200, guiIndexHtml.replace("__OKB_TOKEN__", opts.token));
+    const asset = GUI_ASSETS[url.pathname];
+    if (asset)
+      return new Response(asset[0], { headers: { "content-type": asset[1] } });
+    // Browsers request this unprompted; a 401/404 here is just console noise.
+    if (url.pathname === "/favicon.ico") return new Response(null, { status: 204 });
+  }
 
   const presented =
     req.headers.get("x-okb-token") ??
