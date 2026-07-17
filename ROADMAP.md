@@ -9,14 +9,11 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 1–2 essentially complete** (Resurface F-B + Clip F-A shipped
-> CLI-first; GUI pieces at 3.2, bookmarklet endpoint at 3.1, cron at 4.5).
-> **2.3 core shipped**: hybrid `okb search` (RRF over vec+FTS, graph
-> expansion, opt-in rerank, lean/balanced/max profiles) and `okb ask`
-> (verified citations, budget-packed context, `max` multi-query). Remaining
-> in 2.3: **F-B.8 review garnish + clip autoTag**. Then: **Stage 3.1 local
-> API** (also carries the 2.2 packaging note on shipping the vec0 extension
-> with the compiled binary → Stage 5).
+> **Stages 0–2 complete** (2.3 closed with F-B.8 garnish + clip autoTag; the
+> 2.2 packaging note on shipping the vec0 extension with the compiled binary
+> moves with Stage 5). Now: **Stage 3** — 3.1 local API (incl. the clip
+> token endpoint + `okb bookmarklet`), 3.2 GUI (`okb serve`), 3.3 MCP
+> server (`okb mcp`).
 
 ---
 
@@ -247,8 +244,12 @@ Goal: ask questions of your brain, offline or via API.
 - [x] `okb search` upgraded to hybrid (sources tagged per hit); `okb ask` —
       RAG synthesis, citations post-verified against the packed context,
       empty pool short-circuits before the model, `max` multi-query expansion
-- [ ] Review garnish (F-B.8): optional one-liner per queue item connecting it
-      to recent captures; clip autoTag (F-A) — both off in `lean`
+- [x] Review garnish (F-B.8): `okb review --garnish` — one chat call annotates
+      queue items with a one-liner tying them to notes changed ≤7d; clip
+      autoTag (F-A): `okb clip --auto-tag` / config `clip.autoTag` suggests
+      kebab-case topic tags against the bundle's tag vocabulary. Both opt-in
+      (no silent spend), off in `lean` (`profile.extras`), and fail-soft —
+      any AI failure leaves the deterministic result untouched
 - [x] Tests: RRF fusion; arm sources/degradation; citation integrity; profile
       budget enforced; CLI e2e vs stub embed+chat server (no network in CI)
 
@@ -387,6 +388,17 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-17 — F-B.8 shipped, **Stage 2 complete**: review garnish
+  (`core/review/garnish.ts` — `okb review --garnish` makes one chat call
+  annotating queue items with a ≤25-word line connecting them to notes
+  changed in the last 7 days; unknown ids and "no connection" lines dropped)
+  and clip autoTag (`core/ingest/autotag.ts` — `okb clip --auto-tag` /
+  config `clip.autoTag` suggests ≤5 kebab-case topic tags, existing bundle
+  tags offered as vocabulary via new `Engine.listTags()`; reserved `inbox`
+  filtered). Both opt-in, gated by the new `extras` profile switch (off in
+  `lean`), and fail-soft — chat failures warn and leave the deterministic
+  queue/clip untouched. 278 tests green, tsc clean. Next: Stage 3.1 local
+  API.
 - 2026-07-17 — Stage 2.3 core shipped: hybrid retrieval
   (`core/retrieval/hybrid.ts` — RRF k=60 over FTS + sqlite-vec arms, queries
   embedded under the store's own cache key, vector-arm failures degrade to

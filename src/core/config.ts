@@ -76,6 +76,8 @@ export interface OkbConfig {
     defaultTags?: string[];
     /** Extra query-param names stripped during URL normalization. */
     stripParams?: string[];
+    /** Suggest topic tags via the chat model on every clip (AI extra). */
+    autoTag?: boolean;
   };
   retrieval?: {
     /** Default profile: lean | balanced | max (core/retrieval/profiles.ts). */

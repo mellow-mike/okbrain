@@ -37,6 +37,8 @@ export interface ReviewItem {
   title: string;
   score: number;
   reasons: string[];
+  /** Optional AI one-liner tying the item to recent activity (F-B.8). */
+  garnish?: string;
 }
 
 const DAY = 86_400_000;

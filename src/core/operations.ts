@@ -12,8 +12,9 @@ import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-buil
 import type { Engine, Neighbor, VectorStore } from "./engine/interface.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
 import { log } from "./log.ts";
+import { suggestTags } from "./ingest/autotag.ts";
 import { captureNote } from "./ingest/capture.ts";
-import { clipUrl, type ClipResult } from "./ingest/clip.ts";
+import { clipUrl, type ClipOptions, type ClipResult } from "./ingest/clip.ts";
 import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
 import { listConcepts } from "./okf/bundle.ts";
@@ -26,6 +27,7 @@ import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./r
 import { hybridRetrieve, type HybridArms, type HybridHit } from "./retrieval/hybrid.ts";
 import { ProfileError, resolveProfile, type RetrievalProfile } from "./retrieval/profiles.ts";
 import { rerankConfigured, rerankHits } from "./retrieval/rerank.ts";
+import { garnishQueue, pickRecent, type GarnishNote } from "./review/garnish.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
 import { exportViz, type VizExport } from "./viz/export.ts";
@@ -256,6 +258,29 @@ async function maybeRerank(
 const warnVectorSkip = (ctx: OpContext, reason: string | null): void => {
   if (reason !== null && ctx.hasVectors()) log.warn("vector arm skipped", { reason });
 };
+
+/**
+ * Clip's autoTag hook (F-B.8): undefined unless asked for and allowed by the
+ * profile; failures warn and tag nothing — AI never blocks a clip.
+ */
+function autoTagger(ctx: OpContext, wanted: boolean): ClipOptions["suggestTags"] {
+  if (!wanted) return undefined;
+  if (!profileOf(ctx, {}).extras) {
+    log.warn("autoTag is an AI extra — off in the lean profile");
+    return undefined;
+  }
+  return async (article) => {
+    try {
+      const vocabulary = ctx.hasIndex() ? ctx.engine().listTags() : [];
+      return await suggestTags(article, vocabulary, (m) =>
+        createGateway(ctx.config().ai ?? {}).chat(m),
+      );
+    } catch (e) {
+      log.warn("autoTag skipped", { error: (e as Error).message });
+      return [];
+    }
+  };
+}
 
 /** Writer/id errors are caller mistakes → bad_params; guard blocks → refused. */
 async function writing<T>(fn: () => Promise<T>): Promise<T> {
@@ -696,16 +721,43 @@ export const operations: readonly Operation[] = [
     scope: "read",
     params: [
       { name: "limit", type: "int", description: "queue size (default 5, config review.queueSize)" },
+      { name: "garnish", type: "boolean", description: "add an AI one-liner tying each item to recent notes (off in lean)" },
+      { name: "profile", type: "string", description: "retrieval profile gating the garnish: lean|balanced|max" },
     ],
-    handler: async (ctx, p) => queueFor(ctx, p.limit as number | undefined),
+    handler: async (ctx, p) => {
+      const q = queueFor(ctx, p.limit as number | undefined);
+      if (p.garnish !== true || q.length === 0) return q;
+      if (!profileOf(ctx, p).extras) {
+        log.warn("garnish is an AI extra — off in the lean profile");
+        return q;
+      }
+      try {
+        const eng = ctx.engine();
+        const describe = (n: { id: string; title: string }): GarnishNote => ({
+          ...n,
+          description: eng.getNode(n.id)?.description ?? "",
+        });
+        const recent = pickRecent(eng.listReviewRows(), new Set(q.map((it) => it.id)), new Date());
+        const lines = await garnishQueue(q.map(describe), recent.map(describe), (m) =>
+          createGateway(ctx.config().ai ?? {}).chat(m),
+        );
+        return q.map((it) => {
+          const garnish = lines.get(it.id);
+          return garnish === undefined ? it : { ...it, garnish };
+        });
+      } catch (e) {
+        log.warn("garnish skipped", { error: (e as Error).message });
+        return q;
+      }
+    },
     render: (r) => {
       const q = r as ReviewItem[];
       if (q.length === 0) return "(queue is empty — nothing needs review)";
       return q
-        .map(
-          (it, i) =>
-            `${i + 1}. ${it.id} — ${it.title} (${it.score.toFixed(2)}) — ${it.reasons.join("; ")}`,
-        )
+        .flatMap((it, i) => [
+          `${i + 1}. ${it.id} — ${it.title} (${it.score.toFixed(2)}) — ${it.reasons.join("; ")}`,
+          ...(it.garnish === undefined ? [] : [`   ↳ ${it.garnish}`]),
+        ])
         .join("\n");
     },
   },
@@ -764,6 +816,7 @@ export const operations: readonly Operation[] = [
       { name: "note", type: "string", description: "your comment, saved with the quote" },
       { name: "tags", type: "string", description: "comma-separated extra tags" },
       { name: "read", type: "boolean", description: "skip the inbox tag (already read)" },
+      { name: "auto-tag", type: "boolean", description: "suggest topic tags via the chat model (also config clip.autoTag; off in lean)" },
     ],
     handler: async (ctx, p) => {
       const clip = ctx.config().clip;
@@ -779,6 +832,7 @@ export const operations: readonly Operation[] = [
           },
           {
             resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined,
+            suggestTags: autoTagger(ctx, p["auto-tag"] === true || clip?.autoTag === true),
             maxBodyBytes: clip?.maxBodyBytes,
             defaultTags: clip?.defaultTags,
             stripParams: clip?.stripParams,
@@ -792,7 +846,11 @@ export const operations: readonly Operation[] = [
       const c = r as ClipResult;
       if (c.deduped)
         return `already clipped as ${c.id}${c.appended ? " — highlight appended" : ""}`;
-      return `clipped ${c.id}${c.truncated ? " (body truncated at the 100 KB cap)" : ""}`;
+      return [
+        `clipped ${c.id}`,
+        c.truncated ? " (body truncated at the 100 KB cap)" : "",
+        c.autoTags.length > 0 ? ` — tagged ${c.autoTags.join(", ")}` : "",
+      ].join("");
     },
   },
   {

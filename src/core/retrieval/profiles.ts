@@ -20,12 +20,14 @@ export interface RetrievalProfile {
   multiQuery: number;
   /** Max characters of concept context packed into a synthesis prompt. */
   budgetChars: number;
+  /** AI extras (review garnish, clip autoTag) may run when asked for. */
+  extras: boolean;
 }
 
 export const PROFILES: Record<string, RetrievalProfile> = {
-  lean: { name: "lean", vecK: 8, ftsK: 8, expandTop: 0, rerank: false, multiQuery: 0, budgetChars: 6_000 },
-  balanced: { name: "balanced", vecK: 16, ftsK: 16, expandTop: 4, rerank: true, multiQuery: 0, budgetChars: 12_000 },
-  max: { name: "max", vecK: 32, ftsK: 32, expandTop: 8, rerank: true, multiQuery: 2, budgetChars: 24_000 },
+  lean: { name: "lean", vecK: 8, ftsK: 8, expandTop: 0, rerank: false, multiQuery: 0, budgetChars: 6_000, extras: false },
+  balanced: { name: "balanced", vecK: 16, ftsK: 16, expandTop: 4, rerank: true, multiQuery: 0, budgetChars: 12_000, extras: true },
+  max: { name: "max", vecK: 32, ftsK: 32, expandTop: 8, rerank: true, multiQuery: 2, budgetChars: 24_000, extras: true },
 };
 
 export class ProfileError extends Error {}

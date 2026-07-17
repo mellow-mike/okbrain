@@ -289,7 +289,15 @@ cooldown, and queue size are code defaults until the 2.1 config file wires
 `okb review snooze <id|n> [--days 7]` — `n` is a 1-based queue position;
 a pure-integer argument within queue range is read as a position, otherwise
 as an id. GUI card stack lands with 3.2, cron recompute with 4.5, the
-daily-note section with 4.6, optional AI garnish with 2.3 (off in `lean`).
+daily-note section with 4.6.
+
+**Garnish (opt-in AI extra):** `okb review --garnish` makes one chat call
+annotating queue items with a ≤25-word line connecting each to notes changed
+in the last 7 days (newest 10, queue members excluded) — when a genuine
+connection exists. The model only annotates: unknown ids and "no connection"
+lines are dropped. Gated by the retrieval profile's `extras` switch (off in
+`lean`); any failure (no provider, chat error) warns and returns the plain
+deterministic queue.
 
 Non-goals (v1): no spaced repetition (SM-2), no flashcards, no archive action
 (moving files rewrites inbound links — future Gardener territory).
@@ -326,8 +334,13 @@ with or without an index; offline it fails fast (no queue in v1).
    `resource:` canonical URL, description from page metadata, tags = user
    tags + `inbox` (`--read` skips it), body = extracted markdown capped at
    100KB (truncation noted in the body), `# Citations` with the source link.
-5. Later stages hook in without changing clip: embedding (2.2),
-   link-suggest (4.4), autoTag (2.3, off in `lean`).
+5. Hooks that ride along without changing clip: embedding (2.2, on write),
+   **autoTag** (F-B.8, `--auto-tag` flag or `clip.autoTag` config): one chat
+   call suggests ≤5 kebab-case topic tags for a *new* clip, offered the
+   bundle's existing tag vocabulary (`Engine.listTags()`) so the tag space
+   doesn't fragment; the reserved `inbox` tag is filtered. Off in `lean`
+   (`extras`); failures warn and tag nothing — AI never blocks a clip.
+   Link-suggest lands with 4.4.
 
 ### Reading inbox
 Read-state is user knowledge → it lives in the bundle as the `inbox` **tag**
@@ -343,8 +356,8 @@ a per-install secret token — generated at first `okb serve`, embedded by
 CORS stays locked to localhost; the token is required regardless.
 
 ### Config (`clip.*`)
-Code defaults until the 2.1 config file: `maxBodyBytes` 100KB, `stripParams`
-(utm_* etc.), `defaultTags` [], `autoTag` off in `lean`.
+`maxBodyBytes` 100KB, `stripParams` (utm_* etc.), `defaultTags` [],
+`autoTag` false (true = suggest tags on every clip; still off in `lean`).
 
 ---
 
@@ -386,7 +399,9 @@ config dir to a temp directory and strips provider keys from the env.
 `lean` (vec/fts depth 8, no graph expansion, no rerank, 6 KB ask context),
 `balanced` (default; 16/16, 1-hop expansion of the top 4, rerank when
 configured, 12 KB), `max` (32/32, top-8 expansion, rerank, 2 chat-generated
-extra query phrasings in `okb ask`, 24 KB). Selection: `--profile` → config
+extra query phrasings in `okb ask`, 24 KB). A profile also carries `extras`
+(false in `lean`): whether opt-in AI garnish features (review garnish, clip
+autoTag) may run when asked for. Selection: `--profile` → config
 `retrieval.profile` → `balanced`. `lean` keeps a local model comfortable.
 
 ### Embeddings & vector index
@@ -605,6 +620,19 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-17 — **AI extras are opt-in per call, profile-gated, fail-soft
+  (F-B.8).** Review garnish and clip autoTag never run implicitly: garnish
+  needs `--garnish` on each invocation, autoTag needs the `--auto-tag` flag
+  or an explicit `clip.autoTag: true` in config — the same no-silent-spend
+  rule as rerank. Both consult the retrieval profile's new `extras` switch
+  (false in `lean`, whose whole point is keeping a local model comfortable),
+  and both are one chat call that can only *decorate* the deterministic
+  result: garnish lines are keyed to known queue ids (invented ids dropped),
+  suggested tags are normalized to kebab-case with the reserved `inbox` tag
+  filtered, and any AI failure warns and yields the un-garnished queue /
+  untagged clip. autoTag runs only for newly created clips (a dedupe append
+  never re-tags) and feeds the model the bundle's existing tag vocabulary
+  (`Engine.listTags()`) so tagging converges instead of fragmenting.
 - 2026-07-17 — **Hybrid retrieval ships fail-soft and spend-safe (2.3).**
   Query vectors must live in the documents' space, so the vector arm embeds
   queries under the store's recorded (provider, model) cache key — not the
