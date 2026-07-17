@@ -469,10 +469,19 @@ embed it).
   `read_existing_doc`, `write_concept_doc`, `fetch_url`, `link_suggest`,
   `embed_doc`.
 
-### MCP server
-Exposes read/write ops (search, read, write, list, graph-neighbors, enrich) so
-external agents (Claude, etc.) use the brain as a tool. Untrusted by default;
-write/admin gated; stdio + HTTP transports.
+### MCP server (`okb mcp`, `src/mcp/server.ts`)
+External agents (Claude, etc.) use the brain as a tool. Tools and their JSON
+schemas are generated from the ops registry — the same param specs as the
+CLI and local API, so surfaces can't drift. Trust is fail-closed in three
+layers: connections are **untrusted by default** (read ops only — write
+tools are hidden from `tools/list`, refused by name if called anyway, and
+`runOp` re-gates scope underneath); `okb mcp --trusted` deliberately exposes
+write ops for clients the user fully trusts; admin and `localOnly` ops never
+appear on this surface at all. Transports: stdio (default — stdout carries
+only protocol JSON, logs go to stderr) and Streamable HTTP via `--http`
+(stateless server-per-request, binds 127.0.0.1, Host-checked like the local
+API). Filesystem confinement is the ops' own: concept ids reject traversal
+segments before any path is built.
 
 ---
 
@@ -667,6 +676,23 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-17 — **MCP (3.3): read-only by default, write is an explicit local
+  opt-in, admin never.** The MCP surface is the trust boundary made
+  concrete: a default connection gets read tools only, and the gate is
+  triple-layered (hidden from `tools/list` + refused by name on call +
+  `runOp`'s own fail-closed scope check), so no single bug re-opens it.
+  Write access is `--trusted` — a flag the user passes when wiring their own
+  agent, never negotiated by the client. Admin ops (index/rebuild/embed/
+  init) are excluded outright: an agent that can wipe the derived index or
+  rewrite provider config is a footgun with no agent-shaped use case; and
+  localOnly ops (serve/bookmarklet/mcp) can't start servers from a server.
+  Tool schemas are generated from the registry's param specs, keeping the
+  contract single-sourced. HTTP mode is stateless (fresh server+transport
+  per request — no session table to manage or leak) on 127.0.0.1 with the
+  same Host check as the local API; no token, because the default surface
+  is read-only and write requires the local `--trusted` decision. The MCP
+  TS SDK is Stage 3's one new dependency (pure JS, compiles into the
+  binary — verified end-to-end through the compiled binary).
 - 2026-07-17 — **GUI (3.2): vanilla JS, zero build step; editor is a form,
   not an IDE.** A framework + bundler would add the project's heaviest dev
   dependency for six views of forms and lists — instead the GUI is three

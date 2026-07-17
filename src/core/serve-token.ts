@@ -9,6 +9,12 @@ import { join } from "node:path";
 import { configDir, type Platform } from "./config.ts";
 
 export const DEFAULT_PORT = 6522; // "okb" on a phone keypad
+export const DEFAULT_MCP_PORT = 6523;
+
+/** Only a local server's own host names defeat DNS rebinding. */
+export function hostAllowed(host: string | null, port: number): boolean {
+  return ["127.0.0.1", "localhost", "[::1]"].some((h) => host === `${h}:${port}`);
+}
 
 export function serveTokenPath(p?: Platform): string {
   return join(configDir(p), "serve-token");

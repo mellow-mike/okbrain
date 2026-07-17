@@ -17,7 +17,7 @@ import {
   runOp,
   type Operation,
 } from "./core/operations.ts";
-import { DEFAULT_PORT, ensureServeToken, tokenMatches } from "./core/serve-token.ts";
+import { DEFAULT_PORT, ensureServeToken, hostAllowed, tokenMatches } from "./core/serve-token.ts";
 import cytoscapeJs from "./core/viz/vendor/cytoscape.min.js" with { type: "text" };
 import markedJs from "./core/viz/vendor/marked.umd.js" with { type: "text" };
 import guiAppJs from "./gui/app.js" with { type: "text" };
@@ -47,10 +47,7 @@ export interface ApiServer {
   stop(): void;
 }
 
-/** Only the server's own host names defeat DNS rebinding. */
-export function hostAllowed(host: string | null, port: number): boolean {
-  return ["127.0.0.1", "localhost", "[::1]"].some((h) => host === `${h}:${port}`);
-}
+export { hostAllowed };
 
 /** CORS reflection only for the server's own localhost origins. */
 export function corsHeaders(

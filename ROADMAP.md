@@ -9,12 +9,13 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 0–2 complete; 3.1 + 3.2 shipped** (local API with token-fail-closed
-> security; vanilla-JS GUI — graph/editor/ask/review/inbox/settings —
-> verified end-to-end in Chromium and embedded in the compiled binary).
-> Now: **3.3 MCP server** (`okb mcp` — untrusted by default, write/admin
-> gated). The 2.2 packaging note (ship the vec0 extension with the compiled
-> binary) stays parked at Stage 5.
+> **Stages 0–3 complete.** The brain now has a CLI, a GUI (`okb serve`), and
+> an agent surface (`okb mcp`) — all generated over one ops contract. Next:
+> **Stage 4** — 4.1 ingest sources (rss), 4.2 web pass (LLM-as-crawler over
+> the existing fetch guard), 4.3 typed edges, 4.4 link suggestion (+ the GUI
+> buttons deferred from 3.2), 4.5 jobs/cron, 4.6 skills. The 2.2 packaging
+> note (ship the vec0 extension with the compiled binary) stays parked at
+> Stage 5.
 
 ---
 
@@ -300,9 +301,18 @@ Goal: a real GUI, and "my agent can use my brain."
       (all views, zero page errors, zero external requests)
 
 ### 3.3 MCP server (`okb mcp`)
-- [ ] `mcp/server.ts` — expose read/write ops via MCP TS SDK; stdio + HTTP transports
-- [ ] Trust = untrusted; gate `write`/`admin`; tighten filesystem confinement
-- [ ] Tests: untrusted write is gated; read ops work; scope enforced before handler
+- [x] `src/mcp/server.ts` — tools generated from the ops registry via the MCP
+      TS SDK (schemas from the same param specs as CLI/API); stdio transport
+      (default) + Streamable HTTP (`--http`/`--port`, stateless
+      server-per-request, 127.0.0.1 bind + Host check); verified end-to-end
+      through the compiled binary
+- [x] Trust fail-closed: untrusted by default (read ops only — hidden from
+      the list AND refused by name AND re-gated in `runOp`); `--trusted`
+      exposes write ops; admin + localOnly ops never appear on this surface;
+      concept-id traversal refused before any path is built
+- [x] Tests: gated write (hidden + refused), read ops, generated schemas,
+      traversal confinement, trusted write doctor-clean, HTTP transport —
+      all through the real SDK client
 
 ---
 
@@ -415,6 +425,17 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-17 — Stage 3.3 shipped, **Stage 3 complete**: MCP server
+  (`src/mcp/server.ts` via `@modelcontextprotocol/sdk` — the stage's one new
+  dep). Tools + JSON schemas generated from the ops registry; untrusted by
+  default (read ops only: hidden from tools/list, refused by name, re-gated
+  in `runOp`), `okb mcp --trusted` exposes write ops, admin/localOnly never
+  appear; stdio transport default, `--http` Streamable HTTP (stateless
+  server-per-request, 127.0.0.1 + Host check); id traversal refused before
+  any path is built. 8 new tests through the real SDK client (in-memory +
+  HTTP transports); stdio + tools/call verified through the compiled
+  binary. 307 tests green, tsc clean. Next: Stage 4.1/4.2 (ingest + web
+  pass).
 - 2026-07-17 — Stage 3.2 shipped: GUI (`src/gui/` — vanilla single-page app,
   zero build step; Bun text imports embed all assets into the binary, same
   pattern as the viz vendor libs). Views: Graph (live Cytoscape over the new

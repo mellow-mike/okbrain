@@ -7,6 +7,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createApiServer } from "../api.ts";
+import { runMcpHttp, runMcpStdio } from "../mcp/server.ts";
 import { createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
 import { loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
@@ -30,7 +31,7 @@ import { PROFILES, ProfileError, resolveProfile, type RetrievalProfile } from ".
 import { rerankConfigured, rerankHits } from "./retrieval/rerank.ts";
 import { garnishQueue, pickRecent, type GarnishNote } from "./review/garnish.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
-import { bookmarkletJs, DEFAULT_PORT, ensureServeToken } from "./serve-token.ts";
+import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken } from "./serve-token.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
 import { buildVizGraph, exportViz, type VizExport, type VizGraph } from "./viz/export.ts";
 
@@ -1035,6 +1036,32 @@ export const operations: readonly Operation[] = [
       log.info(`serving ${ctx.bundle} at ${url} — Ctrl-C to stop`);
       log.info("clip from the browser: `okb bookmarklet`");
       return new Promise(() => {}); // lives until interrupted
+    },
+    render: () => "",
+  },
+  {
+    name: "mcp",
+    cliName: "mcp",
+    summary: "Serve the brain over MCP (stdio; --http for Streamable HTTP)",
+    scope: "admin",
+    localOnly: true,
+    params: [
+      { name: "http", type: "boolean", description: "serve Streamable HTTP on 127.0.0.1 instead of stdio" },
+      { name: "port", type: "int", description: `HTTP port (default ${DEFAULT_MCP_PORT}; implies --http)` },
+      { name: "trusted", type: "boolean", description: "expose write ops (only for MCP clients you fully trust)" },
+    ],
+    handler: async (ctx, p) => {
+      const trusted = p.trusted === true;
+      const mode = trusted ? "TRUSTED — write ops exposed" : "untrusted, read-only";
+      if (p.http === true || p.port !== undefined) {
+        const port = (p.port as number | undefined) ?? DEFAULT_MCP_PORT;
+        runMcpHttp({ bundle: ctx.bundle, trusted, port });
+        log.info(`mcp: http://127.0.0.1:${port}/ (${mode})`);
+      } else {
+        await runMcpStdio({ bundle: ctx.bundle, trusted });
+        log.info(`mcp: stdio (${mode})`);
+      }
+      return new Promise(() => {}); // lives until the client disconnects us
     },
     render: () => "",
   },
