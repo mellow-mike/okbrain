@@ -9,13 +9,14 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stage 1 complete**; **Resurface (F-B) + Clip (F-A) shipped** CLI-first
-> (GUI pieces at 3.2, bookmarklet endpoint at 3.1, cron at 4.5). **2.1 +
-> 2.2 shipped**: gateway + `okb init`; chunker, `sqlite-vec` vector store
-> (own `.okb/vectors.db`, cosine, macOS custom-SQLite handled), `okb embed`
-> (incremental/paceable, provider+model+dim cache key), embed-on-write hook.
-> Next: **2.3 hybrid retrieval + `okb ask`** (RRF fusion over vec+FTS, graph
-> expansion, rerank, profiles).
+> **Stages 1–2 essentially complete** (Resurface F-B + Clip F-A shipped
+> CLI-first; GUI pieces at 3.2, bookmarklet endpoint at 3.1, cron at 4.5).
+> **2.3 core shipped**: hybrid `okb search` (RRF over vec+FTS, graph
+> expansion, opt-in rerank, lean/balanced/max profiles) and `okb ask`
+> (verified citations, budget-packed context, `max` multi-query). Remaining
+> in 2.3: **F-B.8 review garnish + clip autoTag**. Then: **Stage 3.1 local
+> API** (also carries the 2.2 packaging note on shipping the vec0 extension
+> with the compiled binary → Stage 5).
 
 ---
 
@@ -233,14 +234,23 @@ Goal: ask questions of your brain, offline or via API.
       alongside) before packaging (Stage 5)
 
 ### 2.3 Retrieval pipeline
-- [ ] `core/retrieval/hybrid.ts` — vector + FTS recall fused via RRF
-- [ ] Graph expansion: pull neighbors/backlinks of top hits
-- [ ] `core/retrieval/rerank.ts` — optional rerank (local/API)
-- [ ] `core/retrieval/profiles.ts` — `lean` / `balanced` / `max` (budget + arms)
-- [ ] `okb search` upgraded to hybrid; `okb ask` (RAG synthesis with citations, no fabrication)
+- [x] `core/retrieval/hybrid.ts` — vector + FTS recall fused via RRF (k=60);
+      queries embedded under the store's own cache key; vector-arm failures
+      degrade to keyword-only with a warning; stale vector rows dropped
+- [x] Graph expansion: 1-hop neighbors/backlinks of top fused hits join at
+      ×0.25 of the parent score, tagged `graph` (off in `lean`)
+- [x] `core/retrieval/rerank.ts` — optional rerank; runs only with an
+      *explicitly* configured provider (never key detection — no silent spend)
+- [x] `core/retrieval/profiles.ts` — `lean` / `balanced` / `max` (arm depths,
+      rerank/multi-query switches, ask budget); `--profile` flag +
+      `retrieval.profile` config key
+- [x] `okb search` upgraded to hybrid (sources tagged per hit); `okb ask` —
+      RAG synthesis, citations post-verified against the packed context,
+      empty pool short-circuits before the model, `max` multi-query expansion
 - [ ] Review garnish (F-B.8): optional one-liner per queue item connecting it
       to recent captures; clip autoTag (F-A) — both off in `lean`
-- [ ] Tests: RRF fusion; citation integrity; profile budget enforced
+- [x] Tests: RRF fusion; arm sources/degradation; citation integrity; profile
+      budget enforced; CLI e2e vs stub embed+chat server (no network in CI)
 
 ---
 
@@ -339,6 +349,7 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B3 | 2026-07-11 | high | engine/CLI | engine-backed reads (`okb search`/`graph`/…) on a never-indexed bundle silently created an empty `.okb/index.db`; `hasIndex()` then trusted it, so later writes refreshed a near-empty index — silent search truncation | lazy `ctx.engine()` always opened with create | fixed | `OpContext.engine(createIfMissing)` — only `index`/`rebuild` create; other ops fail with "run `okb index` first"; regression test in `tests/cli.test.ts` |
 | B4 | 2026-07-11 | low | tests | sync tests failed on ubuntu/windows CI only: the clone-side `git commit` saw no identity ("empty ident name" / "unable to auto-detect email") though `beforeAll` set `GIT_AUTHOR_*` in `process.env`; local runs masked it via the developer's global gitconfig, macOS via runner ident auto-detect | Bun's `execFileSync` without an `env` option passes the *startup* environment, not mutated `process.env` (production `runGit` already spreads it explicitly) | fixed | test helper passes `env: { ...process.env }`; the clone sets local `user.name`/`user.email` so its commit is env-independent |
 | B5 | 2026-07-13 | med | tests | 3 `okb review` CLI tests fail from 2026-07-12 onward (green when written on 07-11): "fresh" notes a/b/c enter the queue. The fixture stamped timestamps relative to a **pinned** `NOW = 2026-07-11`, but the real CLI scores with `new Date()` — one real day later the notes gain staleness > 0 and rank | date-relative fixture pinned to the authoring date; only the pure-scorer tests may pin `now` (they inject it) | fixed | CLI fixture timestamps now derive from `Date.now()` (captured once as `TS.*` so asserts match); pure-scorer tests keep the pinned `NOW` |
+| B6 | 2026-07-17 | low | tests | 2 `engine.vectors` tests failed on windows CI only (PR #13): both `rm` their temp dir while the store's `vectors.db` is still open (the shared `afterEach` closes too late). POSIX unlinks open files; Windows refuses (EBUSY/EPERM). Green on 07-13 — CI pins `bun-version: latest`, so a Bun update likely changed the Windows file-share flags and exposed it | test deleted a directory containing an open SQLite DB | fixed | `store.close()` before the in-test `rm` (double close is a no-op); the two tests themselves are the regression proof (fail on Windows before, pass after) |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -376,6 +387,19 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-17 — Stage 2.3 core shipped: hybrid retrieval
+  (`core/retrieval/hybrid.ts` — RRF k=60 over FTS + sqlite-vec arms, queries
+  embedded under the store's own cache key, vector-arm failures degrade to
+  keyword-only with a warning, stale vector rows dropped; 1-hop graph
+  expansion at ×0.25 parent score), profiles (`profiles.ts` —
+  lean/balanced/max arm depths + ask budget, `--profile` flag,
+  `retrieval.profile` config), opt-in rerank (`rerank.ts` — explicit
+  provider only, a stray VOYAGE_API_KEY never spends), and `okb ask`
+  (`ask.ts` — RAG with citations post-verified against the packed context,
+  empty pool short-circuits before the model, `max` multi-query expansion
+  via chat). `okb search` renders per-hit recall sources. 265 tests green
+  (incl. CLI e2e vs a stub embed+chat server), tsc clean. Next: F-B.8
+  review garnish + clip autoTag (last 2.3 line), then 3.1 local API.
 - 2026-07-13 — Stage 2.2 shipped: chunker (`core/retrieval/chunk.ts`),
   sqlite-vec vector store in its own `.okb/vectors.db` (vec0 + cosine;
   rebuild-safe; `VectorStore` interface; macOS custom-SQLite shim +

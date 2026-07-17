@@ -31,6 +31,7 @@ test("fresh store: no key, empty search, zero count", async () => {
   expect(store.search([1, 0, 0, 0])).toEqual([]);
   expect(store.count()).toBe(0);
   expect(store.embeddedHashes().size).toBe(0);
+  store.close(); // Windows locks open DB files; close before deleting (B6)
   await rm(d, { recursive: true, force: true });
 });
 
@@ -126,5 +127,6 @@ test("a foreign schema version is discarded, not half-read", async () => {
   store = openVectorStore(p);
   expect(store.meta()).toBeNull();
   expect(store.count()).toBe(0);
+  store.close(); // Windows locks open DB files; close before deleting (B6)
   await rm(d, { recursive: true, force: true });
 });

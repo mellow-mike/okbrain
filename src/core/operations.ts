@@ -6,10 +6,10 @@
 
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { RECIPES, resolveCall } from "./ai/gateway.ts";
+import { createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
 import { loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
-import type { Engine, Neighbor, SearchHit, VectorStore } from "./engine/interface.ts";
+import type { Engine, Neighbor, VectorStore } from "./engine/interface.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
 import { log } from "./log.ts";
 import { captureNote } from "./ingest/capture.ts";
@@ -21,7 +21,11 @@ import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
 import { fmTags, OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
 import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
+import { askBrain, type AskResult } from "./retrieval/ask.ts";
 import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./retrieval/embed.ts";
+import { hybridRetrieve, type HybridArms, type HybridHit } from "./retrieval/hybrid.ts";
+import { ProfileError, resolveProfile, type RetrievalProfile } from "./retrieval/profiles.ts";
+import { rerankConfigured, rerankHits } from "./retrieval/rerank.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
 import { exportViz, type VizExport } from "./viz/export.ts";
@@ -196,6 +200,63 @@ function resolveReviewTarget(ctx: OpContext, raw: string): string {
   return raw;
 }
 
+const profileOf = (ctx: OpContext, p: Record<string, unknown>): RetrievalProfile => {
+  try {
+    return resolveProfile(p.profile as string | undefined, ctx.config());
+  } catch (e) {
+    if (e instanceof ProfileError) throw new OpError(e.message, "bad_params");
+    throw e;
+  }
+};
+
+/**
+ * Recall arms for hybrid retrieval. The vector arm joins only when a store
+ * with a pinned cache key exists AND its recorded embedder still resolves —
+ * queries must be embedded in the documents' own space, so the store's
+ * (provider, model) wins over whatever is currently configured.
+ */
+function hybridArms(ctx: OpContext): HybridArms {
+  const arms: HybridArms = { engine: ctx.engine() };
+  if (!ctx.hasVectors()) return arms;
+  const store = ctx.vectors();
+  const meta = store.meta();
+  if (!meta) return arms;
+  try {
+    const emb = gatewayEmbedder(ctx.config().ai ?? {}, { provider: meta.provider, model: meta.model });
+    arms.vectors = store;
+    arms.embed = (texts) => emb.embed(texts);
+  } catch (e) {
+    log.warn("vector arm unavailable", { error: (e as Error).message });
+  }
+  return arms;
+}
+
+/**
+ * Rerank arm: only when the profile asks AND a provider is explicitly
+ * configured (never via key detection — searches must not silently spend);
+ * failures degrade to the fused order.
+ */
+async function maybeRerank(
+  ctx: OpContext,
+  query: string,
+  hits: HybridHit[],
+  profile: RetrievalProfile,
+): Promise<HybridHit[]> {
+  const ai = ctx.config().ai ?? {};
+  if (!profile.rerank || hits.length < 2 || !rerankConfigured(ai)) return hits;
+  try {
+    return await rerankHits(query, hits, createGateway(ai));
+  } catch (e) {
+    log.warn("rerank skipped", { error: (e as Error).message });
+    return hits;
+  }
+}
+
+/** A vector store that exists but couldn't serve recall deserves a warning. */
+const warnVectorSkip = (ctx: OpContext, reason: string | null): void => {
+  if (reason !== null && ctx.hasVectors()) log.warn("vector arm skipped", { reason });
+};
+
 /** Writer/id errors are caller mistakes → bad_params; guard blocks → refused. */
 async function writing<T>(fn: () => Promise<T>): Promise<T> {
   try {
@@ -212,18 +273,64 @@ export const operations: readonly Operation[] = [
   {
     name: "search",
     cliName: "search",
-    summary: "Keyword search (BM25) over titles, bodies, and tags",
+    summary: "Search the brain (hybrid: keyword + vector recall, graph expansion)",
     scope: "read",
     params: [
-      { name: "query", type: "string", required: true, positional: true, description: "search terms (all must match)" },
+      { name: "query", type: "string", required: true, positional: true, description: "search terms" },
       { name: "limit", type: "int", description: "maximum hits (default 20)" },
+      { name: "profile", type: "string", description: "retrieval profile: lean|balanced|max (default balanced)" },
     ],
-    handler: async (ctx, p) =>
-      ctx.engine().search(p.query as string, (p.limit as number | undefined) ?? 20),
+    handler: async (ctx, p) => {
+      const profile = profileOf(ctx, p);
+      const query = p.query as string;
+      const { hits, vectorSkipped } = await hybridRetrieve(
+        [query],
+        hybridArms(ctx),
+        profile,
+        (p.limit as number | undefined) ?? 20,
+      );
+      warnVectorSkip(ctx, vectorSkipped);
+      return maybeRerank(ctx, query, hits, profile);
+    },
     render: (r) => {
-      const hits = r as SearchHit[];
+      const hits = r as HybridHit[];
       if (hits.length === 0) return "(no hits)";
-      return hits.map((h) => `${h.score.toFixed(2)}  ${h.id} — ${h.title}`).join("\n");
+      return hits
+        .map((h) => `${h.score.toFixed(3)}  ${h.id} — ${h.title}  [${h.sources.join("+")}]`)
+        .join("\n");
+    },
+  },
+  {
+    name: "ask",
+    cliName: "ask",
+    summary: "Ask the brain a question (RAG answer with verified citations)",
+    scope: "read",
+    params: [
+      { name: "question", type: "string", required: true, positional: true, description: "the question to answer from your notes" },
+      { name: "profile", type: "string", description: "retrieval profile: lean|balanced|max (default balanced)" },
+    ],
+    handler: async (ctx, p) => {
+      const profile = profileOf(ctx, p);
+      const gw = createGateway(ctx.config().ai ?? {});
+      const r = await askBrain(
+        p.question as string,
+        {
+          bundle: ctx.bundle,
+          arms: hybridArms(ctx),
+          chat: (messages) => gw.chat(messages),
+          rerank: (q, hits) => maybeRerank(ctx, q, hits, profile),
+        },
+        profile,
+      );
+      warnVectorSkip(ctx, r.vectorSkipped);
+      return r;
+    },
+    render: (r) => {
+      const a = r as AskResult;
+      const lines = [a.answer.trim()];
+      if (a.citations.length > 0)
+        lines.push("", "sources:", ...a.citations.map((c) => `  ${c.id} — ${c.title}`));
+      return lines.join("\n");
     },
   },
   {

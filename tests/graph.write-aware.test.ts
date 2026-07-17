@@ -73,7 +73,10 @@ describe("incremental index update on write", () => {
     await okb("index");
     await write("b", "Brandnew", "See [a](/a.md).");
     const search = await okb("search", "Brandnew", "--json");
-    expect(JSON.parse(search.stdout)).toMatchObject([{ id: "b" }]);
+    const hits = JSON.parse(search.stdout) as { id: string; sources: string[] }[];
+    expect(hits[0]).toMatchObject({ id: "b", sources: ["keyword"] });
+    // hybrid graph expansion also surfaces the concept b links to
+    expect(hits.some((h) => h.id === "a" && h.sources.includes("graph"))).toBe(true);
     const graph = await okb("graph", "a");
     expect(graph.stdout).toBe("1 ← b — Brandnew\n");
   });

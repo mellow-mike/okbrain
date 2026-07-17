@@ -37,7 +37,7 @@ describe("okb CLI", () => {
   test("help <command> shows the command's options", async () => {
     const r = await okb("help", "search");
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("usage: okb search <query> [--limit <int>]");
+    expect(r.stdout).toContain("usage: okb search <query> [--limit <int>] [--profile <string>]");
     expect(r.stdout).toContain("maximum hits");
   });
 
