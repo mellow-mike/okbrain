@@ -77,6 +77,10 @@ export interface OkbConfig {
     /** Extra query-param names stripped during URL normalization. */
     stripParams?: string[];
   };
+  retrieval?: {
+    /** Default profile: lean | balanced | max (core/retrieval/profiles.ts). */
+    profile?: string;
+  };
   /** Unknown keys are preserved on rewrite (permissive, like the OKF reader). */
   [key: string]: unknown;
 }

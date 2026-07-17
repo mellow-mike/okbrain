@@ -376,15 +376,18 @@ persists the choice explicitly, records the current bundle as
 `defaultBundle` (bundle resolution: explicit → `$OKB_BUNDLE` → config → cwd;
 skip with `--no-default-bundle`), and validates `--provider`/`--embed-provider`
 against the recipe table. Unknown config keys are preserved on rewrite.
-`review.*` (queueSize, cooldownDays, weights) and `clip.*` (maxBodyBytes,
-defaultTags, stripParams) are read from here by their ops; ops receive config
-via `OpContext.config()`. Tests are hermetic: a bun-test preload pins the
+`review.*` (queueSize, cooldownDays, weights), `clip.*` (maxBodyBytes,
+defaultTags, stripParams), and `retrieval.profile` are read from here by their
+ops; ops receive config via `OpContext.config()`. Tests are hermetic: a bun-test preload pins the
 config dir to a temp directory and strips provider keys from the env.
 
 ### Retrieval profiles (cost knobs)
-`lean` (small payload, no query expansion), `balanced` (default; relational arm
-on), `max` (multi-query expansion, larger payload). A profile sets the context
-budget and which recall arms run; `lean` keeps a local model comfortable.
+`core/retrieval/profiles.ts` — a profile sets each arm's depth and the budget:
+`lean` (vec/fts depth 8, no graph expansion, no rerank, 6 KB ask context),
+`balanced` (default; 16/16, 1-hop expansion of the top 4, rerank when
+configured, 12 KB), `max` (32/32, top-8 expansion, rerank, 2 chat-generated
+extra query phrasings in `okb ask`, 24 KB). Selection: `--profile` → config
+`retrieval.profile` → `balanced`. `lean` keeps a local model comfortable.
 
 ### Embeddings & vector index
 Chunk concept bodies (~400 tokens ≈ 1600 chars, no tokenizer dep —
@@ -411,14 +414,28 @@ self-locate the extension yet — `$OKB_SQLITE_VEC` points at it (Backlog:
 embed it).
 
 ### Retrieval pipeline (brain-first)
-1. Vector recall (sqlite-vec) + keyword recall (FTS5/BM25), fused with
-   Reciprocal Rank Fusion.
-2. Graph expansion: pull 1-hop neighbors/backlinks of top hits; a relational arm
-   answers relational questions over typed edges (deterministic; no-op for
-   non-relational queries).
-3. Optional rerank (local or API) to tighten top-k.
-4. Synthesis with citations to concept ids and external sources — never
-   fabricated. Skills/agents call this (the `search`/`ask` ops) before answering.
+`core/retrieval/hybrid.ts`, behind the `search` and `ask` ops:
+1. Keyword recall (FTS5/BM25) + vector recall (sqlite-vec), fused with
+   Reciprocal Rank Fusion (k=60). Queries embed under the vector store's own
+   cache key — the documents' space — never the currently configured
+   embedder. The vector arm is optional: any failure (no store, unreachable
+   provider, dimension drift) degrades to keyword-only with a warning, so
+   `okb search` always works; vector rows whose node left the keyword index
+   are dropped as stale cache.
+2. Graph expansion: 1-hop neighbors/backlinks of the top fused hits join the
+   pool with a damped share (×0.25) of their parent's score, tagged `graph`.
+   (The relational arm over typed edges arrives with 4.3.)
+3. Optional rerank (`core/retrieval/rerank.ts`) reorders the head by
+   cross-encoder relevance — only when the profile asks AND a rerank
+   provider is explicitly configured (config/env); key detection never
+   triggers it, and failures fall back to the fused order.
+4. `okb ask` (`core/retrieval/ask.ts`): packs the pool score-first into
+   `[id] title\ntext` blocks under the profile budget (vector-arm chunk when
+   present, else the body capped at one chunk), synthesizes with a system
+   prompt confined to those concepts, and post-verifies citations against
+   the packed ids — invented ids never reach `citations` (the answer text is
+   verbatim). An empty pool short-circuits before the model. `max` first
+   asks chat for alternate query phrasings and fuses all rankings.
 
 ### Enrichment agent (generalized from OKF's two passes)
 - **Source pass (pluralized):** filesystem import, quick capture, RSS/feeds, a
@@ -588,6 +605,19 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-17 — **Hybrid retrieval ships fail-soft and spend-safe (2.3).**
+  Query vectors must live in the documents' space, so the vector arm embeds
+  queries under the store's recorded (provider, model) cache key — not the
+  currently configured embedder — and any vector-arm failure degrades to
+  keyword-only with a warning: search must never break because an optional
+  arm can't run. Rerank runs only when a provider is explicitly configured
+  (config `ai.rerankProvider` / `$OKB_RERANK_PROVIDER`), never via key
+  detection — a merely-exported `VOYAGE_API_KEY` must not make every search
+  spend credits. `okb ask` never presents an unverified source: citations
+  are post-checked against the packed context ids, and an empty retrieval
+  pool returns a stock "nothing found" without calling the model (asking
+  with nothing to cite invites fabrication). Multi-query expansion is
+  `max`-only; a chat failure there just narrows recall instead of erroring.
 - 2026-07-13 — **Vectors live in their own DB file, keyed by
   (provider, model, dim) (2.2).** Two forcing facts: a vec0 virtual table
   can't even be `DROP`ped without the extension loaded, so putting it in

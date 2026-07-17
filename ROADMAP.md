@@ -9,13 +9,14 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stage 1 complete**; **Resurface (F-B) + Clip (F-A) shipped** CLI-first
-> (GUI pieces at 3.2, bookmarklet endpoint at 3.1, cron at 4.5). **2.1 +
-> 2.2 shipped**: gateway + `okb init`; chunker, `sqlite-vec` vector store
-> (own `.okb/vectors.db`, cosine, macOS custom-SQLite handled), `okb embed`
-> (incremental/paceable, provider+model+dim cache key), embed-on-write hook.
-> Next: **2.3 hybrid retrieval + `okb ask`** (RRF fusion over vec+FTS, graph
-> expansion, rerank, profiles).
+> **Stages 1–2 essentially complete** (Resurface F-B + Clip F-A shipped
+> CLI-first; GUI pieces at 3.2, bookmarklet endpoint at 3.1, cron at 4.5).
+> **2.3 core shipped**: hybrid `okb search` (RRF over vec+FTS, graph
+> expansion, opt-in rerank, lean/balanced/max profiles) and `okb ask`
+> (verified citations, budget-packed context, `max` multi-query). Remaining
+> in 2.3: **F-B.8 review garnish + clip autoTag**. Then: **Stage 3.1 local
+> API** (also carries the 2.2 packaging note on shipping the vec0 extension
+> with the compiled binary → Stage 5).
 
 ---
 
@@ -233,14 +234,23 @@ Goal: ask questions of your brain, offline or via API.
       alongside) before packaging (Stage 5)
 
 ### 2.3 Retrieval pipeline
-- [ ] `core/retrieval/hybrid.ts` — vector + FTS recall fused via RRF
-- [ ] Graph expansion: pull neighbors/backlinks of top hits
-- [ ] `core/retrieval/rerank.ts` — optional rerank (local/API)
-- [ ] `core/retrieval/profiles.ts` — `lean` / `balanced` / `max` (budget + arms)
-- [ ] `okb search` upgraded to hybrid; `okb ask` (RAG synthesis with citations, no fabrication)
+- [x] `core/retrieval/hybrid.ts` — vector + FTS recall fused via RRF (k=60);
+      queries embedded under the store's own cache key; vector-arm failures
+      degrade to keyword-only with a warning; stale vector rows dropped
+- [x] Graph expansion: 1-hop neighbors/backlinks of top fused hits join at
+      ×0.25 of the parent score, tagged `graph` (off in `lean`)
+- [x] `core/retrieval/rerank.ts` — optional rerank; runs only with an
+      *explicitly* configured provider (never key detection — no silent spend)
+- [x] `core/retrieval/profiles.ts` — `lean` / `balanced` / `max` (arm depths,
+      rerank/multi-query switches, ask budget); `--profile` flag +
+      `retrieval.profile` config key
+- [x] `okb search` upgraded to hybrid (sources tagged per hit); `okb ask` —
+      RAG synthesis, citations post-verified against the packed context,
+      empty pool short-circuits before the model, `max` multi-query expansion
 - [ ] Review garnish (F-B.8): optional one-liner per queue item connecting it
       to recent captures; clip autoTag (F-A) — both off in `lean`
-- [ ] Tests: RRF fusion; citation integrity; profile budget enforced
+- [x] Tests: RRF fusion; arm sources/degradation; citation integrity; profile
+      budget enforced; CLI e2e vs stub embed+chat server (no network in CI)
 
 ---
 
@@ -376,6 +386,19 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-17 — Stage 2.3 core shipped: hybrid retrieval
+  (`core/retrieval/hybrid.ts` — RRF k=60 over FTS + sqlite-vec arms, queries
+  embedded under the store's own cache key, vector-arm failures degrade to
+  keyword-only with a warning, stale vector rows dropped; 1-hop graph
+  expansion at ×0.25 parent score), profiles (`profiles.ts` —
+  lean/balanced/max arm depths + ask budget, `--profile` flag,
+  `retrieval.profile` config), opt-in rerank (`rerank.ts` — explicit
+  provider only, a stray VOYAGE_API_KEY never spends), and `okb ask`
+  (`ask.ts` — RAG with citations post-verified against the packed context,
+  empty pool short-circuits before the model, `max` multi-query expansion
+  via chat). `okb search` renders per-hit recall sources. 265 tests green
+  (incl. CLI e2e vs a stub embed+chat server), tsc clean. Next: F-B.8
+  review garnish + clip autoTag (last 2.3 line), then 3.1 local API.
 - 2026-07-13 — Stage 2.2 shipped: chunker (`core/retrieval/chunk.ts`),
   sqlite-vec vector store in its own `.okb/vectors.db` (vec0 + cosine;
   rebuild-safe; `VectorStore` interface; macOS custom-SQLite shim +
