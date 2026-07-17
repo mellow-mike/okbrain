@@ -6,17 +6,15 @@
 // e.g. `doctor` on a non-conformant bundle) · 2 usage error.
 
 import { existsSync, statSync } from "node:fs";
-import { ConfigError, loadConfig, resolveBundlePath, type OkbConfig } from "./core/config.ts";
+import { ConfigError, resolveBundlePath } from "./core/config.ts";
 import { AiError } from "./core/ai/gateway.ts";
-import type { Engine, VectorStore } from "./core/engine/interface.ts";
-import { defaultDbPath, EngineError, openSqliteEngine } from "./core/engine/sqlite.ts";
-import { defaultVectorsPath, openVectorStore } from "./core/engine/vectors.ts";
+import { openLocalContext, type LocalContext } from "./core/context.ts";
+import { EngineError } from "./core/engine/sqlite.ts";
 import { SyncError } from "./core/sync.ts";
 import {
   OpError,
   operations,
   runOp,
-  type OpContext,
   type Operation,
   type ParamSpec,
 } from "./core/operations.ts";
@@ -157,7 +155,6 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
       raw[spec.name] = await io.stdin();
 
   let bundle: string;
-  let cfg: OkbConfig | undefined;
   try {
     bundle = resolveBundlePath(bundleArg);
   } catch (e) {
@@ -170,37 +167,10 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     return 1;
   }
 
-  let engine: Engine | undefined;
-  let vectors: VectorStore | undefined;
-  const ctx: OpContext = {
-    bundle,
-    trusted: true,
-    engine: (createIfMissing = false) => {
-      if (!engine) {
-        const db = defaultDbPath(bundle);
-        // Opening a fresh, empty index for a read would silently truncate
-        // search — and hasIndex() would treat it as real forever after (B3).
-        if (!createIfMissing && !existsSync(db))
-          throw new EngineError("no index for this bundle yet — run `okb index` first");
-        engine = openSqliteEngine(db);
-      }
-      return engine;
-    },
-    hasIndex: () => existsSync(defaultDbPath(bundle)),
-    vectors: (createIfMissing = false) => {
-      if (!vectors) {
-        const path = defaultVectorsPath(bundle);
-        if (!createIfMissing && !existsSync(path))
-          throw new EngineError("no vector index for this bundle yet — run `okb embed` first");
-        vectors = openVectorStore(path);
-      }
-      return vectors;
-    },
-    hasVectors: () => existsSync(defaultVectorsPath(bundle)),
-    config: () => (cfg ??= loadConfig()),
-  };
+  let local: LocalContext | undefined;
   try {
-    const result = await runOp(op, ctx, raw);
+    local = openLocalContext(bundle);
+    const result = await runOp(op, local.ctx, raw);
     io.out((json ? JSON.stringify(result, null, 2) : op.render(result)) + "\n");
     return op.exitCode?.(result) ?? 0;
   } catch (e) {
@@ -219,8 +189,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     }
     throw e;
   } finally {
-    engine?.close();
-    vectors?.close();
+    local?.close();
   }
 }
 

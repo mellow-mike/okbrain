@@ -348,12 +348,17 @@ Read-state is user knowledge → it lives in the bundle as the `inbox` **tag**
 The inbox is just the tag query: `okb inbox` lists, `okb inbox read <id>`
 clears the tag through the writer. Resurface scores `inbox` as a signal.
 
-### Bookmarklet security (design decided now, built with 3.1)
+### Bookmarklet (built with 3.1)
 Any web page can fire requests at localhost, so a naive clip endpoint is a
-CSRF hole into the brain. The endpoint (Stage 3.1, with the local API) demands
-a per-install secret token — generated at first `okb serve`, embedded by
-`okb bookmarklet`, validated server-side; tokenless requests are rejected.
-CORS stays locked to localhost; the token is required regardless.
+CSRF hole into the brain. The `/clip` endpoint demands the per-install secret
+token (`core/serve-token.ts` — minted at first use, mode 0600 beside
+config.json, embedded by `okb bookmarklet`, constant-time validated);
+tokenless requests are rejected, and the same token gates the whole `/api`
+surface. The bookmarklet itself is a top-level `window.open` GET navigation
+to `/clip?token=…&url=…` (+ the current selection as `quote`) — navigations
+bypass CORS, mixed-content, and private-network-access rules that would
+break a cross-origin `fetch` from an HTTPS page, so it works from any site
+with zero server relaxations. The confirmation page auto-closes on success.
 
 ### Config (`clip.*`)
 `maxBodyBytes` 100KB, `stripParams` (utm_* etc.), `defaultTags` [],
@@ -503,6 +508,29 @@ capability once → it appears in all three. CLI/GUI can't drift.
 | `okb mcp` | admin | Start MCP server |
 | `okb export-viz` | read | Self-contained OKF-style graph HTML |
 
+### Local API (`src/api.ts`, started by `okb serve`)
+The GUI's backend and the bookmarklet's target — a thin adapter generated
+over the registry, trusted like the CLI but defended like a network surface:
+- **Routes:** `GET /api/ops` (public op descriptors, for surface generation),
+  `POST /api/op/<name>` (JSON params → `runOp` → `{ result }`),
+  `GET /api/ask/stream` (SSE via the generic `Operation.stream` hook: events
+  `context` — packed sources before synthesis — then `answer`, then `done`
+  with the full result, or `error`; the gateway doesn't stream tokens yet, so
+  `answer` arrives whole — Backlog), `GET /clip` (bookmarklet), `GET /`
+  (GUI page; placeholder until 3.2). Ops marked `localOnly` (`serve`,
+  `bookmarklet`) never appear on network adapters.
+- **Security (fail-closed):** binds 127.0.0.1 only; the Host header must be
+  the server's own `127.0.0.1/localhost/[::1]:port` (defeats DNS rebinding);
+  every `/api` and `/clip` request must present the per-install token
+  (header `x-okb-token`, `Authorization: Bearer`, or `?token=`;
+  constant-time compare); CORS reflects only the server's own localhost
+  origins — everything else gets no CORS headers and preflights are 403.
+  HTTP errors map from `OpError` codes (bad_params 400, not_found 404,
+  untrusted/refused 403; anything else 500).
+- Each request runs in a fresh `OpContext` (shared `core/context.ts`, also
+  the CLI's) — engines open lazily per request and close after, so the
+  server never holds the index hostage from a concurrent CLI.
+
 ### GUI (local web app, `okb serve`)
 Views: **Graph** (live viewer), **Editor** (markdown + frontmatter, concept-id
 link autocomplete, live backlinks, citation helper, suggested-link inbox; saves
@@ -620,6 +648,29 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-17 — **Local API (3.1): one token gates everything; the
+  bookmarklet navigates instead of fetching.** The per-install serve token
+  is required on every `/api` and `/clip` request, not just clip: CORS only
+  protects response *reads*, so an untokened POST from a hostile page would
+  still execute a write op. Defense layers: 127.0.0.1 bind → Host-header
+  check (DNS rebinding lets a remote origin become "same-origin" with
+  localhost; matching the server's own host:port kills it) → token
+  (constant-time compare) → CORS reflection only for the server's own
+  localhost origins. `GET /` stays tokenless — it's the GUI bootstrap; local
+  processes can read the token file anyway and remote pages can't read the
+  response. The bookmarklet is a top-level GET navigation (`window.open`)
+  rather than a `fetch`, because HTTPS→http://127.0.0.1 fetches trip
+  mixed-content/PNA rules in real browsers; the token in the URL is
+  accepted for a localhost-only, per-install secret. Streaming ask is a
+  generic `Operation.stream(ctx, params, emit)` hook on the registry —
+  adapters stay generated, nothing bypasses the ops layer — emitting phased
+  events (`context`/`answer`/`done`); token-level streaming waits for
+  gateway SSE support (Backlog). `serve`/`bookmarklet` are `localOnly` ops:
+  in the registry (the CLI stays 100% generated) but invisible to network
+  adapters — a server must not be able to start servers. operations.ts ⇄
+  api.ts is a deliberate lazy ESM cycle (the `serve` op needs the server,
+  the server needs the registry); neither dereferences the other at module
+  top level.
 - 2026-07-17 — **AI extras are opt-in per call, profile-gated, fail-soft
   (F-B.8).** Review garnish and clip autoTag never run implicitly: garnish
   needs `--garnish` on each invocation, autoTag needs the `--auto-tag` flag

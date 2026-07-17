@@ -17,6 +17,8 @@ export interface AskDeps {
   chat(messages: ChatMessage[]): Promise<ChatResult>;
   /** Optional rerank of the pool (caller owns gating and failure policy). */
   rerank?(query: string, hits: HybridHit[]): Promise<HybridHit[]>;
+  /** Called with the packed context before synthesis (streaming surfaces). */
+  onContext?(context: Citation[]): void;
 }
 
 export interface Citation {
@@ -127,6 +129,7 @@ export async function askBrain(
 
   const pool = deps.rerank ? await deps.rerank(question, hits) : hits;
   const { blocks, packed } = await packContext(deps.bundle, pool, profile.budgetChars);
+  deps.onContext?.(packed.map(({ id, title }) => ({ id, title })));
   const { text, provider, model } = await deps.chat([
     { role: "system", content: SYNTH_SYSTEM },
     { role: "user", content: `Concepts:\n\n${blocks.join("\n\n")}\n\nQuestion: ${question}` },

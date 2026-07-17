@@ -9,11 +9,11 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 0–2 complete** (2.3 closed with F-B.8 garnish + clip autoTag; the
-> 2.2 packaging note on shipping the vec0 extension with the compiled binary
-> moves with Stage 5). Now: **Stage 3** — 3.1 local API (incl. the clip
-> token endpoint + `okb bookmarklet`), 3.2 GUI (`okb serve`), 3.3 MCP
-> server (`okb mcp`).
+> **Stages 0–2 complete**; **3.1 local API shipped** (token-gated op routes,
+> SSE ask, clip endpoint + bookmarklet). Now: **3.2 GUI** (`okb serve` page:
+> graph / editor / ask / review / inbox / settings), then **3.3 MCP server**
+> (`okb mcp`). The 2.2 packaging note (ship the vec0 extension with the
+> compiled binary) stays parked at Stage 5.
 
 ---
 
@@ -259,11 +259,22 @@ Goal: ask questions of your brain, offline or via API.
 Goal: a real GUI, and "my agent can use my brain."
 
 ### 3.1 Local API
-- [ ] `api.ts` — local HTTP over ops (trusted); bind localhost only; CORS locked to localhost
-- [ ] Streaming endpoint for `ask`
-- [ ] Clip endpoint + per-install secret token + `okb bookmarklet` (F-A.6):
-      token generated at first serve, embedded in the bookmarklet, validated
-      server-side; tokenless requests rejected (CSRF fail-closed, CONTEXT §Clip)
+- [x] `api.ts` — routes generated over the ops registry (`GET /api/ops`,
+      `POST /api/op/<name>`; `localOnly` ops hidden); binds 127.0.0.1 only;
+      Host header checked (DNS rebinding); CORS locked to the server's own
+      localhost origins; per-request `OpContext` via shared
+      `core/context.ts` (CLI refactored onto it)
+- [x] Streaming `ask`: `GET /api/ask/stream` (SSE) — phased events
+      `context` → `answer` → `done`/`error` via a generic `Operation.stream`
+      hook (true token streaming through the gateway → Backlog)
+- [x] Clip endpoint + per-install secret token + `okb bookmarklet` (F-A.6):
+      token minted at first use (`core/serve-token.ts`, 0600 beside
+      config.json), required on **every** `/api` and `/clip` request
+      (constant-time compare; CSRF fail-closed); bookmarklet = top-level GET
+      navigation to `/clip` (no CORS/mixed-content/PNA hurdles), selection
+      rides along as the highlight quote
+- [x] `okb serve [--port]` (API now, GUI page lands at 3.2) + `okb
+      bookmarklet [--port]`, both `localOnly` admin ops
 
 ### 3.2 GUI app (`okb serve`)
 - [ ] GUI build setup (minimal bundler) + static asset embedding into the binary
@@ -383,11 +394,25 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       through — fine for your own notes, but a shared export could carry
       scripted HTML from ingested content. Consider sanitizing (e.g. vendored
       DOMPurify) before Stage 4 ingestion lands.
+- [ ] True token streaming for `okb ask` / the SSE endpoint: the gateway
+      returns whole chat responses, so the `answer` event arrives in one
+      piece; add SSE parsing per dialect when incremental rendering matters.
 
 ---
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-17 — Stage 3.1 shipped: local API (`src/api.ts`) — op routes
+  generated from the registry (`GET /api/ops`, `POST /api/op/<name>`,
+  `localOnly` ops hidden), fail-closed security (127.0.0.1 bind, Host check
+  vs DNS rebinding, per-install token on every `/api`+`/clip` request with
+  constant-time compare, CORS only for the server's own localhost origins),
+  SSE `GET /api/ask/stream` via a new generic `Operation.stream` hook
+  (events `context` → `answer` → `done`/`error`; true token streaming →
+  Backlog), bookmarklet clip: `GET /clip` top-level navigation endpoint +
+  `okb bookmarklet` embedding the token (`core/serve-token.ts`), `okb serve
+  [--port]`. Shared `core/context.ts` now builds the trusted OpContext for
+  CLI + API. 295 tests green, tsc clean. Next: 3.2 GUI.
 - 2026-07-17 — F-B.8 shipped, **Stage 2 complete**: review garnish
   (`core/review/garnish.ts` — `okb review --garnish` makes one chat call
   annotating queue items with a ≤25-word line connecting them to notes
