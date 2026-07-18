@@ -289,7 +289,15 @@ cooldown, and queue size are code defaults until the 2.1 config file wires
 `okb review snooze <id|n> [--days 7]` — `n` is a 1-based queue position;
 a pure-integer argument within queue range is read as a position, otherwise
 as an id. GUI card stack lands with 3.2, cron recompute with 4.5, the
-daily-note section with 4.6, optional AI garnish with 2.3 (off in `lean`).
+daily-note section with 4.6.
+
+**Garnish (opt-in AI extra):** `okb review --garnish` makes one chat call
+annotating queue items with a ≤25-word line connecting each to notes changed
+in the last 7 days (newest 10, queue members excluded) — when a genuine
+connection exists. The model only annotates: unknown ids and "no connection"
+lines are dropped. Gated by the retrieval profile's `extras` switch (off in
+`lean`); any failure (no provider, chat error) warns and returns the plain
+deterministic queue.
 
 Non-goals (v1): no spaced repetition (SM-2), no flashcards, no archive action
 (moving files rewrites inbound links — future Gardener territory).
@@ -326,8 +334,13 @@ with or without an index; offline it fails fast (no queue in v1).
    `resource:` canonical URL, description from page metadata, tags = user
    tags + `inbox` (`--read` skips it), body = extracted markdown capped at
    100KB (truncation noted in the body), `# Citations` with the source link.
-5. Later stages hook in without changing clip: embedding (2.2),
-   link-suggest (4.4), autoTag (2.3, off in `lean`).
+5. Hooks that ride along without changing clip: embedding (2.2, on write),
+   **autoTag** (F-B.8, `--auto-tag` flag or `clip.autoTag` config): one chat
+   call suggests ≤5 kebab-case topic tags for a *new* clip, offered the
+   bundle's existing tag vocabulary (`Engine.listTags()`) so the tag space
+   doesn't fragment; the reserved `inbox` tag is filtered. Off in `lean`
+   (`extras`); failures warn and tag nothing — AI never blocks a clip.
+   Link-suggest lands with 4.4.
 
 ### Reading inbox
 Read-state is user knowledge → it lives in the bundle as the `inbox` **tag**
@@ -335,16 +348,21 @@ Read-state is user knowledge → it lives in the bundle as the `inbox` **tag**
 The inbox is just the tag query: `okb inbox` lists, `okb inbox read <id>`
 clears the tag through the writer. Resurface scores `inbox` as a signal.
 
-### Bookmarklet security (design decided now, built with 3.1)
+### Bookmarklet (built with 3.1)
 Any web page can fire requests at localhost, so a naive clip endpoint is a
-CSRF hole into the brain. The endpoint (Stage 3.1, with the local API) demands
-a per-install secret token — generated at first `okb serve`, embedded by
-`okb bookmarklet`, validated server-side; tokenless requests are rejected.
-CORS stays locked to localhost; the token is required regardless.
+CSRF hole into the brain. The `/clip` endpoint demands the per-install secret
+token (`core/serve-token.ts` — minted at first use, mode 0600 beside
+config.json, embedded by `okb bookmarklet`, constant-time validated);
+tokenless requests are rejected, and the same token gates the whole `/api`
+surface. The bookmarklet itself is a top-level `window.open` GET navigation
+to `/clip?token=…&url=…` (+ the current selection as `quote`) — navigations
+bypass CORS, mixed-content, and private-network-access rules that would
+break a cross-origin `fetch` from an HTTPS page, so it works from any site
+with zero server relaxations. The confirmation page auto-closes on success.
 
 ### Config (`clip.*`)
-Code defaults until the 2.1 config file: `maxBodyBytes` 100KB, `stripParams`
-(utm_* etc.), `defaultTags` [], `autoTag` off in `lean`.
+`maxBodyBytes` 100KB, `stripParams` (utm_* etc.), `defaultTags` [],
+`autoTag` false (true = suggest tags on every clip; still off in `lean`).
 
 ---
 
@@ -386,7 +404,9 @@ config dir to a temp directory and strips provider keys from the env.
 `lean` (vec/fts depth 8, no graph expansion, no rerank, 6 KB ask context),
 `balanced` (default; 16/16, 1-hop expansion of the top 4, rerank when
 configured, 12 KB), `max` (32/32, top-8 expansion, rerank, 2 chat-generated
-extra query phrasings in `okb ask`, 24 KB). Selection: `--profile` → config
+extra query phrasings in `okb ask`, 24 KB). A profile also carries `extras`
+(false in `lean`): whether opt-in AI garnish features (review garnish, clip
+autoTag) may run when asked for. Selection: `--profile` → config
 `retrieval.profile` → `balanced`. `lean` keeps a local model comfortable.
 
 ### Embeddings & vector index
@@ -449,10 +469,19 @@ embed it).
   `read_existing_doc`, `write_concept_doc`, `fetch_url`, `link_suggest`,
   `embed_doc`.
 
-### MCP server
-Exposes read/write ops (search, read, write, list, graph-neighbors, enrich) so
-external agents (Claude, etc.) use the brain as a tool. Untrusted by default;
-write/admin gated; stdio + HTTP transports.
+### MCP server (`okb mcp`, `src/mcp/server.ts`)
+External agents (Claude, etc.) use the brain as a tool. Tools and their JSON
+schemas are generated from the ops registry — the same param specs as the
+CLI and local API, so surfaces can't drift. Trust is fail-closed in three
+layers: connections are **untrusted by default** (read ops only — write
+tools are hidden from `tools/list`, refused by name if called anyway, and
+`runOp` re-gates scope underneath); `okb mcp --trusted` deliberately exposes
+write ops for clients the user fully trusts; admin and `localOnly` ops never
+appear on this surface at all. Transports: stdio (default — stdout carries
+only protocol JSON, logs go to stderr) and Streamable HTTP via `--http`
+(stateless server-per-request, binds 127.0.0.1, Host-checked like the local
+API). Filesystem confinement is the ops' own: concept ids reject traversal
+segments before any path is built.
 
 ---
 
@@ -488,14 +517,56 @@ capability once → it appears in all three. CLI/GUI can't drift.
 | `okb mcp` | admin | Start MCP server |
 | `okb export-viz` | read | Self-contained OKF-style graph HTML |
 
+### Local API (`src/api.ts`, started by `okb serve`)
+The GUI's backend and the bookmarklet's target — a thin adapter generated
+over the registry, trusted like the CLI but defended like a network surface:
+- **Routes:** `GET /api/ops` (public op descriptors, for surface generation),
+  `POST /api/op/<name>` (JSON params → `runOp` → `{ result }`),
+  `GET /api/ask/stream` (SSE via the generic `Operation.stream` hook: events
+  `context` — packed sources before synthesis — then `answer`, then `done`
+  with the full result, or `error`; the gateway doesn't stream tokens yet, so
+  `answer` arrives whole — Backlog), `GET /clip` (bookmarklet), `GET /`
+  (GUI page; placeholder until 3.2). Ops marked `localOnly` (`serve`,
+  `bookmarklet`) never appear on network adapters.
+- **Security (fail-closed):** binds 127.0.0.1 only; the Host header must be
+  the server's own `127.0.0.1/localhost/[::1]:port` (defeats DNS rebinding);
+  every `/api` and `/clip` request must present the per-install token
+  (header `x-okb-token`, `Authorization: Bearer`, or `?token=`;
+  constant-time compare); CORS reflects only the server's own localhost
+  origins — everything else gets no CORS headers and preflights are 403.
+  HTTP errors map from `OpError` codes (bad_params 400, not_found 404,
+  untrusted/refused 403; anything else 500).
+- Each request runs in a fresh `OpContext` (shared `core/context.ts`, also
+  the CLI's) — engines open lazily per request and close after, so the
+  server never holds the index hostage from a concurrent CLI.
+
 ### GUI (local web app, `okb serve`)
-Views: **Graph** (live viewer), **Editor** (markdown + frontmatter, concept-id
-link autocomplete, live backlinks, citation helper, suggested-link inbox; saves
-route through the conformance writer), **Ask** (chat over the brain with
-streamed, cited answers and "open in graph"), **Settings** (engine, provider,
-retrieval profile, sync, enrichment guardrails). It's a web app → cross-platform
-free; an optional Tauri wrapper later gives a native desktop app over the same
-local API.
+A vanilla single-page app (`src/gui/`: index.html + app.js + style.css) —
+no framework, no build step; api.ts serves the files and Bun text imports
+embed them into the compiled binary (the viz-vendor pattern). Presentation
+only: every data access is a `/api/op/*` call. Hash routing; dark default +
+persisted light toggle using the viewer's token system and validated
+palettes. Views:
+- **Graph** — live Cytoscape fed by the `graph_data` op (whole graph as
+  JSON; also `okb graph-data --json` for agents/scripts); search filter,
+  type-colored nodes, detail panel with rendered body (internal links
+  rewired to focus their node), click-through to the editor.
+- **Editor** — scaffold fields (type/title/description/tags/resource) + a
+  markdown body textarea; concept-id link picker inserting normalized
+  links; citation-section helper; live backlinks; saves via
+  `write_concept`, so every save is conformant. (Suggested-link inbox
+  arrives with 4.4.) Deliberately not a rich editor: the bundle is plain
+  markdown and external editors remain first-class.
+- **Ask** — SSE streaming: retrieved context appears as chips before the
+  answer arrives; verified citations link to graph and editor.
+- **Review** — card stack with scores + reasons, optional garnish toggle;
+  done / snooze / open / graph per card.
+- **Inbox** — unread clips/notes; open / mark-read.
+- **Settings** — AI providers + retrieval profile (backed by `init`, which
+  persists them), git sync (status / run), maintenance (re-index, embed,
+  doctor report). Enrichment guardrails join with Stage 4.
+Cross-platform free (it's a web app); an optional Tauri wrapper later gives
+a native desktop app over the same local API.
 
 ### Trust boundary
 Each op call carries a trust flag. CLI + local GUI are trusted; MCP/remote is
@@ -517,8 +588,8 @@ filesystem confinement tightens.
 - **MCP:** the MCP TypeScript SDK.
 - **AI:** HTTP clients per recipe (OpenAI-compatible for most local + several
   API providers).
-- **GUI build:** a lightweight bundler (e.g. Vite or Bun's bundler) — decide at
-  Stage 3; keep deps minimal.
+- **GUI build:** none — vanilla JS/CSS/HTML served as-is and embedded via Bun
+  text imports; Bun's compiler is the only "bundler" (decided at 3.2).
 
 ### Scale path (opt-in, behind the same interfaces)
 More files / faster search → swap engine to **Postgres + pgvector** (ops
@@ -605,6 +676,76 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-17 — **MCP (3.3): read-only by default, write is an explicit local
+  opt-in, admin never.** The MCP surface is the trust boundary made
+  concrete: a default connection gets read tools only, and the gate is
+  triple-layered (hidden from `tools/list` + refused by name on call +
+  `runOp`'s own fail-closed scope check), so no single bug re-opens it.
+  Write access is `--trusted` — a flag the user passes when wiring their own
+  agent, never negotiated by the client. Admin ops (index/rebuild/embed/
+  init) are excluded outright: an agent that can wipe the derived index or
+  rewrite provider config is a footgun with no agent-shaped use case; and
+  localOnly ops (serve/bookmarklet/mcp) can't start servers from a server.
+  Tool schemas are generated from the registry's param specs, keeping the
+  contract single-sourced. HTTP mode is stateless (fresh server+transport
+  per request — no session table to manage or leak) on 127.0.0.1 with the
+  same Host check as the local API; no token, because the default surface
+  is read-only and write requires the local `--trusted` decision. The MCP
+  TS SDK is Stage 3's one new dependency (pure JS, compiles into the
+  binary — verified end-to-end through the compiled binary).
+- 2026-07-17 — **GUI (3.2): vanilla JS, zero build step; editor is a form,
+  not an IDE.** A framework + bundler would add the project's heaviest dev
+  dependency for six views of forms and lists — instead the GUI is three
+  static files served by api.ts and embedded into the binary with Bun text
+  imports (exactly how the viz vendor libs already ship), so `bun build
+  --compile` remains the entire build. All data access goes through
+  `/api/op/*`; the app holds no logic the ops don't provide. The graph view
+  gets its data from a new `graph_data` read op (the viz exporter's
+  `buildVizGraph` behind the contract) rather than a bespoke endpoint, so
+  the same JSON is available to the CLI (`okb graph-data --json`) and MCP.
+  This resolves the "GUI editor scope" open question: a scaffold-field +
+  textarea editor that saves through the conformance writer — the bundle is
+  plain markdown and Obsidian/VS Code stay first-class editors, so okbrain
+  competes on conformance (every save normalized + indexed), not on editing
+  chrome. Settings persist through `init` (which gained
+  `--retrieval-profile`) instead of a new config op. Verified end-to-end in
+  Chromium: every view driven, zero page errors, zero external requests.
+- 2026-07-17 — **Local API (3.1): one token gates everything; the
+  bookmarklet navigates instead of fetching.** The per-install serve token
+  is required on every `/api` and `/clip` request, not just clip: CORS only
+  protects response *reads*, so an untokened POST from a hostile page would
+  still execute a write op. Defense layers: 127.0.0.1 bind → Host-header
+  check (DNS rebinding lets a remote origin become "same-origin" with
+  localhost; matching the server's own host:port kills it) → token
+  (constant-time compare) → CORS reflection only for the server's own
+  localhost origins. `GET /` stays tokenless — it's the GUI bootstrap; local
+  processes can read the token file anyway and remote pages can't read the
+  response. The bookmarklet is a top-level GET navigation (`window.open`)
+  rather than a `fetch`, because HTTPS→http://127.0.0.1 fetches trip
+  mixed-content/PNA rules in real browsers; the token in the URL is
+  accepted for a localhost-only, per-install secret. Streaming ask is a
+  generic `Operation.stream(ctx, params, emit)` hook on the registry —
+  adapters stay generated, nothing bypasses the ops layer — emitting phased
+  events (`context`/`answer`/`done`); token-level streaming waits for
+  gateway SSE support (Backlog). `serve`/`bookmarklet` are `localOnly` ops:
+  in the registry (the CLI stays 100% generated) but invisible to network
+  adapters — a server must not be able to start servers. operations.ts ⇄
+  api.ts is a deliberate lazy ESM cycle (the `serve` op needs the server,
+  the server needs the registry); neither dereferences the other at module
+  top level.
+- 2026-07-17 — **AI extras are opt-in per call, profile-gated, fail-soft
+  (F-B.8).** Review garnish and clip autoTag never run implicitly: garnish
+  needs `--garnish` on each invocation, autoTag needs the `--auto-tag` flag
+  or an explicit `clip.autoTag: true` in config — the same no-silent-spend
+  rule as rerank. Both consult the retrieval profile's new `extras` switch
+  (false in `lean`, whose whole point is keeping a local model comfortable),
+  and both are one chat call that can only *decorate* the deterministic
+  result: garnish lines are keyed to known queue ids (invented ids dropped),
+  suggested tags are normalized to kebab-case with the reserved `inbox` tag
+  filtered, and any AI failure warns and yields the un-garnished queue /
+  untagged clip. autoTag runs only for newly created clips (a dedupe append
+  never re-tags) and feeds the model the bundle's existing tag vocabulary
+  (`Engine.listTags()`) so tagging converges instead of fragmenting.
 - 2026-07-17 — **Hybrid retrieval ships fail-soft and spend-safe (2.3).**
   Query vectors must live in the documents' space, so the vector arm embeds
   queries under the store's recorded (provider, model) cache key — not the
@@ -849,8 +990,6 @@ sections above as current truth; this log says *why/when*.
 
 ### Open questions (decide as they come up; record the answer here)
 - Suggested links: auto-insert on capture vs always route through a review inbox?
-- GUI editor scope for v1: full editor vs read-only + capture (bundle is plain
-  markdown, so Obsidian/VS Code already edit it)?
 - Concept `type` vocabulary: ship a small non-binding default set (Note, Person,
   Project, Reference, Idea, Meeting…) vs fully free-form?
 - Acceptance test: round-trip the three OKF sample bundles (GA4, Stack Overflow,

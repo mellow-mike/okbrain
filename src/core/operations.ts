@@ -6,14 +6,17 @@
 
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createApiServer } from "../api.ts";
+import { runMcpHttp, runMcpStdio } from "../mcp/server.ts";
 import { createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
 import { loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
 import type { Engine, Neighbor, VectorStore } from "./engine/interface.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
 import { log } from "./log.ts";
+import { suggestTags } from "./ingest/autotag.ts";
 import { captureNote } from "./ingest/capture.ts";
-import { clipUrl, type ClipResult } from "./ingest/clip.ts";
+import { clipUrl, type ClipOptions, type ClipResult } from "./ingest/clip.ts";
 import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
 import { listConcepts } from "./okf/bundle.ts";
@@ -24,11 +27,13 @@ import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./o
 import { askBrain, type AskResult } from "./retrieval/ask.ts";
 import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./retrieval/embed.ts";
 import { hybridRetrieve, type HybridArms, type HybridHit } from "./retrieval/hybrid.ts";
-import { ProfileError, resolveProfile, type RetrievalProfile } from "./retrieval/profiles.ts";
+import { PROFILES, ProfileError, resolveProfile, type RetrievalProfile } from "./retrieval/profiles.ts";
 import { rerankConfigured, rerankHits } from "./retrieval/rerank.ts";
+import { garnishQueue, pickRecent, type GarnishNote } from "./review/garnish.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
+import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken } from "./serve-token.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
-import { exportViz, type VizExport } from "./viz/export.ts";
+import { buildVizGraph, exportViz, type VizExport, type VizGraph } from "./viz/export.ts";
 
 export type Scope = "read" | "write" | "admin";
 
@@ -72,6 +77,18 @@ export interface Operation {
   scope: Scope;
   params: ParamSpec[];
   handler(ctx: OpContext, params: Record<string, unknown>): Promise<unknown>;
+  /**
+   * Streaming variant for SSE-capable adapters: same result as `handler`,
+   * but may emit named events (progress, partial output) along the way.
+   * Callers validate with `checkOpCall` first, exactly like `runOp`.
+   */
+  stream?(
+    ctx: OpContext,
+    params: Record<string, unknown>,
+    emit: (event: string, data: unknown) => void,
+  ): Promise<unknown>;
+  /** CLI-only: never exposed over network adapters (local API, MCP). */
+  localOnly?: boolean;
   /** Human rendering of the result for the CLI (`--json` bypasses it). */
   render(result: unknown): string;
   /** CLI exit status derived from a successful result (default 0). */
@@ -257,6 +274,53 @@ const warnVectorSkip = (ctx: OpContext, reason: string | null): void => {
   if (reason !== null && ctx.hasVectors()) log.warn("vector arm skipped", { reason });
 };
 
+/**
+ * Clip's autoTag hook (F-B.8): undefined unless asked for and allowed by the
+ * profile; failures warn and tag nothing — AI never blocks a clip.
+ */
+function autoTagger(ctx: OpContext, wanted: boolean): ClipOptions["suggestTags"] {
+  if (!wanted) return undefined;
+  if (!profileOf(ctx, {}).extras) {
+    log.warn("autoTag is an AI extra — off in the lean profile");
+    return undefined;
+  }
+  return async (article) => {
+    try {
+      const vocabulary = ctx.hasIndex() ? ctx.engine().listTags() : [];
+      return await suggestTags(article, vocabulary, (m) =>
+        createGateway(ctx.config().ai ?? {}).chat(m),
+      );
+    } catch (e) {
+      log.warn("autoTag skipped", { error: (e as Error).message });
+      return [];
+    }
+  };
+}
+
+/** The ask pipeline; `emit` (streaming surfaces) gets context before the answer. */
+async function runAsk(
+  ctx: OpContext,
+  p: Record<string, unknown>,
+  emit?: (event: string, data: unknown) => void,
+): Promise<AskResult> {
+  const profile = profileOf(ctx, p);
+  const gw = createGateway(ctx.config().ai ?? {});
+  const r = await askBrain(
+    p.question as string,
+    {
+      bundle: ctx.bundle,
+      arms: hybridArms(ctx),
+      chat: (messages) => gw.chat(messages),
+      rerank: (q, hits) => maybeRerank(ctx, q, hits, profile),
+      onContext: emit && ((context) => emit("context", context)),
+    },
+    profile,
+  );
+  warnVectorSkip(ctx, r.vectorSkipped);
+  emit?.("answer", { answer: r.answer, citations: r.citations });
+  return r;
+}
+
 /** Writer/id errors are caller mistakes → bad_params; guard blocks → refused. */
 async function writing<T>(fn: () => Promise<T>): Promise<T> {
   try {
@@ -309,22 +373,8 @@ export const operations: readonly Operation[] = [
       { name: "question", type: "string", required: true, positional: true, description: "the question to answer from your notes" },
       { name: "profile", type: "string", description: "retrieval profile: lean|balanced|max (default balanced)" },
     ],
-    handler: async (ctx, p) => {
-      const profile = profileOf(ctx, p);
-      const gw = createGateway(ctx.config().ai ?? {});
-      const r = await askBrain(
-        p.question as string,
-        {
-          bundle: ctx.bundle,
-          arms: hybridArms(ctx),
-          chat: (messages) => gw.chat(messages),
-          rerank: (q, hits) => maybeRerank(ctx, q, hits, profile),
-        },
-        profile,
-      );
-      warnVectorSkip(ctx, r.vectorSkipped);
-      return r;
-    },
+    handler: (ctx, p) => runAsk(ctx, p),
+    stream: (ctx, p, emit) => runAsk(ctx, p, emit),
     render: (r) => {
       const a = r as AskResult;
       const lines = [a.answer.trim()];
@@ -586,6 +636,18 @@ export const operations: readonly Operation[] = [
     },
   },
   {
+    name: "graph_data",
+    cliName: "graph-data",
+    summary: "The whole graph (nodes + edges) as data — for the GUI and agents",
+    scope: "read",
+    params: [],
+    handler: (ctx) => buildVizGraph(ctx.bundle),
+    render: (r) => {
+      const g = r as VizGraph;
+      return `${g.nodes.length} concepts, ${g.edges.length} links (use --json for the data)`;
+    },
+  },
+  {
     // Scope read despite writing a file: output is derived (never canonical
     // knowledge) and the path is fixed to <bundle>/viz.html — no caller-chosen
     // destination an untrusted caller could abuse.
@@ -696,16 +758,43 @@ export const operations: readonly Operation[] = [
     scope: "read",
     params: [
       { name: "limit", type: "int", description: "queue size (default 5, config review.queueSize)" },
+      { name: "garnish", type: "boolean", description: "add an AI one-liner tying each item to recent notes (off in lean)" },
+      { name: "profile", type: "string", description: "retrieval profile gating the garnish: lean|balanced|max" },
     ],
-    handler: async (ctx, p) => queueFor(ctx, p.limit as number | undefined),
+    handler: async (ctx, p) => {
+      const q = queueFor(ctx, p.limit as number | undefined);
+      if (p.garnish !== true || q.length === 0) return q;
+      if (!profileOf(ctx, p).extras) {
+        log.warn("garnish is an AI extra — off in the lean profile");
+        return q;
+      }
+      try {
+        const eng = ctx.engine();
+        const describe = (n: { id: string; title: string }): GarnishNote => ({
+          ...n,
+          description: eng.getNode(n.id)?.description ?? "",
+        });
+        const recent = pickRecent(eng.listReviewRows(), new Set(q.map((it) => it.id)), new Date());
+        const lines = await garnishQueue(q.map(describe), recent.map(describe), (m) =>
+          createGateway(ctx.config().ai ?? {}).chat(m),
+        );
+        return q.map((it) => {
+          const garnish = lines.get(it.id);
+          return garnish === undefined ? it : { ...it, garnish };
+        });
+      } catch (e) {
+        log.warn("garnish skipped", { error: (e as Error).message });
+        return q;
+      }
+    },
     render: (r) => {
       const q = r as ReviewItem[];
       if (q.length === 0) return "(queue is empty — nothing needs review)";
       return q
-        .map(
-          (it, i) =>
-            `${i + 1}. ${it.id} — ${it.title} (${it.score.toFixed(2)}) — ${it.reasons.join("; ")}`,
-        )
+        .flatMap((it, i) => [
+          `${i + 1}. ${it.id} — ${it.title} (${it.score.toFixed(2)}) — ${it.reasons.join("; ")}`,
+          ...(it.garnish === undefined ? [] : [`   ↳ ${it.garnish}`]),
+        ])
         .join("\n");
     },
   },
@@ -764,6 +853,7 @@ export const operations: readonly Operation[] = [
       { name: "note", type: "string", description: "your comment, saved with the quote" },
       { name: "tags", type: "string", description: "comma-separated extra tags" },
       { name: "read", type: "boolean", description: "skip the inbox tag (already read)" },
+      { name: "auto-tag", type: "boolean", description: "suggest topic tags via the chat model (also config clip.autoTag; off in lean)" },
     ],
     handler: async (ctx, p) => {
       const clip = ctx.config().clip;
@@ -779,6 +869,7 @@ export const operations: readonly Operation[] = [
           },
           {
             resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined,
+            suggestTags: autoTagger(ctx, p["auto-tag"] === true || clip?.autoTag === true),
             maxBodyBytes: clip?.maxBodyBytes,
             defaultTags: clip?.defaultTags,
             stripParams: clip?.stripParams,
@@ -792,7 +883,11 @@ export const operations: readonly Operation[] = [
       const c = r as ClipResult;
       if (c.deduped)
         return `already clipped as ${c.id}${c.appended ? " — highlight appended" : ""}`;
-      return `clipped ${c.id}${c.truncated ? " (body truncated at the 100 KB cap)" : ""}`;
+      return [
+        `clipped ${c.id}`,
+        c.truncated ? " (body truncated at the 100 KB cap)" : "",
+        c.autoTags.length > 0 ? ` — tagged ${c.autoTags.join(", ")}` : "",
+      ].join("");
     },
   },
   {
@@ -857,6 +952,7 @@ export const operations: readonly Operation[] = [
       { name: "model", type: "string", description: "chat model (default: the provider's default)" },
       { name: "embed-provider", type: "string", description: "embedding provider: openai|voyage|gemini|ollama|llamacpp|lmstudio|local" },
       { name: "embed-model", type: "string", description: "embedding model" },
+      { name: "retrieval-profile", type: "string", description: "default retrieval profile: lean|balanced|max" },
       { name: "no-default-bundle", type: "boolean", description: "don't change which bundle okb uses by default" },
     ],
     handler: async (ctx, p) => {
@@ -868,6 +964,14 @@ export const operations: readonly Operation[] = [
       if (p.model !== undefined) ai.model = p.model as string;
       if (p["embed-provider"] !== undefined) ai.embedProvider = local(p["embed-provider"]);
       if (p["embed-model"] !== undefined) ai.embedModel = p["embed-model"] as string;
+      if (p["retrieval-profile"] !== undefined) {
+        if (!PROFILES[p["retrieval-profile"] as string])
+          throw new OpError(
+            `unknown retrieval profile: ${p["retrieval-profile"]} (known: ${Object.keys(PROFILES).join(", ")})`,
+            "bad_params",
+          );
+        cfg.retrieval = { ...cfg.retrieval, profile: p["retrieval-profile"] as string };
+      }
       for (const [name, cap] of [
         [ai.provider, "chat"],
         [ai.embedProvider, "embed"],
@@ -915,6 +1019,75 @@ export const operations: readonly Operation[] = [
       ].join("\n");
     },
   },
+  {
+    name: "serve",
+    cliName: "serve",
+    summary: "Start the local API + GUI server (binds 127.0.0.1 only)",
+    scope: "admin",
+    localOnly: true,
+    params: [
+      { name: "port", type: "int", description: `port on 127.0.0.1 (default ${DEFAULT_PORT})` },
+    ],
+    handler: async (ctx, p) => {
+      const { url } = createApiServer({
+        bundle: ctx.bundle,
+        port: p.port as number | undefined,
+      });
+      log.info(`serving ${ctx.bundle} at ${url} — Ctrl-C to stop`);
+      log.info("clip from the browser: `okb bookmarklet`");
+      return new Promise(() => {}); // lives until interrupted
+    },
+    render: () => "",
+  },
+  {
+    name: "mcp",
+    cliName: "mcp",
+    summary: "Serve the brain over MCP (stdio; --http for Streamable HTTP)",
+    scope: "admin",
+    localOnly: true,
+    params: [
+      { name: "http", type: "boolean", description: "serve Streamable HTTP on 127.0.0.1 instead of stdio" },
+      { name: "port", type: "int", description: `HTTP port (default ${DEFAULT_MCP_PORT}; implies --http)` },
+      { name: "trusted", type: "boolean", description: "expose write ops (only for MCP clients you fully trust)" },
+    ],
+    handler: async (ctx, p) => {
+      const trusted = p.trusted === true;
+      const mode = trusted ? "TRUSTED — write ops exposed" : "untrusted, read-only";
+      if (p.http === true || p.port !== undefined) {
+        const port = (p.port as number | undefined) ?? DEFAULT_MCP_PORT;
+        runMcpHttp({ bundle: ctx.bundle, trusted, port });
+        log.info(`mcp: http://127.0.0.1:${port}/ (${mode})`);
+      } else {
+        await runMcpStdio({ bundle: ctx.bundle, trusted });
+        log.info(`mcp: stdio (${mode})`);
+      }
+      return new Promise(() => {}); // lives until the client disconnects us
+    },
+    render: () => "",
+  },
+  {
+    name: "bookmarklet",
+    cliName: "bookmarklet",
+    summary: "Print the clip-to-brain bookmarklet (embeds the serve token)",
+    scope: "admin",
+    localOnly: true,
+    params: [
+      { name: "port", type: "int", description: `port okb serve listens on (default ${DEFAULT_PORT})` },
+    ],
+    handler: async (_ctx, p) => {
+      const port = (p.port as number | undefined) ?? DEFAULT_PORT;
+      return { port, bookmarklet: bookmarkletJs(port, ensureServeToken()) };
+    },
+    render: (r) => {
+      const b = r as { bookmarklet: string };
+      return [
+        b.bookmarklet,
+        "",
+        "Save this as a bookmark's URL; clicking it on any page clips that page",
+        "into your brain (requires a running `okb serve`).",
+      ].join("\n");
+    },
+  },
 ];
 
 export function getOp(name: string): Operation | undefined {
@@ -940,12 +1113,12 @@ function coerce(spec: ParamSpec, v: unknown): unknown {
   );
 }
 
-/** Validate trust and params per the op's declaration, then run its handler. */
-export async function runOp(
+/** Validate trust and params per the op's declaration (every adapter's gate). */
+export function checkOpCall(
   op: Operation,
   ctx: OpContext,
   raw: Record<string, unknown>,
-): Promise<unknown> {
+): Record<string, unknown> {
   if (!ctx.trusted && op.scope !== "read")
     throw new OpError(
       `op ${op.name} (scope ${op.scope}) is not available to untrusted callers`,
@@ -964,5 +1137,14 @@ export async function runOp(
     }
     params[spec.name] = coerce(spec, v);
   }
-  return op.handler(ctx, params);
+  return params;
+}
+
+/** Validate trust and params per the op's declaration, then run its handler. */
+export async function runOp(
+  op: Operation,
+  ctx: OpContext,
+  raw: Record<string, unknown>,
+): Promise<unknown> {
+  return op.handler(ctx, checkOpCall(op, ctx, raw));
 }

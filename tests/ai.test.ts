@@ -245,6 +245,17 @@ describe("config file + okb init", () => {
     expect(bad.stderr).toContain("not a known embed provider");
   });
 
+  test("--retrieval-profile persists to config.retrieval; bad names rejected", async () => {
+    expect(
+      (await okb(["init", "--retrieval-profile", "lean", "--no-default-bundle", "--bundle", bundleA])).code,
+    ).toBe(0);
+    expect(loadConfig().retrieval?.profile).toBe("lean");
+    const bad = await okb(["init", "--retrieval-profile", "turbo", "--bundle", bundleA]);
+    expect(bad.code).toBe(2);
+    expect(bad.stderr).toContain("unknown retrieval profile");
+    expect(loadConfig().retrieval?.profile).toBe("lean");
+  });
+
   test("--no-default-bundle leaves the default alone", async () => {
     const before = loadConfig().defaultBundle;
     const other = await mkdtemp(join(tmpdir(), "okb-init-b-"));

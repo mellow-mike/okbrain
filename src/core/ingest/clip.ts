@@ -11,7 +11,7 @@ import { listConcepts, readConceptPermissive } from "../okf/bundle.ts";
 import { idToAbsPath, slugify } from "../okf/paths.ts";
 import { nowTimestamp, writeConcept } from "../okf/write.ts";
 import { guardedFetch, type FetchedPage } from "./fetch-guard.ts";
-import { extractArticle } from "./extract.ts";
+import { extractArticle, type ExtractedArticle } from "./extract.ts";
 
 export const CLIP_MAX_BODY_BYTES = 100_000;
 
@@ -44,6 +44,8 @@ export interface ClipOptions {
   fetcher?: (url: string) => Promise<FetchedPage>;
   /** id+resource pairs from the engine; omitted → the bundle is scanned. */
   resources?: { id: string; resource: string }[];
+  /** AI autoTag hook (F-B.8); called only for new clips, caller owns failure policy. */
+  suggestTags?: (article: ExtractedArticle) => Promise<string[]>;
   /** `clip.*` config overrides (okb init config.json). */
   maxBodyBytes?: number;
   defaultTags?: string[];
@@ -58,6 +60,8 @@ export interface ClipResult {
   /** A quote/note was appended under # Highlights. */
   appended: boolean;
   truncated: boolean;
+  /** Tags added by the autoTag hook (empty when off or nothing suggested). */
+  autoTags: string[];
 }
 
 async function allResources(root: string): Promise<{ id: string; resource: string }[]> {
@@ -128,7 +132,14 @@ export async function clipUrl(
 
   const finish = async (id: string): Promise<ClipResult> => {
     if (entry !== null) await appendHighlight(root, id, entry);
-    return { id, created: false, deduped: true, appended: entry !== null, truncated: false };
+    return {
+      id,
+      created: false,
+      deduped: true,
+      appended: entry !== null,
+      truncated: false,
+      autoTags: [],
+    };
   };
 
   // Known input URL → no fetch needed (also lets a re-clip work offline).
@@ -146,6 +157,7 @@ export async function clipUrl(
   let id = base;
   for (let n = 2; existsSync(idToAbsPath(root, id)); n++) id = `${base}-${n}`;
 
+  const autoTags = opts.suggestTags ? await opts.suggestTags(art) : [];
   const { text, truncated } = capBytes(art.markdown, opts.maxBodyBytes ?? CLIP_MAX_BODY_BYTES);
   const cite = `- [${art.title}](${canonical})${art.byline ? ` — ${art.byline}` : ""}`;
   const body = [
@@ -171,11 +183,12 @@ export async function clipUrl(
       ...new Set([
         ...(opts.defaultTags ?? []),
         ...(input.tags ?? []),
+        ...autoTags,
         ...(input.read ? [] : ["inbox"]),
       ]),
     ],
     body,
     extra,
   });
-  return { id, created: true, deduped: false, appended: entry !== null, truncated };
+  return { id, created: true, deduped: false, appended: entry !== null, truncated, autoTags };
 }

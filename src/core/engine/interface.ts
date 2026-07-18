@@ -129,6 +129,8 @@ export interface Engine {
   listReviewRows(): ReviewRow[];
   /** id + resource for every node that has one (clip dedupe), sorted by id. */
   listResources(): { id: string; resource: string }[];
+  /** Distinct tags across the bundle (autoTag vocabulary), sorted. */
+  listTags(): string[];
   /** Snooze a concept out of the review queue until `untilIso`. */
   setSnooze(id: string, untilIso: string): void;
   clearSnooze(id: string): void;

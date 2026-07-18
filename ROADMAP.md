@@ -9,14 +9,13 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 1–2 essentially complete** (Resurface F-B + Clip F-A shipped
-> CLI-first; GUI pieces at 3.2, bookmarklet endpoint at 3.1, cron at 4.5).
-> **2.3 core shipped**: hybrid `okb search` (RRF over vec+FTS, graph
-> expansion, opt-in rerank, lean/balanced/max profiles) and `okb ask`
-> (verified citations, budget-packed context, `max` multi-query). Remaining
-> in 2.3: **F-B.8 review garnish + clip autoTag**. Then: **Stage 3.1 local
-> API** (also carries the 2.2 packaging note on shipping the vec0 extension
-> with the compiled binary → Stage 5).
+> **Stages 0–3 complete.** The brain now has a CLI, a GUI (`okb serve`), and
+> an agent surface (`okb mcp`) — all generated over one ops contract. Next:
+> **Stage 4** — 4.1 ingest sources (rss), 4.2 web pass (LLM-as-crawler over
+> the existing fetch guard), 4.3 typed edges, 4.4 link suggestion (+ the GUI
+> buttons deferred from 3.2), 4.5 jobs/cron, 4.6 skills. The 2.2 packaging
+> note (ship the vec0 extension with the compiled binary) stays parked at
+> Stage 5.
 
 ---
 
@@ -247,8 +246,12 @@ Goal: ask questions of your brain, offline or via API.
 - [x] `okb search` upgraded to hybrid (sources tagged per hit); `okb ask` —
       RAG synthesis, citations post-verified against the packed context,
       empty pool short-circuits before the model, `max` multi-query expansion
-- [ ] Review garnish (F-B.8): optional one-liner per queue item connecting it
-      to recent captures; clip autoTag (F-A) — both off in `lean`
+- [x] Review garnish (F-B.8): `okb review --garnish` — one chat call annotates
+      queue items with a one-liner tying them to notes changed ≤7d; clip
+      autoTag (F-A): `okb clip --auto-tag` / config `clip.autoTag` suggests
+      kebab-case topic tags against the bundle's tag vocabulary. Both opt-in
+      (no silent spend), off in `lean` (`profile.extras`), and fail-soft —
+      any AI failure leaves the deterministic result untouched
 - [x] Tests: RRF fusion; arm sources/degradation; citation integrity; profile
       budget enforced; CLI e2e vs stub embed+chat server (no network in CI)
 
@@ -258,27 +261,58 @@ Goal: ask questions of your brain, offline or via API.
 Goal: a real GUI, and "my agent can use my brain."
 
 ### 3.1 Local API
-- [ ] `api.ts` — local HTTP over ops (trusted); bind localhost only; CORS locked to localhost
-- [ ] Streaming endpoint for `ask`
-- [ ] Clip endpoint + per-install secret token + `okb bookmarklet` (F-A.6):
-      token generated at first serve, embedded in the bookmarklet, validated
-      server-side; tokenless requests rejected (CSRF fail-closed, CONTEXT §Clip)
+- [x] `api.ts` — routes generated over the ops registry (`GET /api/ops`,
+      `POST /api/op/<name>`; `localOnly` ops hidden); binds 127.0.0.1 only;
+      Host header checked (DNS rebinding); CORS locked to the server's own
+      localhost origins; per-request `OpContext` via shared
+      `core/context.ts` (CLI refactored onto it)
+- [x] Streaming `ask`: `GET /api/ask/stream` (SSE) — phased events
+      `context` → `answer` → `done`/`error` via a generic `Operation.stream`
+      hook (true token streaming through the gateway → Backlog)
+- [x] Clip endpoint + per-install secret token + `okb bookmarklet` (F-A.6):
+      token minted at first use (`core/serve-token.ts`, 0600 beside
+      config.json), required on **every** `/api` and `/clip` request
+      (constant-time compare; CSRF fail-closed); bookmarklet = top-level GET
+      navigation to `/clip` (no CORS/mixed-content/PNA hurdles), selection
+      rides along as the highlight quote
+- [x] `okb serve [--port]` (API now, GUI page lands at 3.2) + `okb
+      bookmarklet [--port]`, both `localOnly` admin ops
 
 ### 3.2 GUI app (`okb serve`)
-- [ ] GUI build setup (minimal bundler) + static asset embedding into the binary
-- [ ] Graph view — live Cytoscape via API; click-through to editor
-- [ ] Editor — md + frontmatter; concept-id link autocomplete; live backlinks; citation helper; suggested-link inbox; save via conformance writer
-- [ ] Ask view — chat; streamed cited answers; "open in graph"
-- [ ] Review view — card stack for today's queue; done / snooze / open /
-      suggest-links (F-B.6)
-- [ ] Inbox view — clipped items; open / mark-read / suggest-links (F-A.8)
-- [ ] Settings — engine, provider/model, retrieval profile, sync, enrichment guardrails
-- [ ] `okb serve` starts API + GUI
+- [x] No bundler at all: vanilla single-page app (`src/gui/` — index.html,
+      app.js, style.css), served by api.ts and embedded into the compiled
+      binary via Bun text imports (verified: binary serves all assets)
+- [x] Graph view — live Cytoscape over the new `graph_data` read op (also
+      `okb graph-data --json` for agents); search filter, type-colored nodes
+      (viz palettes), detail panel with rendered body + rewired `#concept:`
+      links, click-through to editor
+- [x] Editor — scaffold fields + markdown body textarea; concept-id link
+      picker (inserts normalized links); live backlinks; citation-section
+      helper; saves via `write_concept` (suggested-link inbox → 4.4)
+- [x] Ask view — SSE streamed: context chips appear before the answer,
+      verified citations link to graph/editor
+- [x] Review view — card stack with reasons + optional garnish toggle;
+      done / snooze / open / graph (suggest-links → 4.4)
+- [x] Inbox view — open / mark-read / graph (suggest-links → 4.4)
+- [x] Settings — provider/model + retrieval profile (via `init`, which
+      gained `--retrieval-profile`), sync status/run, maintenance
+      (re-index / embed / doctor); enrichment guardrails arrive with 4.2
+- [x] `okb serve` starts API + GUI; whole app driven end-to-end in Chromium
+      (all views, zero page errors, zero external requests)
 
 ### 3.3 MCP server (`okb mcp`)
-- [ ] `mcp/server.ts` — expose read/write ops via MCP TS SDK; stdio + HTTP transports
-- [ ] Trust = untrusted; gate `write`/`admin`; tighten filesystem confinement
-- [ ] Tests: untrusted write is gated; read ops work; scope enforced before handler
+- [x] `src/mcp/server.ts` — tools generated from the ops registry via the MCP
+      TS SDK (schemas from the same param specs as CLI/API); stdio transport
+      (default) + Streamable HTTP (`--http`/`--port`, stateless
+      server-per-request, 127.0.0.1 bind + Host check); verified end-to-end
+      through the compiled binary
+- [x] Trust fail-closed: untrusted by default (read ops only — hidden from
+      the list AND refused by name AND re-gated in `runOp`); `--trusted`
+      exposes write ops; admin + localOnly ops never appear on this surface;
+      concept-id traversal refused before any path is built
+- [x] Tests: gated write (hidden + refused), read ops, generated schemas,
+      traversal confinement, trusted write doctor-clean, HTTP transport —
+      all through the real SDK client
 
 ---
 
@@ -303,6 +337,7 @@ Goal: the brain improves itself on a schedule.
 
 ### 4.4 Link suggestion + review
 - [ ] `link_suggest` → propose cross-links; GUI review inbox; accept writes a normalized link
+- [ ] Wire suggest-links buttons into the GUI Review / Inbox / Editor views (deferred from 3.2)
 - [ ] Tests: suggestions ranked; accept produces conformant link
 
 ### 4.5 Jobs / cron
@@ -382,11 +417,59 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       through — fine for your own notes, but a shared export could carry
       scripted HTML from ingested content. Consider sanitizing (e.g. vendored
       DOMPurify) before Stage 4 ingestion lands.
+- [ ] True token streaming for `okb ask` / the SSE endpoint: the gateway
+      returns whole chat responses, so the `answer` event arrives in one
+      piece; add SSE parsing per dialect when incremental rendering matters.
 
 ---
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-17 — Stage 3.3 shipped, **Stage 3 complete**: MCP server
+  (`src/mcp/server.ts` via `@modelcontextprotocol/sdk` — the stage's one new
+  dep). Tools + JSON schemas generated from the ops registry; untrusted by
+  default (read ops only: hidden from tools/list, refused by name, re-gated
+  in `runOp`), `okb mcp --trusted` exposes write ops, admin/localOnly never
+  appear; stdio transport default, `--http` Streamable HTTP (stateless
+  server-per-request, 127.0.0.1 + Host check); id traversal refused before
+  any path is built. 8 new tests through the real SDK client (in-memory +
+  HTTP transports); stdio + tools/call verified through the compiled
+  binary. 307 tests green, tsc clean. Next: Stage 4.1/4.2 (ingest + web
+  pass).
+- 2026-07-17 — Stage 3.2 shipped: GUI (`src/gui/` — vanilla single-page app,
+  zero build step; Bun text imports embed all assets into the binary, same
+  pattern as the viz vendor libs). Views: Graph (live Cytoscape over the new
+  `graph_data` op, viz palettes, detail panel with rewired links,
+  click-through to editor), Editor (scaffold fields + body, concept link
+  picker, citation helper, live backlinks, saves via `write_concept`), Ask
+  (SSE — context chips stream in before the answer; citations link to
+  graph/editor), Review (cards + garnish toggle, done/snooze), Inbox
+  (open/mark-read), Settings (`init` — which gained `--retrieval-profile` —
+  plus sync + index/embed/doctor). Whole app driven in Chromium: all views
+  exercised, zero page errors, zero external requests; compiled binary
+  serves the embedded assets. 299 tests green, tsc clean. Next: 3.3 MCP.
+- 2026-07-17 — Stage 3.1 shipped: local API (`src/api.ts`) — op routes
+  generated from the registry (`GET /api/ops`, `POST /api/op/<name>`,
+  `localOnly` ops hidden), fail-closed security (127.0.0.1 bind, Host check
+  vs DNS rebinding, per-install token on every `/api`+`/clip` request with
+  constant-time compare, CORS only for the server's own localhost origins),
+  SSE `GET /api/ask/stream` via a new generic `Operation.stream` hook
+  (events `context` → `answer` → `done`/`error`; true token streaming →
+  Backlog), bookmarklet clip: `GET /clip` top-level navigation endpoint +
+  `okb bookmarklet` embedding the token (`core/serve-token.ts`), `okb serve
+  [--port]`. Shared `core/context.ts` now builds the trusted OpContext for
+  CLI + API. 295 tests green, tsc clean. Next: 3.2 GUI.
+- 2026-07-17 — F-B.8 shipped, **Stage 2 complete**: review garnish
+  (`core/review/garnish.ts` — `okb review --garnish` makes one chat call
+  annotating queue items with a ≤25-word line connecting them to notes
+  changed in the last 7 days; unknown ids and "no connection" lines dropped)
+  and clip autoTag (`core/ingest/autotag.ts` — `okb clip --auto-tag` /
+  config `clip.autoTag` suggests ≤5 kebab-case topic tags, existing bundle
+  tags offered as vocabulary via new `Engine.listTags()`; reserved `inbox`
+  filtered). Both opt-in, gated by the new `extras` profile switch (off in
+  `lean`), and fail-soft — chat failures warn and leave the deterministic
+  queue/clip untouched. 278 tests green, tsc clean. Next: Stage 3.1 local
+  API.
 - 2026-07-17 — Stage 2.3 core shipped: hybrid retrieval
   (`core/retrieval/hybrid.ts` — RRF k=60 over FTS + sqlite-vec arms, queries
   embedded under the store's own cache key, vector-arm failures degrade to
