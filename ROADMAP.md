@@ -320,8 +320,20 @@ Goal: a real GUI, and "my agent can use my brain."
 Goal: the brain improves itself on a schedule.
 
 ### 4.1 Ingest sources
-- [ ] `core/ingest/import.ts` (bulk md), `capture.ts` (note/clip), `rss.ts` (feeds)
+- [x] `core/ingest/rss.ts` — RSS 2.0/RDF/Atom parse (linkedom XML, no new deps);
+      `pullFeed` → conformant `references/<slug>` (inbox+rss tags, `# Citations`,
+      author/published/feed extras), dedupe by normalized URL vs every concept
+      `resource` (clip's rule — a feed entry and a clip of the same page can't
+      duplicate; in-run dedupe too), per-pull `limit`
+- [x] `okb rss [url] [--limit]` — no URL pulls every config `rss.feeds`
+      (multi-pull records per-feed errors so one dead feed can't block the
+      rest; a single explicit feed fails loudly); `rss.maxItems` config
+- [x] `import.ts` (bulk md) and `capture.ts` landed at 1.3, clip at F-A —
+      this stage's remaining source was feeds
 - [ ] (Later) browser grab; email/calendar
+- [x] Tests: RSS+Atom parse (rel=alternate, content:encoded, dc:creator,
+      relative links, linkless items), idempotent re-pull, in-run dedupe,
+      limit paging, doctor-clean output, CLI no-feeds error + live guard
 
 ### 4.2 Web pass (LLM-as-crawler)
 - [ ] `core/ingest/web.ts` — `fetch_url` tool with guardrails (`--web-max-pages`, `--web-max-depth`, allowed-hosts, path prefix/deny, `--no-web`)
@@ -425,6 +437,13 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-19 — Stage 4.1 shipped: RSS/Atom ingest (`core/ingest/rss.ts` —
+  linkedom XML parse over direct-child lookups, RSS 2.0/RDF/Atom;
+  `okb rss [url] [--limit]`, no URL = config `rss.feeds`, per-feed errors
+  captured on multi-pulls). New items land as conformant `references/<slug>`
+  (inbox+rss tags, citations, author/published/feed extras), deduped by
+  clip's normalized-resource rule incl. in-run. 316 tests green, tsc clean.
+  Next: 4.2 web pass.
 - 2026-07-17 — Stage 3.3 shipped, **Stage 3 complete**: MCP server
   (`src/mcp/server.ts` via `@modelcontextprotocol/sdk` — the stage's one new
   dep). Tools + JSON schemas generated from the ops registry; untrusted by

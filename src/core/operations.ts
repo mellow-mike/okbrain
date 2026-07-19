@@ -19,6 +19,7 @@ import { captureNote } from "./ingest/capture.ts";
 import { clipUrl, type ClipOptions, type ClipResult } from "./ingest/clip.ts";
 import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
+import { FeedError, pullFeed, type RssPullResult } from "./ingest/rss.ts";
 import { listConcepts } from "./okf/bundle.ts";
 import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
 import { fmTags, OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
@@ -328,7 +329,8 @@ async function writing<T>(fn: () => Promise<T>): Promise<T> {
   } catch (e) {
     if (e instanceof OkfWriteError || e instanceof InvalidIdError)
       throw new OpError(e.message, "bad_params");
-    if (e instanceof FetchGuardError) throw new OpError(e.message, "refused");
+    if (e instanceof FetchGuardError || e instanceof FeedError)
+      throw new OpError(e.message, "refused");
     throw e;
   }
 }
@@ -889,6 +891,59 @@ export const operations: readonly Operation[] = [
         c.autoTags.length > 0 ? ` — tagged ${c.autoTags.join(", ")}` : "",
       ].join("");
     },
+  },
+  {
+    name: "rss",
+    cliName: "rss",
+    summary: "Pull RSS/Atom feeds into references/ (no URL: every config rss.feeds)",
+    scope: "write",
+    params: [
+      { name: "url", type: "string", positional: true, description: "feed URL (default: every configured rss.feeds entry)" },
+      { name: "limit", type: "int", description: "max new items per feed (default 10, config rss.maxItems)" },
+    ],
+    handler: async (ctx, p) => {
+      const cfg = ctx.config().rss;
+      const urls = p.url !== undefined ? [p.url as string] : (cfg?.feeds ?? []);
+      if (urls.length === 0)
+        throw new OpError(
+          "no feed URL given and no rss.feeds configured (add feeds to config.json)",
+          "bad_params",
+        );
+      const results: RssPullResult[] = [];
+      for (const url of urls) {
+        try {
+          const r = await writing(() =>
+            pullFeed(ctx.bundle, url, {
+              resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined,
+              limit: (p.limit as number | undefined) ?? cfg?.maxItems,
+              stripParams: ctx.config().clip?.stripParams,
+            }),
+          );
+          await reindex(ctx, r.added.map((a) => a.id));
+          results.push(r);
+        } catch (e) {
+          // A single explicit feed fails loudly; a configured multi-pull
+          // records the failure so one dead feed can't block the rest.
+          if (urls.length === 1) throw e;
+          results.push({
+            url, feed: "", added: [], deduped: 0, skipped: 0,
+            error: e instanceof OpError ? e.message : (e as Error).message,
+          });
+        }
+      }
+      return results;
+    },
+    render: (r) =>
+      (r as RssPullResult[])
+        .flatMap((f) => {
+          if (f.error !== undefined) return [`${f.url} — FAILED: ${f.error}`];
+          const skipped = f.skipped > 0 ? `, ${f.skipped} skipped` : "";
+          return [
+            `${f.feed || f.url}: ${f.added.length} added, ${f.deduped} known${skipped}`,
+            ...f.added.map((a) => `  + ${a.id} — ${a.title}`),
+          ];
+        })
+        .join("\n"),
   },
   {
     name: "inbox_list",

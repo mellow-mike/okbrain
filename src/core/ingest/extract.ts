@@ -24,6 +24,9 @@ const turndown = new TurndownService({
 });
 turndown.remove(["script", "style", "noscript"]);
 
+/** HTML (or plain text) → markdown with the clip conversion rules. */
+export const htmlToMarkdown = (html: string): string => turndown.turndown(html).trim();
+
 /** Rewrite relative hrefs/srcs in an HTML fragment to absolute URLs. */
 function absolutize(fragmentHtml: string, pageUrl: string): string {
   const { document } = parseHTML(fragmentHtml);

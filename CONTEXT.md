@@ -360,6 +360,24 @@ bypass CORS, mixed-content, and private-network-access rules that would
 break a cross-origin `fetch` from an HTTPS page, so it works from any site
 with zero server relaxations. The confirmation page auto-closes on success.
 
+### RSS ingest (`okb rss`, Stage 4.1)
+Feeds are the second ingest source (after import/capture/clip): `okb rss
+[url]` pulls one feed, or — with no URL — every entry in config `rss.feeds`
+(what the jobs worker runs). `core/ingest/rss.ts` parses RSS 2.0 / RSS 1.0
+(RDF) / Atom with linkedom's XML parser (no new deps) and writes each new
+item as a conformant `references/<slug>` concept: type `reference`, tags
+`inbox` + `rss`, entry content/summary converted to markdown, `# Citations`
+naming the feed, `author`/`published`/`feed` as extension keys. Dedupe is
+clip's exact rule — normalized item URL against every concept's normalized
+`resource` (plus in-run) — so a feed entry and a hand-clipped article of the
+same page can never duplicate, and re-pulls are idempotent. Entries keep the
+feed's own content; fetching the full page stays clip's (or the enrich
+pass's) job. A per-pull `limit` (default 10, config `rss.maxItems`) paces
+first pulls of deep feeds; the rest arrive on later runs. Multi-feed pulls
+record per-feed errors instead of failing (one dead feed must not block a
+cron pull); a single explicit URL fails loudly. Zero AI, works with or
+without an index.
+
 ### Config (`clip.*`)
 `maxBodyBytes` 100KB, `stripParams` (utm_* etc.), `defaultTags` [],
 `autoTag` false (true = suggest tags on every clip; still off in `lean`).
@@ -676,6 +694,17 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-19 — **RSS ingest (4.1) stores the feed's own content and shares
+  clip's dedupe.** A feed pull does not fetch item pages: the entry's
+  content/summary is the body (converted to markdown), and getting the full
+  article is clip's or the enrich pass's job — pulls stay cheap, cron-safe,
+  and zero-AI. Dedupe reuses clip's normalized-resource rule on both sides,
+  so `okb rss` and `okb clip` can never create duplicates of the same page
+  and re-pulls are idempotent. Configured multi-feed pulls capture per-feed
+  errors in the result instead of throwing (a dead feed must not block the
+  nightly pull); an explicitly given single URL still fails loudly. Feed
+  parsing uses linkedom's XML DOMParser (already a dep) over direct-child
+  lookups — querySelector would cross item boundaries.
 - 2026-07-17 — **MCP (3.3): read-only by default, write is an explicit local
   opt-in, admin never.** The MCP surface is the trust boundary made
   concrete: a default connection gets read tools only, and the gate is

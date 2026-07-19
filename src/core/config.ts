@@ -83,6 +83,12 @@ export interface OkbConfig {
     /** Default profile: lean | balanced | max (core/retrieval/profiles.ts). */
     profile?: string;
   };
+  rss?: {
+    /** Feeds `okb rss` pulls when called without a URL (also the jobs worker). */
+    feeds?: string[];
+    /** Max new items written per feed pull (default 10). */
+    maxItems?: number;
+  };
   /** Unknown keys are preserved on rewrite (permissive, like the OKF reader). */
   [key: string]: unknown;
 }
