@@ -179,17 +179,22 @@ never rejects on any warning class — doctor is the only strict surface.
 - **Backlinks** = reverse edges → "Cited by".
 - **Tags** = facets for filtering and a synthesized tag-browse view.
 
-### Derived typed edges (OKF-safe)
-OKF keeps links untyped on disk on purpose. We type edges **only in the DB** so
-relational retrieval works without breaking the format: a cached pass classifies
-each link's relationship from its nearest heading/sentence (a link under
-`# Joins` → `joins-with`, under `# Citations` → `cites`, etc.). The markdown file
-stays a plain OKF link; okbrain just knows more.
+### Derived typed edges (OKF-safe, 4.3)
+OKF keeps links untyped on disk on purpose. We type edges **only in the DB**
+(`core/graph/typed-edges.ts`) so relational retrieval works without breaking
+the format: classification is deterministic and local — the clause directly
+before the link wins ("depends on [X]" → `depends-on`), else the nearest
+preceding heading (`# Citations` → `cites`, `# Joins` → `joins-with`; an
+unknown heading means untyped, it does not inherit an earlier one), else
+null. One shared `REL_VOCAB` phrase table drives both the classifier and
+the relational query detector. The markdown file stays a plain OKF link;
+okbrain just knows more. The "cache" is the index itself: rels are
+recomputed by every index build and per-concept write refresh.
 
 ### Storage & queries
 SQLite tables: `nodes(id, type, title, description, resource, timestamp,
-last_reviewed, body_len, content_hash)`, `edges(src, dst)` (plus
-`rel`/`evidence` when typed edges land, Stage 4), `tags(node_id, tag)`,
+last_reviewed, body_len, content_hash)`, `edges(src, dst, rel)` (schema v3;
+`rel` nullable, derived — see typed edges above), `tags(node_id, tag)`,
 `review_state(node_id, snooze_until)` (Resurface's DB-only snooze), and an
 FTS5 table sharing `nodes.rowid`. The index lives at `<bundle>/.okb/index.db`
 — inside the bundle so it travels with context but gitignored and always
@@ -462,7 +467,11 @@ embed it).
    are dropped as stale cache.
 2. Graph expansion: 1-hop neighbors/backlinks of the top fused hits join the
    pool with a damped share (×0.25) of their parent's score, tagged `graph`.
-   (The relational arm over typed edges arrives with 4.3.)
+   The relational arm (`relational.ts`, 4.3) adds one more ranking when the
+   query names a known relation ("what cites X"): anchor found via FTS with
+   question stop-words stripped, then in+out neighbors over that relation,
+   tagged `relational` — direction is recall, fusion ranks. Always on; a
+   strict no-op for every other query.
 3. Optional rerank (`core/retrieval/rerank.ts`) reorders the head by
    cross-encoder relevance — only when the profile asks AND a rerank
    provider is explicitly configured (config/env); key detection never
@@ -704,6 +713,21 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-19 — **Typed edges (4.3): sentence beats heading, unknown headings
+  don't inherit, and the DB is the cache.** Classification must be
+  deterministic (it reruns on every index build), so it's a fixed phrase
+  vocabulary, not a model call: the clause ending at the link is the most
+  local signal and wins; otherwise the nearest preceding heading — and an
+  *unknown* nearest heading yields untyped rather than letting an earlier
+  `# Citations` bleed across sections. Rels live in the edges table (schema
+  v3, nullable `rel`), never in markdown — OKF stays untyped on disk. No
+  separate cache table: rels recompute with the content-hash-skipped index
+  build and the per-write refresh, exactly as cheap as link extraction.
+  The relational arm is always on (no profile knob): detection over the
+  same vocabulary makes it a strict no-op for non-relational queries, and
+  it returns in+out neighbors (grammar-blind) because the arm's job is
+  recall — RRF fusion does the ranking. Consumers that ignore rel
+  (path/orphans/review scorer) now type against `LinkEdge`.
 - 2026-07-19 — **Web pass (4.2): guardrails live in the tools; the frontier
   rule replaces URL trust.** The crawler's chat protocol is one JSON action
   per turn over the existing plain-text gateway (no SDK tool-calling — the

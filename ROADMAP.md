@@ -363,9 +363,20 @@ Goal: the brain improves itself on a schedule.
       observation, strike-out + step cap, CLI usage errors
 
 ### 4.3 Typed edges + relational retrieval
-- [ ] `core/graph/typed-edges.ts` — classify link relation from heading/sentence; store `rel`; cache
-- [ ] `core/retrieval/relational.ts` — relational arm over typed edges (deterministic; no-op for non-relational)
-- [ ] Tests: relation classification; relational query results; non-relational no-op
+- [x] `core/graph/typed-edges.ts` — deterministic classification: the clause
+      right before the link ("depends on [X]") wins, else the nearest
+      preceding heading ("# Citations" → cites; unknown heading = untyped,
+      not inherited), else null; one shared `REL_VOCAB` phrase table drives
+      classifier + query detection; `rel` stored on edges (schema v3 —
+      DB-only, the markdown stays plain OKF; cache = the index itself,
+      recomputed with every index build/write refresh)
+- [x] `core/retrieval/relational.ts` — relational arm: query names a known
+      relation → anchor via FTS (question stop-words stripped) → in+out
+      neighbors over that rel join RRF fusion tagged `relational`; strict
+      no-op otherwise; always on (cheap, deterministic — no profile knob)
+- [x] Tests: heading/sentence/priority/dedupe classification; rel round-trip
+      through the engine; relational queries both directions; four no-op
+      cases; hybrid integration (tag present / absent)
 
 ### 4.4 Link suggestion + review
 - [ ] `link_suggest` → propose cross-links; GUI review inbox; accept writes a normalized link
@@ -457,6 +468,13 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-19 — Stage 4.3 shipped: typed edges (`core/graph/typed-edges.ts` —
+  deterministic sentence-clause → heading → null classification over a
+  shared REL_VOCAB; engine schema v3 stores nullable `rel`, DB-only) and
+  the relational retrieval arm (`core/retrieval/relational.ts` — rel-naming
+  queries anchor via FTS and add in+out rel neighbors to RRF, tagged
+  `relational`; strict no-op otherwise, always on). 336 tests green, tsc
+  clean. Next: 4.4 link suggestion.
 - 2026-07-19 — Stage 4.2 shipped: web pass (`core/ingest/web.ts` — LLM as a
   guarded crawler; JSON-action loop over the plain chat gateway; guardrails
   all enforced in-tool: frontier rule, depth/host/path/page caps, --no-web,

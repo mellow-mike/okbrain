@@ -9,7 +9,7 @@ import { runCli } from "../src/cli.ts";
 import { buildIndex } from "../src/core/engine/index-build.ts";
 import { defaultDbPath, openSqliteEngine } from "../src/core/engine/sqlite.ts";
 import { orphans, shortestPath } from "../src/core/graph/queries.ts";
-import type { EdgeRecord } from "../src/core/engine/interface.ts";
+import type { LinkEdge } from "../src/core/engine/interface.ts";
 
 let root: string;
 
@@ -33,7 +33,7 @@ const write = (id: string, title: string, body: string) =>
   okb("write", id, "--type", "note", "--title", title, "--description", "d", "--body", body);
 
 describe("shortestPath / orphans (pure)", () => {
-  const edges: EdgeRecord[] = [
+  const edges: LinkEdge[] = [
     { src: "a", dst: "b" },
     { src: "c", dst: "b" }, // a-b-c only connects against link direction
     { src: "c", dst: "d" },
@@ -61,7 +61,7 @@ describe("engine: dangling edges", () => {
     await write("b", "B", "[x](/ghost.md)");
     await buildIndex(root, eng);
     // ghost doesn't exist: edge hidden, and a→ghost→b must not fake a depth-2 route
-    expect(eng.listEdges()).toEqual([{ src: "a", dst: "b" }]);
+    expect(eng.listEdges()).toEqual([{ src: "a", dst: "b", rel: null }]);
     expect(eng.neighbors("a", 5)).toEqual([{ id: "b", depth: 1 }]);
     eng.close();
   });

@@ -22,7 +22,7 @@ import type {
 
 export class EngineError extends Error {}
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE nodes(
@@ -39,6 +39,7 @@ CREATE TABLE nodes(
 CREATE TABLE edges(
   src TEXT NOT NULL,
   dst TEXT NOT NULL,
+  rel TEXT,
   PRIMARY KEY (src, dst)
 ) WITHOUT ROWID;
 CREATE INDEX edges_dst ON edges(dst);
@@ -175,15 +176,17 @@ export function openSqliteEngine(dbPath: string): Engine {
 
   const replaceEdges = db.transaction((edges: EdgeRecord[]) => {
     db.query("DELETE FROM edges").run();
-    for (const { src, dst } of edges)
-      db.query("INSERT OR IGNORE INTO edges (src, dst) VALUES (?, ?)").run(src, dst);
+    for (const { src, dst, rel } of edges)
+      db.query("INSERT OR IGNORE INTO edges (src, dst, rel) VALUES (?, ?, ?)").run(src, dst, rel);
   });
 
-  const replaceEdgesFor = db.transaction((src: string, dsts: string[]) => {
-    db.query("DELETE FROM edges WHERE src = ?").run(src);
-    for (const dst of dsts)
-      db.query("INSERT OR IGNORE INTO edges (src, dst) VALUES (?, ?)").run(src, dst);
-  });
+  const replaceEdgesFor = db.transaction(
+    (src: string, edges: { dst: string; rel: string | null }[]) => {
+      db.query("DELETE FROM edges WHERE src = ?").run(src);
+      for (const { dst, rel } of edges)
+        db.query("INSERT OR IGNORE INTO edges (src, dst, rel) VALUES (?, ?, ?)").run(src, dst, rel);
+    },
+  );
 
   const toRecord = (r: NodeRow): NodeRecord => ({
     id: r.id,
@@ -234,13 +237,13 @@ export function openSqliteEngine(dbPath: string): Engine {
     ),
 
     replaceEdges: fresh((edges) => replaceEdges(edges)),
-    replaceEdgesFor: fresh((src, dsts) => replaceEdgesFor(src, dsts)),
+    replaceEdgesFor: fresh((src, edges) => replaceEdgesFor(src, edges)),
 
     listEdges: fresh(() =>
       // Dangling edges (unindexed endpoint) stay stored but never surface.
       db
         .query<EdgeRecord, []>(
-          `SELECT e.src, e.dst FROM edges e
+          `SELECT e.src, e.dst, e.rel FROM edges e
            JOIN nodes s ON s.id = e.src JOIN nodes d ON d.id = e.dst
            ORDER BY e.src, e.dst`,
         )

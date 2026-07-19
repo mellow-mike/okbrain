@@ -6,9 +6,10 @@
 // with a note, never an error. Deterministic given its inputs.
 
 import type { Engine, VectorStore } from "../engine/interface.ts";
+import { relationalRanking } from "./relational.ts";
 import type { RetrievalProfile } from "./profiles.ts";
 
-export type RecallSource = "keyword" | "vector" | "graph";
+export type RecallSource = "keyword" | "vector" | "graph" | "relational";
 
 export interface HybridHit {
   id: string;
@@ -66,8 +67,13 @@ export async function hybridRetrieve(
     sources.get(id)!.add(s);
   };
 
-  for (const q of queries)
+  for (const q of queries) {
     rankings.push(eng.search(q, profile.ftsK).map((h) => (mark(h.id, "keyword"), h.id)));
+    // Relational arm (4.3): typed-edge recall for queries naming a relation;
+    // deterministic, and a strict no-op for everything else.
+    const rel = relationalRanking(q, eng);
+    if (rel !== null) rankings.push(rel.ranking.map((id) => (mark(id, "relational"), id)));
+  }
 
   const snippets = new Map<string, string>();
   let vectorSkipped: string | null = null;
