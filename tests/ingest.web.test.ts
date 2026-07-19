@@ -208,6 +208,35 @@ describe("runEnrich loop", () => {
     }
   });
 
+  test("link_suggest tool: wired dep answers, missing dep explains", async () => {
+    const root = tempBundle();
+    const s = scripted([
+      act({ action: "link_suggest", id: "notes/x" }),
+      act({ action: "done", summary: "" }),
+    ]);
+    try {
+      await runEnrich(root, "t", [], defaultLimits([]), {
+        ...deps(s.chat, undefined),
+        suggestLinks: async (id) => [{ id: "notes/other", forId: id }],
+      });
+      expect(s.observations[1]).toContain("notes/other");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+
+    const root2 = tempBundle();
+    const s2 = scripted([
+      act({ action: "link_suggest", id: "notes/x" }),
+      act({ action: "done", summary: "" }),
+    ]);
+    try {
+      await runEnrich(root2, "t", [], defaultLimits([]), deps(s2.chat, undefined));
+      expect(s2.observations[1]).toContain("okb index");
+    } finally {
+      rmSync(root2, { recursive: true, force: true });
+    }
+  });
+
   test("a bad write becomes an observation, not a crash", async () => {
     const root = tempBundle();
     const { observations, chat } = scripted([

@@ -266,6 +266,38 @@ function renderAsk() {
   });
 }
 
+// ---- link suggestions (4.4) ---------------------------------------------
+
+// Shared panel: list suggestions for `id`; `actLabel`/`data-act` decide what
+// clicking a row's button does (accept = write via link_accept; insert =
+// editor-local, no write).
+async function loadSuggestions(el, id, act, actLabel) {
+  el.innerHTML = '<span class="muted">suggesting…</span>';
+  try {
+    var ss = await api('link_suggest', { id: id });
+    el.innerHTML = ss.length
+      ? ss.map(function (s) {
+          return '<div class="row suggestion" data-target="' + esc(s.id) + '">' +
+            '<button data-act="' + act + '">' + actLabel + '</button>' +
+            '<span>' + esc(s.title || s.id) +
+            ' <span class="muted">(' + s.score.toFixed(2) + '; ' + esc(s.reasons.join('; ')) + ')</span></span></div>';
+        }).join('')
+      : '<span class="muted">no suggestions</span>';
+  } catch (e) { el.innerHTML = errorBox(e); }
+}
+
+async function acceptSuggestion(btn, conceptId) {
+  var target = btn.closest('.suggestion').getAttribute('data-target');
+  btn.disabled = true;
+  try {
+    var r = await api('link_accept', { id: conceptId, target: target });
+    btn.textContent = r.added ? 'linked ✓' : 'already linked';
+  } catch (e) {
+    btn.textContent = 'failed';
+    btn.title = e.message;
+  }
+}
+
 // ---- review view --------------------------------------------------------
 
 async function renderReview() {
@@ -288,17 +320,23 @@ async function renderReview() {
         (it.garnish ? '<div class="garnish">↳ ' + esc(it.garnish) + '</div>' : '') +
         '<div class="row"><button data-act="done">Done</button>' +
         '<button data-act="snooze">Snooze 7d</button>' +
+        '<button data-act="suggest">Suggest links</button>' +
         '<a href="' + editorHref(it.id) + '"><button>Open</button></a>' +
-        '<a href="' + graphHref(it.id) + '"><button>Graph</button></a></div></div>';
+        '<a href="' + graphHref(it.id) + '"><button>Graph</button></a></div>' +
+        '<div class="suggest"></div></div>';
     }).join('');
   }
   listEl.addEventListener('click', async function (e) {
     var btn = e.target.closest('button[data-act]');
     if (!btn) return;
-    var id = btn.closest('.card').getAttribute('data-id');
+    var card = btn.closest('.card');
+    var id = card.getAttribute('data-id');
+    var act = btn.getAttribute('data-act');
+    if (act === 'suggest') { loadSuggestions(card.querySelector('.suggest'), id, 'accept', 'Link'); return; }
+    if (act === 'accept') { acceptSuggestion(btn, id); return; }
     btn.disabled = true;
     try {
-      await api(btn.getAttribute('data-act') === 'done' ? 'review_done' : 'review_snooze', { id: id });
+      await api(act === 'done' ? 'review_done' : 'review_snooze', { id: id });
       load();
     } catch (err) { listEl.insertAdjacentHTML('afterbegin', errorBox(err)); }
   });
@@ -322,14 +360,21 @@ async function renderInbox() {
         '<div class="why"><code>' + esc(r.id) + '</code></div>' +
         '<div class="row"><a href="' + editorHref(r.id) + '"><button>Open</button></a>' +
         '<button data-act="read">Mark read</button>' +
-        '<a href="' + graphHref(r.id) + '"><button>Graph</button></a></div></div>';
+        '<button data-act="suggest">Suggest links</button>' +
+        '<a href="' + graphHref(r.id) + '"><button>Graph</button></a></div>' +
+        '<div class="suggest"></div></div>';
     }).join('');
   }
   listEl.addEventListener('click', async function (e) {
-    var btn = e.target.closest('button[data-act="read"]');
+    var btn = e.target.closest('button[data-act]');
     if (!btn) return;
+    var card = btn.closest('.card');
+    var id = card.getAttribute('data-id');
+    var act = btn.getAttribute('data-act');
+    if (act === 'suggest') { loadSuggestions(card.querySelector('.suggest'), id, 'accept', 'Link'); return; }
+    if (act === 'accept') { acceptSuggestion(btn, id); return; }
     btn.disabled = true;
-    try { await api('inbox_read', { id: btn.closest('.card').getAttribute('data-id') }); load(); }
+    try { await api('inbox_read', { id: id }); load(); }
     catch (err) { listEl.insertAdjacentHTML('afterbegin', errorBox(err)); }
   });
   load();
@@ -375,9 +420,10 @@ async function renderEditor(id) {
     '<button class="primary">Save</button>' +
     '<select id="ed-linkpick"><option value="">insert link to…</option></select>' +
     '<button type="button" id="ed-cite">+ Citations</button>' +
+    (exists ? '<button type="button" id="ed-suggest">Suggest links</button>' : '') +
     (exists ? '<a href="' + graphHref(id) + '"><button type="button">Open in graph</button></a>' : '') +
     '<span id="ed-msg" class="muted"></span></div>' +
-    '</form><div id="ed-back"></div></div>';
+    '</form><div id="ed-sugg"></div><div id="ed-back"></div></div>';
   document.getElementById('ed-body').value = body;
   if (exists) document.getElementById('ed-id').readOnly = true;
 
@@ -405,6 +451,22 @@ async function renderEditor(id) {
       pick.value = '';
     });
   }).catch(function () {});
+
+  if (exists) {
+    var suggEl = document.getElementById('ed-sugg');
+    document.getElementById('ed-suggest').addEventListener('click', function () {
+      loadSuggestions(suggEl, id, 'insert', 'Insert');
+    });
+    // Inserting is editor-local: the link lands in the textarea and becomes
+    // real (and normalized) only when the user saves.
+    suggEl.addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-act="insert"]');
+      if (!btn) return;
+      var target = btn.closest('.suggestion').getAttribute('data-target');
+      insertAtCursor('[' + target.split('/').pop() + '](/' + target + '.md)');
+      btn.textContent = 'inserted ✓';
+    });
+  }
 
   document.getElementById('ed-cite').addEventListener('click', function () {
     var url = document.getElementById('ed-resource').value.trim();

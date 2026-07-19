@@ -379,9 +379,22 @@ Goal: the brain improves itself on a schedule.
       cases; hybrid integration (tag present / absent)
 
 ### 4.4 Link suggestion + review
-- [ ] `link_suggest` → propose cross-links; GUI review inbox; accept writes a normalized link
-- [ ] Wire suggest-links buttons into the GUI Review / Inbox / Editor views (deferred from 3.2)
-- [ ] Tests: suggestions ranked; accept produces conformant link
+- [x] `core/graph/link-suggest.ts` — deterministic proposals with reasons
+      (title mention w/ word boundary → strongest; per-word FTS similarity —
+      engine.search is AND-semantics so one query per meaty word; shared
+      tags); self + already-connected (both directions) excluded
+- [x] Ops: `link_suggest` (read) + `link_accept` (write — appends a
+      normalized `[Title](/id.md)` under `# Related`, creating the section;
+      re-accept is a visible no-op); CLI `okb links suggest|accept`; the
+      enrich agent's toolset gained the `link_suggest` action (4.2 note)
+- [x] Suggested links always route through review (open question resolved —
+      see CONTEXT decision); accept is the only writer
+- [x] GUI: suggest-links buttons in Review + Inbox cards (accept = writes) and
+      the Editor (insert = textarea-local, real on save) — deferred from 3.2
+- [x] Tests: ranking + reasons + word-boundary mention; exclusions; CLI e2e
+      (accept → conformant `# Related` link, backlink visible without
+      reindex, repeat no-op, accepted target drops out); missing target
+      not_found; enrich-tool wiring both with and without an index
 
 ### 4.5 Jobs / cron
 - [ ] `core/jobs/worker.ts` — single background worker + file/SQLite lock
@@ -468,6 +481,14 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-19 — Stage 4.4 shipped: link suggestion (`core/graph/link-suggest.ts`
+  — deterministic reasons-first ranking: bounded title mention, per-word FTS
+  similarity, shared tags; connected/self excluded), ops `link_suggest`
+  (read) + `link_accept` (write → normalized link under `# Related`), CLI
+  `okb links suggest|accept`, enrich toolset action, GUI buttons in
+  Review/Inbox (accept) + Editor (insert-only). Open question resolved:
+  suggestions always route through review. 342 tests green, tsc clean.
+  Next: 4.5 jobs/cron.
 - 2026-07-19 — Stage 4.3 shipped: typed edges (`core/graph/typed-edges.ts` —
   deterministic sentence-clause → heading → null classification over a
   shared REL_VOCAB; engine schema v3 stores nullable `rel`, DB-only) and

@@ -545,7 +545,8 @@ capability once → it appears in all three. CLI/GUI can't drift.
 | `okb graph <id> [--depth N]` | read | Neighborhood with `→`/`←`/`↔` direction tags |
 | `okb path <from> <to>` | read | Shortest link chain between two concepts |
 | `okb orphans` | read | Concepts with no links in or out |
-| `okb links suggest` | write | Propose cross-links for review |
+| `okb links suggest <id>` | read | Propose cross-links (deterministic, with reasons) |
+| `okb links accept <id> <target>` | write | Accept one: normalized link under `# Related` |
 | `okb index` / `okb embed` | admin | (Re)build FTS / vectors incrementally |
 | `okb rebuild --confirm-destructive` | admin | Wipe + regenerate index from bundle |
 | `okb doctor` / `okb lint` | read | OKF conformance + health report |
@@ -590,15 +591,16 @@ palettes. Views:
   rewired to focus their node), click-through to the editor.
 - **Editor** — scaffold fields (type/title/description/tags/resource) + a
   markdown body textarea; concept-id link picker inserting normalized
-  links; citation-section helper; live backlinks; saves via
-  `write_concept`, so every save is conformant. (Suggested-link inbox
-  arrives with 4.4.) Deliberately not a rich editor: the bundle is plain
-  markdown and external editors remain first-class.
+  links; citation-section helper; live backlinks; suggest-links panel
+  (insert-only — a suggestion lands in the textarea and becomes real on
+  save); saves via `write_concept`, so every save is conformant.
+  Deliberately not a rich editor: the bundle is plain markdown and external
+  editors remain first-class.
 - **Ask** — SSE streaming: retrieved context appears as chips before the
   answer arrives; verified citations link to graph and editor.
 - **Review** — card stack with scores + reasons, optional garnish toggle;
-  done / snooze / open / graph per card.
-- **Inbox** — unread clips/notes; open / mark-read.
+  done / snooze / suggest-links (accepts write) / open / graph per card.
+- **Inbox** — unread clips/notes; open / mark-read / suggest-links.
 - **Settings** — AI providers + retrieval profile (backed by `init`, which
   persists them), git sync (status / run), maintenance (re-index, embed,
   doctor report). Enrichment guardrails join with Stage 4.
@@ -713,6 +715,20 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-19 — **Link suggestion (4.4): always through review, never
+  auto-insert.** Resolves the open question: a suggested link that writes
+  itself would put derived guesses into canonical markdown, so `link_suggest`
+  is a read op (deterministic scoring with stated reasons — title mention
+  with word boundaries strongest, per-word FTS similarity because
+  engine.search is AND-semantics, shared tags) and `link_accept` is the only
+  writer: it appends a normalized `[Title](/id.md)` under `# Related` via
+  the conformance writer, so accepts are content changes (timestamp + log,
+  correctly). Already-connected concepts in either direction are never
+  suggested — the queue self-cleans as you accept. The GUI keeps the same
+  split: Review/Inbox buttons accept (write ops), while the Editor's button
+  only inserts into the textarea — nothing becomes real until Save. The
+  enrich agent gets the same engine via a `link_suggest` action rather than
+  a separate implementation.
 - 2026-07-19 — **Typed edges (4.3): sentence beats heading, unknown headings
   don't inherit, and the DB is the cache.** Classification must be
   deterministic (it reruns on every index build), so it's a fixed phrase
@@ -1066,7 +1082,6 @@ sections above as current truth; this log says *why/when*.
   upgrade behind the engine interface.
 
 ### Open questions (decide as they come up; record the answer here)
-- Suggested links: auto-insert on capture vs always route through a review inbox?
 - Concept `type` vocabulary: ship a small non-binding default set (Note, Person,
   Project, Reference, Idea, Meeting…) vs fully free-form?
 - Acceptance test: round-trip the three OKF sample bundles (GA4, Stack Overflow,

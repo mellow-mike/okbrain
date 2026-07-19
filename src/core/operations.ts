@@ -12,6 +12,8 @@ import { createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
 import { loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
 import type { Engine, Neighbor, VectorStore } from "./engine/interface.ts";
+import { suggestLinks, type LinkSuggestion } from "./graph/link-suggest.ts";
+import { extractTargets } from "./graph/links.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
 import { log } from "./log.ts";
 import { suggestTags } from "./ingest/autotag.ts";
@@ -321,6 +323,22 @@ async function runAsk(
   warnVectorSkip(ctx, r.vectorSkipped);
   emit?.("answer", { answer: r.answer, citations: r.citations });
   return r;
+}
+
+/** Suggestions for one concept (op handler + the enrich agent's tool). */
+async function suggestFor(ctx: OpContext, id: string, limit?: number): Promise<LinkSuggestion[]> {
+  const view = await readConceptView(ctx.bundle, id);
+  return suggestLinks(
+    {
+      id,
+      title: fmString(view.frontmatter.title),
+      description: fmString(view.frontmatter.description),
+      body: view.body,
+      tags: fmTags(view.frontmatter.tags),
+    },
+    ctx.engine(),
+    limit,
+  );
 }
 
 /** Writer/id errors are caller mistakes → bad_params; guard blocks → refused. */
@@ -947,6 +965,54 @@ export const operations: readonly Operation[] = [
         .join("\n"),
   },
   {
+    name: "link_suggest",
+    cliName: "links suggest",
+    summary: "Propose cross-links for a concept (deterministic, with reasons)",
+    scope: "read",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "concept id to suggest links for" },
+      { name: "limit", type: "int", description: "max suggestions (default 5)" },
+    ],
+    handler: (ctx, p) => suggestFor(ctx, p.id as string, p.limit as number | undefined),
+    render: (r) => {
+      const ss = r as LinkSuggestion[];
+      if (ss.length === 0) return "(no suggestions)";
+      return ss
+        .map((s) => `${s.score.toFixed(2)}  ${s.id} — ${s.title}  (${s.reasons.join("; ")})`)
+        .join("\n");
+    },
+  },
+  {
+    name: "link_accept",
+    cliName: "links accept",
+    summary: "Accept a suggestion: append a normalized link under # Related",
+    scope: "write",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "concept that gains the link" },
+      { name: "target", type: "string", required: true, positional: true, description: "concept id to link to" },
+    ],
+    handler: async (ctx, p) => {
+      const [id, target] = [p.id as string, p.target as string];
+      const view = await readConceptView(ctx.bundle, id);
+      const targetView = await readConceptView(ctx.bundle, target); // not_found on missing
+      if (extractTargets(id, view.body).includes(target)) return { id, target, added: false };
+      const line = `- [${fmString(targetView.frontmatter.title) || target}](/${target}.md)`;
+      const body = view.body.replace(/\s+$/, "");
+      const withSection = /^# Related$/m.test(body)
+        ? body.replace(/^# Related$/m, `# Related\n\n${line}`)
+        : `${body}\n\n# Related\n\n${line}`;
+      await writing(() => writeConcept(ctx.bundle, { id, body: withSection }));
+      await reindex(ctx, [id]);
+      return { id, target, added: true };
+    },
+    render: (r) => {
+      const x = r as { id: string; target: string; added: boolean };
+      return x.added
+        ? `linked ${x.id} → ${x.target}`
+        : `${x.id} already links to ${x.target}`;
+    },
+  },
+  {
     name: "enrich",
     cliName: "enrich",
     summary: "Run the enrichment agent (LLM as a guarded crawler; caps enforced in-tool)",
@@ -1002,6 +1068,7 @@ export const operations: readonly Operation[] = [
       const gw = createGateway(ctx.config().ai ?? {});
       const r = await runEnrich(ctx.bundle, task, seeds, limits, {
         chat: async (messages) => (await gw.chat(messages)).text,
+        suggestLinks: ctx.hasIndex() ? (id) => suggestFor(ctx, id) : undefined,
         listConcepts: async () => {
           if (ctx.hasIndex()) {
             const eng = ctx.engine();

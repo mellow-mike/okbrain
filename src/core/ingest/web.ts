@@ -52,6 +52,8 @@ export interface EnrichDeps {
   fetcher?(url: string): Promise<FetchedPage>;
   /** Concept ids + titles the list tool returns (engine or bundle scan). */
   listConcepts(): Promise<{ id: string; title: string }[]>;
+  /** Cross-link proposals (4.4); absent when the bundle has no index. */
+  suggestLinks?(id: string): Promise<unknown>;
 }
 
 export interface EnrichResult {
@@ -120,6 +122,7 @@ Respond with EXACTLY one JSON object per turn (no prose), one of:
 {"action":"list_concepts"}
 {"action":"read_concept","id":"<concept id>"}
 {"action":"fetch_url","url":"<seed or discovered url>"}
+{"action":"link_suggest","id":"<concept id>"}
 {"action":"write_concept","id":"<id>","type":"<type>","title":"...","description":"one line","body":"<markdown>","tags":["optional"]}
 {"action":"done","summary":"<what you did and why>"}
 
@@ -247,6 +250,11 @@ export async function runEnrich(
           }
           case "fetch_url":
             observation = await fetchTool(String(action.url ?? ""));
+            break;
+          case "link_suggest":
+            observation = deps.suggestLinks
+              ? { suggestions: await deps.suggestLinks(String(action.id ?? "")) }
+              : { error: "link suggestions need an index (run `okb index` first)" };
             break;
           case "write_concept":
             observation = await writeTool(action);
