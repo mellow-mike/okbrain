@@ -397,11 +397,23 @@ Goal: the brain improves itself on a schedule.
       not_found; enrich-tool wiring both with and without an index
 
 ### 4.5 Jobs / cron
-- [ ] `core/jobs/worker.ts` — single background worker + file/SQLite lock
-- [ ] Scheduled: embed backfill, enrich stale, regenerate index/backlinks,
-      `doctor`, nightly review-queue recompute (F-B.7)
-- [ ] Progress to stderr; clean shutdown
-- [ ] Tests: lock prevents double-run; jobs idempotent
+- [x] `core/jobs/worker.ts` — sequential runner + `.okb/jobs.lock` (exclusive
+      create; stale lock — dead pid, unreadable, or >24 h — reclaimed once);
+      scheduling belongs to the OS (cron/launchd/Task Scheduler invoking
+      `okb jobs`), no daemon in v1
+- [x] `okb jobs [--only …]` runs: index refresh (also regenerates edges/
+      backlinks wholesale), embed backfill (only when a vector store already
+      exists — never creates one), rss pull (config `rss.feeds`), review
+      queue recompute (F-B.7 — queue is on-demand, so the job surfaces
+      today's queue in the run report), doctor. **enrich-stale deliberately
+      excluded**: no job spends AI implicitly (no-silent-spend rule); run
+      `okb enrich` when you mean it
+- [x] Progress to stderr (structured log); SIGINT/SIGTERM finish the current
+      job then stop; per-job failures captured, later jobs still run; exit 1
+      when any non-skipped job failed
+- [x] Tests: lock exclusivity/stale-reclaim/release; failure capture +
+      ordering; CLI e2e (run/skip reasons, idempotent re-run, held-lock
+      refusal, `--only` subset + unknown-job usage error)
 
 ### 4.6 Skills
 - [ ] `skills/RESOLVER.md` (thin router) + `capture/enrich/ingest/query/daily-note/link-suggest` SKILL.md
@@ -481,6 +493,12 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-19 — Stage 4.5 shipped: jobs worker (`core/jobs/worker.ts` —
+  sequential run under `.okb/jobs.lock`, stale-reclaim once, signal-clean
+  stop, per-job failure capture; `okb jobs [--only]` = index, embed
+  backfill (existing store only), rss pull, review recompute (F-B.7),
+  doctor; enrich-stale excluded by the no-silent-spend rule; OS cron owns
+  scheduling). 349 tests green, tsc clean. Next: 4.6 skills.
 - 2026-07-19 — Stage 4.4 shipped: link suggestion (`core/graph/link-suggest.ts`
   — deterministic reasons-first ranking: bounded title mention, per-word FTS
   similarity, shared tags; connected/self excluded), ops `link_suggest`

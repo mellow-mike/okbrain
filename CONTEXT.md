@@ -685,9 +685,17 @@ Decision rule: lookup/list/status → CLI command (deterministic); needs to
 think/adapt → skill. Operating discipline worth keeping: do a task manually
 3–10×, codify it into a skill, then put it on cron.
 
-Jobs/cron: a single background worker + file/SQLite lock for nightly embedding
-backfill, enrichment of stale concepts, `index.md`/backlink regeneration, and
-`okb doctor`. No queue infra in v1.
+Jobs/cron (`core/jobs/worker.ts`, `okb jobs`): one sequential maintenance
+run under `.okb/jobs.lock` — exclusive create, stale locks (dead pid,
+unreadable, >24 h) reclaimed once, SIGINT/SIGTERM finish the current job
+then stop, per-job failures captured so later jobs still run. The job list:
+index refresh (regenerates edges/backlinks), embed backfill (only when a
+vector store already exists), rss pull (`rss.feeds`), review-queue
+recompute (surfaced in the run report — the queue itself is on-demand),
+doctor. Nothing in the list spends AI implicitly; enrich-stale is
+deliberately not a job — `okb enrich` is always an explicit decision.
+Scheduling belongs to the OS (cron / launchd / Task Scheduler invoking
+`okb jobs`); no daemon, no queue infra in v1.
 
 ---
 
@@ -715,6 +723,19 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-19 — **Jobs (4.5): the OS schedules, okb runs once under a lock,
+  and no job spends AI implicitly.** A daemon would violate the lightweight
+  core for zero gain — every platform already ships a scheduler, so
+  `okb jobs` is a single idempotent pass (cron/launchd/Task Scheduler owns
+  the cadence) guarded by an exclusively-created `.okb/jobs.lock`; stale
+  locks (dead pid / unreadable / >24 h) are reclaimed exactly once so a
+  crash can't wedge the nightly run, while a live lock always wins. The
+  roadmap's "enrich stale" job was dropped from the list on the
+  no-silent-spend rule (rerank/garnish precedent): embed only backfills a
+  store the user explicitly created, rss/index/doctor/review are zero-AI,
+  and enrichment stays a deliberate `okb enrich`. Job failures are data
+  (captured per job, run continues, exit 1 at the end) — a broken feed must
+  not cancel doctor.
 - 2026-07-19 — **Link suggestion (4.4): always through review, never
   auto-insert.** Resolves the open question: a suggested link that writes
   itself would put derived guesses into canonical markdown, so `link_suggest`

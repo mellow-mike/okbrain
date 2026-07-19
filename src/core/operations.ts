@@ -36,6 +36,7 @@ import { rerankConfigured, rerankHits } from "./retrieval/rerank.ts";
 import { garnishQueue, pickRecent, type GarnishNote } from "./review/garnish.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
 import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken } from "./serve-token.ts";
+import { JobLockError, runJobs, type Job, type JobResult } from "./jobs/worker.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
 import { buildVizGraph, exportViz, type VizExport, type VizGraph } from "./viz/export.ts";
 
@@ -323,6 +324,35 @@ async function runAsk(
   warnVectorSkip(ctx, r.vectorSkipped);
   emit?.("answer", { answer: r.answer, citations: r.citations });
   return r;
+}
+
+/**
+ * Pull feeds and reindex what landed (`okb rss` + the jobs worker). A single
+ * explicit URL fails loudly; a configured multi-pull records per-feed errors
+ * so one dead feed can't block the rest.
+ */
+async function pullFeeds(ctx: OpContext, urls: string[], limit?: number): Promise<RssPullResult[]> {
+  const results: RssPullResult[] = [];
+  for (const url of urls) {
+    try {
+      const r = await writing(() =>
+        pullFeed(ctx.bundle, url, {
+          resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined,
+          limit,
+          stripParams: ctx.config().clip?.stripParams,
+        }),
+      );
+      await reindex(ctx, r.added.map((a) => a.id));
+      results.push(r);
+    } catch (e) {
+      if (urls.length === 1) throw e;
+      results.push({
+        url, feed: "", added: [], deduped: 0, skipped: 0,
+        error: e instanceof OpError ? e.message : (e as Error).message,
+      });
+    }
+  }
+  return results;
 }
 
 /** Suggestions for one concept (op handler + the enrich agent's tool). */
@@ -928,29 +958,7 @@ export const operations: readonly Operation[] = [
           "no feed URL given and no rss.feeds configured (add feeds to config.json)",
           "bad_params",
         );
-      const results: RssPullResult[] = [];
-      for (const url of urls) {
-        try {
-          const r = await writing(() =>
-            pullFeed(ctx.bundle, url, {
-              resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined,
-              limit: (p.limit as number | undefined) ?? cfg?.maxItems,
-              stripParams: ctx.config().clip?.stripParams,
-            }),
-          );
-          await reindex(ctx, r.added.map((a) => a.id));
-          results.push(r);
-        } catch (e) {
-          // A single explicit feed fails loudly; a configured multi-pull
-          // records the failure so one dead feed can't block the rest.
-          if (urls.length === 1) throw e;
-          results.push({
-            url, feed: "", added: [], deduped: 0, skipped: 0,
-            error: e instanceof OpError ? e.message : (e as Error).message,
-          });
-        }
-      }
-      return results;
+      return pullFeeds(ctx, urls, (p.limit as number | undefined) ?? cfg?.maxItems);
     },
     render: (r) =>
       (r as RssPullResult[])
@@ -1146,6 +1154,95 @@ export const operations: readonly Operation[] = [
       const x = r as { id: string; removed: boolean };
       return x.removed ? `marked ${x.id} read` : `${x.id} was not in the inbox`;
     },
+  },
+  {
+    // No AI-spending job runs implicitly: embed only backfills an existing
+    // store, and enrich-stale is deliberately absent (run `okb enrich` when
+    // you mean to spend). Scheduling belongs to the OS (cron/Task Scheduler).
+    name: "jobs",
+    cliName: "jobs",
+    summary: "Run the maintenance jobs once, under a lock (schedule via OS cron)",
+    scope: "admin",
+    params: [
+      { name: "only", type: "string", description: "comma-separated subset of: index,embed,rss,review,doctor" },
+    ],
+    handler: async (ctx, p) => {
+      const cfg = ctx.config();
+      const feeds = cfg.rss?.feeds ?? [];
+      const jobs: Job[] = [
+        {
+          name: "index",
+          run: async () => renderStats(await buildIndex(ctx.bundle, ctx.engine(true))),
+        },
+        {
+          name: "embed",
+          skip: ctx.hasVectors()
+            ? undefined
+            : "no vector store — run `okb embed` once to opt in",
+          run: async () => {
+            const s = await embedBundle(ctx.bundle, ctx.vectors(), gatewayEmbedder(cfg.ai ?? {}));
+            return `embedded ${s.embedded}, skipped ${s.skipped}, removed ${s.removed}${s.pending > 0 ? `, ${s.pending} pending` : ""}`;
+          },
+        },
+        {
+          name: "rss",
+          skip: feeds.length > 0 ? undefined : "no rss.feeds configured",
+          run: async () => {
+            const rs = await pullFeeds(ctx, feeds, cfg.rss?.maxItems);
+            const added = rs.reduce((n, r) => n + r.added.length, 0);
+            const failed = rs.filter((r) => r.error !== undefined);
+            return `${added} added across ${rs.length} feeds${failed.length > 0 ? `; failed: ${failed.map((f) => f.url).join(", ")}` : ""}`;
+          },
+        },
+        {
+          // F-B.7 nightly recompute: the queue is on-demand, so "recompute"
+          // means surfacing today's queue in the run report.
+          name: "review",
+          run: async () => {
+            const q = queueFor(ctx);
+            return q.length === 0
+              ? "queue empty"
+              : q.map((it, i) => `${i + 1}. ${it.id} (${it.score.toFixed(2)}) — ${it.reasons.join("; ")}`).join("\n");
+          },
+        },
+        {
+          name: "doctor",
+          run: async () => {
+            const rep = await runDoctor(ctx.bundle);
+            return `${rep.ok ? "ok" : "NOT CONFORMANT"} — ${rep.errors} errors, ${rep.warnings} warnings`;
+          },
+        },
+      ];
+      let picked = jobs;
+      if (p.only !== undefined) {
+        const names = (p.only as string).split(",").map((s) => s.trim()).filter((s) => s !== "");
+        for (const n of names)
+          if (!jobs.some((j) => j.name === n))
+            throw new OpError(
+              `unknown job: ${n} (known: ${jobs.map((j) => j.name).join(", ")})`,
+              "bad_params",
+            );
+        picked = jobs.filter((j) => names.includes(j.name));
+      }
+      try {
+        return await runJobs(ctx.bundle, picked);
+      } catch (e) {
+        if (e instanceof JobLockError) throw new OpError(e.message, "refused");
+        throw e;
+      }
+    },
+    render: (r) =>
+      (r as JobResult[])
+        .map((j) => {
+          if (j.skipped) return `[skip] ${j.name} — ${j.detail}`;
+          const tag = j.ok ? " ok " : "FAIL";
+          const detail = j.detail.includes("\n")
+            ? "\n" + j.detail.replace(/^/gm, "       ")
+            : ` — ${j.detail}`;
+          return `[${tag}] ${j.name} (${j.ms} ms)${detail}`;
+        })
+        .join("\n"),
+    exitCode: (r) => ((r as JobResult[]).some((j) => !j.ok && !j.skipped) ? 1 : 0),
   },
   {
     name: "init",
