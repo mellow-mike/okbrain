@@ -336,11 +336,31 @@ Goal: the brain improves itself on a schedule.
       limit paging, doctor-clean output, CLI no-feeds error + live guard
 
 ### 4.2 Web pass (LLM-as-crawler)
-- [ ] `core/ingest/web.ts` — `fetch_url` tool with guardrails (`--web-max-pages`, `--web-max-depth`, allowed-hosts, path prefix/deny, `--no-web`)
-- [ ] Crawler loop: enrich existing concept | mint `references/<slug>` | skip; write `# Citations`
-- [ ] Tool set: `list_concepts`, `read_concept_raw`, `read_existing_doc`, `write_concept_doc`, `fetch_url`, `link_suggest`, `embed_doc` (all trust-aware)
-- [ ] `okb enrich [--web-seed …]`
-- [ ] Tests: caps enforced inside the tool; host allowlist; no-web path
+- [x] `core/ingest/web.ts` — `fetch_url` tool with guardrails enforced
+      in-tool: `--no-web`, frontier rule (only seeds + links discovered on
+      fetched pages are fetchable — an invented URL is refused with zero
+      packets), depth cap, host allowlist (default: seed hosts, subdomains
+      ok), path allow/deny prefixes, page cap (checked last so policy
+      refusals report their real reason), step cap; guarded fetch underneath
+      (SSRF guard stays live)
+- [x] Crawler loop: JSON-action protocol over the plain-text chat gateway
+      (list_concepts / read_concept / fetch_url / write_concept / done);
+      enrich existing | mint `references/<slug>` (new ids confined there,
+      tool-enforced) | skip; citations prompted under `# Citations`;
+      guard refusals + bad writes are error observations (model corrects
+      course), unparseable replies strike out after 2
+- [x] Tool set simplified vs the sketch: one read tool (read_concept, raw);
+      `embed_doc` unnecessary — writes go through the standard reindex hook
+      (index + vectors refresh automatically); `link_suggest` joins the
+      toolset when 4.4 lands
+- [x] `okb enrich [task] [--web-seed …] [--concept id] [--web-max-pages]
+      [--web-max-depth] [--allow-host] [--allow-path] [--deny-path]
+      [--no-web]`; GUI Settings gained the enrichment form (guardrails +
+      run), deferred from 3.2
+- [x] Tests: every cap/filter enforced in-tool (incl. frontier + depth-2
+      refusal + zero-packet invented-URL), scripted-chat full pass
+      (doctor-clean cited reference), references/ confinement, bad-write
+      observation, strike-out + step cap, CLI usage errors
 
 ### 4.3 Typed edges + relational retrieval
 - [ ] `core/graph/typed-edges.ts` — classify link relation from heading/sentence; store `rel`; cache
@@ -437,6 +457,13 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-19 — Stage 4.2 shipped: web pass (`core/ingest/web.ts` — LLM as a
+  guarded crawler; JSON-action loop over the plain chat gateway; guardrails
+  all enforced in-tool: frontier rule, depth/host/path/page caps, --no-web,
+  step cap; SSRF guard underneath; new ids confined to references/).
+  `okb enrich` + GUI Settings enrichment form (deferred from 3.2). 10 new
+  tests vs scripted chat + fake fetcher (zero network). 326 tests green,
+  tsc clean. Next: 4.3 typed edges.
 - 2026-07-19 — Stage 4.1 shipped: RSS/Atom ingest (`core/ingest/rss.ts` —
   linkedom XML parse over direct-child lookups, RSS 2.0/RDF/Atom;
   `okb rss [url] [--limit]`, no URL = config `rss.feeds`, per-feed errors

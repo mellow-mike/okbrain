@@ -468,6 +468,18 @@ async function renderSettings() {
     '<h3>Sync (git)</h3><div class="row">' +
     '<button id="sync-status">Status</button><button id="sync-run" class="primary">Sync now</button></div>' +
     '<div id="sync-out"></div>' +
+    '<h3>Enrichment (guardrailed web pass)</h3>' +
+    '<form id="enrf" class="stack"><div class="grid">' +
+    field('web-seed', 'Seed URLs', '', 'comma-separated http(s) URLs') +
+    field('task', 'Task', '', 'what to improve (optional)') +
+    field('web-max-pages', 'Max pages', '', '5') +
+    field('web-max-depth', 'Max depth', '', '1') +
+    field('allow-host', 'Allowed hosts', '', 'default: the seeds’ hosts') +
+    field('deny-path', 'Denied path prefixes', '', 'e.g. /admin,/login') +
+    '</div><div class="row"><label class="field"><span>Web</span>' +
+    '<select id="ed-no-web"><option value="">on</option><option value="1">off (--no-web)</option></select></label>' +
+    '<button class="primary">Run enrich</button></div></form>' +
+    '<div id="enr-out"></div>' +
     '<h3>Maintenance</h3><div class="row">' +
     '<button id="mx-index">Re-index</button><button id="mx-embed">Embed</button>' +
     '<button id="mx-doctor">Doctor</button></div><div id="mx-out"></div></div>';
@@ -490,6 +502,27 @@ async function renderSettings() {
         ' (' + r.chat.keyStatus + ')') + '\nembed: ' + esc(r.embed.provider + ' / ' + r.embed.model +
         ' (' + r.embed.keyStatus + ')') + '</div>');
     } catch (err) { show('set-out', errorBox(err)); }
+  });
+  document.getElementById('enrf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var params = {};
+    ['web-seed', 'task', 'allow-host', 'deny-path'].forEach(function (n) {
+      var v = document.getElementById('ed-' + n).value.trim();
+      if (v) params[n] = v;
+    });
+    ['web-max-pages', 'web-max-depth'].forEach(function (n) {
+      var v = document.getElementById('ed-' + n).value.trim();
+      if (v) params[n] = parseInt(v, 10);
+    });
+    if (document.getElementById('ed-no-web').value) params['no-web'] = true;
+    busy('enr-out');
+    try {
+      var r = await api('enrich', params);
+      show('enr-out', '<div class="notice">' + esc(
+        r.fetched.map(function (u) { return 'fetched ' + u; })
+          .concat(r.written.map(function (w) { return (w.created ? 'created ' : 'enriched ') + w.id; }))
+          .concat([(r.summary || '(no summary)') + ' — ' + r.steps + ' steps']).join('\n')) + '</div>');
+    } catch (err) { show('enr-out', errorBox(err)); }
   });
   document.getElementById('sync-status').addEventListener('click', async function () {
     busy('sync-out');

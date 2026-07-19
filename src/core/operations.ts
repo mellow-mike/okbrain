@@ -20,9 +20,10 @@ import { clipUrl, type ClipOptions, type ClipResult } from "./ingest/clip.ts";
 import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
 import { FeedError, pullFeed, type RssPullResult } from "./ingest/rss.ts";
-import { listConcepts } from "./okf/bundle.ts";
+import { defaultLimits, runEnrich, type EnrichResult } from "./ingest/web.ts";
+import { listConcepts, readConceptPermissive } from "./okf/bundle.ts";
 import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
-import { fmTags, OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
+import { fmString, fmTags, OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
 import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
 import { askBrain, type AskResult } from "./retrieval/ask.ts";
@@ -944,6 +945,88 @@ export const operations: readonly Operation[] = [
           ];
         })
         .join("\n"),
+  },
+  {
+    name: "enrich",
+    cliName: "enrich",
+    summary: "Run the enrichment agent (LLM as a guarded crawler; caps enforced in-tool)",
+    scope: "write",
+    params: [
+      { name: "task", type: "string", positional: true, description: "what to improve (default derived from --concept/--web-seed)" },
+      { name: "web-seed", type: "string", description: "comma-separated seed URLs the crawl may start from" },
+      { name: "concept", type: "string", description: "existing concept id to focus the enrichment on" },
+      { name: "web-max-pages", type: "int", description: "page fetch cap for the run (default 5)" },
+      { name: "web-max-depth", type: "int", description: "link-following depth from the seeds (default 1)" },
+      { name: "allow-host", type: "string", description: "comma-separated fetchable hosts (default: the seeds' hosts)" },
+      { name: "allow-path", type: "string", description: "comma-separated URL path prefixes allowed (default: all)" },
+      { name: "deny-path", type: "string", description: "comma-separated URL path prefixes refused" },
+      { name: "no-web", type: "boolean", description: "run purely from the bundle (every fetch refused)" },
+    ],
+    handler: async (ctx, p) => {
+      const list = (v: unknown): string[] =>
+        v === undefined
+          ? []
+          : (v as string).split(",").map((s) => s.trim()).filter((s) => s !== "");
+      const seeds = list(p["web-seed"]);
+      for (const s of seeds) {
+        let u: URL | undefined;
+        try {
+          u = new URL(s);
+        } catch {
+          /* refused below */
+        }
+        if (u === undefined || (u.protocol !== "http:" && u.protocol !== "https:"))
+          throw new OpError(`seed is not an http(s) URL: ${s}`, "bad_params");
+      }
+      const concept = p.concept as string | undefined;
+      if (concept !== undefined) await readConceptView(ctx.bundle, concept); // not_found early
+      if (p.task === undefined && seeds.length === 0 && concept === undefined)
+        throw new OpError(
+          "give okb enrich a task, --concept, and/or --web-seed URLs",
+          "bad_params",
+        );
+      const task =
+        (p.task as string | undefined) ??
+        (concept !== undefined
+          ? `Enrich the concept ${concept} with well-cited material from the seed pages.`
+          : "Review the seed pages and capture what is worth keeping as reference concepts.");
+
+      const limits = defaultLimits(seeds);
+      if (p["web-max-pages"] !== undefined) limits.maxPages = p["web-max-pages"] as number;
+      if (p["web-max-depth"] !== undefined) limits.maxDepth = p["web-max-depth"] as number;
+      if (p["allow-host"] !== undefined) limits.allowHosts = list(p["allow-host"]);
+      limits.allowPaths = list(p["allow-path"]);
+      limits.denyPaths = list(p["deny-path"]);
+      limits.noWeb = p["no-web"] === true;
+
+      const gw = createGateway(ctx.config().ai ?? {});
+      const r = await runEnrich(ctx.bundle, task, seeds, limits, {
+        chat: async (messages) => (await gw.chat(messages)).text,
+        listConcepts: async () => {
+          if (ctx.hasIndex()) {
+            const eng = ctx.engine();
+            return eng.listNodeIds().map((id) => ({ id, title: eng.getNode(id)!.title }));
+          }
+          const out: { id: string; title: string }[] = [];
+          for (const id of await listConcepts(ctx.bundle))
+            out.push({
+              id,
+              title: fmString((await readConceptPermissive(ctx.bundle, id)).doc.frontmatter.title),
+            });
+          return out;
+        },
+      });
+      await reindex(ctx, r.written.map((w) => w.id));
+      return r;
+    },
+    render: (r) => {
+      const e = r as EnrichResult;
+      return [
+        ...e.fetched.map((u) => `fetched ${u}`),
+        ...e.written.map((w) => `${w.created ? "created" : "enriched"} ${w.id}`),
+        `${e.summary || "(no summary)"} — ${e.steps} steps`,
+      ].join("\n");
+    },
   },
   {
     name: "inbox_list",

@@ -476,16 +476,26 @@ embed it).
    asks chat for alternate query phrasings and fuses all rankings.
 
 ### Enrichment agent (generalized from OKF's two passes)
-- **Source pass (pluralized):** filesystem import, quick capture, RSS/feeds, a
-  browser grab (later email/calendar) — each produces/updates OKF concepts.
-- **Web pass:** the LLM acts as a guarded crawler — fetch seeds, decide which
-  outbound links are authoritative, then enrich an existing concept, mint a
-  `references/<slug>` doc, or skip. Guardrails enforced inside the tool:
-  `--web-max-pages`, `--web-max-depth`, same-domain allowed-hosts, path
-  prefix/deny filters, `--no-web`. Citations written under `# Citations`.
-- **Tools (minimal, trust-aware):** `list_concepts`, `read_concept_raw`,
-  `read_existing_doc`, `write_concept_doc`, `fetch_url`, `link_suggest`,
-  `embed_doc`.
+- **Source pass (pluralized):** filesystem import, quick capture, clip,
+  RSS/feeds (4.1), a browser grab (later email/calendar) — each
+  produces/updates OKF concepts.
+- **Web pass (`okb enrich`, `core/ingest/web.ts`):** the LLM acts as a
+  guarded crawler driving a JSON-action loop over the plain-text chat
+  gateway (`list_concepts` / `read_concept` / `fetch_url` / `write_concept`
+  / `done` — one JSON object per model turn). It may enrich an existing
+  concept, mint a `references/<slug>` doc (new ids are confined there by the
+  tool), or skip; citations go under `# Citations`. Every guardrail lives
+  inside the tools, never the prompt: `--no-web`, the **frontier rule**
+  (only seeds and links discovered on fetched pages are fetchable — an
+  invented URL is refused with zero packets sent), `--web-max-depth`,
+  host allowlist (defaults to the seeds' hosts, subdomains included), path
+  allow/deny prefixes, `--web-max-pages` (checked last so a policy refusal
+  reports its real reason), and a step cap so a chatty run always ends.
+  Guard refusals and bad writes come back as error observations the model
+  can correct; two unparseable replies abort. `guardedFetch` (clip's SSRF
+  guard) sits underneath. Writes flow through the conformance writer and
+  the standard reindex hook (index + vectors), which is why the sketched
+  `embed_doc` tool doesn't exist; `link_suggest` joins the toolset with 4.4.
 
 ### MCP server (`okb mcp`, `src/mcp/server.ts`)
 External agents (Claude, etc.) use the brain as a tool. Tools and their JSON
@@ -694,6 +704,20 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-19 — **Web pass (4.2): guardrails live in the tools; the frontier
+  rule replaces URL trust.** The crawler's chat protocol is one JSON action
+  per turn over the existing plain-text gateway (no SDK tool-calling — the
+  gateway stays three dialects of plain fetch). Prompts are advice; the
+  tools are law: fetch_url refuses anything not in the frontier map (seeds
+  at depth 0, links discovered on fetched pages at parent+1), so a
+  hallucinated URL never costs a packet, and depth/host/path/page caps are
+  re-checked on every call with the SSRF guard underneath. New concept ids
+  are confined to references/ by write_concept (existing concepts may be
+  enriched in place) — the same enrich/mint/skip triad OKF's pass used.
+  Failures the model can fix (guard refusal, missing scaffold field, 404)
+  return as error observations; only provider/system errors abort. The
+  sketched read_existing_doc/embed_doc tools were dropped: one raw read
+  suffices, and the standard write-reindex hook already refreshes vectors.
 - 2026-07-19 — **RSS ingest (4.1) stores the feed's own content and shares
   clip's dedupe.** A feed pull does not fetch item pages: the entry's
   content/summary is the body (converted to markdown), and getting the full
