@@ -9,13 +9,14 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 0–3 complete.** The brain now has a CLI, a GUI (`okb serve`), and
-> an agent surface (`okb mcp`) — all generated over one ops contract. Next:
-> **Stage 4** — 4.1 ingest sources (rss), 4.2 web pass (LLM-as-crawler over
-> the existing fetch guard), 4.3 typed edges, 4.4 link suggestion (+ the GUI
-> buttons deferred from 3.2), 4.5 jobs/cron, 4.6 skills. The 2.2 packaging
-> note (ship the vec0 extension with the compiled binary) stays parked at
-> Stage 5.
+> **Stages 0–4 complete.** The brain ingests (import/capture/clip/rss),
+> enriches itself behind guardrails (`okb enrich`), retrieves over keyword +
+> vector + graph + typed-edge relational arms, proposes links through
+> review, runs nightly maintenance (`okb jobs` under OS cron), and ships
+> agent skills. Next: **Stage 5** — packaging (embed/ship the vec0
+> extension with the compiled binary — the parked 2.2 note — plus signed
+> per-OS binaries), then the optional scale items (Postgres engine,
+> rebuild-parity, multi-brain mounts) as they earn their way in.
 
 ---
 
@@ -416,9 +417,13 @@ Goal: the brain improves itself on a schedule.
       refusal, `--only` subset + unknown-job usage error)
 
 ### 4.6 Skills
-- [ ] `skills/RESOLVER.md` (thin router) + `capture/enrich/ingest/query/daily-note/link-suggest` SKILL.md
-- [ ] daily-note embeds a "worth revisiting" section from the review queue (F-B.7)
-- [ ] Each parameterized; brain-first where applicable
+- [x] `skills/RESOLVER.md` (thin router: intent table + ground rules —
+      brain-first, writes only via okb commands, no silent spend) +
+      `capture/enrich/ingest/query/daily-note/link-suggest` SKILL.md
+- [x] daily-note embeds a "worth revisiting" section from the review queue
+      (F-B.7 — reasons verbatim, done/snooze stays the user's move)
+- [x] Each parameterized (explicit Parameters block) and CLI-grounded:
+      deterministic steps are `okb` calls, the skill carries only judgment
 
 ---
 
@@ -493,6 +498,12 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-19 — Stage 4.6 shipped, **Stage 4 complete**: skills
+  (`skills/RESOLVER.md` router + capture/ingest/enrich/query/daily-note/
+  link-suggest SKILL.md — parameterized, CLI-grounded, brain-first;
+  daily-note embeds the review queue per F-B.7). 349 tests green, tsc
+  clean. Next: Stage 5 packaging (vec0 in the binary, signed per-OS
+  builds).
 - 2026-07-19 — Stage 4.5 shipped: jobs worker (`core/jobs/worker.ts` —
   sequential run under `.okb/jobs.lock`, stale-reclaim once, signal-clean
   stop, per-job failure capture; `okb jobs [--only]` = index, embed

@@ -679,11 +679,16 @@ okbrain/
 ## Skills & jobs
 
 "Thin harness, fat skills": capabilities needing judgment are markdown
-procedures the agent reads, parameterized like method calls. First set: capture,
-ingest, enrich, query (brain-first retrieval recipe), link-suggest, daily-note.
-Decision rule: lookup/list/status → CLI command (deterministic); needs to
-think/adapt → skill. Operating discipline worth keeping: do a task manually
-3–10×, codify it into a skill, then put it on cron.
+procedures the agent reads, parameterized like method calls. The first set
+shipped with 4.6 under `skills/`: `RESOLVER.md` routes intent to one of
+capture, ingest, enrich, query (brain-first retrieval recipe), daily-note
+(embeds the review queue's "worth revisiting" section, reasons verbatim),
+and link-suggest. Every skill has an explicit Parameters block and grounds
+its deterministic steps in `okb` CLI calls (`--json`) — the skill carries
+only the judgment. Decision rule: lookup/list/status → CLI command
+(deterministic); needs to think/adapt → skill. Operating discipline worth
+keeping: do a task manually 3–10×, codify it into a skill, then put it on
+cron.
 
 Jobs/cron (`core/jobs/worker.ts`, `okb jobs`): one sequential maintenance
 run under `.okb/jobs.lock` — exclusive create, stale locks (dead pid,
