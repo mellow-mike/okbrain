@@ -37,8 +37,8 @@ describe("nodes + tags", () => {
     engine.upsertNode(node("gone", { title: "unique-marker", tags: ["t"] }));
     engine.upsertNode(node("stays"));
     engine.replaceEdges([
-      { src: "gone", dst: "stays" },
-      { src: "stays", dst: "gone" },
+      { src: "gone", dst: "stays", rel: null },
+      { src: "stays", dst: "gone", rel: null },
     ]);
     engine.removeNode("gone");
     expect(engine.getNode("gone")).toBeNull();
@@ -91,9 +91,9 @@ describe("neighbors (depth-bounded CTE)", () => {
     for (const id of ["a", "b", "c", "d"]) e.upsertNode(node(id));
     // a -> b -> c, d -> a
     e.replaceEdges([
-      { src: "a", dst: "b" },
-      { src: "b", dst: "c" },
-      { src: "d", dst: "a" },
+      { src: "a", dst: "b", rel: null },
+      { src: "b", dst: "c", rel: null },
+      { src: "d", dst: "a", rel: null },
     ]);
     expect(e.neighbors("a")).toEqual([
       { id: "b", depth: 1 },
@@ -112,8 +112,8 @@ describe("neighbors (depth-bounded CTE)", () => {
     const e = openSqliteEngine(":memory:");
     for (const id of ["a", "b"]) e.upsertNode(node(id));
     e.replaceEdges([
-      { src: "a", dst: "b" },
-      { src: "b", dst: "a" },
+      { src: "a", dst: "b", rel: null },
+      { src: "b", dst: "a", rel: null },
     ]);
     expect(e.neighbors("a", 5)).toEqual([{ id: "b", depth: 1 }]);
     e.close();

@@ -64,7 +64,8 @@ export interface ClipResult {
   autoTags: string[];
 }
 
-async function allResources(root: string): Promise<{ id: string; resource: string }[]> {
+/** Every concept's id+resource, scanned from the bundle (no index needed). */
+export async function allResources(root: string): Promise<{ id: string; resource: string }[]> {
   const out: { id: string; resource: string }[] = [];
   for (const id of await listConcepts(root)) {
     const r = fmString((await readConceptPermissive(root, id)).doc.frontmatter.resource);
@@ -73,7 +74,8 @@ async function allResources(root: string): Promise<{ id: string; resource: strin
   return out;
 }
 
-function findByResource(
+/** First concept whose normalized `resource` equals `normalized`, else null. */
+export function findByResource(
   resources: { id: string; resource: string }[],
   normalized: string,
   stripParams: string[],

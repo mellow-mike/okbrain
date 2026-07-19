@@ -7,7 +7,7 @@ import { Database } from "bun:sqlite";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { EdgeRecord, ReviewRow } from "../src/core/engine/interface.ts";
+import type { LinkEdge, ReviewRow } from "../src/core/engine/interface.ts";
 import { EngineError, openSqliteEngine } from "../src/core/engine/sqlite.ts";
 import { writeConcept } from "../src/core/okf/write.ts";
 import { defaultReviewConfig, reviewQueue } from "../src/core/review/score.ts";
@@ -29,12 +29,12 @@ const row = (id: string, over: Partial<ReviewRow> = {}): ReviewRow => ({
   ...over,
 });
 
-const queue = (rows: ReviewRow[], edges: EdgeRecord[] = []) =>
+const queue = (rows: ReviewRow[], edges: LinkEdge[] = []) =>
   reviewQueue(rows, edges, NOW, { ...defaultReviewConfig, queueSize: 100 });
 
 describe("scoring signals (pure)", () => {
   // A linked pair isolates staleness: no orphan/hub/neighbor/inbox signal fires.
-  const pair = (days: number): [ReviewRow[], EdgeRecord[]] => [
+  const pair = (days: number): [ReviewRow[], LinkEdge[]] => [
     [row("a", { timestamp: daysAgo(days) }), row("b", { timestamp: daysAgo(days) })],
     [{ src: "a", dst: "b" }],
   ];

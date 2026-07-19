@@ -9,7 +9,7 @@
 // doctor` is where it gets flagged.
 
 import { createHash } from "node:crypto";
-import { extractTargets } from "../graph/links.ts";
+import { classifyTargets, type TypedTarget } from "../graph/typed-edges.ts";
 import { log } from "../log.ts";
 import { listConcepts, readConceptPermissive, type PermissiveConcept } from "../okf/bundle.ts";
 import { fmString, fmTags } from "../okf/document.ts";
@@ -44,9 +44,9 @@ function upsertConcept(engine: Engine, { id, doc, parsed }: PermissiveConcept, h
   });
 }
 
-/** Extracted targets minus self-links (dangling targets kept; see header). */
-const outgoing = (id: string, body: string): string[] =>
-  extractTargets(id, body).filter((dst) => dst !== id);
+/** Extracted typed targets minus self-links (dangling targets kept; see header). */
+const outgoing = (id: string, body: string): TypedTarget[] =>
+  classifyTargets(id, body).filter((t) => t.dst !== id);
 
 /** (Re)index the bundle at `root` into `engine`. Safe to run repeatedly. */
 export async function buildIndex(root: string, engine: Engine): Promise<IndexStats> {
@@ -58,7 +58,7 @@ export async function buildIndex(root: string, engine: Engine): Promise<IndexSta
 
   for (const id of ids) {
     const concept = await readConceptPermissive(root, id);
-    for (const dst of outgoing(id, concept.doc.body)) edges.push({ src: id, dst });
+    for (const t of outgoing(id, concept.doc.body)) edges.push({ src: id, dst: t.dst, rel: t.rel });
 
     const hash = hashOf(concept.raw);
     if (have.get(id) === hash) {

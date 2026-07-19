@@ -9,13 +9,14 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 0–3 complete.** The brain now has a CLI, a GUI (`okb serve`), and
-> an agent surface (`okb mcp`) — all generated over one ops contract. Next:
-> **Stage 4** — 4.1 ingest sources (rss), 4.2 web pass (LLM-as-crawler over
-> the existing fetch guard), 4.3 typed edges, 4.4 link suggestion (+ the GUI
-> buttons deferred from 3.2), 4.5 jobs/cron, 4.6 skills. The 2.2 packaging
-> note (ship the vec0 extension with the compiled binary) stays parked at
-> Stage 5.
+> **Stages 0–4 complete.** The brain ingests (import/capture/clip/rss),
+> enriches itself behind guardrails (`okb enrich`), retrieves over keyword +
+> vector + graph + typed-edge relational arms, proposes links through
+> review, runs nightly maintenance (`okb jobs` under OS cron), and ships
+> agent skills. Next: **Stage 5** — packaging (embed/ship the vec0
+> extension with the compiled binary — the parked 2.2 note — plus signed
+> per-OS binaries), then the optional scale items (Postgres engine,
+> rebuild-parity, multi-brain mounts) as they earn their way in.
 
 ---
 
@@ -320,37 +321,109 @@ Goal: a real GUI, and "my agent can use my brain."
 Goal: the brain improves itself on a schedule.
 
 ### 4.1 Ingest sources
-- [ ] `core/ingest/import.ts` (bulk md), `capture.ts` (note/clip), `rss.ts` (feeds)
+- [x] `core/ingest/rss.ts` — RSS 2.0/RDF/Atom parse (linkedom XML, no new deps);
+      `pullFeed` → conformant `references/<slug>` (inbox+rss tags, `# Citations`,
+      author/published/feed extras), dedupe by normalized URL vs every concept
+      `resource` (clip's rule — a feed entry and a clip of the same page can't
+      duplicate; in-run dedupe too), per-pull `limit`
+- [x] `okb rss [url] [--limit]` — no URL pulls every config `rss.feeds`
+      (multi-pull records per-feed errors so one dead feed can't block the
+      rest; a single explicit feed fails loudly); `rss.maxItems` config
+- [x] `import.ts` (bulk md) and `capture.ts` landed at 1.3, clip at F-A —
+      this stage's remaining source was feeds
 - [ ] (Later) browser grab; email/calendar
+- [x] Tests: RSS+Atom parse (rel=alternate, content:encoded, dc:creator,
+      relative links, linkless items), idempotent re-pull, in-run dedupe,
+      limit paging, doctor-clean output, CLI no-feeds error + live guard
 
 ### 4.2 Web pass (LLM-as-crawler)
-- [ ] `core/ingest/web.ts` — `fetch_url` tool with guardrails (`--web-max-pages`, `--web-max-depth`, allowed-hosts, path prefix/deny, `--no-web`)
-- [ ] Crawler loop: enrich existing concept | mint `references/<slug>` | skip; write `# Citations`
-- [ ] Tool set: `list_concepts`, `read_concept_raw`, `read_existing_doc`, `write_concept_doc`, `fetch_url`, `link_suggest`, `embed_doc` (all trust-aware)
-- [ ] `okb enrich [--web-seed …]`
-- [ ] Tests: caps enforced inside the tool; host allowlist; no-web path
+- [x] `core/ingest/web.ts` — `fetch_url` tool with guardrails enforced
+      in-tool: `--no-web`, frontier rule (only seeds + links discovered on
+      fetched pages are fetchable — an invented URL is refused with zero
+      packets), depth cap, host allowlist (default: seed hosts, subdomains
+      ok), path allow/deny prefixes, page cap (checked last so policy
+      refusals report their real reason), step cap; guarded fetch underneath
+      (SSRF guard stays live)
+- [x] Crawler loop: JSON-action protocol over the plain-text chat gateway
+      (list_concepts / read_concept / fetch_url / write_concept / done);
+      enrich existing | mint `references/<slug>` (new ids confined there,
+      tool-enforced) | skip; citations prompted under `# Citations`;
+      guard refusals + bad writes are error observations (model corrects
+      course), unparseable replies strike out after 2
+- [x] Tool set simplified vs the sketch: one read tool (read_concept, raw);
+      `embed_doc` unnecessary — writes go through the standard reindex hook
+      (index + vectors refresh automatically); `link_suggest` joins the
+      toolset when 4.4 lands
+- [x] `okb enrich [task] [--web-seed …] [--concept id] [--web-max-pages]
+      [--web-max-depth] [--allow-host] [--allow-path] [--deny-path]
+      [--no-web]`; GUI Settings gained the enrichment form (guardrails +
+      run), deferred from 3.2
+- [x] Tests: every cap/filter enforced in-tool (incl. frontier + depth-2
+      refusal + zero-packet invented-URL), scripted-chat full pass
+      (doctor-clean cited reference), references/ confinement, bad-write
+      observation, strike-out + step cap, CLI usage errors
 
 ### 4.3 Typed edges + relational retrieval
-- [ ] `core/graph/typed-edges.ts` — classify link relation from heading/sentence; store `rel`; cache
-- [ ] `core/retrieval/relational.ts` — relational arm over typed edges (deterministic; no-op for non-relational)
-- [ ] Tests: relation classification; relational query results; non-relational no-op
+- [x] `core/graph/typed-edges.ts` — deterministic classification: the clause
+      right before the link ("depends on [X]") wins, else the nearest
+      preceding heading ("# Citations" → cites; unknown heading = untyped,
+      not inherited), else null; one shared `REL_VOCAB` phrase table drives
+      classifier + query detection; `rel` stored on edges (schema v3 —
+      DB-only, the markdown stays plain OKF; cache = the index itself,
+      recomputed with every index build/write refresh)
+- [x] `core/retrieval/relational.ts` — relational arm: query names a known
+      relation → anchor via FTS (question stop-words stripped) → in+out
+      neighbors over that rel join RRF fusion tagged `relational`; strict
+      no-op otherwise; always on (cheap, deterministic — no profile knob)
+- [x] Tests: heading/sentence/priority/dedupe classification; rel round-trip
+      through the engine; relational queries both directions; four no-op
+      cases; hybrid integration (tag present / absent)
 
 ### 4.4 Link suggestion + review
-- [ ] `link_suggest` → propose cross-links; GUI review inbox; accept writes a normalized link
-- [ ] Wire suggest-links buttons into the GUI Review / Inbox / Editor views (deferred from 3.2)
-- [ ] Tests: suggestions ranked; accept produces conformant link
+- [x] `core/graph/link-suggest.ts` — deterministic proposals with reasons
+      (title mention w/ word boundary → strongest; per-word FTS similarity —
+      engine.search is AND-semantics so one query per meaty word; shared
+      tags); self + already-connected (both directions) excluded
+- [x] Ops: `link_suggest` (read) + `link_accept` (write — appends a
+      normalized `[Title](/id.md)` under `# Related`, creating the section;
+      re-accept is a visible no-op); CLI `okb links suggest|accept`; the
+      enrich agent's toolset gained the `link_suggest` action (4.2 note)
+- [x] Suggested links always route through review (open question resolved —
+      see CONTEXT decision); accept is the only writer
+- [x] GUI: suggest-links buttons in Review + Inbox cards (accept = writes) and
+      the Editor (insert = textarea-local, real on save) — deferred from 3.2
+- [x] Tests: ranking + reasons + word-boundary mention; exclusions; CLI e2e
+      (accept → conformant `# Related` link, backlink visible without
+      reindex, repeat no-op, accepted target drops out); missing target
+      not_found; enrich-tool wiring both with and without an index
 
 ### 4.5 Jobs / cron
-- [ ] `core/jobs/worker.ts` — single background worker + file/SQLite lock
-- [ ] Scheduled: embed backfill, enrich stale, regenerate index/backlinks,
-      `doctor`, nightly review-queue recompute (F-B.7)
-- [ ] Progress to stderr; clean shutdown
-- [ ] Tests: lock prevents double-run; jobs idempotent
+- [x] `core/jobs/worker.ts` — sequential runner + `.okb/jobs.lock` (exclusive
+      create; stale lock — dead pid, unreadable, or >24 h — reclaimed once);
+      scheduling belongs to the OS (cron/launchd/Task Scheduler invoking
+      `okb jobs`), no daemon in v1
+- [x] `okb jobs [--only …]` runs: index refresh (also regenerates edges/
+      backlinks wholesale), embed backfill (only when a vector store already
+      exists — never creates one), rss pull (config `rss.feeds`), review
+      queue recompute (F-B.7 — queue is on-demand, so the job surfaces
+      today's queue in the run report), doctor. **enrich-stale deliberately
+      excluded**: no job spends AI implicitly (no-silent-spend rule); run
+      `okb enrich` when you mean it
+- [x] Progress to stderr (structured log); SIGINT/SIGTERM finish the current
+      job then stop; per-job failures captured, later jobs still run; exit 1
+      when any non-skipped job failed
+- [x] Tests: lock exclusivity/stale-reclaim/release; failure capture +
+      ordering; CLI e2e (run/skip reasons, idempotent re-run, held-lock
+      refusal, `--only` subset + unknown-job usage error)
 
 ### 4.6 Skills
-- [ ] `skills/RESOLVER.md` (thin router) + `capture/enrich/ingest/query/daily-note/link-suggest` SKILL.md
-- [ ] daily-note embeds a "worth revisiting" section from the review queue (F-B.7)
-- [ ] Each parameterized; brain-first where applicable
+- [x] `skills/RESOLVER.md` (thin router: intent table + ground rules —
+      brain-first, writes only via okb commands, no silent spend) +
+      `capture/enrich/ingest/query/daily-note/link-suggest` SKILL.md
+- [x] daily-note embeds a "worth revisiting" section from the review queue
+      (F-B.7 — reasons verbatim, done/snooze stays the user's move)
+- [x] Each parameterized (explicit Parameters block) and CLI-grounded:
+      deterministic steps are `okb` calls, the skill carries only judgment
 
 ---
 
@@ -425,6 +498,47 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-19 — Stage 4.6 shipped, **Stage 4 complete**: skills
+  (`skills/RESOLVER.md` router + capture/ingest/enrich/query/daily-note/
+  link-suggest SKILL.md — parameterized, CLI-grounded, brain-first;
+  daily-note embeds the review queue per F-B.7). 349 tests green, tsc
+  clean. Next: Stage 5 packaging (vec0 in the binary, signed per-OS
+  builds).
+- 2026-07-19 — Stage 4.5 shipped: jobs worker (`core/jobs/worker.ts` —
+  sequential run under `.okb/jobs.lock`, stale-reclaim once, signal-clean
+  stop, per-job failure capture; `okb jobs [--only]` = index, embed
+  backfill (existing store only), rss pull, review recompute (F-B.7),
+  doctor; enrich-stale excluded by the no-silent-spend rule; OS cron owns
+  scheduling). 349 tests green, tsc clean. Next: 4.6 skills.
+- 2026-07-19 — Stage 4.4 shipped: link suggestion (`core/graph/link-suggest.ts`
+  — deterministic reasons-first ranking: bounded title mention, per-word FTS
+  similarity, shared tags; connected/self excluded), ops `link_suggest`
+  (read) + `link_accept` (write → normalized link under `# Related`), CLI
+  `okb links suggest|accept`, enrich toolset action, GUI buttons in
+  Review/Inbox (accept) + Editor (insert-only). Open question resolved:
+  suggestions always route through review. 342 tests green, tsc clean.
+  Next: 4.5 jobs/cron.
+- 2026-07-19 — Stage 4.3 shipped: typed edges (`core/graph/typed-edges.ts` —
+  deterministic sentence-clause → heading → null classification over a
+  shared REL_VOCAB; engine schema v3 stores nullable `rel`, DB-only) and
+  the relational retrieval arm (`core/retrieval/relational.ts` — rel-naming
+  queries anchor via FTS and add in+out rel neighbors to RRF, tagged
+  `relational`; strict no-op otherwise, always on). 336 tests green, tsc
+  clean. Next: 4.4 link suggestion.
+- 2026-07-19 — Stage 4.2 shipped: web pass (`core/ingest/web.ts` — LLM as a
+  guarded crawler; JSON-action loop over the plain chat gateway; guardrails
+  all enforced in-tool: frontier rule, depth/host/path/page caps, --no-web,
+  step cap; SSRF guard underneath; new ids confined to references/).
+  `okb enrich` + GUI Settings enrichment form (deferred from 3.2). 10 new
+  tests vs scripted chat + fake fetcher (zero network). 326 tests green,
+  tsc clean. Next: 4.3 typed edges.
+- 2026-07-19 — Stage 4.1 shipped: RSS/Atom ingest (`core/ingest/rss.ts` —
+  linkedom XML parse over direct-child lookups, RSS 2.0/RDF/Atom;
+  `okb rss [url] [--limit]`, no URL = config `rss.feeds`, per-feed errors
+  captured on multi-pulls). New items land as conformant `references/<slug>`
+  (inbox+rss tags, citations, author/published/feed extras), deduped by
+  clip's normalized-resource rule incl. in-run. 316 tests green, tsc clean.
+  Next: 4.2 web pass.
 - 2026-07-17 — Stage 3.3 shipped, **Stage 3 complete**: MCP server
   (`src/mcp/server.ts` via `@modelcontextprotocol/sdk` — the stage's one new
   dep). Tools + JSON schemas generated from the ops registry; untrusted by

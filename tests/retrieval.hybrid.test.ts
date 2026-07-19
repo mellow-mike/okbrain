@@ -46,7 +46,7 @@ beforeAll(() => {
   put("notes/kw-only", "Keyword", "databases appear here too");
   put("notes/vec-only", "Vector", "storage engines and tables");
   put("notes/nb", "Neighbor", "unrelated gardening");
-  eng.replaceEdges([{ src: "notes/dbs", dst: "notes/nb" }]);
+  eng.replaceEdges([{ src: "notes/dbs", dst: "notes/nb", rel: null }]);
 
   store = openVectorStore(":memory:");
   store.reset({ provider: "fake", model: "m", dim: 4 });

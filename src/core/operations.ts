@@ -12,6 +12,8 @@ import { createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
 import { loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
 import type { Engine, Neighbor, VectorStore } from "./engine/interface.ts";
+import { suggestLinks, type LinkSuggestion } from "./graph/link-suggest.ts";
+import { extractTargets } from "./graph/links.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
 import { log } from "./log.ts";
 import { suggestTags } from "./ingest/autotag.ts";
@@ -19,9 +21,11 @@ import { captureNote } from "./ingest/capture.ts";
 import { clipUrl, type ClipOptions, type ClipResult } from "./ingest/clip.ts";
 import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
-import { listConcepts } from "./okf/bundle.ts";
+import { FeedError, pullFeed, type RssPullResult } from "./ingest/rss.ts";
+import { defaultLimits, runEnrich, type EnrichResult } from "./ingest/web.ts";
+import { listConcepts, readConceptPermissive } from "./okf/bundle.ts";
 import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
-import { fmTags, OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
+import { fmString, fmTags, OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
 import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
 import { askBrain, type AskResult } from "./retrieval/ask.ts";
@@ -32,6 +36,7 @@ import { rerankConfigured, rerankHits } from "./retrieval/rerank.ts";
 import { garnishQueue, pickRecent, type GarnishNote } from "./review/garnish.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
 import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken } from "./serve-token.ts";
+import { JobLockError, runJobs, type Job, type JobResult } from "./jobs/worker.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
 import { buildVizGraph, exportViz, type VizExport, type VizGraph } from "./viz/export.ts";
 
@@ -321,6 +326,51 @@ async function runAsk(
   return r;
 }
 
+/**
+ * Pull feeds and reindex what landed (`okb rss` + the jobs worker). A single
+ * explicit URL fails loudly; a configured multi-pull records per-feed errors
+ * so one dead feed can't block the rest.
+ */
+async function pullFeeds(ctx: OpContext, urls: string[], limit?: number): Promise<RssPullResult[]> {
+  const results: RssPullResult[] = [];
+  for (const url of urls) {
+    try {
+      const r = await writing(() =>
+        pullFeed(ctx.bundle, url, {
+          resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined,
+          limit,
+          stripParams: ctx.config().clip?.stripParams,
+        }),
+      );
+      await reindex(ctx, r.added.map((a) => a.id));
+      results.push(r);
+    } catch (e) {
+      if (urls.length === 1) throw e;
+      results.push({
+        url, feed: "", added: [], deduped: 0, skipped: 0,
+        error: e instanceof OpError ? e.message : (e as Error).message,
+      });
+    }
+  }
+  return results;
+}
+
+/** Suggestions for one concept (op handler + the enrich agent's tool). */
+async function suggestFor(ctx: OpContext, id: string, limit?: number): Promise<LinkSuggestion[]> {
+  const view = await readConceptView(ctx.bundle, id);
+  return suggestLinks(
+    {
+      id,
+      title: fmString(view.frontmatter.title),
+      description: fmString(view.frontmatter.description),
+      body: view.body,
+      tags: fmTags(view.frontmatter.tags),
+    },
+    ctx.engine(),
+    limit,
+  );
+}
+
 /** Writer/id errors are caller mistakes → bad_params; guard blocks → refused. */
 async function writing<T>(fn: () => Promise<T>): Promise<T> {
   try {
@@ -328,7 +378,8 @@ async function writing<T>(fn: () => Promise<T>): Promise<T> {
   } catch (e) {
     if (e instanceof OkfWriteError || e instanceof InvalidIdError)
       throw new OpError(e.message, "bad_params");
-    if (e instanceof FetchGuardError) throw new OpError(e.message, "refused");
+    if (e instanceof FetchGuardError || e instanceof FeedError)
+      throw new OpError(e.message, "refused");
     throw e;
   }
 }
@@ -891,6 +942,168 @@ export const operations: readonly Operation[] = [
     },
   },
   {
+    name: "rss",
+    cliName: "rss",
+    summary: "Pull RSS/Atom feeds into references/ (no URL: every config rss.feeds)",
+    scope: "write",
+    params: [
+      { name: "url", type: "string", positional: true, description: "feed URL (default: every configured rss.feeds entry)" },
+      { name: "limit", type: "int", description: "max new items per feed (default 10, config rss.maxItems)" },
+    ],
+    handler: async (ctx, p) => {
+      const cfg = ctx.config().rss;
+      const urls = p.url !== undefined ? [p.url as string] : (cfg?.feeds ?? []);
+      if (urls.length === 0)
+        throw new OpError(
+          "no feed URL given and no rss.feeds configured (add feeds to config.json)",
+          "bad_params",
+        );
+      return pullFeeds(ctx, urls, (p.limit as number | undefined) ?? cfg?.maxItems);
+    },
+    render: (r) =>
+      (r as RssPullResult[])
+        .flatMap((f) => {
+          if (f.error !== undefined) return [`${f.url} — FAILED: ${f.error}`];
+          const skipped = f.skipped > 0 ? `, ${f.skipped} skipped` : "";
+          return [
+            `${f.feed || f.url}: ${f.added.length} added, ${f.deduped} known${skipped}`,
+            ...f.added.map((a) => `  + ${a.id} — ${a.title}`),
+          ];
+        })
+        .join("\n"),
+  },
+  {
+    name: "link_suggest",
+    cliName: "links suggest",
+    summary: "Propose cross-links for a concept (deterministic, with reasons)",
+    scope: "read",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "concept id to suggest links for" },
+      { name: "limit", type: "int", description: "max suggestions (default 5)" },
+    ],
+    handler: (ctx, p) => suggestFor(ctx, p.id as string, p.limit as number | undefined),
+    render: (r) => {
+      const ss = r as LinkSuggestion[];
+      if (ss.length === 0) return "(no suggestions)";
+      return ss
+        .map((s) => `${s.score.toFixed(2)}  ${s.id} — ${s.title}  (${s.reasons.join("; ")})`)
+        .join("\n");
+    },
+  },
+  {
+    name: "link_accept",
+    cliName: "links accept",
+    summary: "Accept a suggestion: append a normalized link under # Related",
+    scope: "write",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "concept that gains the link" },
+      { name: "target", type: "string", required: true, positional: true, description: "concept id to link to" },
+    ],
+    handler: async (ctx, p) => {
+      const [id, target] = [p.id as string, p.target as string];
+      const view = await readConceptView(ctx.bundle, id);
+      const targetView = await readConceptView(ctx.bundle, target); // not_found on missing
+      if (extractTargets(id, view.body).includes(target)) return { id, target, added: false };
+      const line = `- [${fmString(targetView.frontmatter.title) || target}](/${target}.md)`;
+      const body = view.body.replace(/\s+$/, "");
+      const withSection = /^# Related$/m.test(body)
+        ? body.replace(/^# Related$/m, `# Related\n\n${line}`)
+        : `${body}\n\n# Related\n\n${line}`;
+      await writing(() => writeConcept(ctx.bundle, { id, body: withSection }));
+      await reindex(ctx, [id]);
+      return { id, target, added: true };
+    },
+    render: (r) => {
+      const x = r as { id: string; target: string; added: boolean };
+      return x.added
+        ? `linked ${x.id} → ${x.target}`
+        : `${x.id} already links to ${x.target}`;
+    },
+  },
+  {
+    name: "enrich",
+    cliName: "enrich",
+    summary: "Run the enrichment agent (LLM as a guarded crawler; caps enforced in-tool)",
+    scope: "write",
+    params: [
+      { name: "task", type: "string", positional: true, description: "what to improve (default derived from --concept/--web-seed)" },
+      { name: "web-seed", type: "string", description: "comma-separated seed URLs the crawl may start from" },
+      { name: "concept", type: "string", description: "existing concept id to focus the enrichment on" },
+      { name: "web-max-pages", type: "int", description: "page fetch cap for the run (default 5)" },
+      { name: "web-max-depth", type: "int", description: "link-following depth from the seeds (default 1)" },
+      { name: "allow-host", type: "string", description: "comma-separated fetchable hosts (default: the seeds' hosts)" },
+      { name: "allow-path", type: "string", description: "comma-separated URL path prefixes allowed (default: all)" },
+      { name: "deny-path", type: "string", description: "comma-separated URL path prefixes refused" },
+      { name: "no-web", type: "boolean", description: "run purely from the bundle (every fetch refused)" },
+    ],
+    handler: async (ctx, p) => {
+      const list = (v: unknown): string[] =>
+        v === undefined
+          ? []
+          : (v as string).split(",").map((s) => s.trim()).filter((s) => s !== "");
+      const seeds = list(p["web-seed"]);
+      for (const s of seeds) {
+        let u: URL | undefined;
+        try {
+          u = new URL(s);
+        } catch {
+          /* refused below */
+        }
+        if (u === undefined || (u.protocol !== "http:" && u.protocol !== "https:"))
+          throw new OpError(`seed is not an http(s) URL: ${s}`, "bad_params");
+      }
+      const concept = p.concept as string | undefined;
+      if (concept !== undefined) await readConceptView(ctx.bundle, concept); // not_found early
+      if (p.task === undefined && seeds.length === 0 && concept === undefined)
+        throw new OpError(
+          "give okb enrich a task, --concept, and/or --web-seed URLs",
+          "bad_params",
+        );
+      const task =
+        (p.task as string | undefined) ??
+        (concept !== undefined
+          ? `Enrich the concept ${concept} with well-cited material from the seed pages.`
+          : "Review the seed pages and capture what is worth keeping as reference concepts.");
+
+      const limits = defaultLimits(seeds);
+      if (p["web-max-pages"] !== undefined) limits.maxPages = p["web-max-pages"] as number;
+      if (p["web-max-depth"] !== undefined) limits.maxDepth = p["web-max-depth"] as number;
+      if (p["allow-host"] !== undefined) limits.allowHosts = list(p["allow-host"]);
+      limits.allowPaths = list(p["allow-path"]);
+      limits.denyPaths = list(p["deny-path"]);
+      limits.noWeb = p["no-web"] === true;
+
+      const gw = createGateway(ctx.config().ai ?? {});
+      const r = await runEnrich(ctx.bundle, task, seeds, limits, {
+        chat: async (messages) => (await gw.chat(messages)).text,
+        suggestLinks: ctx.hasIndex() ? (id) => suggestFor(ctx, id) : undefined,
+        listConcepts: async () => {
+          if (ctx.hasIndex()) {
+            const eng = ctx.engine();
+            return eng.listNodeIds().map((id) => ({ id, title: eng.getNode(id)!.title }));
+          }
+          const out: { id: string; title: string }[] = [];
+          for (const id of await listConcepts(ctx.bundle))
+            out.push({
+              id,
+              title: fmString((await readConceptPermissive(ctx.bundle, id)).doc.frontmatter.title),
+            });
+          return out;
+        },
+      });
+      await reindex(ctx, r.written.map((w) => w.id));
+      return r;
+    },
+    render: (r) => {
+      const e = r as EnrichResult;
+      return [
+        ...e.fetched.map((u) => `fetched ${u}`),
+        ...e.written.map((w) => `${w.created ? "created" : "enriched"} ${w.id}`),
+        `${e.summary || "(no summary)"} — ${e.steps} steps`,
+      ].join("\n");
+    },
+  },
+  {
     name: "inbox_list",
     cliName: "inbox",
     summary: "List unread clips and notes (concepts tagged inbox), newest first",
@@ -941,6 +1154,95 @@ export const operations: readonly Operation[] = [
       const x = r as { id: string; removed: boolean };
       return x.removed ? `marked ${x.id} read` : `${x.id} was not in the inbox`;
     },
+  },
+  {
+    // No AI-spending job runs implicitly: embed only backfills an existing
+    // store, and enrich-stale is deliberately absent (run `okb enrich` when
+    // you mean to spend). Scheduling belongs to the OS (cron/Task Scheduler).
+    name: "jobs",
+    cliName: "jobs",
+    summary: "Run the maintenance jobs once, under a lock (schedule via OS cron)",
+    scope: "admin",
+    params: [
+      { name: "only", type: "string", description: "comma-separated subset of: index,embed,rss,review,doctor" },
+    ],
+    handler: async (ctx, p) => {
+      const cfg = ctx.config();
+      const feeds = cfg.rss?.feeds ?? [];
+      const jobs: Job[] = [
+        {
+          name: "index",
+          run: async () => renderStats(await buildIndex(ctx.bundle, ctx.engine(true))),
+        },
+        {
+          name: "embed",
+          skip: ctx.hasVectors()
+            ? undefined
+            : "no vector store — run `okb embed` once to opt in",
+          run: async () => {
+            const s = await embedBundle(ctx.bundle, ctx.vectors(), gatewayEmbedder(cfg.ai ?? {}));
+            return `embedded ${s.embedded}, skipped ${s.skipped}, removed ${s.removed}${s.pending > 0 ? `, ${s.pending} pending` : ""}`;
+          },
+        },
+        {
+          name: "rss",
+          skip: feeds.length > 0 ? undefined : "no rss.feeds configured",
+          run: async () => {
+            const rs = await pullFeeds(ctx, feeds, cfg.rss?.maxItems);
+            const added = rs.reduce((n, r) => n + r.added.length, 0);
+            const failed = rs.filter((r) => r.error !== undefined);
+            return `${added} added across ${rs.length} feeds${failed.length > 0 ? `; failed: ${failed.map((f) => f.url).join(", ")}` : ""}`;
+          },
+        },
+        {
+          // F-B.7 nightly recompute: the queue is on-demand, so "recompute"
+          // means surfacing today's queue in the run report.
+          name: "review",
+          run: async () => {
+            const q = queueFor(ctx);
+            return q.length === 0
+              ? "queue empty"
+              : q.map((it, i) => `${i + 1}. ${it.id} (${it.score.toFixed(2)}) — ${it.reasons.join("; ")}`).join("\n");
+          },
+        },
+        {
+          name: "doctor",
+          run: async () => {
+            const rep = await runDoctor(ctx.bundle);
+            return `${rep.ok ? "ok" : "NOT CONFORMANT"} — ${rep.errors} errors, ${rep.warnings} warnings`;
+          },
+        },
+      ];
+      let picked = jobs;
+      if (p.only !== undefined) {
+        const names = (p.only as string).split(",").map((s) => s.trim()).filter((s) => s !== "");
+        for (const n of names)
+          if (!jobs.some((j) => j.name === n))
+            throw new OpError(
+              `unknown job: ${n} (known: ${jobs.map((j) => j.name).join(", ")})`,
+              "bad_params",
+            );
+        picked = jobs.filter((j) => names.includes(j.name));
+      }
+      try {
+        return await runJobs(ctx.bundle, picked);
+      } catch (e) {
+        if (e instanceof JobLockError) throw new OpError(e.message, "refused");
+        throw e;
+      }
+    },
+    render: (r) =>
+      (r as JobResult[])
+        .map((j) => {
+          if (j.skipped) return `[skip] ${j.name} — ${j.detail}`;
+          const tag = j.ok ? " ok " : "FAIL";
+          const detail = j.detail.includes("\n")
+            ? "\n" + j.detail.replace(/^/gm, "       ")
+            : ` — ${j.detail}`;
+          return `[${tag}] ${j.name} (${j.ms} ms)${detail}`;
+        })
+        .join("\n"),
+    exitCode: (r) => ((r as JobResult[]).some((j) => !j.ok && !j.skipped) ? 1 : 0),
   },
   {
     name: "init",

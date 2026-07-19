@@ -43,8 +43,8 @@ describe("buildIndex", () => {
     expect(engine.getNode("notes/beta")?.resource).toBe("https://example.com");
     // alpha->beta deduped; beta's broken link dropped
     expect(engine.listEdges()).toEqual([
-      { src: "alpha", dst: "notes/beta" },
-      { src: "notes/beta", dst: "alpha" },
+      { src: "alpha", dst: "notes/beta", rel: null },
+      { src: "notes/beta", dst: "alpha", rel: null },
     ]);
   });
 
@@ -68,7 +68,7 @@ describe("buildIndex", () => {
     expect(stats).toEqual({ indexed: 1, skipped: 2, removed: 0, edges: 1 });
     expect(engine.getNode("alpha")?.title).toBe("Alpha Prime");
     expect(engine.search("Prime")[0]?.id).toBe("alpha");
-    expect(engine.listEdges()).toEqual([{ src: "notes/beta", dst: "alpha" }]);
+    expect(engine.listEdges()).toEqual([{ src: "notes/beta", dst: "alpha", rel: null }]);
   });
 
   test("deleted concepts are removed from the index", async () => {

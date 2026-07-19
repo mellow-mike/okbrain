@@ -4,9 +4,9 @@
 // path reconstruction wants BFS parent tracking anyway. Undirected, matching
 // `neighbors` — a backlink connects as much as a link.
 
-import type { EdgeRecord } from "../engine/interface.ts";
+import type { LinkEdge } from "../engine/interface.ts";
 
-function adjacency(edges: EdgeRecord[]): Map<string, string[]> {
+function adjacency(edges: LinkEdge[]): Map<string, string[]> {
   const adj = new Map<string, string[]>();
   const add = (a: string, b: string) => {
     const list = adj.get(a);
@@ -23,7 +23,7 @@ function adjacency(edges: EdgeRecord[]): Map<string, string[]> {
 
 /** Shortest undirected path from `src` to `dst` inclusive, or null within `maxHops`. */
 export function shortestPath(
-  edges: EdgeRecord[],
+  edges: LinkEdge[],
   src: string,
   dst: string,
   maxHops = 10,
@@ -51,7 +51,7 @@ export function shortestPath(
 }
 
 /** Ids with no resolved edge in either direction, in input order. */
-export function orphans(ids: string[], edges: EdgeRecord[]): string[] {
+export function orphans(ids: string[], edges: LinkEdge[]): string[] {
   const linked = new Set<string>();
   for (const { src, dst } of edges) {
     linked.add(src);

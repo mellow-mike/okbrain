@@ -266,6 +266,38 @@ function renderAsk() {
   });
 }
 
+// ---- link suggestions (4.4) ---------------------------------------------
+
+// Shared panel: list suggestions for `id`; `actLabel`/`data-act` decide what
+// clicking a row's button does (accept = write via link_accept; insert =
+// editor-local, no write).
+async function loadSuggestions(el, id, act, actLabel) {
+  el.innerHTML = '<span class="muted">suggesting…</span>';
+  try {
+    var ss = await api('link_suggest', { id: id });
+    el.innerHTML = ss.length
+      ? ss.map(function (s) {
+          return '<div class="row suggestion" data-target="' + esc(s.id) + '">' +
+            '<button data-act="' + act + '">' + actLabel + '</button>' +
+            '<span>' + esc(s.title || s.id) +
+            ' <span class="muted">(' + s.score.toFixed(2) + '; ' + esc(s.reasons.join('; ')) + ')</span></span></div>';
+        }).join('')
+      : '<span class="muted">no suggestions</span>';
+  } catch (e) { el.innerHTML = errorBox(e); }
+}
+
+async function acceptSuggestion(btn, conceptId) {
+  var target = btn.closest('.suggestion').getAttribute('data-target');
+  btn.disabled = true;
+  try {
+    var r = await api('link_accept', { id: conceptId, target: target });
+    btn.textContent = r.added ? 'linked ✓' : 'already linked';
+  } catch (e) {
+    btn.textContent = 'failed';
+    btn.title = e.message;
+  }
+}
+
 // ---- review view --------------------------------------------------------
 
 async function renderReview() {
@@ -288,17 +320,23 @@ async function renderReview() {
         (it.garnish ? '<div class="garnish">↳ ' + esc(it.garnish) + '</div>' : '') +
         '<div class="row"><button data-act="done">Done</button>' +
         '<button data-act="snooze">Snooze 7d</button>' +
+        '<button data-act="suggest">Suggest links</button>' +
         '<a href="' + editorHref(it.id) + '"><button>Open</button></a>' +
-        '<a href="' + graphHref(it.id) + '"><button>Graph</button></a></div></div>';
+        '<a href="' + graphHref(it.id) + '"><button>Graph</button></a></div>' +
+        '<div class="suggest"></div></div>';
     }).join('');
   }
   listEl.addEventListener('click', async function (e) {
     var btn = e.target.closest('button[data-act]');
     if (!btn) return;
-    var id = btn.closest('.card').getAttribute('data-id');
+    var card = btn.closest('.card');
+    var id = card.getAttribute('data-id');
+    var act = btn.getAttribute('data-act');
+    if (act === 'suggest') { loadSuggestions(card.querySelector('.suggest'), id, 'accept', 'Link'); return; }
+    if (act === 'accept') { acceptSuggestion(btn, id); return; }
     btn.disabled = true;
     try {
-      await api(btn.getAttribute('data-act') === 'done' ? 'review_done' : 'review_snooze', { id: id });
+      await api(act === 'done' ? 'review_done' : 'review_snooze', { id: id });
       load();
     } catch (err) { listEl.insertAdjacentHTML('afterbegin', errorBox(err)); }
   });
@@ -322,14 +360,21 @@ async function renderInbox() {
         '<div class="why"><code>' + esc(r.id) + '</code></div>' +
         '<div class="row"><a href="' + editorHref(r.id) + '"><button>Open</button></a>' +
         '<button data-act="read">Mark read</button>' +
-        '<a href="' + graphHref(r.id) + '"><button>Graph</button></a></div></div>';
+        '<button data-act="suggest">Suggest links</button>' +
+        '<a href="' + graphHref(r.id) + '"><button>Graph</button></a></div>' +
+        '<div class="suggest"></div></div>';
     }).join('');
   }
   listEl.addEventListener('click', async function (e) {
-    var btn = e.target.closest('button[data-act="read"]');
+    var btn = e.target.closest('button[data-act]');
     if (!btn) return;
+    var card = btn.closest('.card');
+    var id = card.getAttribute('data-id');
+    var act = btn.getAttribute('data-act');
+    if (act === 'suggest') { loadSuggestions(card.querySelector('.suggest'), id, 'accept', 'Link'); return; }
+    if (act === 'accept') { acceptSuggestion(btn, id); return; }
     btn.disabled = true;
-    try { await api('inbox_read', { id: btn.closest('.card').getAttribute('data-id') }); load(); }
+    try { await api('inbox_read', { id: id }); load(); }
     catch (err) { listEl.insertAdjacentHTML('afterbegin', errorBox(err)); }
   });
   load();
@@ -375,9 +420,10 @@ async function renderEditor(id) {
     '<button class="primary">Save</button>' +
     '<select id="ed-linkpick"><option value="">insert link to…</option></select>' +
     '<button type="button" id="ed-cite">+ Citations</button>' +
+    (exists ? '<button type="button" id="ed-suggest">Suggest links</button>' : '') +
     (exists ? '<a href="' + graphHref(id) + '"><button type="button">Open in graph</button></a>' : '') +
     '<span id="ed-msg" class="muted"></span></div>' +
-    '</form><div id="ed-back"></div></div>';
+    '</form><div id="ed-sugg"></div><div id="ed-back"></div></div>';
   document.getElementById('ed-body').value = body;
   if (exists) document.getElementById('ed-id').readOnly = true;
 
@@ -405,6 +451,22 @@ async function renderEditor(id) {
       pick.value = '';
     });
   }).catch(function () {});
+
+  if (exists) {
+    var suggEl = document.getElementById('ed-sugg');
+    document.getElementById('ed-suggest').addEventListener('click', function () {
+      loadSuggestions(suggEl, id, 'insert', 'Insert');
+    });
+    // Inserting is editor-local: the link lands in the textarea and becomes
+    // real (and normalized) only when the user saves.
+    suggEl.addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-act="insert"]');
+      if (!btn) return;
+      var target = btn.closest('.suggestion').getAttribute('data-target');
+      insertAtCursor('[' + target.split('/').pop() + '](/' + target + '.md)');
+      btn.textContent = 'inserted ✓';
+    });
+  }
 
   document.getElementById('ed-cite').addEventListener('click', function () {
     var url = document.getElementById('ed-resource').value.trim();
@@ -468,6 +530,18 @@ async function renderSettings() {
     '<h3>Sync (git)</h3><div class="row">' +
     '<button id="sync-status">Status</button><button id="sync-run" class="primary">Sync now</button></div>' +
     '<div id="sync-out"></div>' +
+    '<h3>Enrichment (guardrailed web pass)</h3>' +
+    '<form id="enrf" class="stack"><div class="grid">' +
+    field('web-seed', 'Seed URLs', '', 'comma-separated http(s) URLs') +
+    field('task', 'Task', '', 'what to improve (optional)') +
+    field('web-max-pages', 'Max pages', '', '5') +
+    field('web-max-depth', 'Max depth', '', '1') +
+    field('allow-host', 'Allowed hosts', '', 'default: the seeds’ hosts') +
+    field('deny-path', 'Denied path prefixes', '', 'e.g. /admin,/login') +
+    '</div><div class="row"><label class="field"><span>Web</span>' +
+    '<select id="ed-no-web"><option value="">on</option><option value="1">off (--no-web)</option></select></label>' +
+    '<button class="primary">Run enrich</button></div></form>' +
+    '<div id="enr-out"></div>' +
     '<h3>Maintenance</h3><div class="row">' +
     '<button id="mx-index">Re-index</button><button id="mx-embed">Embed</button>' +
     '<button id="mx-doctor">Doctor</button></div><div id="mx-out"></div></div>';
@@ -490,6 +564,27 @@ async function renderSettings() {
         ' (' + r.chat.keyStatus + ')') + '\nembed: ' + esc(r.embed.provider + ' / ' + r.embed.model +
         ' (' + r.embed.keyStatus + ')') + '</div>');
     } catch (err) { show('set-out', errorBox(err)); }
+  });
+  document.getElementById('enrf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var params = {};
+    ['web-seed', 'task', 'allow-host', 'deny-path'].forEach(function (n) {
+      var v = document.getElementById('ed-' + n).value.trim();
+      if (v) params[n] = v;
+    });
+    ['web-max-pages', 'web-max-depth'].forEach(function (n) {
+      var v = document.getElementById('ed-' + n).value.trim();
+      if (v) params[n] = parseInt(v, 10);
+    });
+    if (document.getElementById('ed-no-web').value) params['no-web'] = true;
+    busy('enr-out');
+    try {
+      var r = await api('enrich', params);
+      show('enr-out', '<div class="notice">' + esc(
+        r.fetched.map(function (u) { return 'fetched ' + u; })
+          .concat(r.written.map(function (w) { return (w.created ? 'created ' : 'enriched ') + w.id; }))
+          .concat([(r.summary || '(no summary)') + ' — ' + r.steps + ' steps']).join('\n')) + '</div>');
+    } catch (err) { show('enr-out', errorBox(err)); }
   });
   document.getElementById('sync-status').addEventListener('click', async function () {
     busy('sync-out');

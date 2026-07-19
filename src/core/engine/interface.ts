@@ -27,7 +27,12 @@ export interface NodeUpsert extends NodeRecord {
 export interface EdgeRecord {
   src: string;
   dst: string;
+  /** DB-only typed relation (4.3), classified from link context; null = untyped. */
+  rel: string | null;
 }
+
+/** The untyped view of an edge, for consumers that ignore `rel`. */
+export type LinkEdge = Pick<EdgeRecord, "src" | "dst">;
 
 export interface SearchHit {
   id: string;
@@ -116,7 +121,7 @@ export interface Engine {
    */
   replaceEdges(edges: EdgeRecord[]): void;
   /** Replace one concept's outgoing edges (incremental update on write). */
-  replaceEdgesFor(src: string, dsts: string[]): void;
+  replaceEdgesFor(src: string, edges: { dst: string; rel: string | null }[]): void;
   /** Resolved edges only (both endpoints indexed), sorted by src then dst. */
   listEdges(): EdgeRecord[];
   /** One concept's resolved links (`out`) and backlinks (`in`), sorted. */

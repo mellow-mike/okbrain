@@ -4,7 +4,7 @@
 // UX. Config values are code defaults until the Stage-2.1 config file wires
 // `review.*` keys.
 
-import type { EdgeRecord, ReviewRow } from "../engine/interface.ts";
+import type { LinkEdge, ReviewRow } from "../engine/interface.ts";
 
 export interface ReviewConfig {
   cooldownDays: number;
@@ -55,7 +55,7 @@ const age = (d: number): string =>
 /** Rank all rows and return the top of the queue (deterministic order). */
 export function reviewQueue(
   rows: ReviewRow[],
-  edges: EdgeRecord[],
+  edges: LinkEdge[],
   now: Date,
   cfg: ReviewConfig = defaultReviewConfig,
 ): ReviewItem[] {

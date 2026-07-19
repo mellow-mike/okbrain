@@ -179,17 +179,22 @@ never rejects on any warning class — doctor is the only strict surface.
 - **Backlinks** = reverse edges → "Cited by".
 - **Tags** = facets for filtering and a synthesized tag-browse view.
 
-### Derived typed edges (OKF-safe)
-OKF keeps links untyped on disk on purpose. We type edges **only in the DB** so
-relational retrieval works without breaking the format: a cached pass classifies
-each link's relationship from its nearest heading/sentence (a link under
-`# Joins` → `joins-with`, under `# Citations` → `cites`, etc.). The markdown file
-stays a plain OKF link; okbrain just knows more.
+### Derived typed edges (OKF-safe, 4.3)
+OKF keeps links untyped on disk on purpose. We type edges **only in the DB**
+(`core/graph/typed-edges.ts`) so relational retrieval works without breaking
+the format: classification is deterministic and local — the clause directly
+before the link wins ("depends on [X]" → `depends-on`), else the nearest
+preceding heading (`# Citations` → `cites`, `# Joins` → `joins-with`; an
+unknown heading means untyped, it does not inherit an earlier one), else
+null. One shared `REL_VOCAB` phrase table drives both the classifier and
+the relational query detector. The markdown file stays a plain OKF link;
+okbrain just knows more. The "cache" is the index itself: rels are
+recomputed by every index build and per-concept write refresh.
 
 ### Storage & queries
 SQLite tables: `nodes(id, type, title, description, resource, timestamp,
-last_reviewed, body_len, content_hash)`, `edges(src, dst)` (plus
-`rel`/`evidence` when typed edges land, Stage 4), `tags(node_id, tag)`,
+last_reviewed, body_len, content_hash)`, `edges(src, dst, rel)` (schema v3;
+`rel` nullable, derived — see typed edges above), `tags(node_id, tag)`,
 `review_state(node_id, snooze_until)` (Resurface's DB-only snooze), and an
 FTS5 table sharing `nodes.rowid`. The index lives at `<bundle>/.okb/index.db`
 — inside the bundle so it travels with context but gitignored and always
@@ -360,6 +365,24 @@ bypass CORS, mixed-content, and private-network-access rules that would
 break a cross-origin `fetch` from an HTTPS page, so it works from any site
 with zero server relaxations. The confirmation page auto-closes on success.
 
+### RSS ingest (`okb rss`, Stage 4.1)
+Feeds are the second ingest source (after import/capture/clip): `okb rss
+[url]` pulls one feed, or — with no URL — every entry in config `rss.feeds`
+(what the jobs worker runs). `core/ingest/rss.ts` parses RSS 2.0 / RSS 1.0
+(RDF) / Atom with linkedom's XML parser (no new deps) and writes each new
+item as a conformant `references/<slug>` concept: type `reference`, tags
+`inbox` + `rss`, entry content/summary converted to markdown, `# Citations`
+naming the feed, `author`/`published`/`feed` as extension keys. Dedupe is
+clip's exact rule — normalized item URL against every concept's normalized
+`resource` (plus in-run) — so a feed entry and a hand-clipped article of the
+same page can never duplicate, and re-pulls are idempotent. Entries keep the
+feed's own content; fetching the full page stays clip's (or the enrich
+pass's) job. A per-pull `limit` (default 10, config `rss.maxItems`) paces
+first pulls of deep feeds; the rest arrive on later runs. Multi-feed pulls
+record per-feed errors instead of failing (one dead feed must not block a
+cron pull); a single explicit URL fails loudly. Zero AI, works with or
+without an index.
+
 ### Config (`clip.*`)
 `maxBodyBytes` 100KB, `stripParams` (utm_* etc.), `defaultTags` [],
 `autoTag` false (true = suggest tags on every clip; still off in `lean`).
@@ -444,7 +467,11 @@ embed it).
    are dropped as stale cache.
 2. Graph expansion: 1-hop neighbors/backlinks of the top fused hits join the
    pool with a damped share (×0.25) of their parent's score, tagged `graph`.
-   (The relational arm over typed edges arrives with 4.3.)
+   The relational arm (`relational.ts`, 4.3) adds one more ranking when the
+   query names a known relation ("what cites X"): anchor found via FTS with
+   question stop-words stripped, then in+out neighbors over that relation,
+   tagged `relational` — direction is recall, fusion ranks. Always on; a
+   strict no-op for every other query.
 3. Optional rerank (`core/retrieval/rerank.ts`) reorders the head by
    cross-encoder relevance — only when the profile asks AND a rerank
    provider is explicitly configured (config/env); key detection never
@@ -458,16 +485,26 @@ embed it).
    asks chat for alternate query phrasings and fuses all rankings.
 
 ### Enrichment agent (generalized from OKF's two passes)
-- **Source pass (pluralized):** filesystem import, quick capture, RSS/feeds, a
-  browser grab (later email/calendar) — each produces/updates OKF concepts.
-- **Web pass:** the LLM acts as a guarded crawler — fetch seeds, decide which
-  outbound links are authoritative, then enrich an existing concept, mint a
-  `references/<slug>` doc, or skip. Guardrails enforced inside the tool:
-  `--web-max-pages`, `--web-max-depth`, same-domain allowed-hosts, path
-  prefix/deny filters, `--no-web`. Citations written under `# Citations`.
-- **Tools (minimal, trust-aware):** `list_concepts`, `read_concept_raw`,
-  `read_existing_doc`, `write_concept_doc`, `fetch_url`, `link_suggest`,
-  `embed_doc`.
+- **Source pass (pluralized):** filesystem import, quick capture, clip,
+  RSS/feeds (4.1), a browser grab (later email/calendar) — each
+  produces/updates OKF concepts.
+- **Web pass (`okb enrich`, `core/ingest/web.ts`):** the LLM acts as a
+  guarded crawler driving a JSON-action loop over the plain-text chat
+  gateway (`list_concepts` / `read_concept` / `fetch_url` / `write_concept`
+  / `done` — one JSON object per model turn). It may enrich an existing
+  concept, mint a `references/<slug>` doc (new ids are confined there by the
+  tool), or skip; citations go under `# Citations`. Every guardrail lives
+  inside the tools, never the prompt: `--no-web`, the **frontier rule**
+  (only seeds and links discovered on fetched pages are fetchable — an
+  invented URL is refused with zero packets sent), `--web-max-depth`,
+  host allowlist (defaults to the seeds' hosts, subdomains included), path
+  allow/deny prefixes, `--web-max-pages` (checked last so a policy refusal
+  reports its real reason), and a step cap so a chatty run always ends.
+  Guard refusals and bad writes come back as error observations the model
+  can correct; two unparseable replies abort. `guardedFetch` (clip's SSRF
+  guard) sits underneath. Writes flow through the conformance writer and
+  the standard reindex hook (index + vectors), which is why the sketched
+  `embed_doc` tool doesn't exist; `link_suggest` joins the toolset with 4.4.
 
 ### MCP server (`okb mcp`, `src/mcp/server.ts`)
 External agents (Claude, etc.) use the brain as a tool. Tools and their JSON
@@ -508,7 +545,8 @@ capability once → it appears in all three. CLI/GUI can't drift.
 | `okb graph <id> [--depth N]` | read | Neighborhood with `→`/`←`/`↔` direction tags |
 | `okb path <from> <to>` | read | Shortest link chain between two concepts |
 | `okb orphans` | read | Concepts with no links in or out |
-| `okb links suggest` | write | Propose cross-links for review |
+| `okb links suggest <id>` | read | Propose cross-links (deterministic, with reasons) |
+| `okb links accept <id> <target>` | write | Accept one: normalized link under `# Related` |
 | `okb index` / `okb embed` | admin | (Re)build FTS / vectors incrementally |
 | `okb rebuild --confirm-destructive` | admin | Wipe + regenerate index from bundle |
 | `okb doctor` / `okb lint` | read | OKF conformance + health report |
@@ -553,15 +591,16 @@ palettes. Views:
   rewired to focus their node), click-through to the editor.
 - **Editor** — scaffold fields (type/title/description/tags/resource) + a
   markdown body textarea; concept-id link picker inserting normalized
-  links; citation-section helper; live backlinks; saves via
-  `write_concept`, so every save is conformant. (Suggested-link inbox
-  arrives with 4.4.) Deliberately not a rich editor: the bundle is plain
-  markdown and external editors remain first-class.
+  links; citation-section helper; live backlinks; suggest-links panel
+  (insert-only — a suggestion lands in the textarea and becomes real on
+  save); saves via `write_concept`, so every save is conformant.
+  Deliberately not a rich editor: the bundle is plain markdown and external
+  editors remain first-class.
 - **Ask** — SSE streaming: retrieved context appears as chips before the
   answer arrives; verified citations link to graph and editor.
 - **Review** — card stack with scores + reasons, optional garnish toggle;
-  done / snooze / open / graph per card.
-- **Inbox** — unread clips/notes; open / mark-read.
+  done / snooze / suggest-links (accepts write) / open / graph per card.
+- **Inbox** — unread clips/notes; open / mark-read / suggest-links.
 - **Settings** — AI providers + retrieval profile (backed by `init`, which
   persists them), git sync (status / run), maintenance (re-index, embed,
   doctor report). Enrichment guardrails join with Stage 4.
@@ -640,15 +679,28 @@ okbrain/
 ## Skills & jobs
 
 "Thin harness, fat skills": capabilities needing judgment are markdown
-procedures the agent reads, parameterized like method calls. First set: capture,
-ingest, enrich, query (brain-first retrieval recipe), link-suggest, daily-note.
-Decision rule: lookup/list/status → CLI command (deterministic); needs to
-think/adapt → skill. Operating discipline worth keeping: do a task manually
-3–10×, codify it into a skill, then put it on cron.
+procedures the agent reads, parameterized like method calls. The first set
+shipped with 4.6 under `skills/`: `RESOLVER.md` routes intent to one of
+capture, ingest, enrich, query (brain-first retrieval recipe), daily-note
+(embeds the review queue's "worth revisiting" section, reasons verbatim),
+and link-suggest. Every skill has an explicit Parameters block and grounds
+its deterministic steps in `okb` CLI calls (`--json`) — the skill carries
+only the judgment. Decision rule: lookup/list/status → CLI command
+(deterministic); needs to think/adapt → skill. Operating discipline worth
+keeping: do a task manually 3–10×, codify it into a skill, then put it on
+cron.
 
-Jobs/cron: a single background worker + file/SQLite lock for nightly embedding
-backfill, enrichment of stale concepts, `index.md`/backlink regeneration, and
-`okb doctor`. No queue infra in v1.
+Jobs/cron (`core/jobs/worker.ts`, `okb jobs`): one sequential maintenance
+run under `.okb/jobs.lock` — exclusive create, stale locks (dead pid,
+unreadable, >24 h) reclaimed once, SIGINT/SIGTERM finish the current job
+then stop, per-job failures captured so later jobs still run. The job list:
+index refresh (regenerates edges/backlinks), embed backfill (only when a
+vector store already exists), rss pull (`rss.feeds`), review-queue
+recompute (surfaced in the run report — the queue itself is on-demand),
+doctor. Nothing in the list spends AI implicitly; enrich-stale is
+deliberately not a job — `okb enrich` is always an explicit decision.
+Scheduling belongs to the OS (cron / launchd / Task Scheduler invoking
+`okb jobs`); no daemon, no queue infra in v1.
 
 ---
 
@@ -676,6 +728,73 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-19 — **Jobs (4.5): the OS schedules, okb runs once under a lock,
+  and no job spends AI implicitly.** A daemon would violate the lightweight
+  core for zero gain — every platform already ships a scheduler, so
+  `okb jobs` is a single idempotent pass (cron/launchd/Task Scheduler owns
+  the cadence) guarded by an exclusively-created `.okb/jobs.lock`; stale
+  locks (dead pid / unreadable / >24 h) are reclaimed exactly once so a
+  crash can't wedge the nightly run, while a live lock always wins. The
+  roadmap's "enrich stale" job was dropped from the list on the
+  no-silent-spend rule (rerank/garnish precedent): embed only backfills a
+  store the user explicitly created, rss/index/doctor/review are zero-AI,
+  and enrichment stays a deliberate `okb enrich`. Job failures are data
+  (captured per job, run continues, exit 1 at the end) — a broken feed must
+  not cancel doctor.
+- 2026-07-19 — **Link suggestion (4.4): always through review, never
+  auto-insert.** Resolves the open question: a suggested link that writes
+  itself would put derived guesses into canonical markdown, so `link_suggest`
+  is a read op (deterministic scoring with stated reasons — title mention
+  with word boundaries strongest, per-word FTS similarity because
+  engine.search is AND-semantics, shared tags) and `link_accept` is the only
+  writer: it appends a normalized `[Title](/id.md)` under `# Related` via
+  the conformance writer, so accepts are content changes (timestamp + log,
+  correctly). Already-connected concepts in either direction are never
+  suggested — the queue self-cleans as you accept. The GUI keeps the same
+  split: Review/Inbox buttons accept (write ops), while the Editor's button
+  only inserts into the textarea — nothing becomes real until Save. The
+  enrich agent gets the same engine via a `link_suggest` action rather than
+  a separate implementation.
+- 2026-07-19 — **Typed edges (4.3): sentence beats heading, unknown headings
+  don't inherit, and the DB is the cache.** Classification must be
+  deterministic (it reruns on every index build), so it's a fixed phrase
+  vocabulary, not a model call: the clause ending at the link is the most
+  local signal and wins; otherwise the nearest preceding heading — and an
+  *unknown* nearest heading yields untyped rather than letting an earlier
+  `# Citations` bleed across sections. Rels live in the edges table (schema
+  v3, nullable `rel`), never in markdown — OKF stays untyped on disk. No
+  separate cache table: rels recompute with the content-hash-skipped index
+  build and the per-write refresh, exactly as cheap as link extraction.
+  The relational arm is always on (no profile knob): detection over the
+  same vocabulary makes it a strict no-op for non-relational queries, and
+  it returns in+out neighbors (grammar-blind) because the arm's job is
+  recall — RRF fusion does the ranking. Consumers that ignore rel
+  (path/orphans/review scorer) now type against `LinkEdge`.
+- 2026-07-19 — **Web pass (4.2): guardrails live in the tools; the frontier
+  rule replaces URL trust.** The crawler's chat protocol is one JSON action
+  per turn over the existing plain-text gateway (no SDK tool-calling — the
+  gateway stays three dialects of plain fetch). Prompts are advice; the
+  tools are law: fetch_url refuses anything not in the frontier map (seeds
+  at depth 0, links discovered on fetched pages at parent+1), so a
+  hallucinated URL never costs a packet, and depth/host/path/page caps are
+  re-checked on every call with the SSRF guard underneath. New concept ids
+  are confined to references/ by write_concept (existing concepts may be
+  enriched in place) — the same enrich/mint/skip triad OKF's pass used.
+  Failures the model can fix (guard refusal, missing scaffold field, 404)
+  return as error observations; only provider/system errors abort. The
+  sketched read_existing_doc/embed_doc tools were dropped: one raw read
+  suffices, and the standard write-reindex hook already refreshes vectors.
+- 2026-07-19 — **RSS ingest (4.1) stores the feed's own content and shares
+  clip's dedupe.** A feed pull does not fetch item pages: the entry's
+  content/summary is the body (converted to markdown), and getting the full
+  article is clip's or the enrich pass's job — pulls stay cheap, cron-safe,
+  and zero-AI. Dedupe reuses clip's normalized-resource rule on both sides,
+  so `okb rss` and `okb clip` can never create duplicates of the same page
+  and re-pulls are idempotent. Configured multi-feed pulls capture per-feed
+  errors in the result instead of throwing (a dead feed must not block the
+  nightly pull); an explicitly given single URL still fails loudly. Feed
+  parsing uses linkedom's XML DOMParser (already a dep) over direct-child
+  lookups — querySelector would cross item boundaries.
 - 2026-07-17 — **MCP (3.3): read-only by default, write is an explicit local
   opt-in, admin never.** The MCP surface is the trust boundary made
   concrete: a default connection gets read tools only, and the gate is
@@ -989,7 +1108,6 @@ sections above as current truth; this log says *why/when*.
   upgrade behind the engine interface.
 
 ### Open questions (decide as they come up; record the answer here)
-- Suggested links: auto-insert on capture vs always route through a review inbox?
 - Concept `type` vocabulary: ship a small non-binding default set (Note, Person,
   Project, Reference, Idea, Meeting…) vs fully free-form?
 - Acceptance test: round-trip the three OKF sample bundles (GA4, Stack Overflow,
