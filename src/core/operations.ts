@@ -9,7 +9,8 @@ import { readFile } from "node:fs/promises";
 import { createApiServer } from "../api.ts";
 import { runMcpHttp, runMcpStdio } from "../mcp/server.ts";
 import { createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
-import { loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
+import { listBrains, loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
+import { calibration, CLAIM_TYPE, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
 import type { Engine, Neighbor, VectorStore } from "./engine/interface.ts";
 import { suggestLinks, type LinkSuggestion } from "./graph/link-suggest.ts";
@@ -46,6 +47,8 @@ export type Scope = "read" | "write" | "admin";
 export interface OpContext {
   bundle: string;
   trusted: boolean;
+  /** Read-only brain mount (Stage 5): write/admin ops are refused. */
+  readonly?: boolean;
   /**
    * Open (or return the already-open) engine; the adapter owns its lifecycle.
    * Without `createIfMissing`, a bundle with no index yet must fail loudly —
@@ -1245,6 +1248,140 @@ export const operations: readonly Operation[] = [
     exitCode: (r) => ((r as JobResult[]).some((j) => !j.ok && !j.skipped) ? 1 : 0),
   },
   {
+    name: "take",
+    cliName: "take",
+    summary: "Record an opinion/prediction as a claim with stated confidence",
+    scope: "write",
+    params: [
+      { name: "statement", type: "string", required: true, positional: true, description: "the claim, stated so it can later be judged correct or not" },
+      { name: "confidence", type: "int", required: true, description: "how sure you are it's correct, 0–100" },
+      { name: "resolve-by", type: "string", description: "date (YYYY-MM-DD) by which the claim should be judged" },
+      { name: "tags", type: "string", description: "comma-separated tags" },
+      { name: "body", type: "string", description: "reasoning behind the take (markdown)" },
+    ],
+    handler: async (ctx, p) => {
+      const confidence = p.confidence as number;
+      if (confidence < 0 || confidence > 100)
+        throw new OpError("confidence must be 0–100", "bad_params");
+      const resolveBy = p["resolve-by"] as string | undefined;
+      if (resolveBy !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(resolveBy))
+        throw new OpError("resolve-by must be a YYYY-MM-DD date", "bad_params");
+      const statement = (p.statement as string).trim();
+      const r = await writing(async () => {
+        const base = `${CLAIM_TYPE}s/${slugify(statement.slice(0, 80))}`;
+        let id = base;
+        for (let n = 2; existsSync(idToAbsPath(ctx.bundle, id)); n++) id = `${base}-${n}`;
+        return writeConcept(ctx.bundle, {
+          id,
+          type: CLAIM_TYPE,
+          title: statement,
+          description: `Claim held at ${confidence}% confidence.`,
+          body: p.body as string | undefined,
+          tags: parseTags(p.tags),
+          extra: { confidence, ...(resolveBy === undefined ? {} : { resolve_by: resolveBy }) },
+        });
+      });
+      await reindex(ctx, [r.id]);
+      return { ...r, confidence };
+    },
+    render: (r) => {
+      const x = r as WriteResult & { confidence: number };
+      return `staked ${x.id} at ${x.confidence}% — settle it later with \`okb resolve\``;
+    },
+  },
+  {
+    name: "resolve",
+    cliName: "resolve",
+    summary: "Settle a claim: correct, incorrect, or void (can't be judged)",
+    scope: "write",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "claim concept id, e.g. claims/foo" },
+      { name: "outcome", type: "string", required: true, positional: true, description: "correct | incorrect | void (aliases: true, false)" },
+    ],
+    handler: async (ctx, p) => {
+      const alias: Record<string, Outcome> = {
+        correct: "correct", true: "correct", incorrect: "incorrect", false: "incorrect", void: "void",
+      };
+      const outcome = alias[(p.outcome as string).toLowerCase()];
+      if (outcome === undefined)
+        throw new OpError("outcome must be correct, incorrect, or void", "bad_params");
+      const id = p.id as string;
+      const view = await readConceptView(ctx.bundle, id); // not_found on missing
+      if (fmString(view.frontmatter.type) !== CLAIM_TYPE)
+        throw new OpError(`${id} is not a claim (type ${fmString(view.frontmatter.type) || "?"})`, "bad_params");
+      const prior = view.frontmatter.outcome;
+      if (prior !== undefined)
+        throw new OpError(
+          `${id} is already resolved (${String(prior)}) — edit its frontmatter to re-judge`,
+          "refused",
+        );
+      const resolved = nowTimestamp();
+      await writing(() => writeConcept(ctx.bundle, { id, extra: { outcome, resolved } }));
+      await reindex(ctx, [id]);
+      return { id, outcome, resolved };
+    },
+    render: (r) => {
+      const x = r as { id: string; outcome: Outcome };
+      return `resolved ${x.id}: ${x.outcome}`;
+    },
+  },
+  {
+    name: "calibrate",
+    cliName: "calibrate",
+    summary: "Score your resolved claims: Brier score + calibration by confidence",
+    scope: "read",
+    params: [],
+    handler: async (ctx) => calibration(await scanClaims(ctx.bundle), new Date()),
+    render: (r) => {
+      const c = r as CalibrationReport;
+      const total = c.open.length + c.correct + c.incorrect + c.void;
+      if (total === 0) return "no claims yet — stake one with `okb take`";
+      const lines: string[] = [];
+      if (c.open.length > 0) {
+        lines.push(`open claims (${c.open.length}):`);
+        for (const o of c.open)
+          lines.push(
+            `  ${o.overdue ? "!" : " "} ${o.id} — ${o.confidence === null ? "?" : `${o.confidence}%`}${o.resolveBy ? ` — resolve by ${o.resolveBy}${o.overdue ? " (overdue)" : ""}` : ""}`,
+          );
+      }
+      lines.push(`resolved: ${c.correct} correct, ${c.incorrect} incorrect, ${c.void} void`);
+      if (c.brier !== null) {
+        lines.push(
+          `Brier score: ${c.brier.toFixed(3)} over ${c.correct + c.incorrect} scored claims (0 is perfect, 0.25 = coin flip)`,
+        );
+        for (const b of c.buckets)
+          lines.push(`  ${b.range.padStart(7)}  n=${b.n}  said ${b.meanConfidence}%  got ${b.hitRate}%`);
+      }
+      return lines.join("\n");
+    },
+  },
+  {
+    name: "brains",
+    cliName: "brains",
+    summary: "List configured brain mounts (config.json `brains`; use --brain <name>)",
+    scope: "read",
+    // Mount paths are host filesystem topology — CLI only, never a network surface.
+    localOnly: true,
+    params: [],
+    handler: async (ctx) =>
+      listBrains().map((b) => ({
+        ...b,
+        exists: existsSync(b.path),
+        active: b.path === ctx.bundle,
+      })),
+    render: (r) => {
+      const bs = r as { name: string; path: string; readonly: boolean; exists: boolean; active: boolean }[];
+      if (bs.length === 0)
+        return 'no brains configured — add to config.json, e.g.\n  "brains": { "work": "/path/to/work-bundle", "ref": { "path": "/path/to/ref", "readonly": true } }';
+      return bs
+        .map(
+          (b) =>
+            `${b.active ? "*" : " "} ${b.name.padEnd(12)} ${b.path}${b.readonly ? "  [readonly]" : ""}${b.exists ? "" : "  [missing]"}`,
+        )
+        .join("\n");
+    },
+  },
+  {
     name: "init",
     cliName: "init",
     summary: "Attach this bundle as the default and pick AI providers (config.json)",
@@ -1334,6 +1471,7 @@ export const operations: readonly Operation[] = [
       const { url } = createApiServer({
         bundle: ctx.bundle,
         port: p.port as number | undefined,
+        readonly: ctx.readonly === true,
       });
       log.info(`serving ${ctx.bundle} at ${url} — Ctrl-C to stop`);
       log.info("clip from the browser: `okb bookmarklet`");
@@ -1354,13 +1492,14 @@ export const operations: readonly Operation[] = [
     ],
     handler: async (ctx, p) => {
       const trusted = p.trusted === true;
+      const readonly = ctx.readonly === true;
       const mode = trusted ? "TRUSTED — write ops exposed" : "untrusted, read-only";
       if (p.http === true || p.port !== undefined) {
         const port = (p.port as number | undefined) ?? DEFAULT_MCP_PORT;
-        runMcpHttp({ bundle: ctx.bundle, trusted, port });
+        runMcpHttp({ bundle: ctx.bundle, trusted, readonly, port });
         log.info(`mcp: http://127.0.0.1:${port}/ (${mode})`);
       } else {
-        await runMcpStdio({ bundle: ctx.bundle, trusted });
+        await runMcpStdio({ bundle: ctx.bundle, trusted, readonly });
         log.info(`mcp: stdio (${mode})`);
       }
       return new Promise(() => {}); // lives until the client disconnects us
@@ -1425,6 +1564,11 @@ export function checkOpCall(
     throw new OpError(
       `op ${op.name} (scope ${op.scope}) is not available to untrusted callers`,
       "untrusted",
+    );
+  if (ctx.readonly === true && op.scope !== "read")
+    throw new OpError(
+      `this brain is mounted read-only — op ${op.name} (scope ${op.scope}) is refused`,
+      "refused",
     );
   for (const key of Object.keys(raw))
     if (!op.params.some((s) => s.name === key))

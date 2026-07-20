@@ -6,7 +6,7 @@
 // e.g. `doctor` on a non-conformant bundle) · 2 usage error.
 
 import { existsSync, statSync } from "node:fs";
-import { ConfigError, resolveBundlePath } from "./core/config.ts";
+import { ConfigError, resolveBrain, resolveBundlePath } from "./core/config.ts";
 import { AiError } from "./core/ai/gateway.ts";
 import { openLocalContext, type LocalContext } from "./core/context.ts";
 import { EngineError } from "./core/engine/sqlite.ts";
@@ -56,6 +56,7 @@ function helpText(): string {
     "global options:",
     "  --json             machine-readable output",
     "  --bundle <path>    bundle root (default: $OKB_BUNDLE or cwd)",
+    "  --brain <name>     use a configured brain mount (also $OKB_BRAIN)",
     "",
     "`okb help <command>` shows a command's options.",
     `current bundle: ${currentBundleLabel()}`,
@@ -83,6 +84,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
   let json = false;
   let help = false;
   let bundleArg: string | undefined;
+  let brainArg: string | undefined;
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -94,7 +96,17 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
         io.err("--bundle requires a path\n");
         return 2;
       }
+    } else if (a === "--brain") {
+      brainArg = argv[++i];
+      if (brainArg === undefined) {
+        io.err("--brain requires a name (see `okb brains`)\n");
+        return 2;
+      }
     } else rest.push(a);
+  }
+  if (brainArg !== undefined && bundleArg !== undefined) {
+    io.err("--brain and --bundle are mutually exclusive\n");
+    return 2;
   }
 
   let cmd = rest.shift();
@@ -155,8 +167,16 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
       raw[spec.name] = await io.stdin();
 
   let bundle: string;
+  let readonly = false;
   try {
-    bundle = resolveBundlePath(bundleArg);
+    const brainName = brainArg ?? (bundleArg === undefined ? process.env.OKB_BRAIN : undefined);
+    if (brainName !== undefined) {
+      const brain = resolveBrain(brainName);
+      bundle = brain.path;
+      readonly = brain.readonly;
+    } else {
+      bundle = resolveBundlePath(bundleArg);
+    }
   } catch (e) {
     if (!(e instanceof ConfigError)) throw e;
     io.err(e.message + "\n");
@@ -169,7 +189,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
 
   let local: LocalContext | undefined;
   try {
-    local = openLocalContext(bundle);
+    local = openLocalContext(bundle, true, readonly);
     const result = await runOp(op, local.ctx, raw);
     io.out((json ? JSON.stringify(result, null, 2) : op.render(result)) + "\n");
     return op.exitCode?.(result) ?? 0;

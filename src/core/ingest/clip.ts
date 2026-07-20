@@ -13,7 +13,7 @@ import { nowTimestamp, writeConcept } from "../okf/write.ts";
 import { guardedFetch, type FetchedPage } from "./fetch-guard.ts";
 import { extractArticle, type ExtractedArticle } from "./extract.ts";
 
-export const CLIP_MAX_BODY_BYTES = 100_000;
+const CLIP_MAX_BODY_BYTES = 100_000;
 
 // Tracking params stripped during URL normalization (clip.stripParams default).
 const TRACKING = [/^utm_/i, /^fbclid$/i, /^gclid$/i, /^mc_[ce]id$/i, /^igshid$/i];

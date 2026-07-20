@@ -389,6 +389,33 @@ without an index.
 
 ---
 
+## Calibration — takes vs facts
+
+Opinions and predictions ("takes") are knowledge too, but they must not
+masquerade as settled facts. The separation is a concept type: `type: claim`
+(`core/claims.ts`), living under `claims/` per the `<type>s/` scheme, with
+okbrain extension keys — `confidence` (0–100), optional `resolve_by`
+(YYYY-MM-DD), and on settlement `outcome` + `resolved`. All OKF-safe:
+consumers tolerate and preserve unknown keys, and claims are ordinary
+concepts to search/graph/review.
+
+- **`okb take <statement> --confidence 70 [--resolve-by …]`** — stakes a
+  claim at `claims/<slug>` through the conformance writer (numeric suffix on
+  collision, statement = title, optional `--body` for the reasoning).
+- **`okb resolve <id> correct|incorrect|void`** — settles exactly once
+  (re-judging means editing frontmatter by hand — deliberate friction);
+  `true`/`false` accepted as aliases but the stored value is a word, never a
+  YAML boolean (a bare `outcome: true` would round-trip as a boolean and
+  complicate every consumer). A resolution is a content change: `timestamp`
+  refreshes and `log.md` gets an entry.
+- **`okb calibrate`** — deterministic, zero-AI report from a bundle scan (no
+  index required): open claims with overdue flags (`resolve_by` past), the
+  Brier score (mean `(confidence/100 − outcome)²` over correct/incorrect;
+  void counts but never scores), and per-decade calibration buckets (stated
+  confidence vs actual hit rate).
+
+---
+
 ## AI integration
 
 ### Gateway (`core/ai/gateway.ts` + `recipes.ts`)
@@ -551,9 +578,16 @@ capability once → it appears in all three. CLI/GUI can't drift.
 | `okb rebuild --confirm-destructive` | admin | Wipe + regenerate index from bundle |
 | `okb doctor` / `okb lint` | read | OKF conformance + health report |
 | `okb sync` | write | git commit/push/pull |
+| `okb take <statement> --confidence N` | write | Stake a claim (opinion/prediction) |
+| `okb resolve <id> <outcome>` | write | Settle a claim: correct/incorrect/void |
+| `okb calibrate` | read | Brier score + calibration over resolved claims |
+| `okb brains` | read | List configured brain mounts (CLI-only) |
 | `okb serve` | admin | Start local GUI + API |
 | `okb mcp` | admin | Start MCP server |
 | `okb export-viz` | read | Self-contained OKF-style graph HTML |
+
+Global flags: `--json` everywhere, `--bundle <path>`, `--brain <name>`
+(named mount; also `$OKB_BRAIN`).
 
 ### Local API (`src/api.ts`, started by `okb serve`)
 The GUI's backend and the bookmarklet's target — a thin adapter generated
@@ -613,6 +647,20 @@ untrusted unless explicitly local. Not-strictly-trusted ⇒ untrusted
 (fail-closed). Untrusted callers get read ops; write/admin are gated and
 filesystem confinement tightens.
 
+### Multi-brain mounts (Stage 5)
+The gbrain "brains" axis: config `brains` maps a name to a bundle path
+(string form) or `{ path, readonly }` (policy form) — `~` expands, paths
+must otherwise be absolute (a config file resolving against cwd would be a
+footgun). Selection is `okb --brain <name>` / `$OKB_BRAIN` (mutually
+exclusive with `--bundle`); `okb brains` lists mounts and is `localOnly` —
+mount paths are host filesystem topology and never belong on a network
+surface. The **read-only policy is a third gate in the ops layer**, distinct
+from trust: `checkOpCall` refuses write/admin on a readonly context before
+any handler runs, and the flag is threaded through every adapter (CLI, each
+local-API request, MCP even with `--trusted`), so serving a read-only brain
+cannot re-open it. Each mount is its own repo + its own `.okb/` index —
+nothing is shared between brains.
+
 ---
 
 ## Tech stack
@@ -630,12 +678,29 @@ filesystem confinement tightens.
 - **GUI build:** none — vanilla JS/CSS/HTML served as-is and embedded via Bun
   text imports; Bun's compiler is the only "bundler" (decided at 3.2).
 
+### Packaging & distribution (Stage 5)
+`okb` and the sqlite-vec `vec0` extension always travel **side by side**:
+the extension lookup is `$OKB_SQLITE_VEC` → next to the okb executable → the
+npm package (dev path). Embedding vec0 *inside* the compiled binary was
+rejected — SQLite loads extensions via dlopen, which can't read Bun's
+compiled-in virtual files, so extraction would be needed anyway; shipping
+the pair beats hidden temp-file extraction. `bun run build` copies the
+platform vec0 into `bin/`; `scripts/package-release.ts` (driven by
+`.github/workflows/release.yml` on `v*` tags) cross-compiles all five
+targets from one Linux runner and pairs each with its platform vec0 from
+the npm registry (tar.gz/zip + SHA256SUMS.txt). Homebrew/Scoop manifest
+templates live in `packaging/`; artifacts stay unsigned until org
+certificates exist (hook points documented in `packaging/README.md`).
+
 ### Scale path (opt-in, behind the same interfaces)
 More files / faster search → swap engine to **Postgres + pgvector** (ops
-unchanged; verify with a rebuild-parity test). Heavier background work → promote
-the single worker to a real queue. Multiple/team brains → mount additional
-bundles (gbrain's "brains" axis), each its own repo + index + policy. Single-user
-stays the default. Switching engines = point at the new engine + `okb rebuild`.
+unchanged; verify with a rebuild-parity test) — **deliberately deferred**:
+without Postgres in the 3-OS CI matrix it cannot meet the "most well-tested"
+bar, and no bundle has outgrown SQLite (decision 2026-07-20). Heavier
+background work → promote the single worker to a real queue. Multiple/team
+brains → **shipped** as multi-brain mounts (see §Surfaces). Single-user
+stays the default. Switching engines = point at the new engine +
+`okb rebuild`.
 
 ---
 
@@ -645,8 +710,9 @@ stays the default. Switching engines = point at the new engine + `okb rebuild`.
 okbrain/
 ├── src/
 │   ├── core/
-│   │   ├── operations.ts        # the ONE contract (scope + trust)
-│   │   ├── config.ts            # bundle path + cross-platform config/data dirs
+│   │   ├── operations.ts        # the ONE contract (scope + trust + readonly)
+│   │   ├── config.ts            # bundle path, config/data dirs, brain mounts
+│   │   ├── claims.ts            # calibration: takes vs facts (Brier, buckets)
 │   │   ├── log.ts               # structured logger
 │   │   ├── okf/                 # document, paths, bundle, indexmd, logmd, doctor
 │   │   ├── engine/              # interface, sqlite, index-build  (postgres later)
@@ -668,10 +734,12 @@ okbrain/
 │   ├── daily-note/SKILL.md
 │   └── link-suggest/SKILL.md
 ├── bundles/example/             # tiny conformant OKF bundle for tests/demos
+├── scripts/                     # build/release helpers (copy-vec0, package-release)
+├── packaging/                   # Homebrew/Scoop templates + release/signing docs
 ├── docs/
 │   └── context/                 # user-dropped reference material
 │       └── REFERENCES.md        # registry of that material (see below)
-└── tests/                       # conformance, graph, retrieval, rebuild-parity
+└── tests/                       # conformance, graph, retrieval, surfaces
 ```
 
 ---
@@ -728,6 +796,54 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-20 — **Packaging (5.1): vec0 ships beside the binary, never
+  embedded in it.** SQLite loads extensions with dlopen, which cannot read
+  the virtual files Bun compiles into an executable — an embedded vec0
+  would need extraction to a real path on every start, trading a visible
+  file for hidden temp-dir state. So the contract is "okb and vec0 sit in
+  the same directory": the lookup is `$OKB_SQLITE_VEC` → executable's dir →
+  npm package (dev), `bun run build` copies the pair, and every release
+  archive, the Homebrew formula (libexec + symlink), and the Scoop manifest
+  preserve it. Releases cross-compile all five bun targets from one Linux
+  runner (`scripts/package-release.ts`, verified end-to-end) with the
+  matching sqlite-vec platform tarball pulled from the npm registry at the
+  repo's pinned version. Signing/notarization stays a documented hook, not
+  a workflow step, until certificates exist — a release process that lies
+  about signing is worse than one that says "unsigned".
+- 2026-07-20 — **Multi-brain (5.2): read-only is a third ops-layer gate,
+  not a trust level.** A readonly mount is a *policy* on a trusted caller —
+  reusing `trusted=false` would have conflated it with the MCP boundary and
+  produced misleading errors, so `OpContext.readonly` is its own fail-closed
+  check in `checkOpCall` (write/admin refused before any handler) and every
+  adapter threads it: the CLI at resolution, the local API into each
+  per-request context, MCP even under `--trusted`. Brain paths must be
+  absolute (after `~` expansion) because a config file resolving relative
+  paths against whatever cwd happens to be would silently target the wrong
+  directory; `okb brains` is `localOnly` because mount paths are host
+  topology no network surface needs. Per-brain provider/profile settings
+  are Backlog until wanted.
+- 2026-07-20 — **Calibration (5.3): claims are a concept type, outcomes are
+  words, resolution settles once.** "Takes vs facts" needs no new storage:
+  `type: claim` + extension keys (`confidence`, `resolve_by`, `outcome`,
+  `resolved`) keep claims ordinary OKF concepts that search/graph/review
+  already handle. Outcomes are `correct|incorrect|void` — storing `true`
+  would round-trip as a YAML boolean and force every consumer to handle
+  both shapes (CLI still accepts true/false as aliases). `okb resolve`
+  refuses a second judgment (re-judging = hand-editing frontmatter,
+  deliberate friction against score-polishing), and a resolution is a
+  content change (timestamp + log). Scoring is a bundle scan, not an engine
+  query: claim keys aren't indexed columns, scans are laptop-cheap, and
+  `okb calibrate` stays index-free like clip. Brier + per-decade buckets
+  because both are deterministic, explainable, and need zero AI.
+- 2026-07-20 — **Postgres engine and desktop wrapper deferred (5.4).** The
+  North Star says most-well-tested, and the 3-OS CI matrix has no Postgres
+  service — an engine that ships without CI-green tests on every platform
+  would violate the bar it exists to meet; SQLite has no observed scale
+  problem to justify the infrastructure. The engine interface remains the
+  seam (rebuild-parity test lands with the engine when it earns its way
+  in). Tauri/Electron likewise: `okb serve` already gives a cross-platform
+  GUI, and a wrapper would be the repo's heaviest dependency for window
+  chrome. Both stay on the roadmap as `[!]` with this rationale.
 - 2026-07-19 — **Jobs (4.5): the OS schedules, okb runs once under a lock,
   and no job spends AI implicitly.** A daemon would violate the lightweight
   core for zero gain — every platform already ships a scheduler, so

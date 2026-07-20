@@ -140,6 +140,12 @@ describe("request guards", () => {
     expect(bearer.status).toBe(200);
     expect((await fetch(base + `api/ops?token=${TOKEN}`)).status).toBe(200);
   });
+
+  test("a busy port fails with an actionable message", () => {
+    expect(() => createApiServer({ bundle, port: api.port, token: TOKEN })).toThrow(
+      /already in use.*--port/,
+    );
+  });
 });
 
 describe("op routes", () => {

@@ -22,9 +22,20 @@ export function defaultVectorsPath(bundleRoot: string): string {
   return join(bundleRoot, ".okb", "vectors.db");
 }
 
-/** Locate the loadable vec0 extension ($OKB_SQLITE_VEC overrides, e.g. for a compiled binary). */
-function extensionPath(): string {
+/** Platform filename of the loadable vec0 extension. */
+export const vec0Filename = (platform: NodeJS.Platform = process.platform): string =>
+  platform === "win32" ? "vec0.dll" : platform === "darwin" ? "vec0.dylib" : "vec0.so";
+
+/**
+ * Locate the loadable vec0 extension: $OKB_SQLITE_VEC → next to the okb
+ * executable (how a shipped binary finds it — the release archive and
+ * `bun run build` both place vec0 beside okb) → the sqlite-vec npm package
+ * (the dev path). Exported for tests; `execDir` is injectable.
+ */
+export function extensionPath(execDir: string = dirname(process.execPath)): string {
   if (process.env.OKB_SQLITE_VEC) return process.env.OKB_SQLITE_VEC;
+  const shipped = join(execDir, vec0Filename());
+  if (existsSync(shipped)) return shipped;
   try {
     const p = sqliteVec.getLoadablePath();
     if (existsSync(p)) return p;
@@ -32,7 +43,7 @@ function extensionPath(): string {
     // fall through to the actionable error
   }
   throw new VecError(
-    "cannot locate the sqlite-vec extension — set OKB_SQLITE_VEC to the vec0 library path",
+    `cannot locate the sqlite-vec extension — place ${vec0Filename()} next to the okb binary, or set OKB_SQLITE_VEC to the vec0 library path`,
   );
 }
 

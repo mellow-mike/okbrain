@@ -137,8 +137,8 @@ bun install                                   # deps
 bun run src/cli.ts <args>                      # run CLI in dev (alias: okb)
 bunx tsc --noEmit                              # typecheck
 bun test                                       # unit tests (capture per rule above)
-bun build --compile --outfile bin/okb src/cli.ts            # local binary
-bun build --compile --target bun-darwin-arm64 --outfile dist/okb-macos-arm64 src/cli.ts   # cross-compile example
+bun run build                                  # local binary: bin/okb + bin/vec0.* (side by side)
+bun run scripts/package-release.ts             # all five per-OS release archives → dist/
 bun run src/cli.ts serve                       # start local GUI + API (later stage)
 bun run src/cli.ts mcp                          # start MCP server (later stage)
 ```

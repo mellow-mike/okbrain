@@ -6,7 +6,7 @@
 
 import type { ChatMessage, ChatResult } from "../ai/gateway.ts";
 
-export const MAX_AUTO_TAGS = 5;
+const MAX_AUTO_TAGS = 5;
 const EXCERPT_CHARS = 2_000;
 /** Workflow tags the model must never assign. */
 const RESERVED = new Set(["inbox"]);

@@ -13,6 +13,7 @@ already does (`okb help` lists them, `--json` everywhere).
 | "what do I know about…", any question answerable from the bundle | `query/SKILL.md` |
 | "write my daily note", "what should I look at today" | `daily-note/SKILL.md` |
 | "connect my notes", "what should link to what" | `link-suggest/SKILL.md` |
+| "I think/predict X", "settle that claim", "how calibrated am I" | no skill — direct CLI: `okb take`, `okb resolve`, `okb calibrate` |
 
 Ground rules (apply in every skill):
 - **Brain-first:** query the bundle before answering from model memory; cite
