@@ -15,13 +15,14 @@ export interface LocalContext {
   close(): void;
 }
 
-export function openLocalContext(bundle: string, trusted = true): LocalContext {
+export function openLocalContext(bundle: string, trusted = true, readonly = false): LocalContext {
   let engine: Engine | undefined;
   let vectors: VectorStore | undefined;
   let cfg: OkbConfig | undefined;
   const ctx: OpContext = {
     bundle,
     trusted,
+    readonly,
     engine: (createIfMissing = false) => {
       if (!engine) {
         const db = defaultDbPath(bundle);

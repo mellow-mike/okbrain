@@ -9,14 +9,16 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 0–4 complete.** The brain ingests (import/capture/clip/rss),
+> **Stages 0–5 complete.** The brain ingests (import/capture/clip/rss),
 > enriches itself behind guardrails (`okb enrich`), retrieves over keyword +
 > vector + graph + typed-edge relational arms, proposes links through
-> review, runs nightly maintenance (`okb jobs` under OS cron), and ships
-> agent skills. Next: **Stage 5** — packaging (embed/ship the vec0
-> extension with the compiled binary — the parked 2.2 note — plus signed
-> per-OS binaries), then the optional scale items (Postgres engine,
-> rebuild-parity, multi-brain mounts) as they earn their way in.
+> review, runs nightly maintenance (`okb jobs` under OS cron), ships agent
+> skills, and now also: packages (vec0 beside the binary, five-target
+> release workflow, Homebrew/Scoop templates), mounts multiple brains with
+> per-mount read-only policy (`--brain`), and scores opinions
+> (`okb take` / `resolve` / `calibrate`). Postgres and a desktop wrapper
+> are deliberately deferred (see 5.4). Next: signing when certificates
+> exist, and Backlog items as they earn their way in.
 
 ---
 
@@ -228,10 +230,10 @@ Goal: ask questions of your brain, offline or via API.
 - [x] Tests: re-embed only on change; provider switch invalidates correctly;
       store mechanics + persistence; batch-boundary assembly; CLI + hook
       end-to-end vs a stub embed server (no network in CI)
-- [ ] Compiled binary can't self-locate the vec0 extension (node_modules
-      isn't shipped) — `$OKB_SQLITE_VEC` is the documented escape hatch;
-      embed the platform extension into the binary at build time (or ship it
-      alongside) before packaging (Stage 5)
+- [x] Compiled binary can't self-locate the vec0 extension (node_modules
+      isn't shipped) — resolved at 5.1: okb looks for vec0 next to its own
+      executable; `bun run build` and the release archives ship the pair
+      together; `$OKB_SQLITE_VEC` stays the universal override
 
 ### 2.3 Retrieval pipeline
 - [x] `core/retrieval/hybrid.ts` — vector + FTS recall fused via RRF (k=60);
@@ -427,13 +429,59 @@ Goal: the brain improves itself on a schedule.
 
 ---
 
-## Stage 5+ — Scale & advanced (optional)
-- [ ] `core/engine/postgres.ts` (pgvector) behind the engine interface
-- [ ] Rebuild-parity test: SQLite vs Postgres identical derived state
-- [ ] Multi-brain mounts (brains axis): per-bundle repo + index + access policy
-- [ ] Calibration / "takes vs facts": separate opinions from facts; prediction scoring
-- [ ] Tauri/Electron desktop wrapper over the local API
-- [ ] Packaging: signed per-OS binaries; Homebrew tap + Scoop manifest; release workflow
+## Stage 5 — Packaging, scale & advanced
+
+### 5.1 Packaging & release
+- [x] vec0 ships beside the binary: `extensionPath` looks `$OKB_SQLITE_VEC`
+      → next to the okb executable → the sqlite-vec npm package (dev);
+      `bun run build` copies the platform vec0 into `bin/`
+      (`scripts/copy-vec0.ts`); compiled-binary embed verified end-to-end
+      against a stub (dlopen can't read Bun's compiled-in virtual files, so
+      side-by-side beats embedding)
+- [x] Release workflow (`.github/workflows/release.yml`): tag `v*` →
+      `scripts/package-release.ts` cross-compiles all five targets
+      (linux/darwin × x64/arm64 + windows-x64) on one Linux runner, pairs
+      each with its platform vec0 from the npm registry, emits
+      tar.gz/zip + SHA256SUMS.txt, creates the GitHub release; full run
+      verified locally
+- [x] Homebrew formula + Scoop manifest templates (`packaging/`, both built
+      on the okb-and-vec0-side-by-side rule) + `packaging/README.md`
+- [!] Signed/notarized binaries — blocked on org certificates; the hook
+      points and per-OS steps are documented in `packaging/README.md`
+
+### 5.2 Multi-brain mounts (brains axis)
+- [x] Config `brains` map (string path or `{ path, readonly }`; `~`
+      expansion, absolute-path rule) + `resolveBrain`/`listBrains` in
+      `core/config.ts`
+- [x] `okb --brain <name>` / `$OKB_BRAIN` (global CLI flag; mutually
+      exclusive with `--bundle`); `okb brains` lists mounts (localOnly —
+      mount paths are host topology, never a network surface)
+- [x] Read-only policy enforced in the ops layer (`checkOpCall` refuses
+      write/admin before any handler) and threaded through CLI, local API
+      (per request), and MCP — a served read-only brain stays read-only
+- [x] Tests: config resolution, ops-layer gating, CLI e2e incl. env var +
+      exclusivity (`tests/brains.test.ts`)
+
+### 5.3 Calibration — takes vs facts
+- [x] `core/claims.ts` — `type: claim` concepts carry `confidence` (0–100),
+      optional `resolve_by`, and on settlement `outcome`
+      (correct/incorrect/void — words, not YAML booleans) + `resolved`; all
+      okbrain extension keys, OKF-safe; scan-based (no index required)
+- [x] Ops: `take` (stake a claim at `claims/<slug>`), `resolve` (settles
+      exactly once; true/false accepted as aliases), `calibrate` (read:
+      open claims w/ overdue flags, Brier score, per-decade calibration
+      buckets) — zero AI, fully deterministic
+- [x] Tests: pure Brier/bucket/overdue math + CLI e2e (doctor-clean claims,
+      single settlement, validation) (`tests/claims.test.ts`)
+
+### 5.4 Deliberately deferred
+- [!] `core/engine/postgres.ts` (pgvector) + rebuild-parity test — no
+      Postgres in the 3-OS CI matrix means it can't meet the "most
+      well-tested" bar; the engine interface stays the seam; revisit when a
+      bundle actually outgrows SQLite (decision 2026-07-20)
+- [!] Tauri/Electron desktop wrapper — the GUI is already cross-platform
+      via `okb serve`, and a wrapper adds the repo's heaviest dependency
+      for chrome; revisit on real demand (decision 2026-07-20)
 
 ---
 
@@ -458,6 +506,8 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B4 | 2026-07-11 | low | tests | sync tests failed on ubuntu/windows CI only: the clone-side `git commit` saw no identity ("empty ident name" / "unable to auto-detect email") though `beforeAll` set `GIT_AUTHOR_*` in `process.env`; local runs masked it via the developer's global gitconfig, macOS via runner ident auto-detect | Bun's `execFileSync` without an `env` option passes the *startup* environment, not mutated `process.env` (production `runGit` already spreads it explicitly) | fixed | test helper passes `env: { ...process.env }`; the clone sets local `user.name`/`user.email` so its commit is env-independent |
 | B5 | 2026-07-13 | med | tests | 3 `okb review` CLI tests fail from 2026-07-12 onward (green when written on 07-11): "fresh" notes a/b/c enter the queue. The fixture stamped timestamps relative to a **pinned** `NOW = 2026-07-11`, but the real CLI scores with `new Date()` — one real day later the notes gain staleness > 0 and rank | date-relative fixture pinned to the authoring date; only the pure-scorer tests may pin `now` (they inject it) | fixed | CLI fixture timestamps now derive from `Date.now()` (captured once as `TS.*` so asserts match); pure-scorer tests keep the pinned `NOW` |
 | B6 | 2026-07-17 | low | tests | 2 `engine.vectors` tests failed on windows CI only (PR #13): both `rm` their temp dir while the store's `vectors.db` is still open (the shared `afterEach` closes too late). POSIX unlinks open files; Windows refuses (EBUSY/EPERM). Green on 07-13 — CI pins `bun-version: latest`, so a Bun update likely changed the Windows file-share flags and exposed it | test deleted a directory containing an open SQLite DB | fixed | `store.close()` before the in-test `rm` (double close is a no-op); the two tests themselves are the regression proof (fail on Windows before, pass after) |
+| B7 | 2026-07-20 | low | mcp | HTTP transport: an exception inside the per-request handler (connect/handleRequest) became an unhandled promise rejection with the client socket left open | async `createServer` callback had no try/catch | fixed | wrapped in try/catch → JSON 500; found by review — no deterministic repro exists through the SDK (it absorbs malformed input), so the guard is verified by inspection |
+| B8 | 2026-07-20 | low | api | `okb serve` on an occupied port died with Bun's raw "Failed to start server" instead of telling the user what to do | EADDRINUSE not translated at `createApiServer` | fixed | actionable error naming `--port`; regression test in `tests/api.test.ts` |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -493,11 +543,31 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [ ] True token streaming for `okb ask` / the SSE endpoint: the gateway
       returns whole chat responses, so the `answer` event arrives in one
       piece; add SSE parsing per dialect when incremental rendering matters.
+- [ ] Per-brain settings: a mount could carry its own retrieval profile /
+      provider defaults (today `brains` entries are path + readonly only).
+- [ ] GUI brain switcher: `okb serve` serves one bundle; a mount dropdown
+      would need the server to re-scope per request.
+- [ ] Claims in review: surface overdue claims (`resolve_by` past) as a
+      Resurface signal so settling them becomes part of the daily queue.
 
 ---
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-20 — **Stage 5 shipped** after a full review pass. Review: no
+  functional bugs found; hardening B7 (MCP HTTP 500 guard) + B8 (serve
+  port-in-use message, with test), six internal-only exports de-exported.
+  5.1 packaging: vec0 resolves next to the executable, `bun run build`
+  copies it, `scripts/package-release.ts` + `release.yml` build all five
+  targets (verified locally end-to-end incl. compiled-binary embed vs a
+  stub), Homebrew/Scoop templates under `packaging/`. 5.2 multi-brain:
+  config `brains` map, `--brain`/`$OKB_BRAIN`, read-only policy enforced in
+  `checkOpCall` and threaded through CLI/API/MCP, `okb brains` (localOnly).
+  5.3 calibration: `core/claims.ts`, `okb take`/`resolve`/`calibrate`
+  (Brier + decade buckets, zero AI). 5.4: Postgres + desktop wrapper
+  deferred with reasons (Decisions Log). README rewritten
+  production-ready with a 10-step startup guide. 372 tests green, tsc
+  clean. Next: signing when certs exist; Backlog on demand.
 - 2026-07-19 — Stage 4.6 shipped, **Stage 4 complete**: skills
   (`skills/RESOLVER.md` router + capture/ingest/enrich/query/daily-note/
   link-suggest SKILL.md — parameterized, CLI-grounded, brain-first;

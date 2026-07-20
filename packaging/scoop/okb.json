@@ -1,0 +1,22 @@
+{
+  "##": "Scoop manifest template for a bucket. Fill version and hash from the release's SHA256SUMS.txt. The archive holds okb.exe and vec0.dll side by side, which is exactly how okb locates the extension.",
+  "version": "VERSION",
+  "description": "OKF-native personal knowledge manager (single binary)",
+  "homepage": "https://github.com/mellow-mike/okbrain",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/mellow-mike/okbrain/releases/download/vVERSION/okb-VERSION-windows-x64.zip",
+      "hash": "SHA256_WINDOWS_X64"
+    }
+  },
+  "bin": "okb.exe",
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/mellow-mike/okbrain/releases/download/vVERSION/okb-VERSION-windows-x64.zip"
+      }
+    }
+  }
+}

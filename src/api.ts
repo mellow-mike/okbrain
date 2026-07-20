@@ -38,6 +38,8 @@ export interface ApiOptions {
   port?: number;
   /** Injectable for tests; default: the per-install serve token. */
   token?: string;
+  /** Serving a read-only brain mount: write/admin ops are refused per request. */
+  readonly?: boolean;
 }
 
 export interface ApiServer {
@@ -97,18 +99,18 @@ const clipPage = (message: string, ok: boolean): string =>
   (ok ? "<script>setTimeout(()=>window.close(),1500)</script>" : "");
 
 /** Public op descriptors for surface generation (GUI forms, MCP tools). */
-export const opDescriptors = (): unknown =>
+const opDescriptors = (): unknown =>
   operations
     .filter((o) => !o.localOnly)
     .map(({ name, summary, scope, params }) => ({ name, summary, scope, params }));
 
 async function runJsonOp(
   op: Operation,
-  bundle: string,
+  o: ServeState,
   raw: Record<string, unknown>,
   cors: Hdrs = {},
 ): Promise<Response> {
-  const local = openLocalContext(bundle);
+  const local = openLocalContext(o.bundle, true, o.readonly);
   try {
     return json(200, { result: await runOp(op, local.ctx, raw) }, cors);
   } catch (e) {
@@ -139,14 +141,14 @@ function sse(local: LocalContext, run: (send: (event: string, data: unknown) => 
   });
 }
 
-function askStream(url: URL, bundle: string, cors: Hdrs): Response {
+function askStream(url: URL, o: ServeState, cors: Hdrs): Response {
   const op = getOp("ask")!;
   const raw: Record<string, unknown> = {};
   for (const k of ["question", "profile"]) {
     const v = url.searchParams.get(k);
     if (v !== null) raw[k] = v;
   }
-  const local = openLocalContext(bundle);
+  const local = openLocalContext(o.bundle, true, o.readonly);
   try {
     const params = checkOpCall(op, local.ctx, raw);
     return sse(local, (send) => op.stream!(local.ctx, params, send), cors);
@@ -156,14 +158,14 @@ function askStream(url: URL, bundle: string, cors: Hdrs): Response {
   }
 }
 
-async function clipNav(url: URL, bundle: string): Promise<Response> {
+async function clipNav(url: URL, o: ServeState): Promise<Response> {
   const op = getOp("clip")!;
   const raw: Record<string, unknown> = {};
   for (const k of ["url", "quote", "note", "tags"]) {
     const v = url.searchParams.get(k);
     if (v !== null && v !== "") raw[k] = v;
   }
-  const local = openLocalContext(bundle);
+  const local = openLocalContext(o.bundle, true, o.readonly);
   try {
     const result = await runOp(op, local.ctx, raw);
     return html(200, clipPage(op.render(result), true));
@@ -174,10 +176,14 @@ async function clipNav(url: URL, bundle: string): Promise<Response> {
   }
 }
 
-export async function handleRequest(
-  req: Request,
-  opts: { bundle: string; port: number; token: string },
-): Promise<Response> {
+interface ServeState {
+  bundle: string;
+  port: number;
+  token: string;
+  readonly: boolean;
+}
+
+export async function handleRequest(req: Request, opts: ServeState): Promise<Response> {
   const url = new URL(req.url);
   if (!hostAllowed(req.headers.get("host"), opts.port))
     return json(403, { error: "host not allowed (localhost only)" });
@@ -207,8 +213,8 @@ export async function handleRequest(
   if (url.pathname === "/api/ops" && req.method === "GET")
     return json(200, { ops: opDescriptors() }, cors);
   if (url.pathname === "/api/ask/stream" && req.method === "GET")
-    return askStream(url, opts.bundle, cors ?? {});
-  if (url.pathname === "/clip" && req.method === "GET") return clipNav(url, opts.bundle);
+    return askStream(url, opts, cors ?? {});
+  if (url.pathname === "/clip" && req.method === "GET") return clipNav(url, opts);
 
   const m = /^\/api\/op\/([a-z_]+)$/.exec(url.pathname);
   if (m && req.method === "POST") {
@@ -223,7 +229,7 @@ export async function handleRequest(
     }
     if (typeof raw !== "object" || raw === null || Array.isArray(raw))
       return json(400, { error: "request body must be a JSON object of parameters" }, cors);
-    return runJsonOp(op, opts.bundle, raw as Record<string, unknown>, cors);
+    return runJsonOp(op, opts, raw as Record<string, unknown>, cors);
   }
 
   return json(404, { error: "not found" }, cors);
@@ -231,12 +237,22 @@ export async function handleRequest(
 
 export function createApiServer(opts: ApiOptions): ApiServer {
   const token = opts.token ?? ensureServeToken();
-  const bundle = opts.bundle;
-  const server: Bun.Server<undefined> = Bun.serve({
-    hostname: "127.0.0.1",
-    port: opts.port ?? DEFAULT_PORT,
-    fetch: (req) => handleRequest(req, { bundle, port: server.port!, token }),
-  });
+  const { bundle, readonly = false } = opts;
+  const wanted = opts.port ?? DEFAULT_PORT;
+  let server: Bun.Server<undefined>;
+  try {
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: wanted,
+      fetch: (req) => handleRequest(req, { bundle, port: server.port!, token, readonly }),
+    });
+  } catch (e) {
+    if ((e as { code?: string }).code === "EADDRINUSE")
+      throw new Error(
+        `port ${wanted} is already in use (another okb serve?) — pick one with --port`,
+      );
+    throw e;
+  }
   const port = server.port!;
   return {
     url: `http://127.0.0.1:${port}/`,

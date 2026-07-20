@@ -11,8 +11,8 @@ export interface GarnishNote {
   description: string;
 }
 
-export const RECENT_DAYS = 7;
-export const RECENT_CAP = 10;
+const RECENT_DAYS = 7;
+const RECENT_CAP = 10;
 
 /** Notes changed within RECENT_DAYS (queue excluded), newest first, capped. */
 export function pickRecent(

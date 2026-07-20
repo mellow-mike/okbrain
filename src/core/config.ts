@@ -19,7 +19,7 @@ export interface Platform {
   cwd: string;
 }
 
-export function currentPlatform(): Platform {
+function currentPlatform(): Platform {
   return {
     os: process.platform,
     env: process.env,
@@ -89,6 +89,11 @@ export interface OkbConfig {
     /** Max new items written per feed pull (default 10). */
     maxItems?: number;
   };
+  /**
+   * Named bundle mounts (Stage 5): `okb --brain work …`. A string is the
+   * bundle path; the object form adds a per-brain access policy.
+   */
+  brains?: Record<string, string | { path: string; readonly?: boolean }>;
   /** Unknown keys are preserved on rewrite (permissive, like the OKF reader). */
   [key: string]: unknown;
 }
@@ -134,4 +139,35 @@ export function resolveBundlePath(
 ): string {
   const candidate = explicit ?? p.env.OKB_BUNDLE ?? loadConfig(p).defaultBundle ?? p.cwd;
   return isAbsolute(candidate) ? resolve(candidate) : resolve(p.cwd, candidate);
+}
+
+export interface BrainMount {
+  name: string;
+  path: string;
+  readonly: boolean;
+}
+
+/** Every configured brain mount, normalized; paths expand a leading `~`. */
+export function listBrains(p: Platform = currentPlatform()): BrainMount[] {
+  const brains = loadConfig(p).brains ?? {};
+  return Object.entries(brains).map(([name, v]) => {
+    const raw = typeof v === "string" ? v : v.path;
+    const expanded = raw === "~" || raw.startsWith("~/") ? join(p.home, raw.slice(2)) : raw;
+    if (!isAbsolute(expanded))
+      throw new ConfigError(`brain ${name}: path must be absolute (got ${raw})`);
+    return { name, path: resolve(expanded), readonly: typeof v !== "string" && v.readonly === true };
+  });
+}
+
+/** Resolve one named mount (`okb --brain <name>`); unknown names list what exists. */
+export function resolveBrain(name: string, p: Platform = currentPlatform()): BrainMount {
+  const brains = listBrains(p);
+  const brain = brains.find((b) => b.name === name);
+  if (!brain)
+    throw new ConfigError(
+      brains.length === 0
+        ? `no brains configured — add a "brains" map to config.json (okb help brains)`
+        : `unknown brain: ${name} (configured: ${brains.map((b) => b.name).join(", ")})`,
+    );
+  return brain;
 }

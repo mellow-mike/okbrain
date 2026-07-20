@@ -3,11 +3,17 @@
 
 import { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { VectorStore } from "../src/core/engine/interface.ts";
-import { defaultVectorsPath, openVectorStore, VecError } from "../src/core/engine/vectors.ts";
+import {
+  defaultVectorsPath,
+  extensionPath,
+  openVectorStore,
+  vec0Filename,
+  VecError,
+} from "../src/core/engine/vectors.ts";
 
 let dir: string;
 let store: VectorStore;
@@ -129,4 +135,32 @@ test("a foreign schema version is discarded, not half-read", async () => {
   expect(store.count()).toBe(0);
   store.close(); // Windows locks open DB files; close before deleting (B6)
   await rm(d, { recursive: true, force: true });
+});
+
+describe("extension lookup (Stage 5 packaging)", () => {
+  test("vec0Filename matches the platform convention", () => {
+    expect(vec0Filename("linux")).toBe("vec0.so");
+    expect(vec0Filename("darwin")).toBe("vec0.dylib");
+    expect(vec0Filename("win32")).toBe("vec0.dll");
+  });
+
+  test("a vec0 next to the executable wins over the npm package", async () => {
+    const d = await mkdtemp(join(tmpdir(), "okb-vec-exec-"));
+    const shipped = join(d, vec0Filename());
+    await copyFile(extensionPath(d), shipped); // npm-path fallback seeds the copy
+    expect(extensionPath(d)).toBe(shipped);
+    await rm(d, { recursive: true, force: true });
+  });
+
+  test("no shipped copy → the npm package path; $OKB_SQLITE_VEC overrides all", async () => {
+    const d = await mkdtemp(join(tmpdir(), "okb-vec-empty-"));
+    expect(extensionPath(d)).toContain("sqlite-vec"); // node_modules dev path
+    process.env.OKB_SQLITE_VEC = join(d, "custom-vec0.so");
+    try {
+      expect(extensionPath(d)).toBe(join(d, "custom-vec0.so"));
+    } finally {
+      delete process.env.OKB_SQLITE_VEC;
+    }
+    await rm(d, { recursive: true, force: true });
+  });
 });

@@ -24,6 +24,8 @@ export interface McpOptions {
   bundle: string;
   /** Expose write ops to this connection. Never set for remote clients. */
   trusted: boolean;
+  /** Serving a read-only brain mount: write ops refused even when trusted. */
+  readonly?: boolean;
 }
 
 /** The MCP tool surface: no admin, no localOnly; write only when trusted. */
@@ -62,7 +64,7 @@ export function createMcpServer(opts: McpOptions): Server {
         content: [{ type: "text", text: `unknown tool: ${req.params.name}` }],
         isError: true,
       };
-    const local = openLocalContext(opts.bundle, opts.trusted);
+    const local = openLocalContext(opts.bundle, opts.trusted, opts.readonly === true);
     try {
       const result = await runOp(op, local.ctx, req.params.arguments ?? {});
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -103,8 +105,16 @@ export function runMcpHttp(opts: McpOptions & { port: number }): HttpServer {
       void transport.close();
       void server.close();
     });
-    await server.connect(transport);
-    await transport.handleRequest(req, res);
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res);
+    } catch (e) {
+      // An async throw here would otherwise be an unhandled rejection with the
+      // socket left hanging — answer with a plain 500 instead.
+      if (!res.headersSent) res.writeHead(500, { "content-type": "application/json" });
+      if (!res.writableEnded)
+        res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
+    }
   });
   httpServer.listen(opts.port, "127.0.0.1", () => {
     const addr = httpServer.address();

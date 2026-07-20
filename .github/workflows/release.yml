@@ -1,0 +1,44 @@
+name: Release
+
+# Tag `vX.Y.Z` → cross-compiled per-OS archives (okb + vec0 side by side),
+# SHA256SUMS.txt, and a GitHub release. Artifacts are unsigned: signing and
+# macOS notarization need org certificates — hook them in after the package
+# step when available (see packaging/README.md).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The CI matrix gates merges; the release gate re-runs the fast checks.
+      - name: Typecheck + test
+        run: |
+          bun run typecheck
+          bun test
+
+      - name: Build release archives
+        run: bun run scripts/package-release.ts ${{ github.ref_name }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
