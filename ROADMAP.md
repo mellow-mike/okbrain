@@ -302,6 +302,15 @@ Goal: a real GUI, and "my agent can use my brain."
       (re-index / embed / doctor); enrichment guardrails arrive with 4.2
 - [x] `okb serve` starts API + GUI; whole app driven end-to-end in Chromium
       (all views, zero page errors, zero external requests)
+- [x] Full-surface wiring pass: every non-`localOnly` op now has a GUI home
+      (invariant 2). New views — **Search** (`search`), **Add** (`capture`/
+      `clip`/`rss`/`import`), **Claims** (`take`/`resolve`/`calibrate`),
+      **Stats** (`stats`/`graph_path`/`orphans`) — plus Settings maintenance
+      gained `export_viz` + confirm-gated `rebuild`. `new_concept` stays
+      Editor-covered by design. Regression test asserts each op literal is
+      present in the served `app.js`; re-driven end-to-end in Chromium (all
+      ten views incl. write/admin flows, zero page errors, zero external
+      requests)
 
 ### 3.3 MCP server (`okb mcp`)
 - [x] `src/mcp/server.ts` — tools generated from the ops registry via the MCP
@@ -560,6 +569,19 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-22 — **GUI full-surface wiring.** Closed the gap between the ops
+  contract and the GUI: a dozen non-`localOnly` ops were CLI/MCP-only.
+  Added four views — **Search** (hybrid `search` with source chips),
+  **Add** (quick `capture` / `clip` / `rss` / `import` in one ingest hub),
+  **Claims** (`calibrate` dashboard + `take` stake form + per-claim
+  `resolve`), **Stats** (`stats` tiles + `graph_path` finder + `orphans`
+  list) — and gave Settings maintenance `export_viz` + a confirm-gated
+  `rebuild`. `app.js`/`index.html`/`style.css` only (presentation layer;
+  no ops touched). New api.test asserts every op the GUI should expose is
+  wired in the served `app.js` (`ask` via its SSE endpoint). Driven
+  end-to-end in Chromium across all ten views incl. capture/resolve/
+  export-viz/rebuild write+admin flows — zero page errors, zero external
+  requests. 383 tests green, tsc clean. Next: Backlog as items earn in.
 - 2026-07-22 — Two high-impact Backlog items shipped. **Writer no-op
   detection** (`core/okf/write.ts`): an update that would reproduce the
   on-disk bytes but for a timestamp refresh is skipped entirely — no rewrite,

@@ -114,8 +114,27 @@ describe("request guards", () => {
   test("GET / serves the GUI shell with the token injected", async () => {
     const page = await (await fetch(base)).text();
     expect(page).toContain(`window.OKB_TOKEN = "${TOKEN}"`);
-    for (const link of ["#graph", "#ask", "#review", "#inbox", "#editor", "#settings"])
+    for (const link of [
+      "#graph", "#search", "#ask", "#add", "#review", "#inbox",
+      "#claims", "#stats", "#editor", "#settings",
+    ])
       expect(page).toContain(`href="${link}"`);
+  });
+
+  test("the GUI JS wires every non-localOnly op to a surface", async () => {
+    const appJs = await (await fetch(base + "gui/app.js")).text();
+    // Each op the GUI exposes appears as an api() call target...
+    for (const op of [
+      "search", "read_concept", "list_concepts", "graph_neighbors",
+      "graph_path", "orphans", "stats", "doctor", "write_concept", "capture",
+      "import", "graph_data", "export_viz", "index", "rebuild", "embed", "sync",
+      "review_queue", "review_done", "review_snooze", "clip", "rss",
+      "link_suggest", "link_accept", "enrich", "inbox_list", "inbox_read",
+      "take", "resolve", "calibrate", "init",
+    ])
+      expect(appJs).toContain(`'${op}'`);
+    // ...except `ask`, which the GUI drives over the SSE stream endpoint.
+    expect(appJs).toContain("/api/ask/stream");
   });
 
   test("GUI assets served tokenless with correct content types", async () => {
