@@ -37,6 +37,7 @@ import { rerankConfigured, rerankHits } from "./retrieval/rerank.ts";
 import { garnishQueue, pickRecent, type GarnishNote } from "./review/garnish.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
 import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken } from "./serve-token.ts";
+import { computeStats, type BrainStats } from "./stats.ts";
 import { JobLockError, runJobs, type Job, type JobResult } from "./jobs/worker.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
 import { buildVizGraph, exportViz, type VizExport, type VizGraph } from "./viz/export.ts";
@@ -188,7 +189,7 @@ const renderStats = (r: unknown): string => {
 
 const renderWrite = (r: unknown): string => {
   const w = r as WriteResult;
-  return `${w.created ? "created" : "updated"} ${w.id}`;
+  return `${w.noop ? "unchanged" : w.created ? "created" : "updated"} ${w.id}`;
 };
 
 /** Comma-separated CLI tags → array (`""` clears, undefined keeps). */
@@ -549,6 +550,32 @@ export const operations: readonly Operation[] = [
       const os = r as { id: string; title: string }[];
       if (os.length === 0) return "(no orphans)";
       return os.map((o) => `${o.id} — ${o.title}`).join("\n");
+    },
+  },
+  {
+    name: "stats",
+    cliName: "stats",
+    summary: "Brain at a glance: concept/link/tag counts, orphans, freshness",
+    scope: "read",
+    params: [],
+    handler: async (ctx) => {
+      const eng = ctx.engine();
+      return computeStats(eng.listReviewRows(), eng.listEdges(), eng.tagCounts(), new Date());
+    },
+    render: (r) => {
+      const s = r as BrainStats;
+      const lines = [
+        `${s.concepts} concepts, ${s.edges} links (${s.typedEdges} typed), ${s.tags} tags`,
+      ];
+      if (s.byType.length > 0)
+        lines.push("by type:  " + s.byType.map((t) => `${t.type} ${t.count}`).join(", "));
+      if (s.topTags.length > 0)
+        lines.push("top tags: " + s.topTags.map((t) => `${t.tag} ${t.count}`).join(", "));
+      lines.push(
+        `orphans ${s.orphans}, inbox ${s.inbox}, never reviewed ${s.neverReviewed}, stale ${s.stale} (>${s.staleDays}d)`,
+      );
+      if (s.newest) lines.push(`freshest ${s.newest.slice(0, 10)}, oldest ${s.oldest!.slice(0, 10)}`);
+      return lines.join("\n");
     },
   },
   {
