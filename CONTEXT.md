@@ -629,11 +629,29 @@ no framework, no build step; api.ts serves the files and Bun text imports
 embed them into the compiled binary (the viz-vendor pattern). Presentation
 only: every data access is a `/api/op/*` call. Hash routing; dark default +
 persisted light toggle using the viewer's token system and validated
-palettes. Views:
+palettes. Every non-`localOnly` op has a home on one of the views below — the
+GUI is a full surface over the ops contract, not a subset. Views:
 - **Graph** — live Cytoscape fed by the `graph_data` op (whole graph as
   JSON; also `okb graph-data --json` for agents/scripts); search filter,
   type-colored nodes, detail panel with rendered body (internal links
   rewired to focus their node), click-through to the editor.
+- **Search** — hybrid `search` op (keyword + vector recall, graph
+  expansion, optional profile) with per-hit recall-source chips; distinct
+  from the Graph view's client-side title filter. Each hit links to
+  editor + graph.
+- **Ask** — SSE streaming: retrieved context appears as chips before the
+  answer arrives; verified citations link to graph and editor.
+- **Add** — the quick-ingest hub for the ops that don't need the full
+  editor: quick `capture` (note → `inbox/`), `clip` a URL, pull configured
+  feeds (`rss`), and bulk `import` of a server-side path.
+- **Review** — card stack with scores + reasons, optional garnish toggle;
+  done / snooze / suggest-links (accepts write) / open / graph per card.
+- **Inbox** — unread clips/notes; open / mark-read / suggest-links.
+- **Claims** — calibration dashboard (`calibrate`: correct/incorrect/void
+  tallies, Brier score, per-decade buckets); a stake form (`take`) and
+  per-open-claim resolve controls (`resolve`), overdue claims flagged.
+- **Stats** — brain-at-a-glance tiles (`stats`), a two-concept path finder
+  (`graph_path`), and an orphan list (`orphans`).
 - **Editor** — scaffold fields (type/title/description/tags/resource) + a
   markdown body textarea; concept-id link picker inserting normalized
   links; citation-section helper; live backlinks; suggest-links panel
@@ -641,14 +659,10 @@ palettes. Views:
   save); saves via `write_concept`, so every save is conformant.
   Deliberately not a rich editor: the bundle is plain markdown and external
   editors remain first-class.
-- **Ask** — SSE streaming: retrieved context appears as chips before the
-  answer arrives; verified citations link to graph and editor.
-- **Review** — card stack with scores + reasons, optional garnish toggle;
-  done / snooze / suggest-links (accepts write) / open / graph per card.
-- **Inbox** — unread clips/notes; open / mark-read / suggest-links.
 - **Settings** — AI providers + retrieval profile (backed by `init`, which
-  persists them), git sync (status / run), maintenance (re-index, embed,
-  doctor report). Enrichment guardrails join with Stage 4.
+  persists them), git sync (status / run), enrichment guardrails + run
+  (`enrich`), and maintenance (re-index, embed, doctor, export viz.html,
+  and a confirm-gated rebuild).
 Cross-platform free (it's a web app); an optional Tauri wrapper later gives
 a native desktop app over the same local API.
 
@@ -808,6 +822,23 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-22 — **The GUI is a full surface over the ops contract, not a
+  curated subset.** Stage 3.2 shipped the GUI with the everyday views, but
+  a dozen non-`localOnly` ops (`search`, `graph_path`, `orphans`, `stats`,
+  `capture`, `import`, `export_viz`, `rebuild`, `clip`, `rss`, `take`,
+  `resolve`, `calibrate`) had no GUI home and were reachable only from the
+  CLI/MCP — a drift the ops-contract invariant (2) exists to prevent. Wired
+  them all in with three new views (Search, Add, Claims, Stats) plus two
+  maintenance buttons, so every capability the local API exposes now has a
+  GUI affordance. A regression test asserts each op literal is present in
+  the served `app.js` (and `ask` via its SSE endpoint), so a new
+  network-facing op can't be added without a GUI wiring or a deliberate
+  choice to leave it out. `new_concept` is the one intentional omission:
+  the Editor already creates via `write_concept` with an explicit id, so a
+  second create path would be redundant chrome. Forms that need typed
+  inputs (claim confidence/date) use plain inputs rather than the generic
+  `field()` helper, whose ids are `ed`-prefixed for the Editor/Settings
+  forms.
 - 2026-07-22 — **Writer no-op detection compares bytes, not fields.** The
   guard reserializes the candidate concept with the *existing* timestamp and
   compares to the on-disk bytes; only an exact match is a no-op. Comparing

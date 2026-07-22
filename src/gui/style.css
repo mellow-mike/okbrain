@@ -75,6 +75,21 @@ code { font-size: 12px; background: var(--code-bg); border-radius: 4px; padding:
               text-transform: uppercase; color: var(--muted); }
 form .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
+.chip.warn { color: var(--warn); border-color: var(--warn); }
+
+/* stat tiles + calibration table (stats, claims views) */
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+         gap: 10px; }
+.tile { background: var(--plane); border: 1px solid var(--line); border-radius: 10px;
+        padding: 12px 14px; }
+.tile .num { font-size: 20px; font-weight: 600; }
+.tile .lbl { font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase;
+             color: var(--muted); margin-top: 2px; }
+.tbl { border-collapse: collapse; font-size: 12px; }
+.tbl th, .tbl td { text-align: left; padding: 4px 14px 4px 0; border-bottom: 1px solid var(--line); }
+.tbl th { color: var(--muted); font-weight: 600; text-transform: uppercase;
+          font-size: 11px; letter-spacing: 0.5px; }
+
 /* rendered markdown (ask answers, graph detail) */
 .md { color: var(--ink-2); overflow-wrap: break-word; }
 .md h1, .md h2, .md h3 { font-size: 13px; color: var(--ink);

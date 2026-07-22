@@ -29,6 +29,11 @@ function errorBox(e) {
   return '<div class="error">' + esc(e && e.message ? e.message : e) + '</div>';
 }
 
+function tile(label, value) {
+  return '<div class="tile"><div class="num">' + esc(value) + '</div>' +
+    '<div class="lbl">' + esc(label) + '</div></div>';
+}
+
 // ---- theme --------------------------------------------------------------
 
 var themeBtn = document.getElementById('theme');
@@ -48,9 +53,12 @@ themeBtn.addEventListener('click', function () {
 // ---- router -------------------------------------------------------------
 
 var routes = {
-  graph: renderGraph, ask: renderAsk, review: renderReview,
-  inbox: renderInbox, editor: renderEditor, settings: renderSettings,
+  graph: renderGraph, search: renderSearch, ask: renderAsk, add: renderAdd,
+  review: renderReview, inbox: renderInbox, claims: renderClaims,
+  stats: renderStats, editor: renderEditor, settings: renderSettings,
 };
+
+var DIR_MARK = { out: '→', in: '←', both: '↔' };
 
 function route() {
   var h = location.hash.slice(1) || 'graph';
@@ -209,6 +217,47 @@ async function renderGraph(focusId) {
     cy.fit(undefined, 40);
   });
   if (focusId) focusNode(focusId);
+}
+
+// ---- search view --------------------------------------------------------
+
+// Hybrid search (keyword + vector recall, graph expansion) via the `search`
+// op — distinct from the graph view's client-side title filter.
+function renderSearch(initialQ) {
+  view.innerHTML =
+    '<div class="stack"><h2>Search</h2>' +
+    '<form id="sf" class="row">' +
+    '<input id="sq" style="flex:1" placeholder="keyword + vector search…" autofocus>' +
+    '<select id="sp"><option value="">balanced</option><option>lean</option><option>max</option></select>' +
+    '<button class="primary">Search</button></form>' +
+    '<div id="sout" class="stack"></div></div>';
+  var out = document.getElementById('sout');
+  var qEl = document.getElementById('sq');
+  document.getElementById('sf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var q = qEl.value.trim();
+    if (!q) return;
+    out.innerHTML = '<span class="muted">searching…</span>';
+    var params = { query: q };
+    var p = document.getElementById('sp').value;
+    if (p) params.profile = p;
+    try {
+      var hits = await api('search', params);
+      out.innerHTML = hits.length
+        ? hits.map(function (h) {
+            return '<div class="card"><div class="title">' +
+              '<a href="' + editorHref(h.id) + '">' + esc(h.title || h.id) + '</a>' +
+              ' <span class="muted">(' + h.score.toFixed(3) + ')</span></div>' +
+              '<div class="why"><code>' + esc(h.id) + '</code> · ' +
+              h.sources.map(function (s) { return '<span class="chip">' + esc(s) + '</span>'; }).join(' ') +
+              '</div>' + (h.description ? '<div class="why">' + esc(h.description) + '</div>' : '') +
+              '<div class="row"><a href="' + editorHref(h.id) + '"><button>Open</button></a>' +
+              '<a href="' + graphHref(h.id) + '"><button>Graph</button></a></div></div>';
+          }).join('')
+        : '<div class="notice">No hits.</div>';
+    } catch (err) { out.innerHTML = errorBox(err); }
+  });
+  if (initialQ) { qEl.value = initialQ; qEl.form.requestSubmit(); }
 }
 
 // ---- ask view -----------------------------------------------------------
@@ -380,6 +429,240 @@ async function renderInbox() {
   load();
 }
 
+// ---- add view (capture / clip / rss / import) ---------------------------
+
+// One home for the quick-ingest ops that don't need the full editor: capture a
+// note, clip a URL, pull configured feeds, or bulk-import a server-side path.
+function renderAdd() {
+  view.innerHTML =
+    '<div class="stack"><h2>Add to your brain</h2>' +
+    '<h3>Quick capture</h3>' +
+    '<form id="capf" class="stack">' +
+    '<label class="field"><span>Note (first line becomes the title)</span>' +
+    '<textarea id="cap-text" rows="4" placeholder="a thought worth keeping…"></textarea></label>' +
+    '<div class="row"><input id="cap-tags" placeholder="tags (comma-separated)">' +
+    '<button class="primary">Capture</button></div></form><div id="cap-out"></div>' +
+    '<h3>Clip a web page</h3>' +
+    '<form id="clipf" class="row">' +
+    '<input id="clip-url" style="flex:1" placeholder="https://… page to clip">' +
+    '<label class="row" style="gap:5px"><input type="checkbox" id="clip-read"> already read</label>' +
+    '<button class="primary">Clip</button></form><div id="clip-out"></div>' +
+    '<h3>Pull RSS feeds</h3><div class="row">' +
+    '<button id="rss-run" class="primary">Pull configured feeds</button>' +
+    '<span class="muted">config <code>rss.feeds</code></span></div><div id="rss-out"></div>' +
+    '<h3>Import markdown (server-side path)</h3>' +
+    '<form id="impf" class="row">' +
+    '<input id="imp-path" style="flex:1" placeholder="/path/to/file-or-directory on the okb host">' +
+    '<label class="row" style="gap:5px"><input type="checkbox" id="imp-over"> overwrite</label>' +
+    '<button class="primary">Import</button></form><div id="imp-out"></div></div>';
+
+  function out(el, p) { document.getElementById(el).innerHTML = p; }
+  function busy(el) { out(el, '<span class="muted">working…</span>'); }
+  function done(el, id, label) {
+    out(el, '<div class="notice">' + esc(label) + ' — <a href="' + editorHref(id) + '">open</a></div>');
+  }
+
+  document.getElementById('capf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var text = document.getElementById('cap-text').value.trim();
+    if (!text) return;
+    var params = { text: text };
+    var tags = document.getElementById('cap-tags').value.trim();
+    if (tags) params.tags = tags;
+    busy('cap-out');
+    try {
+      var r = await api('capture', params);
+      document.getElementById('cap-text').value = '';
+      document.getElementById('cap-tags').value = '';
+      done('cap-out', r.id, (r.created ? 'captured ' : 'updated ') + r.id);
+    } catch (err) { out('cap-out', errorBox(err)); }
+  });
+
+  document.getElementById('clipf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var url = document.getElementById('clip-url').value.trim();
+    if (!url) return;
+    var params = { url: url };
+    if (document.getElementById('clip-read').checked) params.read = true;
+    busy('clip-out');
+    try {
+      var r = await api('clip', params);
+      var msg = r.deduped
+        ? 'already clipped as ' + r.id + (r.appended ? ' — highlight appended' : '')
+        : 'clipped ' + r.id + (r.autoTags && r.autoTags.length ? ' — tagged ' + r.autoTags.join(', ') : '');
+      done('clip-out', r.id, msg);
+    } catch (err) { out('clip-out', errorBox(err)); }
+  });
+
+  document.getElementById('rss-run').addEventListener('click', async function () {
+    busy('rss-out');
+    try {
+      var feeds = await api('rss', {});
+      out('rss-out', '<div class="notice">' + esc(feeds.map(function (f) {
+        if (f.error) return (f.feed || f.url) + ' — FAILED: ' + f.error;
+        return (f.feed || f.url) + ': ' + f.added.length + ' added, ' + f.deduped + ' known';
+      }).join('\n')) + '</div>');
+    } catch (err) { out('rss-out', errorBox(err)); }
+  });
+
+  document.getElementById('impf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var path = document.getElementById('imp-path').value.trim();
+    if (!path) return;
+    var params = { path: path };
+    if (document.getElementById('imp-over').checked) params.overwrite = true;
+    busy('imp-out');
+    try {
+      var r = await api('import', params);
+      out('imp-out', '<div class="notice">' + esc(
+        r.imported.map(function (id) { return 'imported ' + id; })
+          .concat(r.skipped.map(function (s) { return 'skipped ' + s.path + ' — ' + s.reason; }))
+          .concat([r.imported.length + ' imported, ' + r.skipped.length + ' skipped']).join('\n')) + '</div>');
+    } catch (err) { out('imp-out', errorBox(err)); }
+  });
+}
+
+// ---- claims view (take / resolve / calibrate) ---------------------------
+
+async function renderClaims() {
+  view.innerHTML =
+    '<div class="stack"><h2>Claims &amp; calibration</h2>' +
+    '<h3>Stake a claim</h3>' +
+    '<form id="tf" class="stack"><div class="grid">' +
+    '<label class="field"><span>Statement</span>' +
+    '<input id="t-statement" placeholder="something you can later judge true or false"></label>' +
+    '<label class="field"><span>Confidence %</span>' +
+    '<input id="t-confidence" type="number" min="0" max="100" placeholder="0–100"></label>' +
+    '</div><div class="grid">' +
+    '<label class="field"><span>Resolve by (optional)</span><input id="t-resolve-by" type="date"></label>' +
+    '<label class="field"><span>Tags</span><input id="t-tags" placeholder="comma-separated"></label>' +
+    '</div><label class="field"><span>Reasoning (optional)</span>' +
+    '<textarea id="t-body" rows="3"></textarea></label>' +
+    '<div class="row"><button class="primary">Stake claim</button>' +
+    '<span id="t-msg" class="muted"></span></div></form>' +
+    '<div id="c-out"></div></div>';
+
+  document.getElementById('tf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var statement = document.getElementById('t-statement').value.trim();
+    var confidence = document.getElementById('t-confidence').value.trim();
+    if (!statement) return;
+    if (confidence === '') {
+      document.getElementById('t-msg').textContent = 'confidence is required (0–100)';
+      return;
+    }
+    var params = { statement: statement, confidence: parseInt(confidence, 10) };
+    ['resolve-by', 'tags', 'body'].forEach(function (n) {
+      var v = document.getElementById('t-' + n).value.trim();
+      if (v) params[n] = v;
+    });
+    document.getElementById('t-msg').textContent = 'staking…';
+    try {
+      var r = await api('take', params);
+      document.getElementById('tf').reset();
+      document.getElementById('t-msg').textContent = 'staked ' + r.id + ' at ' + r.confidence + '%';
+      loadCalibration();
+    } catch (err) { document.getElementById('t-msg').textContent = ''; document.getElementById('c-out').innerHTML = errorBox(err); }
+  });
+
+  async function loadCalibration() {
+    var el = document.getElementById('c-out');
+    el.innerHTML = '<span class="muted">scoring…</span>';
+    var c;
+    try { c = await api('calibrate', {}); }
+    catch (e) { el.innerHTML = errorBox(e); return; }
+    var total = c.open.length + c.correct + c.incorrect + c.void;
+    if (!total) { el.innerHTML = '<div class="notice">No claims yet — stake one above.</div>'; return; }
+    var h = '<h3>Score</h3><div class="tiles">' +
+      tile('Correct', c.correct) + tile('Incorrect', c.incorrect) + tile('Void', c.void) +
+      tile('Brier', c.brier === null ? '—' : c.brier.toFixed(3)) + '</div>';
+    if (c.buckets.length) {
+      h += '<table class="tbl"><thead><tr><th>confidence</th><th>n</th><th>said</th><th>got</th></tr></thead><tbody>' +
+        c.buckets.map(function (b) {
+          return '<tr><td>' + esc(b.range) + '</td><td>' + b.n + '</td><td>' + b.meanConfidence + '%</td><td>' + b.hitRate + '%</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+    if (c.open.length) {
+      h += '<h3>Open claims (' + c.open.length + ')</h3>' + c.open.map(function (o) {
+        return '<div class="card" data-id="' + esc(o.id) + '">' +
+          '<div class="title">' + (o.overdue ? '<span class="chip warn">overdue</span> ' : '') +
+          '<a href="' + editorHref(o.id) + '">' + esc(o.title || o.id) + '</a></div>' +
+          '<div class="why">' + (o.confidence === null ? '?' : o.confidence + '%') +
+          (o.resolveBy ? ' · resolve by ' + esc(o.resolveBy) : '') + '</div>' +
+          '<div class="row"><button data-act="correct">Correct</button>' +
+          '<button data-act="incorrect">Incorrect</button>' +
+          '<button data-act="void">Void</button></div></div>';
+      }).join('');
+    }
+    el.innerHTML = h;
+  }
+
+  document.getElementById('c-out').addEventListener('click', async function (e) {
+    var btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    var id = btn.closest('.card').getAttribute('data-id');
+    btn.closest('.row').querySelectorAll('button').forEach(function (b) { b.disabled = true; });
+    try { await api('resolve', { id: id, outcome: btn.getAttribute('data-act') }); loadCalibration(); }
+    catch (err) { document.getElementById('c-out').insertAdjacentHTML('afterbegin', errorBox(err)); }
+  });
+
+  loadCalibration();
+}
+
+// ---- stats view (stats / orphans / path) --------------------------------
+
+async function renderStats() {
+  view.innerHTML =
+    '<div class="stack"><h2>Stats</h2><div id="st-out"><span class="muted">counting…</span></div>' +
+    '<h3>Path between two concepts</h3>' +
+    '<form id="pf" class="row">' +
+    '<input id="p-from" placeholder="from id"><span class="muted">→</span>' +
+    '<input id="p-to" placeholder="to id"><button class="primary">Find path</button></form>' +
+    '<div id="p-out"></div>' +
+    '<h3>Orphans (no links in or out)</h3><div id="or-out"><span class="muted">loading…</span></div></div>';
+
+  try {
+    var s = await api('stats', {});
+    var h = '<div class="tiles">' +
+      tile('Concepts', s.concepts) + tile('Links', s.edges + (s.typedEdges ? ' · ' + s.typedEdges + ' typed' : '')) +
+      tile('Tags', s.tags) + tile('Orphans', s.orphans) + tile('Inbox', s.inbox) +
+      tile('Never reviewed', s.neverReviewed) + tile('Stale >' + s.staleDays + 'd', s.stale) + '</div>';
+    if (s.byType.length) h += '<h3>By type</h3><div class="row">' +
+      s.byType.map(function (t) { return '<span class="chip">' + esc(t.type) + ' ' + t.count + '</span>'; }).join(' ') + '</div>';
+    if (s.topTags.length) h += '<h3>Top tags</h3><div class="row">' +
+      s.topTags.map(function (t) { return '<span class="chip">' + esc(t.tag) + ' ' + t.count + '</span>'; }).join(' ') + '</div>';
+    if (s.newest) h += '<p class="muted">freshest ' + esc(s.newest.slice(0, 10)) + ' · oldest ' + esc(s.oldest.slice(0, 10)) + '</p>';
+    document.getElementById('st-out').innerHTML = h;
+  } catch (e) { document.getElementById('st-out').innerHTML = errorBox(e); }
+
+  document.getElementById('pf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var from = document.getElementById('p-from').value.trim();
+    var to = document.getElementById('p-to').value.trim();
+    var el = document.getElementById('p-out');
+    if (!from || !to) return;
+    el.innerHTML = '<span class="muted">searching…</span>';
+    try {
+      var hops = await api('graph_path', { from: from, to: to });
+      if (!hops) { el.innerHTML = '<div class="notice">No path found.</div>'; return; }
+      el.innerHTML = '<div class="notice">' + hops.map(function (hp, i) {
+        var label = '<a href="' + graphHref(hp.id) + '">' + esc(hp.title || hp.id) + '</a>';
+        return i === 0 ? label : ' ' + DIR_MARK[hp.dir] + ' ' + label;
+      }).join('') + '</div>';
+    } catch (err) { el.innerHTML = errorBox(err); }
+  });
+
+  try {
+    var os = await api('orphans', {});
+    document.getElementById('or-out').innerHTML = os.length
+      ? os.map(function (o) {
+          return '<div class="row"><a href="' + editorHref(o.id) + '">' + esc(o.title || o.id) + '</a> ' +
+            '<a href="' + graphHref(o.id) + '" class="muted">graph</a></div>';
+        }).join('')
+      : '<div class="notice">No orphans.</div>';
+  } catch (e) { document.getElementById('or-out').innerHTML = errorBox(e); }
+}
+
 // ---- editor view --------------------------------------------------------
 
 function field(name, label, value, placeholder) {
@@ -544,7 +827,8 @@ async function renderSettings() {
     '<div id="enr-out"></div>' +
     '<h3>Maintenance</h3><div class="row">' +
     '<button id="mx-index">Re-index</button><button id="mx-embed">Embed</button>' +
-    '<button id="mx-doctor">Doctor</button></div><div id="mx-out"></div></div>';
+    '<button id="mx-doctor">Doctor</button><button id="mx-viz">Export viz.html</button>' +
+    '<button id="mx-rebuild">Rebuild (wipe + reindex)</button></div><div id="mx-out"></div></div>';
 
   function show(el, p) { document.getElementById(el).innerHTML = p; }
   function busy(el) { show(el, '<span class="muted">working…</span>'); }
@@ -616,6 +900,19 @@ async function renderSettings() {
         }).concat([(r.ok ? 'ok' : 'not conformant') + ' — ' + r.concepts + ' concepts, ' +
           r.errors + ' errors, ' + r.warnings + ' warnings']).join('\n')) + '</div>');
     } catch (e) { show('mx-out', errorBox(e)); }
+  });
+  document.getElementById('mx-viz').addEventListener('click', async function () {
+    busy('mx-out');
+    try {
+      var r = await api('export_viz', {});
+      show('mx-out', '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>');
+    } catch (e) { show('mx-out', errorBox(e)); }
+  });
+  document.getElementById('mx-rebuild').addEventListener('click', async function () {
+    if (!confirm('Rebuild wipes the derived index and rebuilds it from the bundle. Continue?')) return;
+    busy('mx-out');
+    try { show('mx-out', notice(await api('rebuild', { 'confirm-destructive': true }))); }
+    catch (e) { show('mx-out', errorBox(e)); }
   });
 }
 
