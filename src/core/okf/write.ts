@@ -41,6 +41,12 @@ export interface WriteResult {
   id: string;
   path: string;
   created: boolean;
+  /**
+   * True when an update would have produced byte-identical output but for a
+   * refreshed `timestamp`, so the write was skipped entirely (see the no-op
+   * guard below). Absent on real writes and creates.
+   */
+  noop?: boolean;
 }
 
 /** Emitted `timestamp` format: ISO 8601 UTC, second precision. */
@@ -97,6 +103,17 @@ export async function writeConcept(
 
   let body = normalizeLinks(input.id, input.body ?? prevBody).replace(/\r\n?/g, "\n");
   if (body !== "" && !body.endsWith("\n")) body += "\n";
+
+  // No-op guard: when updating a parseable concept that already carries a
+  // timestamp would change nothing on disk except that timestamp's refresh,
+  // skip the whole write — no rewrite, no timestamp bump, no log.md entry, no
+  // index regeneration. Re-running imports or repeated agent passes over
+  // unchanged content then leave no trace in git history (the timestamp means
+  // "last content change", so bumping it for an identical file is a lie).
+  if (existing !== undefined && prevTs !== "") {
+    const asIs = serialize({ frontmatter: { ...fm, timestamp: prevTs }, body });
+    if (asIs === existing.raw) return { id: input.id, path, created: false, noop: true };
+  }
 
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, serialize({ frontmatter: fm, body }), "utf8");

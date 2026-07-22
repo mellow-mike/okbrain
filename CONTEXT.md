@@ -86,6 +86,16 @@ Every write produces a conformant bundle (`writeConcept`, exposed as the
 - Full scaffold present: create requires `type`/`title`/`description`;
   `timestamp` (ISO-8601 UTC, second precision) is refreshed on every write;
   `resource`/`tags` included when applicable (`tags: []` clears).
+- **No-op writes are skipped.** An update whose serialized output would match
+  the on-disk bytes but for the refreshed `timestamp` is a no-op: the file is
+  not rewritten, `timestamp` is not bumped, no `log.md` entry is appended, and
+  the index is not regenerated. `writeConcept` detects this by reserializing
+  the candidate with the *existing* timestamp and comparing byte-for-byte;
+  `WriteResult.noop` marks it (`okb write` renders `unchanged`). This keeps
+  re-imports and repeated agent passes over unchanged content out of git
+  history and preserves `timestamp`'s meaning ("last content change").
+  Non-canonical existing files (CRLF endings, a missing timestamp) never
+  match, so they are still normalized on the next write.
 - Links normalized to bundle-absolute form (`#anchors` and `"title"` suffixes
   survive; destinations with spaces/parens get `<…>` wrapped).
 - Reserved ids (`index`, `log` basenames) are refused — those files belong to
@@ -572,6 +582,7 @@ capability once → it appears in all three. CLI/GUI can't drift.
 | `okb graph <id> [--depth N]` | read | Neighborhood with `→`/`←`/`↔` direction tags |
 | `okb path <from> <to>` | read | Shortest link chain between two concepts |
 | `okb orphans` | read | Concepts with no links in or out |
+| `okb stats` | read | Counts by type/tag, links, orphans, freshness snapshot |
 | `okb links suggest <id>` | read | Propose cross-links (deterministic, with reasons) |
 | `okb links accept <id> <target>` | write | Accept one: normalized link under `# Related` |
 | `okb index` / `okb embed` | admin | (Re)build FTS / vectors incrementally |
@@ -713,6 +724,7 @@ okbrain/
 │   │   ├── operations.ts        # the ONE contract (scope + trust + readonly)
 │   │   ├── config.ts            # bundle path, config/data dirs, brain mounts
 │   │   ├── claims.ts            # calibration: takes vs facts (Brier, buckets)
+│   │   ├── stats.ts             # okb stats: brain-wide counts/orphans/freshness
 │   │   ├── log.ts               # structured logger
 │   │   ├── okf/                 # document, paths, bundle, indexmd, logmd, doctor
 │   │   ├── engine/              # interface, sqlite, index-build  (postgres later)
@@ -796,6 +808,28 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-22 — **Writer no-op detection compares bytes, not fields.** The
+  guard reserializes the candidate concept with the *existing* timestamp and
+  compares to the on-disk bytes; only an exact match is a no-op. Comparing
+  bytes rather than a field-by-field semantic diff is deliberately
+  conservative: it can only ever *skip* a write that would have produced an
+  identical file (minus the timestamp bump), so it never risks dropping a real
+  change, and it correctly treats a canonicalization (CRLF→LF, adding a missing
+  timestamp, reordering keys) as the real write it is. The alternative — a
+  semantic equality check — would have to re-encode the notion of "conformant
+  bytes" a second time and could disagree with the serializer. The no-op path
+  also skips `index.md`/`log.md` regeneration: an unchanged concept's index row
+  is already correct, and a spurious `**Update**` log line for a byte-identical
+  file is exactly the git churn this removes.
+- 2026-07-22 — **`okb stats` is code, not a skill, and needs an index.** A
+  brain-wide snapshot (counts, orphans, freshness) is a deterministic
+  aggregate, so by the thin-harness rule it is a read op (`core/stats.ts`
+  pure `computeStats` over engine rows/edges/`tagCounts()`), not agent
+  judgment. It reads through the engine like `search`/`graph`/`orphans`, so it
+  fails loudly on a never-indexed bundle (B3) rather than silently creating an
+  empty index. Freshness takes an injected `now` and a `staleDays` window so
+  the aggregation is testable and the "stale" line is meaningful without a
+  magic constant buried in a query.
 - 2026-07-20 — **Packaging (5.1): vec0 ships beside the binary, never
   embedded in it.** SQLite loads extensions with dlopen, which cannot read
   the virtual files Bun compiles into an executable — an embedded vec0

@@ -136,6 +136,8 @@ export interface Engine {
   listResources(): { id: string; resource: string }[];
   /** Distinct tags across the bundle (autoTag vocabulary), sorted. */
   listTags(): string[];
+  /** Distinct tags with their usage counts (`okb stats`), sorted by tag. */
+  tagCounts(): { tag: string; count: number }[];
   /** Snooze a concept out of the review queue until `untilIso`. */
   setSnooze(id: string, untilIso: string): void;
   clearSnooze(id: string): void;

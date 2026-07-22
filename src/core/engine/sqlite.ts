@@ -320,6 +320,14 @@ export function openSqliteEngine(dbPath: string): Engine {
         .map((r) => r.tag),
     ),
 
+    tagCounts: fresh(() =>
+      db
+        .query<{ tag: string; count: number }, []>(
+          "SELECT tag, COUNT(*) AS count FROM tags GROUP BY tag ORDER BY tag",
+        )
+        .all(),
+    ),
+
     setSnooze: fresh((id, untilIso) => {
       db.query(
         "INSERT INTO review_state (node_id, snooze_until) VALUES (?, ?) ON CONFLICT(node_id) DO UPDATE SET snooze_until=excluded.snooze_until",

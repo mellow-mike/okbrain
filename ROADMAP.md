@@ -523,10 +523,16 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       large trees if it gets slow
 - [ ] `okb capture` triage flow: promote `inbox/` notes to a proper home
       (`okb move`? skill?) once graph tooling (1.4) exists
-- [ ] Writer no-op detection: skip the write (and the `timestamp` refresh) when
+- [x] Writer no-op detection: skip the write (and the `timestamp` refresh) when
       the result would be byte-identical, so re-running imports/agent passes
-      never churns git history
-- [ ] `okb stats` (concept/edge/tag counts, orphans, freshness)
+      never churns git history. `writeConcept` reserializes the candidate with
+      the existing timestamp and compares to the on-disk bytes; a match returns
+      `{ noop: true }` before any rewrite/log/index work. Non-canonical files
+      (CRLF, missing timestamp) never match, so they still get normalized.
+- [x] `okb stats` (concept/edge/tag counts, orphans, freshness) — read op over
+      `core/stats.ts` (pure `computeStats`): by-type + top-tag breakdowns,
+      orphan/inbox/never-reviewed counts, oldest/newest + a stale window. Needs
+      an index (fails loudly otherwise, per B3); auto-exposed on CLI/API/MCP.
 - [ ] Bundle templates / starter vocabularies
 - [ ] Export to other PKM formats (one-way) for portability checks
 - [ ] Link extraction and doctor's `log.md` heading scan are regex-based and
@@ -554,6 +560,19 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-22 — Two high-impact Backlog items shipped. **Writer no-op
+  detection** (`core/okf/write.ts`): an update that would reproduce the
+  on-disk bytes but for a timestamp refresh is skipped entirely — no rewrite,
+  no `timestamp` bump, no `log.md` entry, no index churn — so re-imports and
+  repeated agent passes stop churning git history and `timestamp` keeps
+  meaning "last content change"; `WriteResult.noop` surfaces it (`okb write`
+  renders `unchanged`). Non-canonical files (CRLF, missing timestamp) never
+  false-match, so they still normalize. **`okb stats`** (`core/stats.ts` pure
+  `computeStats` + read op + engine `tagCounts()`): concept/link/tag totals,
+  by-type and top-tag breakdowns, orphan/inbox/never-reviewed counts, and a
+  freshness window (oldest/newest + stale-over-N-days); auto-exposed on
+  CLI/API/MCP. 382 tests green, tsc clean. Next: Backlog as items earn their
+  way in.
 - 2026-07-20 — **Stage 5 shipped** after a full review pass. Review: no
   functional bugs found; hardening B7 (MCP HTTP 500 guard) + B8 (serve
   port-in-use message, with test), six internal-only exports de-exported.

@@ -127,6 +127,63 @@ describe("writeConcept: update", () => {
   });
 });
 
+describe("writeConcept: no-op detection", () => {
+  test("a byte-identical update is skipped: no rewrite, no timestamp bump, no log entry", async () => {
+    // Author through the writer so the on-disk bytes are already canonical.
+    await writeConcept(root, { id: "notes/a", type: "note", title: "A", description: "d", body: "Body." });
+    const path = join(root, "notes", "a.md");
+    const before = await readFile(path, "utf8");
+    const ts0 = parse(before).frontmatter.timestamp;
+    const logBefore = await readFile(join(root, "log.md"), "utf8");
+
+    // Re-write the exact same content (same fields, same body).
+    const r = await writeConcept(root, { id: "notes/a", type: "note", title: "A", description: "d", body: "Body." });
+    expect(r).toMatchObject({ id: "notes/a", created: false, noop: true });
+
+    const after = await readFile(path, "utf8");
+    expect(after).toBe(before); // byte-identical, timestamp untouched
+    expect(parse(after).frontmatter.timestamp).toBe(ts0);
+    // No spurious **Update** entry appended to the log.
+    expect(await readFile(join(root, "log.md"), "utf8")).toBe(logBefore);
+  });
+
+  test("a real change still rewrites and refreshes the timestamp", async () => {
+    await writeFile(
+      join(root, "a.md"),
+      "---\ntype: note\ntitle: Old\ndescription: keep\ntimestamp: 2020-01-01T00:00:00Z\n---\nOne.\n",
+    );
+    const r = await writeConcept(root, { id: "a", body: "Two." });
+    expect(r.noop).toBeUndefined();
+    const { frontmatter, body } = parse(await readFile(join(root, "a.md"), "utf8"));
+    expect(body).toBe("Two.\n");
+    expect(frontmatter.timestamp).not.toBe("2020-01-01T00:00:00Z");
+  });
+
+  test("a non-canonical existing file is not a no-op — it is rewritten canonically", async () => {
+    // Same content, but CRLF line endings + a timestamp present: writing must
+    // normalize to LF, so it is a real change (never falsely detected as no-op).
+    await writeFile(
+      join(root, "a.md"),
+      "---\r\ntype: note\r\ntitle: A\r\ndescription: d\r\ntimestamp: 2020-01-01T00:00:00Z\r\n---\r\nBody.\r\n",
+    );
+    const r = await writeConcept(root, { id: "a", type: "note", title: "A", description: "d", body: "Body." });
+    expect(r.noop).toBeUndefined();
+    const raw = await readFile(join(root, "a.md"), "utf8");
+    expect(raw.includes("\r")).toBe(false); // rewritten as LF
+  });
+
+  test("op-level render reports an unchanged write", async () => {
+    let out = "";
+    const io = { out: (t: string) => void (out += t), err: (t: string) => void (out += t) };
+    const args = (extra: string[]) =>
+      ["write", "notes/n", "--type", "note", "--title", "N", "--description", "d", "--body", "Same.", ...extra, "--bundle", root];
+    expect(await runCli(args([]), io)).toBe(0);
+    out = "";
+    expect(await runCli(args([]), io)).toBe(0);
+    expect(out).toContain("unchanged notes/n");
+  });
+});
+
 describe("write_concept op", () => {
   test("is gated for untrusted callers before the handler runs", async () => {
     expect(
