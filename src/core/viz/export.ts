@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { buildEdges, LINK, resolveLinkTarget, type Edge } from "../graph/links.ts";
 import { listConcepts, readConceptPermissive } from "../okf/bundle.ts";
 import { fmString, fmTags } from "../okf/document.ts";
+import safeMarkdownJs from "./safe-markdown.js" with { type: "text" };
 import cytoscapeJs from "./vendor/cytoscape.min.js" with { type: "text" };
 import markedJs from "./vendor/marked.umd.js" with { type: "text" };
 
@@ -208,6 +209,7 @@ try { if (localStorage.getItem('okb-viz-theme') === 'light')
 </script>
 <script>${cytoscapeJs}</script>
 <script>${markedJs}</script>
+<script>${safeMarkdownJs}</script>
 <script>
 var G = JSON.parse(document.getElementById('okb-graph').textContent);
 // Categorical palettes per surface (validated: fixed CVD-safe slot order, never
@@ -378,7 +380,7 @@ function showDetail(id) {
   if (n.tags.length) h += '<div class="meta">' + n.tags.map(function (t) {
     return '<span class="chip">' + esc(t) + '</span>';
   }).join(' ') + '</div>';
-  h += '<div class="body">' + marked.parse(n.body) + '</div>';
+  h += '<div class="body">' + okbMarkdown(n.body) + '</div>';
   var out = linksTo[id] || [], back = citedBy[id] || [];
   if (out.length) h += '<h3>Links to</h3>' + conceptList(out);
   if (back.length) h += '<h3>Cited by</h3>' + conceptList(back);

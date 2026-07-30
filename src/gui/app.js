@@ -164,7 +164,7 @@ async function renderGraph(focusId) {
     if (n.tags.length) h += '<div class="meta">' + n.tags.map(function (t) {
       return '<span class="chip">' + esc(t) + '</span>';
     }).join(' ') + '</div>';
-    h += '<div class="body md">' + marked.parse(n.body) + '</div>';
+    h += '<div class="body md">' + okbMarkdown(n.body) + '</div>';
     var out = linksTo[id] || [], back = citedBy[id] || [];
     if (out.length) h += '<h3>Links to</h3>' + conceptList(out);
     if (back.length) h += '<h3>Cited by</h3>' + conceptList(back);
@@ -299,7 +299,7 @@ function renderAsk() {
         : '';
     });
     es.addEventListener('answer', function (ev) {
-      outEl.innerHTML = marked.parse(JSON.parse(ev.data).answer);
+      outEl.innerHTML = okbMarkdown(JSON.parse(ev.data).answer);
     });
     es.addEventListener('done', function (ev) {
       var r = JSON.parse(ev.data).result;

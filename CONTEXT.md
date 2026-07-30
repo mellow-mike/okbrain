@@ -822,6 +822,34 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-07-30 — **The viewers render markdown, not HTML: raw HTML in a concept
+  body is escaped to source text.** Concept bodies are untrusted input — `okb
+  clip` takes arbitrary web pages, `okb rss` arbitrary feeds, `okb import`
+  arbitrary files, and a git-synced bundle carries whatever a collaborator's
+  device wrote. Markdown permits inline HTML by spec and marked has shipped no
+  sanitizer since v5, so `marked.parse(body) → innerHTML` executed that HTML in
+  both viewers: in `viz.html` (which holds every body in `G`, and is meant to be
+  committed and shared) and in the GUI, whose page also holds the serve token
+  and so grants every write/admin op. Rejected pulling in DOMPurify — a
+  sanitizer is a large dependency in the compiled binary, and *allowing* HTML
+  was never a feature we wanted. Instead `core/viz/safe-markdown.js` (shared by
+  both surfaces, loaded after marked) overrides the `html` renderer to escape,
+  and `link`/`image` to drop any scheme outside http/https/mailto/ftp —
+  scheme-less hrefs (relative links, the viewer's `#concept:` anchors) still
+  work, and escaping `&` is what stops an entity-encoded `javascript:` from
+  being reassembled by the browser. Markdown rendering is otherwise unchanged.
+  Consequence: a body that deliberately embeds HTML now displays that HTML as
+  text. That is the correct default for a bundle whose contents arrive from the
+  open web; if a trusted-HTML mode is ever wanted it must be opt-in per bundle.
+
+- 2026-07-30 — **Address guards classify expanded IPv6, never the literal.**
+  `isPrivateIp` matched IPv6 with regexes over the un-expanded string, which
+  only ever catches one spelling: `::ffff:127.0.0.1` was refused while
+  `::ffff:7f00:1`, `0:0:0:0:0:0:0:1` and `::127.0.0.1` sailed through to the
+  same destinations. Every check now runs on the eight expanded 16-bit groups,
+  IPv4-mapped/compatible addresses are classified by their embedded v4 address,
+  and anything that fails to parse is refused rather than assumed public.
+
 - 2026-07-22 — **The GUI is a full surface over the ops contract, not a
   curated subset.** Stage 3.2 shipped the GUI with the everyday views, but
   a dozen non-`localOnly` ops (`search`, `graph_path`, `orphans`, `stats`,

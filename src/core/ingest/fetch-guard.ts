@@ -35,16 +35,58 @@ const v4Private = (ip: string): boolean => {
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) // CGNAT shared space
+    (a === 100 && b >= 64 && b <= 127) || // CGNAT shared space
+    a >= 224 // multicast (224/4) and reserved/broadcast (240/4)
   );
 };
 
+/**
+ * Expand an IPv6 literal to its eight 16-bit groups, or null when it isn't one.
+ * Textual matching on the un-expanded form cannot classify IPv6: `::1`,
+ * `0:0:0:0:0:0:0:1` and `::ffff:7f00:1` all reach loopback but look nothing
+ * alike, so every check below runs on the expanded groups instead.
+ */
+function hextets(raw: string): number[] | null {
+  let s = raw;
+  // A trailing dotted quad (`::ffff:127.0.0.1`) is the low two groups.
+  const dotted = /^(.*:)((?:\d{1,3}\.){3}\d{1,3})$/.exec(s);
+  if (dotted) {
+    const b = dotted[2]!.split(".").map(Number);
+    if (b.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    s = `${dotted[1]!}${((b[0]! << 8) | b[1]!).toString(16)}:${((b[2]! << 8) | b[3]!).toString(16)}`;
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const groups = (part: string): number[] | null => {
+    if (part === "") return [];
+    const out: number[] = [];
+    for (const h of part.split(":")) {
+      if (!/^[0-9a-f]{1,4}$/i.test(h)) return null;
+      out.push(parseInt(h, 16));
+    }
+    return out;
+  };
+  const head = groups(halves[0]!);
+  const tail = halves.length === 2 ? groups(halves[1]!) : [];
+  if (head === null || tail === null) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const fill = 8 - head.length - tail.length;
+  return fill < 0 ? null : [...head, ...(Array(fill).fill(0) as number[]), ...tail];
+}
+
 const v6Private = (ip: string): boolean => {
-  const low = ip.toLowerCase();
-  if (low === "::" || low === "::1") return true;
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(low);
-  if (mapped) return v4Private(mapped[1]!);
-  return /^f[cd]/.test(low) || /^fe[89ab]/.test(low); // fc00::/7, fe80::/10
+  const h = hextets(ip.toLowerCase());
+  if (h === null) return true; // unclassifiable → refuse, never assume public
+  // IPv4-mapped (`::ffff:a.b.c.d`) and IPv4-compatible (`::a.b.c.d`) addresses
+  // route to the v4 destination in their low 32 bits — classify them as that
+  // address. `::` and `::1` fall out of this as 0.0.0.0 / 0.0.0.1.
+  if (h.slice(0, 5).every((x) => x === 0) && (h[5] === 0xffff || h[5] === 0))
+    return v4Private(`${h[6]! >> 8}.${h[6]! & 0xff}.${h[7]! >> 8}.${h[7]! & 0xff}`);
+  return (
+    (h[0]! & 0xfe00) === 0xfc00 || // fc00::/7 unique-local
+    (h[0]! & 0xffc0) === 0xfe80 || // fe80::/10 link-local
+    (h[0]! & 0xff00) === 0xff00 // ff00::/8 multicast
+  );
 };
 
 export const isPrivateIp = (ip: string): boolean =>
