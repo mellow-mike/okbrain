@@ -517,6 +517,10 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B6 | 2026-07-17 | low | tests | 2 `engine.vectors` tests failed on windows CI only (PR #13): both `rm` their temp dir while the store's `vectors.db` is still open (the shared `afterEach` closes too late). POSIX unlinks open files; Windows refuses (EBUSY/EPERM). Green on 07-13 — CI pins `bun-version: latest`, so a Bun update likely changed the Windows file-share flags and exposed it | test deleted a directory containing an open SQLite DB | fixed | `store.close()` before the in-test `rm` (double close is a no-op); the two tests themselves are the regression proof (fail on Windows before, pass after) |
 | B7 | 2026-07-20 | low | mcp | HTTP transport: an exception inside the per-request handler (connect/handleRequest) became an unhandled promise rejection with the client socket left open | async `createServer` callback had no try/catch | fixed | wrapped in try/catch → JSON 500; found by review — no deterministic repro exists through the SDK (it absorbs malformed input), so the guard is verified by inspection |
 | B8 | 2026-07-20 | low | api | `okb serve` on an occupied port died with Bun's raw "Failed to start server" instead of telling the user what to do | EADDRINUSE not translated at `createApiServer` | fixed | actionable error naming `--port`; regression test in `tests/api.test.ts` |
+| B9 | 2026-07-30 | crit | viz/gui | Stored XSS in both viewers: `marked.parse(body)` → `innerHTML` renders raw HTML from concept bodies. Repro: clip a page that *displays* `&lt;img src=x onerror=…&gt;` as text — turndown un-escapes it into the markdown body — then open the concept. Driven in Chromium pre-fix: the handler fired and POSTed the whole graph `G` to an external host. In the GUI the page also holds `window.OKB_TOKEN`, so a payload reaches every write/admin op | markdown permits inline HTML by spec and marked has had no sanitizer since v5; bodies are untrusted (clip/rss/import/git-synced bundles) | fixed | shared `core/viz/safe-markdown.js` escapes raw HTML and gates link/image URL schemes; `tests/viz.safe-markdown.test.ts` + Chromium re-drive (0 live nodes, 0 external requests) |
+| B10 | 2026-07-30 | high | ingest | SSRF guard bypass: `isPrivateIp` matched IPv6 textually, so only the dotted-quad spelling of an IPv4-mapped address was caught. `http://[::ffff:7f00:1]/` reached a loopback server (verified end-to-end); `::ffff:a9fe:a9fe` reaches cloud metadata and `0:0:0:0:0:0:0:1` is loopback. Reachable from `okb clip` / `okb rss` / `okb enrich` | regex matching on the un-expanded literal cannot classify IPv6 — one address has many spellings | fixed | expand to eight groups first, then classify (v4-mapped/compatible → v4 rules; fc00::/7, fe80::/10, ff00::/8); unparseable → refuse. Regression tests in `tests/clip.test.ts` |
+| B11 | 2026-07-30 | med | api | `tokenMatches` compared UTF-16 string length but handed byte buffers to `timingSafeEqual`; a multibyte candidate of equal string length threw `RangeError` instead of returning false, so the auth path answered 500 rather than 401 (reachable by any page that can hit the port) | length check in code units, comparison in bytes | fixed | compare byte lengths before `timingSafeEqual`; regression tests at both unit and HTTP level in `tests/api.test.ts` |
+| B12 | 2026-07-30 | low | api | GUI responses carried no anti-framing headers, though `/` embeds the serve token — a remote page could frame the GUI and drive authenticated writes with hijacked clicks | no `X-Frame-Options`/`frame-ancestors` on the local API | fixed | `X-Frame-Options: DENY` + `frame-ancestors 'none'` + `nosniff` on every response; regression test in `tests/api.test.ts` |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -569,6 +573,16 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-07-30 — **Security audit of `src/`.** Full pass against the CLAUDE.md
+  invariants. Four findings, all fixed with regression tests (B9–B12): stored
+  XSS in `viz.html` and the GUI via unsanitized `marked.parse` → `innerHTML`
+  (confirmed exploitable in Chromium — it exfiltrated the whole graph, and the
+  GUI page holds the serve token), an SSRF guard bypass on IPv6 spellings of
+  loopback/metadata addresses, an unhandled `RangeError` on the API auth path,
+  and missing anti-framing headers. Trust gating (`checkOpCall`), the ops
+  contract, the git subprocess layer and FTS/SQL construction all held up.
+  Next: unreviewed lower-severity notes are listed in the PR — atomic concept
+  writes and `slugify` dropping non-ASCII titles are the two worth scheduling.
 - 2026-07-22 — **GUI full-surface wiring.** Closed the gap between the ops
   contract and the GUI: a dozen non-`localOnly` ops were CLI/MCP-only.
   Added four views — **Search** (hybrid `search` with source chips),

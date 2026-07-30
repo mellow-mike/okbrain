@@ -18,6 +18,7 @@ import {
   type Operation,
 } from "./core/operations.ts";
 import { DEFAULT_PORT, ensureServeToken, hostAllowed, tokenMatches } from "./core/serve-token.ts";
+import safeMarkdownJs from "./core/viz/safe-markdown.js" with { type: "text" };
 import cytoscapeJs from "./core/viz/vendor/cytoscape.min.js" with { type: "text" };
 import markedJs from "./core/viz/vendor/marked.umd.js" with { type: "text" };
 import guiAppJs from "./gui/app.js" with { type: "text" };
@@ -30,6 +31,7 @@ const GUI_ASSETS: Record<string, [string, string]> = {
   "/gui/style.css": [guiStyleCss, "text/css; charset=utf-8"],
   "/gui/cytoscape.js": [cytoscapeJs, "application/javascript; charset=utf-8"],
   "/gui/marked.js": [markedJs, "application/javascript; charset=utf-8"],
+  "/gui/safe-markdown.js": [safeMarkdownJs, "application/javascript; charset=utf-8"],
 };
 
 export interface ApiOptions {
@@ -67,14 +69,28 @@ export function corsHeaders(
 
 type Hdrs = Record<string, string>;
 
+/**
+ * On every response: `/` embeds the serve token in the page, so a remote site
+ * framing the GUI could drive authenticated write ops with hijacked clicks.
+ * nosniff keeps the static assets from being re-typed by the browser.
+ */
+const GUARD: Hdrs = {
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+};
+
 const json = (status: number, body: unknown, headers: Hdrs = {}): Response =>
   new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json", ...GUARD, ...headers },
   });
 
 const html = (status: number, body: string): Response =>
-  new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+  new Response(body, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8", ...GUARD },
+  });
 
 const esc = (s: string): string =>
   s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
@@ -198,7 +214,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
       return html(200, guiIndexHtml.replace("__OKB_TOKEN__", opts.token));
     const asset = GUI_ASSETS[url.pathname];
     if (asset)
-      return new Response(asset[0], { headers: { "content-type": asset[1] } });
+      return new Response(asset[0], { headers: { "content-type": asset[1], ...GUARD } });
     // Browsers request this unprompted; a 401/404 here is just console noise.
     if (url.pathname === "/favicon.ico") return new Response(null, { status: 204 });
   }
