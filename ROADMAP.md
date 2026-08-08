@@ -573,6 +573,19 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-08-08 — **README rewritten as a landing page.** Reordered from a
+  ten-step tutorial into a cognitive funnel (what → why → demo → install →
+  quick start → commands → config → architecture), and every command, output
+  block and count re-verified against the code rather than carried over.
+  Fixed four stale/false claims: the test count (372 → 398), a missing
+  `stats` command in the reference table, an install section pointing at
+  GitHub Releases when zero releases are tagged (build-from-source is now
+  the primary path; the release flow sits in a `<details>` with a TODO), and
+  README-only env vars now cross-checked against `gateway.ts`
+  (`OKB_AI_PROVIDER` added). Adds a Mermaid architecture diagram, an exit-code
+  table (`doctor` → 1 makes it a CI gate), and surfaces the shipped
+  `bundles/example` as a zero-commitment trial path. Docs only — no `src/`
+  change. Next: Backlog as items earn in.
 - 2026-07-30 — **Security audit of `src/`.** Full pass against the CLAUDE.md
   invariants. Four findings, all fixed with regression tests (B9–B12): stored
   XSS in `viz.html` and the GUI via unsanitized `marked.parse` → `innerHTML`
