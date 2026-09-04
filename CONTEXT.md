@@ -322,10 +322,12 @@ concentric / breadth-first / circle / grid), fit-to-view. OKF v0.2 signals
 render as badges (status / trust tier / stale) and in the detail panel
 (`generated`, `verified`, `sources` with credibility signals); stale nodes get
 a dashed border, deprecated ones fade. Body rendering is shared with the
-GUI through `core/viz/render.js` (one source, embedded in both): markdown →
-`[^id]` footnote attribution → **DOMPurify** sanitization — a clipped page can
-never run script — → internal-link resolution (`#concept:` anchors,
-bundle-absolute, or relative to the concept). Theming: **dark mode
+GUI through `core/viz/render.js` (one source, embedded in both): markdown
+through `core/viz/safe-markdown.js` (raw HTML escaped to source text, unsafe
+URL schemes dropped — a clipped page can never run script) → `[^id]`
+footnote attribution, swapped in after rendering so it never bypasses the
+sanitizer → internal-link resolution (`#concept:` anchors, bundle-absolute,
+or relative to the concept). Theming: **dark mode
 default**, light via a persisted toggle (`localStorage`); chrome colors live
 once as CSS custom properties on `:root[data-theme=…]` and the Cytoscape
 styles read them back via `getComputedStyle`, so both surfaces render from one
@@ -338,10 +340,10 @@ color-alone.
   current DB, click-through to the editor.
 - **Static export:** `okb export-viz` writes the single HTML file to the fixed
   path `<bundle>/viz.html` — no backend, shareable, committable next to the
-  bundle. Built straight from a bundle walk (works without an index).
-  Cytoscape, marked, and DOMPurify are vendored minified builds
-  (`core/viz/vendor/`), inlined into the page and embedded in the compiled
-  binary via Bun text imports. Internal
+  bundle. Built straight from a bundle walk (works without an index). Cytoscape
+  and marked are vendored minified builds (`core/viz/vendor/`), inlined into
+  the page together with okbrain's own `safe-markdown.js` + `render.js` and
+  embedded in the compiled binary via Bun text imports. Internal
   `.md` links in bodies are rewired to `#concept:<encoded-id>` anchors the
   viewer intercepts to focus the target node; external/broken links pass
   through untouched (external ones open in a new tab). The op is scope `read`
@@ -764,8 +766,9 @@ widths (the sidebar becomes a top bar). Every non-`localOnly` op has a home
 on one of the views below — a registry-derived test enforces it — and the
 `localOnly` ones surface as a brain switcher, a status footer, the
 bookmarklet, and MCP setup instructions. Rendered markdown goes through the
-shared `render.js` (footnotes, DOMPurify, link routing), so a clipped page
-cannot exfiltrate the API token. Views:
+shared `render.js` over `safe-markdown.js` (raw HTML escaped, schemes gated,
+footnotes, link routing), so a clipped page cannot exfiltrate the API token.
+Views:
 - **Home** — the habit-forming front page: tiles (`stats`), quick `capture`,
   today's review queue with Reviewed/Snooze, inbox preview, recently
   changed (`list_concepts --detail`), one-click `doctor` with the v0.2
@@ -837,9 +840,10 @@ its own `.okb/` index — nothing is shared between brains.
 - **Engine (default):** SQLite + `sqlite-vec` (vectors) + FTS5 (keyword) —
   embedded, file-based, zero-config, cross-platform.
 - **Graph:** SQLite tables + recursive CTEs.
-- **Viewer:** Cytoscape.js + marked.js (from OKF's viewer) + DOMPurify
-  (sanitization), bundled into the static export and reused live in the GUI
-  through one shared `render.js`.
+- **Viewer:** Cytoscape.js + marked.js (from OKF's viewer), rendered through
+  okbrain's `safe-markdown.js` (escape raw HTML, gate URL schemes) and one
+  shared `render.js`, bundled into the static export and reused live in the
+  GUI.
 - **MCP:** the MCP TypeScript SDK.
 - **AI:** HTTP clients per recipe (OpenAI-compatible for most local + several
   API providers).
@@ -1027,11 +1031,11 @@ sections above as current truth; this log says *why/when*.
   over `x-okb-brain`, status footer, bookmarklet, MCP snippet) rather than
   being exposed as ops. The framework-free decision stands: three files
   embedded in the binary keep `bun build --compile` the entire build.
-  Rendered markdown is now sanitized with vendored DOMPurify through one
-  shared `render.js` (GUI + static viewer) — the Backlog XSS concern became
-  urgent once the app embeds a write-capable API token in its page. A
-  registry-derived test replaced the hand-maintained op list that had let
-  `jobs` ship without a GUI home.
+  Rendered markdown goes through one shared `render.js` (GUI + static
+  viewer) on top of the 2026-07-30 `safe-markdown.js` renderer, so the
+  v0.2 footnote attribution and link routing never add a second HTML path
+  around the sanitizer. A registry-derived test replaced the hand-maintained
+  op list that had let `jobs` ship without a GUI home.
 - 2026-09-03 — **`okb rm` exists.** Deleting a concept was the one everyday
   action the product had no path for except editing the filesystem; the op
   deletes the file, prunes emptied directories, regenerates indexes, logs a
@@ -1049,6 +1053,34 @@ sections above as current truth; this log says *why/when*.
   `bun run package` builds the host's archive with the vec0 already in
   `node_modules` — no registry fetch — so the "fully offline local package"
   is a one-command build, not only a release-runner artifact.
+- 2026-07-30 — **The viewers render markdown, not HTML: raw HTML in a concept
+  body is escaped to source text.** Concept bodies are untrusted input — `okb
+  clip` takes arbitrary web pages, `okb rss` arbitrary feeds, `okb import`
+  arbitrary files, and a git-synced bundle carries whatever a collaborator's
+  device wrote. Markdown permits inline HTML by spec and marked has shipped no
+  sanitizer since v5, so `marked.parse(body) → innerHTML` executed that HTML in
+  both viewers: in `viz.html` (which holds every body in `G`, and is meant to be
+  committed and shared) and in the GUI, whose page also holds the serve token
+  and so grants every write/admin op. Rejected pulling in DOMPurify — a
+  sanitizer is a large dependency in the compiled binary, and *allowing* HTML
+  was never a feature we wanted. Instead `core/viz/safe-markdown.js` (shared by
+  both surfaces, loaded after marked) overrides the `html` renderer to escape,
+  and `link`/`image` to drop any scheme outside http/https/mailto/ftp —
+  scheme-less hrefs (relative links, the viewer's `#concept:` anchors) still
+  work, and escaping `&` is what stops an entity-encoded `javascript:` from
+  being reassembled by the browser. Markdown rendering is otherwise unchanged.
+  Consequence: a body that deliberately embeds HTML now displays that HTML as
+  text. That is the correct default for a bundle whose contents arrive from the
+  open web; if a trusted-HTML mode is ever wanted it must be opt-in per bundle.
+
+- 2026-07-30 — **Address guards classify expanded IPv6, never the literal.**
+  `isPrivateIp` matched IPv6 with regexes over the un-expanded string, which
+  only ever catches one spelling: `::ffff:127.0.0.1` was refused while
+  `::ffff:7f00:1`, `0:0:0:0:0:0:0:1` and `::127.0.0.1` sailed through to the
+  same destinations. Every check now runs on the eight expanded 16-bit groups,
+  IPv4-mapped/compatible addresses are classified by their embedded v4 address,
+  and anything that fails to parse is refused rather than assumed public.
+
 - 2026-07-22 — **The GUI is a full surface over the ops contract, not a
   curated subset.** Stage 3.2 shipped the GUI with the everyday views, but
   a dozen non-`localOnly` ops (`search`, `graph_path`, `orphans`, `stats`,

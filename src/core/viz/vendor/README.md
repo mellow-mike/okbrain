@@ -8,6 +8,9 @@ Copied verbatim from their npm packages; inlined into `viz.html` by
 |---|---|---|---|
 | `cytoscape.min.js` | `cytoscape` | see file header | MIT |
 | `marked.umd.js` | `marked` | 18.0.5 | MIT |
-| `purify.min.js` | `dompurify` | 3.4.14 | Apache-2.0 OR MPL-2.0 |
 
 To update: copy the `dist/` build from the package tarball and bump this table.
+
+okbrain's own browser scripts live one level up (`core/viz/safe-markdown.js`,
+the sanitizing renderer; `core/viz/render.js`, the shared viewer helpers) and
+are loaded after these, in that order.

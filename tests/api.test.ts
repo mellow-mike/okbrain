@@ -70,6 +70,13 @@ describe("serve token", () => {
     expect(tokenMatches("", TOKEN)).toBe(false);
     expect(tokenMatches(TOKEN + "x", TOKEN)).toBe(false);
   });
+
+  // Same UTF-16 length, different byte length: comparing string lengths let
+  // this reach timingSafeEqual, which throws instead of returning false.
+  test("tokenMatches: multibyte candidate is refused, not thrown on", () => {
+    expect(tokenMatches("é".repeat(TOKEN.length), TOKEN)).toBe(false);
+    expect(tokenMatches("☃".repeat(TOKEN.length), TOKEN)).toBe(false);
+  });
 });
 
 describe("request guards", () => {
@@ -80,6 +87,25 @@ describe("request guards", () => {
     expect(hostAllowed("evil.com:6522", 6522)).toBe(false); // DNS rebinding
     expect(hostAllowed("127.0.0.1:9999", 6522)).toBe(false);
     expect(hostAllowed(null, 6522)).toBe(false);
+  });
+
+  test("a multibyte token candidate gets 401, not a 500", async () => {
+    // Same UTF-16 length as the real token, so the byte-length mismatch is
+    // only discoverable inside the comparison itself.
+    const candidate = "é".repeat(api.token.length);
+    expect(candidate.length).toBe(api.token.length);
+    const res = await fetch(`${base}api/ops?token=${encodeURIComponent(candidate)}`);
+    expect(res.status).toBe(401);
+  });
+
+  // `/` embeds the serve token, so the GUI must never be framable.
+  test("responses carry the anti-framing guards", async () => {
+    for (const path of ["", "gui/app.js", "api/ops"]) {
+      const res = await fetch(base + path, { headers: { "x-okb-token": api.token } });
+      expect(res.headers.get("x-frame-options")).toBe("DENY");
+      expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    }
   });
 
   test("corsHeaders: own localhost origins only", () => {
@@ -143,7 +169,7 @@ describe("request guards", () => {
       ["gui/style.css", "text/css", "--accent"],
       ["gui/cytoscape.js", "application/javascript", "cytoscape"],
       ["gui/marked.js", "application/javascript", "marked"],
-      ["gui/purify.js", "application/javascript", "DOMPurify"],
+      ["gui/safe-markdown.js", "application/javascript", "okbMarkdown"],
       ["gui/render.js", "application/javascript", "okbRender"],
     ];
     for (const [path, type, needle] of cases) {

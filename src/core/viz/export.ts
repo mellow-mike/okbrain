@@ -1,7 +1,8 @@
 // Static graph viewer export (Stage 0.7). Walks the bundle directly (no index
 // required), builds graph JSON, and writes one self-contained OKF-style HTML
-// file: Cytoscape.js graph + marked/DOMPurify body rendering, all vendored
-// and inlined, so viz.html needs no backend or network and can be committed
+// file: Cytoscape.js graph + marked body rendering (through safe-markdown.js:
+// raw HTML escaped, unsafe URL schemes dropped) and the shared render.js,
+// all inlined, so viz.html needs no backend or network and can be committed
 // next to the bundle. Internal `.md` links in bodies are rewired to
 // `#concept:<id>` anchors the viewer intercepts to focus the target node; the
 // OKF v0.2 signals (status, trust tier, staleness, provenance) show as badges.
@@ -25,10 +26,10 @@ import {
   type Status,
   type TrustTier,
 } from "../okf/document.ts";
+import renderJs from "./render.js" with { type: "text" };
+import safeMarkdownJs from "./safe-markdown.js" with { type: "text" };
 import cytoscapeJs from "./vendor/cytoscape.min.js" with { type: "text" };
 import markedJs from "./vendor/marked.umd.js" with { type: "text" };
-import purifyJs from "./vendor/purify.min.js" with { type: "text" };
-import renderJs from "./render.js" with { type: "text" };
 
 export interface VizNode {
   id: string;
@@ -261,7 +262,7 @@ try { if (localStorage.getItem('okb-viz-theme') === 'light')
 </script>
 <script>${cytoscapeJs}</script>
 <script>${markedJs}</script>
-<script>${purifyJs}</script>
+<script>${safeMarkdownJs}</script>
 <script>${renderJs}</script>
 <script>
 var G = JSON.parse(document.getElementById('okb-graph').textContent);

@@ -71,6 +71,37 @@ describe("fetch guard — target policy (no packets sent)", () => {
     for (const ip of ["8.8.8.8", "93.184.216.34", "172.32.0.1", "2606:4700::1111", "::ffff:8.8.8.8"])
       expect(isPrivateIp(ip)).toBe(false);
   });
+
+  // Textual matching on the un-expanded literal missed every spelling but the
+  // dotted-quad one, so `http://[::ffff:7f00:1]/` walked straight past the
+  // guard into loopback (and `::ffff:a9fe:a9fe` into cloud metadata).
+  test("isPrivateIp expands IPv6 before classifying", () => {
+    for (const ip of [
+      "::ffff:7f00:1", // 127.0.0.1, hex form
+      "::ffff:a9fe:a9fe", // 169.254.169.254, hex form
+      "::ffff:a00:1", // 10.0.0.1, hex form
+      "0:0:0:0:0:0:0:1", // loopback, fully expanded
+      "0000:0000:0000:0000:0000:0000:0000:0001",
+      "::127.0.0.1", // IPv4-compatible
+      "::", // unspecified
+      "fdff:ffff::1", // fc00::/7 upper half
+      "febf::1", // fe80::/10 upper bound
+      "ff02::1", // link-local all-nodes multicast
+    ])
+      expect(isPrivateIp(ip)).toBe(true);
+    for (const ip of ["::ffff:808:808", "2001:4860:4860::8888", "fec0::1"])
+      expect(isPrivateIp(ip)).toBe(false);
+  });
+
+  test("guardedFetch refuses loopback spelled as IPv4-mapped IPv6", async () => {
+    const victim = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("internal") });
+    try {
+      for (const host of [`[::ffff:7f00:1]:${victim.port}`, `[0:0:0:0:0:0:0:1]:${victim.port}`])
+        await expect(guardedFetch(`http://${host}/`)).rejects.toThrow(/private\/loopback/);
+    } finally {
+      victim.stop(true);
+    }
+  });
 });
 
 describe("fetch guard — mechanics (stub server, allowPrivate)", () => {

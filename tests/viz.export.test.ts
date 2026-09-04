@@ -110,7 +110,7 @@ describe("renderHtml", () => {
     expect(html).toContain('<script id="okb-graph" type="application/json">');
     expect(html).toContain("The Cytoscape Consortium"); // cytoscape inlined
     expect(html).toContain("a markdown parser"); // marked inlined
-    expect(html).toContain("DOMPurify"); // sanitizer inlined: bodies never run script
+    expect(html).toContain("okbMarkdown"); // sanitizing renderer inlined: bodies never run script
     expect(html).toContain("okbRender"); // shared viewer helpers inlined
     expect(html).not.toContain("</script><b>"); // < escaped in data
     const json = /<script id="okb-graph"[^>]*>([\s\S]*?)<\/script>/.exec(html)![1]!;

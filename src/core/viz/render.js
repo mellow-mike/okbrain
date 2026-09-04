@@ -1,8 +1,9 @@
 // Shared browser-side rendering for the GUI and the static viewer (one
-// source, embedded into both via Bun text imports): markdown → sanitized
-// HTML with OKF v0.2 footnote attribution, internal-link resolution, and the
-// signal badges (status / trust tier / staleness). Depends on the vendored
-// `marked` and `DOMPurify` globals. Plain script, no build step.
+// source, embedded into both via Bun text imports): markdown → HTML through
+// `okbMarkdown` (safe-markdown.js: raw HTML escaped to source text, unsafe
+// URL schemes dropped), OKF v0.2 footnote attribution, internal-link
+// resolution, and the signal badges (status / trust tier / staleness).
+// Loaded after marked.js and safe-markdown.js. Plain script, no build step.
 (function () {
   'use strict';
 
@@ -12,36 +13,40 @@
     });
   }
 
-  // OKF §5.1 per-claim attribution: `[^id]` references keyed to sources[].id.
-  // marked has no footnote syntax, so refs become superscript links and the
-  // definitions collect into a numbered list at the end of the body.
-  function footnotes(md) {
+  /** Inline markdown (a footnote definition) without the paragraph wrapper. */
+  function inline(md) {
+    return okbMarkdown(md).replace(/^<p>([\s\S]*?)<\/p>\s*$/, '$1');
+  }
+
+  /**
+   * Markdown body → HTML with OKF §5.1 per-claim attribution resolved:
+   * `[^id]` references (keyed to sources[].id) become superscript links and
+   * their `[^id]: text` definitions collect into a numbered list at the end.
+   * marked has no footnote syntax, so definitions are lifted out before
+   * parsing and references are swapped in the rendered output — where they
+   * survive as literal text — so nothing here ever bypasses the sanitizer.
+   */
+  function renderMarkdown(md) {
     var defs = {};
-    var stripped = md.replace(/^\[\^([^\]\s]+)\]:[ \t]*(.*)$/gm, function (_, id, text) {
+    var src = String(md == null ? '' : md).replace(/^\[\^([^\]\s]+)\]:[ \t]*(.*)$/gm, function (_, id, text) {
       defs[id] = text;
       return '';
     });
+    var html = okbMarkdown(src);
     var used = [];
-    var out = stripped.replace(/\[\^([^\]\s]+)\]/g, function (m, id) {
+    html = html.replace(/\[\^([^\]\s<&]+)\]/g, function (m, id) {
       if (!Object.prototype.hasOwnProperty.call(defs, id)) return m;
       if (used.indexOf(id) < 0) used.push(id);
-      var n = used.indexOf(id) + 1;
       return '<sup class="fn"><a href="#fn-' + esc(encodeURIComponent(id)) +
-        '" title="' + esc(defs[id]) + '">' + n + '</a></sup>';
+        '" title="' + esc(defs[id]) + '">' + (used.indexOf(id) + 1) + '</a></sup>';
     });
     if (used.length) {
-      out += '\n\n<ol class="footnotes">' + used.map(function (id) {
+      html += '<ol class="footnotes">' + used.map(function (id) {
         return '<li id="fn-' + esc(encodeURIComponent(id)) + '"><code>' + esc(id) + '</code> ' +
-          marked.parseInline(defs[id]) + '</li>';
+          inline(defs[id]) + '</li>';
       }).join('') + '</ol>';
     }
-    return out;
-  }
-
-  /** Markdown body → sanitized HTML (footnotes resolved). */
-  function renderMarkdown(md) {
-    var html = marked.parse(footnotes(md || ''), { gfm: true, breaks: false });
-    return DOMPurify.sanitize(html, { ADD_ATTR: ['target', 'rel'] });
+    return html;
   }
 
   /**
@@ -134,7 +139,6 @@
 
   window.okbRender = {
     esc: esc,
-    footnotes: footnotes,
     renderMarkdown: renderMarkdown,
     resolveInternal: resolveInternal,
     wireLinks: wireLinks,

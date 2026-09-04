@@ -35,10 +35,17 @@ export function ensureServeToken(p?: Platform): string {
   return token;
 }
 
-/** Constant-time token comparison (length is public — the token format is). */
+/**
+ * Constant-time token comparison (length is public — the token format is).
+ * Lengths are compared in bytes, not UTF-16 code units: a multibyte candidate
+ * can match the token's string length while differing in byte length, and
+ * timingSafeEqual throws rather than returning false on mismatched buffers.
+ */
 export function tokenMatches(candidate: string | null, token: string): boolean {
-  if (candidate === null || candidate.length !== token.length) return false;
-  return timingSafeEqual(Buffer.from(candidate, "utf8"), Buffer.from(token, "utf8"));
+  if (candidate === null) return false;
+  const a = Buffer.from(candidate, "utf8");
+  const b = Buffer.from(token, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 /**
