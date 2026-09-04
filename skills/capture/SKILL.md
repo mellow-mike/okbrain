@@ -11,8 +11,9 @@ Steps:
    - URL → `okb clip <url> [--tags …] [--quote "<selection>"]` (add
      `--auto-tag` only if the user wants topical tags and a provider is
      configured).
-   - Fleeting text → `okb capture "<text>" [--tags …]` — lands in `inbox/`,
-     triage later.
+   - Fleeting text → `okb capture "<text>" [--tags …]` — lands in `inbox/`
+     tagged `inbox`; triage later (`okb inbox`, then `okb inbox read <id>`
+     or a proper home via `okb write`).
    - `deliberate` → `okb new <type> "<title>" "<one-line description>"
      [--body …]`; derive a clean, specific title; the description is one
      honest sentence, not a repeat of the title.

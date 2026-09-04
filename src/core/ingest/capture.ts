@@ -1,7 +1,10 @@
 // Quick capture (Stage 1.3): turn a snippet of text into a conformant concept
 // under `inbox/` with zero required metadata — title/description are derived
 // from the first line, the id from the date + title, colliding ids get a
-// numeric suffix. Routes through the conformance writer like every write.
+// numeric suffix. Captures carry the `inbox` tag (the reading inbox is the
+// tag, not the directory), so `okb inbox` and the review queue see them
+// until they are triaged. Routes through the conformance writer like every
+// write.
 
 import { existsSync } from "node:fs";
 import { idToAbsPath, slugify } from "../okf/paths.ts";
@@ -11,6 +14,8 @@ export interface CaptureInput {
   text: string;
   title?: string;
   tags?: string[];
+  /** `generated.by` for the note (default: the configured local actor). */
+  actor?: string;
 }
 
 /** Clip to `max` chars on a word-ish boundary, marking truncation with `…`. */
@@ -31,6 +36,7 @@ export async function captureNote(root: string, input: CaptureInput): Promise<Wr
     title,
     description: clip(firstLine, 120),
     body: text,
-    tags: input.tags,
+    tags: [...new Set([...(input.tags ?? []), "inbox"])],
+    actor: input.actor,
   });
 }

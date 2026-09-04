@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseFeed, pullFeed, FeedError } from "../src/core/ingest/rss.ts";
 import { runDoctor } from "../src/core/okf/doctor.ts";
+import { parse } from "../src/core/okf/document.ts";
 import { okb } from "./helpers.ts";
 
 const RSS = `<?xml version="1.0"?>
@@ -114,8 +115,12 @@ describe("pullFeed", () => {
       expect(raw).toContain("resource: https://blog.example.com/first"); // utm gone
       expect(raw).not.toContain("utm_source");
       expect(raw).toContain("Full **content** of the post.");
-      expect(raw).toContain("# Citations");
-      expect(raw).toContain("author: Ann Author");
+      expect(raw).not.toContain("# Citations");
+      expect(raw).toContain("generated:\n  by: okb/");
+      // v0.2 provenance: the feed, then the article with its credibility signals.
+      const sources = parse(raw).frontmatter.sources as Record<string, unknown>[];
+      expect(sources[0]).toEqual({ id: "feed", resource: FEED_URL, title: "Example Blog" });
+      expect(sources[1]).toMatchObject({ resource: "https://blog.example.com/first", title: "First Post", author: "Ann Author" });
       expect(raw).toContain("- rss");
 
       const rep = await runDoctor(root);

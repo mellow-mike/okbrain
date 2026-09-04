@@ -17,6 +17,7 @@ import {
   type WebPassLimits,
 } from "../src/core/ingest/web.ts";
 import { runDoctor } from "../src/core/okf/doctor.ts";
+import { parse } from "../src/core/okf/document.ts";
 import { writeConcept } from "../src/core/okf/write.ts";
 import { okb } from "./helpers.ts";
 
@@ -95,7 +96,8 @@ describe("runEnrich loop", () => {
         type: "reference",
         title: "Seed Topic",
         description: "What the seed pages say",
-        body: `Summary of the pages.\n\n# Citations\n\n- [Seed](${SEED})\n- [Page B](${PAGE_B})`,
+        body: "Summary of the pages.[^seed]\n\n[^seed]: Seed",
+        sources: [{ id: "seed", resource: SEED, title: "Seed" }, PAGE_B],
       }),
       act({ action: "done", summary: "minted one reference" }),
     ]);
@@ -106,7 +108,12 @@ describe("runEnrich loop", () => {
       expect(r.summary).toBe("minted one reference");
       expect(observations[2]).toContain('"links"'); // fetch result fed back
       const raw = await readFile(join(root, "references", "seed-topic.md"), "utf8");
-      expect(raw).toContain("# Citations");
+      expect(raw).not.toContain("# Citations");
+      expect(raw).toContain("generated:\n  by: okb-enrich/"); // agent actor (producer/model)
+      expect(parse(raw).frontmatter.sources).toEqual([
+        { id: "seed", resource: SEED, title: "Seed" },
+        { id: "ex-org", resource: PAGE_B },
+      ]);
       expect((await runDoctor(root)).errors).toBe(0);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -240,13 +247,38 @@ describe("runEnrich loop", () => {
   test("a bad write becomes an observation, not a crash", async () => {
     const root = tempBundle();
     const { observations, chat } = scripted([
-      act({ action: "write_concept", id: "references/x", body: "no scaffold" }), // create needs type/title/description
+      act({ action: "write_concept", id: "references/x", body: "no scaffold", sources: [SEED] }), // create needs type/title/description
+      act({ action: "write_concept", id: "references/y", type: "reference", title: "Y", description: "d", body: "uncited" }),
       act({ action: "done", summary: "" }),
     ]);
     try {
       const r = await runEnrich(root, "t", [], defaultLimits([]), deps(chat, undefined));
       expect(r.written).toEqual([]);
       expect(observations[1]).toContain("required");
+      expect(observations[2]).toContain("sources entry"); // a minted reference must cite something
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("enriching an existing concept merges sources and never shrinks them", async () => {
+    const root = tempBundle();
+    await writeConcept(root, {
+      id: "notes/topic", type: "note", title: "Topic", description: "d", body: "old",
+      sources: [{ id: "orig", resource: "https://orig.test/doc" }],
+    });
+    const { chat } = scripted([
+      act({ action: "write_concept", id: "notes/topic", body: "old plus web", sources: ["https://orig.test/doc", SEED] }),
+      act({ action: "done", summary: "" }),
+    ]);
+    try {
+      await runEnrich(root, "t", [], defaultLimits([]), { ...deps(chat, undefined), actor: "okb-enrich/test-model" });
+      const fm = parse(await readFile(join(root, "notes", "topic.md"), "utf8")).frontmatter;
+      expect(fm.sources).toEqual([
+        { id: "orig", resource: "https://orig.test/doc" },
+        { id: "ex-org", resource: SEED },
+      ]);
+      expect(fm.generated).toMatchObject({ by: "okb-enrich/test-model" });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

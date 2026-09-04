@@ -6,13 +6,14 @@
 // transport on 127.0.0.1.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, mcpOps, runMcpHttp } from "../src/mcp/server.ts";
+import { parse } from "../src/core/okf/document.ts";
+import { createMcpServer, mcpActor, mcpOps, runMcpHttp } from "../src/mcp/server.ts";
 import { okb } from "./helpers.ts";
 
 let bundle: string;
@@ -129,7 +130,16 @@ describe("trusted connection (--trusted)", () => {
     expect(r.isError).not.toBe(true);
     expect(textOf(r)).toContain("notes/via-mcp");
     expect((await okb(["doctor", "--bundle", bundle])).code).toBe(0);
+    // Writes over MCP are attributed to the connected client (OKF §7 actor), never to a human.
+    const fm = parse(await readFile(join(bundle, "notes", "via-mcp.md"), "utf8")).frontmatter;
+    expect(fm.generated).toMatchObject({ by: "test-client/0.0.0" });
     await client.close();
+  });
+
+  test("mcpActor: client name/version → producer/version; junk falls back", () => {
+    expect(mcpActor({ name: "Claude Desktop", version: "1.2" })).toBe("Claude-Desktop/1.2");
+    expect(mcpActor({ name: "x", version: "" })).toBe("x/unknown");
+    expect(mcpActor(undefined)).toBe("mcp-client/unknown");
   });
 });
 

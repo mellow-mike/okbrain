@@ -9,7 +9,19 @@ import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { listMdFiles } from "../okf/bundle.ts";
-import { fmString, fmTags, OkfParseError, parse, type OkfDocument } from "../okf/document.ts";
+import {
+  fmGenerated,
+  fmSources,
+  fmString,
+  fmTags,
+  isActor,
+  isIsoInstant,
+  normalizeVerified,
+  OkfParseError,
+  parse,
+  STATUSES,
+  type OkfDocument,
+} from "../okf/document.ts";
 import { idToAbsPath, InvalidIdError, isReservedName, slugify } from "../okf/paths.ts";
 import { OkfWriteError, writeConcept } from "../okf/write.ts";
 import { clip } from "./capture.ts";
@@ -22,6 +34,8 @@ export interface ImportInput {
   dest?: string;
   /** Update concepts whose id already exists instead of skipping them. */
   overwrite?: boolean;
+  /** `generated.by` for sources that carry no provenance of their own. */
+  actor?: string;
 }
 
 export interface ImportResult {
@@ -82,6 +96,11 @@ export async function importPath(root: string, input: ImportInput): Promise<Impo
     }
     const fm = doc.frontmatter;
     const tags = fmTags(fm.tags);
+    // OKF v0.2 families ride along when well-formed; a foreign `generated`
+    // is the source's own provenance and is kept verbatim.
+    const generated = fmGenerated(fm);
+    const verified = normalizeVerified(fm).filter((e) => isActor(e.by));
+    const sources = fmSources(fm);
     await writeConcept(root, {
       id,
       type: fmString(fm.type) || input.type || "note",
@@ -90,6 +109,12 @@ export async function importPath(root: string, input: ImportInput): Promise<Impo
       body: doc.body,
       resource: fmString(fm.resource) || undefined,
       tags: tags.length > 0 ? tags : undefined,
+      status: (STATUSES as readonly unknown[]).includes(fm.status) ? (fm.status as string) : undefined,
+      staleAfter: isIsoInstant(fm.stale_after) ? fm.stale_after : undefined,
+      sources: sources.length > 0 ? sources : undefined,
+      generated: generated !== null && isActor(generated.by) ? generated : undefined,
+      verified: verified.length > 0 ? verified : undefined,
+      actor: input.actor,
       extra: fm,
     });
     result.imported.push(id);

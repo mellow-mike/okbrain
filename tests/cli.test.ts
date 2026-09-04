@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runCli } from "../src/cli.ts";
+import { VERSION } from "../src/core/version.ts";
 import { capture, okb as okbAt } from "./helpers.ts";
 
 let root: string;
@@ -32,6 +33,14 @@ describe("okb CLI", () => {
     expect(io.stdout).toContain("usage: okb <command>");
     for (const cmd of ["search", "read", "list", "graph", "doctor", "export-viz", "write", "index", "rebuild"])
       expect(io.stdout).toContain(`\n  ${cmd} `);
+  });
+
+  test("--version / version print okbrain's version", async () => {
+    const r = await okb("--version");
+    expect(r.code).toBe(0);
+    expect(r.stdout).toMatch(/^okb \d+\.\d+\.\d+/);
+    const j = await okb("version", "--json");
+    expect(JSON.parse(j.stdout).version).toBe(VERSION);
   });
 
   test("help <command> shows the command's options", async () => {

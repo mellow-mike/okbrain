@@ -9,6 +9,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { Status, TrustTier } from "../okf/document.ts";
 import { ensureExtensionCapableSqlite } from "./custom-sqlite.ts";
 import type {
   EdgeRecord,
@@ -22,7 +23,7 @@ import type {
 
 export class EngineError extends Error {}
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const SCHEMA = `
 CREATE TABLE nodes(
@@ -33,6 +34,9 @@ CREATE TABLE nodes(
   resource TEXT,
   timestamp TEXT,
   last_reviewed TEXT,
+  status TEXT NOT NULL,
+  stale_after TEXT,
+  trust TEXT NOT NULL,
   body_len INTEGER NOT NULL,
   content_hash TEXT NOT NULL
 );
@@ -81,6 +85,9 @@ interface NodeRow {
   resource: string | null;
   timestamp: string | null;
   last_reviewed: string | null;
+  status: Status;
+  stale_after: string | null;
+  trust: TrustTier;
   body_len: number;
   content_hash: string;
 }
@@ -130,11 +137,13 @@ export function openSqliteEngine(dbPath: string): Engine {
 
   const upsert = db.transaction((n: NodeUpsert) => {
     db.query(
-      `INSERT INTO nodes (id, type, title, description, resource, timestamp, last_reviewed, body_len, content_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO nodes (id, type, title, description, resource, timestamp, last_reviewed,
+         status, stale_after, trust, body_len, content_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET type=excluded.type, title=excluded.title,
          description=excluded.description, resource=excluded.resource,
          timestamp=excluded.timestamp, last_reviewed=excluded.last_reviewed,
+         status=excluded.status, stale_after=excluded.stale_after, trust=excluded.trust,
          body_len=excluded.body_len, content_hash=excluded.content_hash`,
     ).run(
       n.id,
@@ -144,6 +153,9 @@ export function openSqliteEngine(dbPath: string): Engine {
       n.resource,
       n.timestamp,
       n.lastReviewed,
+      n.status,
+      n.staleAfter,
+      n.trust,
       n.bodyLen,
       n.contentHash,
     );
@@ -196,6 +208,9 @@ export function openSqliteEngine(dbPath: string): Engine {
     resource: r.resource,
     timestamp: r.timestamp,
     lastReviewed: r.last_reviewed,
+    status: r.status,
+    staleAfter: r.stale_after,
+    trust: r.trust,
     bodyLen: r.body_len,
     contentHash: r.content_hash,
   });
@@ -297,6 +312,7 @@ export function openSqliteEngine(dbPath: string): Engine {
       db
         .query<Omit<ReviewRow, "inbox"> & { inbox: number }, []>(
           `SELECT n.id, n.type, n.title, n.timestamp, n.last_reviewed AS lastReviewed,
+             n.status, n.stale_after AS staleAfter, n.trust,
              EXISTS(SELECT 1 FROM tags t WHERE t.node_id = n.id AND t.tag = 'inbox') AS inbox,
              (SELECT snooze_until FROM review_state r WHERE r.node_id = n.id) AS snoozeUntil
            FROM nodes n ORDER BY n.id`,

@@ -11,6 +11,7 @@ import { AiError } from "./core/ai/gateway.ts";
 import { openLocalContext, type LocalContext } from "./core/context.ts";
 import { EngineError } from "./core/engine/sqlite.ts";
 import { SyncError } from "./core/sync.ts";
+import { VERSION } from "./core/version.ts";
 import {
   OpError,
   operations,
@@ -57,6 +58,7 @@ function helpText(): string {
     "  --json             machine-readable output",
     "  --bundle <path>    bundle root (default: $OKB_BUNDLE or cwd)",
     "  --brain <name>     use a configured brain mount (also $OKB_BRAIN)",
+    "  --version          print okbrain's version",
     "",
     "`okb help <command>` shows a command's options.",
     `current bundle: ${currentBundleLabel()}`,
@@ -90,6 +92,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     const a = argv[i]!;
     if (a === "--json") json = true;
     else if (a === "--help" || a === "-h") help = true;
+    else if (a === "--version" || a === "-v") rest.unshift("version");
     else if (a === "--bundle") {
       bundleArg = argv[++i];
       if (bundleArg === undefined) {
@@ -116,6 +119,10 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
   }
   if (cmd === undefined) {
     io.out(helpText() + "\n");
+    return 0;
+  }
+  if (cmd === "version") {
+    io.out((json ? JSON.stringify({ version: VERSION }) : `okb ${VERSION}`) + "\n");
     return 0;
   }
   // Two-word commands ("review done", "inbox read") win over a one-word op

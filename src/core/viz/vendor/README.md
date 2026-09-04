@@ -1,14 +1,16 @@
-# Vendored viewer libraries
+# Vendored browser libraries
 
-Minified browser builds inlined into the static `viz.html` export (and embedded
-into the compiled binary via Bun text imports). Vendored — not npm runtime
-deps — because neither package's `exports` map exposes these files to import.
+Copied verbatim from their npm packages; inlined into `viz.html` by
+`core/viz/export.ts` and served to the GUI by `api.ts` via Bun text imports
+(their `exports` maps hide the browser builds from `import`).
 
-| file | package | version | license |
-|------|---------|---------|---------|
-| `cytoscape.min.js` | [cytoscape](https://js.cytoscape.org) | 3.34.0 | MIT |
-| `marked.umd.js` | [marked](https://marked.js.org) | 18.0.5 | MIT |
+| File | Package | Version | License |
+|---|---|---|---|
+| `cytoscape.min.js` | `cytoscape` | see file header | MIT |
+| `marked.umd.js` | `marked` | 18.0.5 | MIT |
 
-To update: `bun add -d <pkg>`, copy `dist/cytoscape.min.js` /
-`lib/marked.umd.js` here, strip any `sourceMappingURL` comment, update this
-table, `bun remove <pkg>`.
+To update: copy the `dist/` build from the package tarball and bump this table.
+
+okbrain's own browser scripts live one level up (`core/viz/safe-markdown.js`,
+the sanitizing renderer; `core/viz/render.js`, the shared viewer helpers) and
+are loaded after these, in that order.

@@ -2,9 +2,11 @@
 type: note
 title: Evergreen notes
 description: Notes written to evolve and accumulate over time
-timestamp: 2026-07-05T09:00:00Z
 tags:
   - pkm
+generated:
+  by: human:okbrain
+  at: 2026-07-05T09:00:00Z
 ---
 # Evergreen notes
 

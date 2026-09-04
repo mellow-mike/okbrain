@@ -5,13 +5,17 @@
 // SHA256SUMS.txt into dist/. Runs on the Linux release runner (uses tar/zip);
 // the app itself stays free of platform-only shell commands.
 //
-//   bun run scripts/package-release.ts [version]   (default: package.json version)
+//   bun run scripts/package-release.ts [version]      all five targets (needs network)
+//   bun run scripts/package-release.ts --local        this machine only, fully offline:
+//                                                     vec0 comes from node_modules
+//                                                     (`bun run package`)
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { copyFile, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
+import * as sqliteVec from "sqlite-vec";
 
 interface Target {
   bunTarget: string;
@@ -35,12 +39,22 @@ const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
   version: string;
   dependencies: Record<string, string>;
 };
-const version = (process.argv[2] ?? pkg.version).replace(/^v/, "");
+const args = process.argv.slice(2);
+const local = args.includes("--local");
+const version = (args.find((a) => !a.startsWith("--")) ?? pkg.version).replace(/^v/, "");
 const vecVersion = (
   JSON.parse(readFileSync(join(root, "node_modules", "sqlite-vec", "package.json"), "utf8")) as {
     version: string;
   }
 ).version;
+
+/** The target matching this machine (for `--local`). */
+function hostTarget(): Target {
+  const os = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "darwin" : "linux";
+  const t = TARGETS.find((x) => x.os === os && x.arch === process.arch);
+  if (!t) throw new Error(`no release target for ${process.platform}/${process.arch}`);
+  return t;
+}
 
 /** Fetch and unpack one sqlite-vec platform tarball; returns the vec0 path. */
 async function fetchVec(t: Target, into: string): Promise<string> {
@@ -58,21 +72,29 @@ rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
 const sums: string[] = [];
 
-for (const t of TARGETS) {
+for (const t of local ? [hostTarget()] : TARGETS) {
   const label = `okb-${version}-${t.os}-${t.arch}`;
   const stage = join(dist, label);
   mkdirSync(stage, { recursive: true });
-  console.log(`\n=== ${label} (${t.bunTarget}, vec0 ${vecVersion}) ===`);
+  console.log(`\n=== ${label} (${t.bunTarget}, vec0 ${vecVersion}${local ? ", local" : ""}) ===`);
 
   await $`bun build --compile --target=${t.bunTarget} --outfile ${join(stage, t.exe)} ${join(root, "src", "cli.ts")}`;
-  const work = join(dist, `.vec-${t.os}-${t.arch}`);
-  mkdirSync(work, { recursive: true });
-  await copyFile(await fetchVec(t, work), join(stage, t.vec));
-  rmSync(work, { recursive: true, force: true });
+  if (local) {
+    await copyFile(sqliteVec.getLoadablePath(), join(stage, t.vec));
+  } else {
+    const work = join(dist, `.vec-${t.os}-${t.arch}`);
+    mkdirSync(work, { recursive: true });
+    await copyFile(await fetchVec(t, work), join(stage, t.vec));
+    rmSync(work, { recursive: true, force: true });
+  }
   for (const f of ["LICENSE", "README.md"]) await copyFile(join(root, f), join(stage, f));
 
   const archive = t.os === "windows" ? `${label}.zip` : `${label}.tar.gz`;
-  if (t.os === "windows") await $`cd ${stage} && zip -qr ${join(dist, archive)} .`;
+  if (t.os === "windows")
+    // `zip` on the Linux runner; bsdtar (`tar -a`) on a Windows host building locally.
+    await (process.platform === "win32"
+      ? $`tar -a -cf ${join(dist, archive)} -C ${stage} .`
+      : $`cd ${stage} && zip -qr ${join(dist, archive)} .`);
   else await $`tar -czf ${join(dist, archive)} -C ${stage} .`;
   rmSync(stage, { recursive: true, force: true });
 

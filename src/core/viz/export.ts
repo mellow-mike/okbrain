@@ -1,15 +1,32 @@
 // Static graph viewer export (Stage 0.7). Walks the bundle directly (no index
 // required), builds graph JSON, and writes one self-contained OKF-style HTML
-// file: Cytoscape.js graph + marked.js body rendering, both vendored and
-// inlined, so viz.html needs no backend or network and can be committed next
-// to the bundle. Internal `.md` links in bodies are rewired to `#concept:<id>`
-// anchors the viewer intercepts to focus the target node.
+// file: Cytoscape.js graph + marked body rendering (through safe-markdown.js:
+// raw HTML escaped, unsafe URL schemes dropped) and the shared render.js,
+// all inlined, so viz.html needs no backend or network and can be committed
+// next to the bundle. Internal `.md` links in bodies are rewired to
+// `#concept:<id>` anchors the viewer intercepts to focus the target node; the
+// OKF v0.2 signals (status, trust tier, staleness, provenance) show as badges.
 
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { buildEdges, LINK, resolveLinkTarget, type Edge } from "../graph/links.ts";
 import { listConcepts, readConceptPermissive } from "../okf/bundle.ts";
-import { fmString, fmTags } from "../okf/document.ts";
+import {
+  fmGenerated,
+  fmSources,
+  fmStatus,
+  fmString,
+  fmTags,
+  isIsoInstant,
+  isStale,
+  normalizeVerified,
+  trustTier,
+  type ActorEvent,
+  type SourceEntry,
+  type Status,
+  type TrustTier,
+} from "../okf/document.ts";
+import renderJs from "./render.js" with { type: "text" };
 import safeMarkdownJs from "./safe-markdown.js" with { type: "text" };
 import cytoscapeJs from "./vendor/cytoscape.min.js" with { type: "text" };
 import markedJs from "./vendor/marked.umd.js" with { type: "text" };
@@ -20,9 +37,17 @@ export interface VizNode {
   title: string;
   description: string;
   tags: string[];
+  resource: string;
   bodyLen: number;
   /** Markdown body with internal links rewired for in-viewer navigation. */
   body: string;
+  status: Status;
+  trust: TrustTier;
+  stale: boolean;
+  staleAfter: string | null;
+  generated: ActorEvent | null;
+  verified: ActorEvent[];
+  sources: SourceEntry[];
 }
 
 export interface VizGraph {
@@ -47,10 +72,10 @@ export async function buildVizGraph(root: string): Promise<VizGraph> {
   const ids = await listConcepts(root);
   const known = new Set(ids);
   const nodes: VizNode[] = [];
-  const docs: { id: string; body: string }[] = [];
+  const docs: { id: string; body: string; frontmatter: Record<string, unknown> }[] = [];
   for (const id of ids) {
     const { doc } = await readConceptPermissive(root, id);
-    docs.push({ id, body: doc.body });
+    docs.push({ id, body: doc.body, frontmatter: doc.frontmatter });
     const fm = doc.frontmatter;
     nodes.push({
       id,
@@ -58,8 +83,16 @@ export async function buildVizGraph(root: string): Promise<VizGraph> {
       title: fmString(fm.title),
       description: fmString(fm.description),
       tags: fmTags(fm.tags),
+      resource: fmString(fm.resource),
       bodyLen: doc.body.length,
       body: rewireLinks(id, doc.body, known),
+      status: fmStatus(fm),
+      trust: trustTier(fm),
+      stale: isStale(fm),
+      staleAfter: isIsoInstant(fm.stale_after) ? fm.stale_after : null,
+      generated: fmGenerated(fm),
+      verified: normalizeVerified(fm),
+      sources: fmSources(fm),
     });
   }
   return { nodes, edges: buildEdges(docs, known) };
@@ -102,6 +135,7 @@ export function renderHtml(graph: VizGraph): string {
     --plane: #0d0d0d; --surface: #1a1a19;
     --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
     --line: #2c2c2a; --edge-line: #383835; --accent: #3987e5;
+    --ok: #199e70; --warn: #c98500; --danger: #e66767;
     --code-bg: #242422; --chip-bg: rgba(255, 255, 255, 0.06);
   }
   :root[data-theme="light"] {
@@ -109,6 +143,7 @@ export function renderHtml(graph: VizGraph): string {
     --plane: #f9f9f7; --surface: #fcfcfb;
     --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
     --line: #e1e0d9; --edge-line: #c3c2b7; --accent: #2a78d6;
+    --ok: #1baf7a; --warn: #eda100; --danger: #e34948;
     --code-bg: #f0efec; --chip-bg: rgba(11, 11, 11, 0.05);
   }
   * { box-sizing: border-box; margin: 0; }
@@ -158,6 +193,18 @@ export function renderHtml(graph: VizGraph): string {
   .chip { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2);
     background: var(--chip-bg); border: 1px solid var(--line); border-radius: 10px;
     padding: 1px 8px; font-size: 11px; }
+  .badge { display: inline-block; border-radius: 10px; padding: 1px 8px; font-size: 11px;
+    font-weight: 600; border: 1px solid var(--line); color: var(--ink-2); }
+  .badge.status-draft { color: var(--warn); border-color: var(--warn); }
+  .badge.status-deprecated { color: var(--muted); text-decoration: line-through; }
+  .badge.trust-human-reviewed { color: var(--ok); border-color: var(--ok); }
+  .badge.trust-machine-confirmed { color: var(--accent); border-color: var(--accent); }
+  .badge.stale { color: var(--danger); border-color: var(--danger); }
+  dl.fm { display: grid; grid-template-columns: 80px 1fr; gap: 3px 10px; font-size: 12px;
+    margin: 8px 0; }
+  dl.fm dt { color: var(--muted); }
+  dl.fm dd { color: var(--ink-2); overflow-wrap: anywhere; }
+  ul.sources { padding-left: 16px; }
   #detail .desc { color: var(--ink-2); margin-bottom: 8px; }
   #detail .body { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px;
     color: var(--ink-2); }
@@ -171,10 +218,16 @@ export function renderHtml(graph: VizGraph): string {
     padding: 0 3px; }
   #detail .body pre code { padding: 0; }
   #detail .body img { max-width: 100%; }
+  #detail .body table { border-collapse: collapse; margin-bottom: 8px; }
+  #detail .body th, #detail .body td { border: 1px solid var(--line); padding: 3px 6px; }
   #detail .body blockquote { border-left: 2px solid var(--line); padding-left: 10px;
     color: var(--muted); margin-bottom: 8px; }
+  #detail .body sup.fn a { font-size: 10px; }
+  #detail .body ol.footnotes { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line);
+    padding-top: 6px; margin-top: 10px; }
   #detail a { color: var(--accent); text-decoration: none; }
   #detail a:hover { text-decoration: underline; }
+  #detail a.broken { color: var(--muted); text-decoration: line-through; }
   #detail li { margin: 2px 0; }
 </style>
 </head>
@@ -210,8 +263,10 @@ try { if (localStorage.getItem('okb-viz-theme') === 'light')
 <script>${cytoscapeJs}</script>
 <script>${markedJs}</script>
 <script>${safeMarkdownJs}</script>
+<script>${renderJs}</script>
 <script>
 var G = JSON.parse(document.getElementById('okb-graph').textContent);
+var R = window.okbRender, esc = R.esc;
 // Categorical palettes per surface (validated: fixed CVD-safe slot order, never
 // cycled); types beyond 8 fold into the muted overflow color.
 var PALETTE = {
@@ -223,11 +278,6 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 function typeName(t) { return t || '(untyped)'; }
-function esc(s) {
-  return String(s).replace(/[&<>"]/g, function (c) {
-    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
-  });
-}
 
 var byId = {}, citedBy = {}, linksTo = {}, typeCount = {}, types = [];
 G.nodes.forEach(function (n) {
@@ -252,6 +302,7 @@ var cy = cytoscape({
   container: document.getElementById('graph'),
   elements: G.nodes.map(function (n) {
     return { data: { id: n.id, label: n.title || n.id, type: typeName(n.type),
+      status: n.status, stale: n.stale,
       size: 16 + 4 * Math.sqrt(Math.min(n.bodyLen, 20000) / 100) } };
   }).concat(G.edges.map(function (e) {
     return { data: { id: JSON.stringify([e.src, e.dst]), source: e.src, target: e.dst } };
@@ -264,12 +315,17 @@ var cy = cytoscape({
       'text-outline-color': function () { return cssVar('--surface'); },
       'text-outline-width': 2, 'text-valign': 'bottom', 'text-margin-y': 4,
       'text-wrap': 'ellipsis', 'text-max-width': '120px' } },
+    { selector: 'node[?stale]', style: {
+      'border-width': 2, 'border-style': 'dashed',
+      'border-color': function () { return cssVar('--danger'); } } },
+    { selector: 'node[status = "deprecated"]', style: { opacity: 0.45 } },
     { selector: 'edge', style: {
       width: 1.2, 'line-color': function () { return cssVar('--edge-line'); },
       'target-arrow-color': function () { return cssVar('--edge-line'); },
       'target-arrow-shape': 'triangle', 'arrow-scale': 0.8, 'curve-style': 'bezier' } },
     { selector: 'node:selected', style: {
-      'border-width': 3, 'border-color': function () { return cssVar('--accent'); } } },
+      'border-width': 3, 'border-style': 'solid',
+      'border-color': function () { return cssVar('--accent'); } } },
     { selector: '.dim', style: { opacity: 0.15 } }
   ],
   layout: { name: 'cose', animate: false },
@@ -375,22 +431,23 @@ function showDetail(id) {
   if (!n) return;
   currentId = id;
   var h = '<h2>' + esc(n.title || n.id) + '</h2>' +
-    '<div class="meta">' + typeChip(typeName(n.type)) + '<code>' + esc(n.id) + '</code></div>';
+    '<div class="meta">' + typeChip(typeName(n.type)) + '<code>' + esc(n.id) + '</code></div>' +
+    '<div class="meta">' + R.badges(n) + '</div>';
   if (n.description) h += '<p class="desc">' + esc(n.description) + '</p>';
   if (n.tags.length) h += '<div class="meta">' + n.tags.map(function (t) {
     return '<span class="chip">' + esc(t) + '</span>';
   }).join(' ') + '</div>';
-  h += '<div class="body">' + okbMarkdown(n.body) + '</div>';
+  h += '<dl class="fm">';
+  if (n.resource) h += '<dt>Resource</dt><dd><a href="' + esc(n.resource) + '">' + esc(n.resource) + '</a></dd>';
+  h += '<dt>Generated</dt><dd>' + R.actorLine(n.generated) + '</dd>';
+  h += '<dt>Verified</dt><dd>' + (n.verified.length ? n.verified.map(R.actorLine).join('<br>') : '—') + '</dd>';
+  h += '<dt>Sources</dt><dd>' + R.sourcesList(n.sources) + '</dd></dl>';
+  h += '<div class="body">' + R.renderMarkdown(n.body) + '</div>';
   var out = linksTo[id] || [], back = citedBy[id] || [];
   if (out.length) h += '<h3>Links to</h3>' + conceptList(out);
   if (back.length) h += '<h3>Cited by</h3>' + conceptList(back);
   detailEl.innerHTML = h;
-  detailEl.querySelectorAll('a[href]').forEach(function (a) {
-    if (a.getAttribute('href').indexOf('#concept:') !== 0) {
-      a.target = '_blank';
-      a.rel = 'noopener';
-    }
-  });
+  R.wireLinks(detailEl, { baseId: id, hrefFor: conceptHref, known: function (x) { return !!byId[x]; } });
 }
 
 function focusNode(id) {
@@ -416,7 +473,7 @@ cy.on('mouseover', 'node', function (e) {
   var t = typeName(n.type);
   tipEl.innerHTML = '<div class="t">' + esc(n.title || n.id) + '</div>' +
     '<div class="meta"><span class="swatch" style="background:' + colorOf[t] +
-    '"></span>' + esc(t) + '</div>' +
+    '"></span>' + esc(t) + (n.stale ? ' · stale' : '') + (n.status !== 'stable' ? ' · ' + esc(n.status) : '') + '</div>' +
     (n.description ? '<div class="d">' + esc(n.description) + '</div>' : '');
   var p = e.renderedPosition, box = e.cy.container().getBoundingClientRect();
   tipEl.style.left = Math.min(p.x + 14, box.width - 270) + 'px';

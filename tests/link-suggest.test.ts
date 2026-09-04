@@ -21,6 +21,7 @@ const node = (id: string, title: string, opts: Partial<NodeUpsert> = {}): NodeUp
   resource: null,
   timestamp: null,
   lastReviewed: null,
+  status: "stable", staleAfter: null, trust: "unverified",
   bodyLen: 0,
   contentHash: id,
   body: "",

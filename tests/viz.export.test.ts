@@ -69,7 +69,7 @@ describe("buildVizGraph", () => {
   test("node metadata and rewired bodies", async () => {
     const g = await buildVizGraph(root);
     const alpha = g.nodes.find((n) => n.id === "alpha")!;
-    expect(alpha).toMatchObject({ type: "note", title: "Alpha", tags: ["a", "b"] });
+    expect(alpha).toMatchObject({ type: "note", title: "Alpha", tags: ["a", "b"], status: "stable", trust: "unverified", stale: false });
     expect(alpha.body).toContain("[beta](#concept:notes%2Fbeta)");
     expect(alpha.body).toContain("[gone](missing.md)"); // broken: untouched
     expect(alpha.bodyLen).toBeGreaterThan(0);
@@ -90,8 +90,16 @@ describe("renderHtml", () => {
         title: "Evil",
         description: "",
         tags: [],
+        resource: "",
         bodyLen: 20,
         body: "</script><b>bad</b>",
+        status: "stable",
+        trust: "unverified",
+        stale: false,
+        staleAfter: null,
+        generated: null,
+        verified: [],
+        sources: [],
       },
     ],
     edges: [],
@@ -102,6 +110,8 @@ describe("renderHtml", () => {
     expect(html).toContain('<script id="okb-graph" type="application/json">');
     expect(html).toContain("The Cytoscape Consortium"); // cytoscape inlined
     expect(html).toContain("a markdown parser"); // marked inlined
+    expect(html).toContain("okbMarkdown"); // sanitizing renderer inlined: bodies never run script
+    expect(html).toContain("okbRender"); // shared viewer helpers inlined
     expect(html).not.toContain("</script><b>"); // < escaped in data
     const json = /<script id="okb-graph"[^>]*>([\s\S]*?)<\/script>/.exec(html)![1]!;
     expect((JSON.parse(json) as VizGraph).nodes[0]!.body).toBe("</script><b>bad</b>");

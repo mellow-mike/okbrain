@@ -9,16 +9,20 @@ is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 0–5 complete.** The brain ingests (import/capture/clip/rss),
+> **Stages 0–6 complete.** The brain ingests (import/capture/clip/rss),
 > enriches itself behind guardrails (`okb enrich`), retrieves over keyword +
 > vector + graph + typed-edge relational arms, proposes links through
 > review, runs nightly maintenance (`okb jobs` under OS cron), ships agent
-> skills, and now also: packages (vec0 beside the binary, five-target
-> release workflow, Homebrew/Scoop templates), mounts multiple brains with
-> per-mount read-only policy (`--brain`), and scores opinions
-> (`okb take` / `resolve` / `calibrate`). Postgres and a desktop wrapper
-> are deliberately deferred (see 5.4). Next: signing when certificates
-> exist, and Backlog items as they earn their way in.
+> skills, packages (vec0 beside the binary, five-target release workflow,
+> one-command offline local package, Homebrew/Scoop templates), mounts
+> multiple brains with per-mount read-only policy (`--brain`, GUI
+> switcher), scores opinions (`okb take` / `resolve` / `calibrate`), and —
+> as of Stage 6 — writes **OKF v0.2** (provenance / trust / lifecycle
+> families, actors, `okb upgrade` for v0.1 bundles) behind a GUI that is a
+> full product surface (Home, Browse, a Concept reader, delete, jobs,
+> upgrade, sanitized rendering). Postgres and a desktop wrapper stay
+> deferred (see 5.4). Next: a tagged `v0.1.0` release, signing when
+> certificates exist, and Backlog items as they earn their way in.
 
 ---
 
@@ -75,9 +79,10 @@ conformance. Reuses OKF reference shapes directly.
 ### 0.8 Stage-0 acceptance
 - [x] `bundles/example/` — tiny conformant bundle (4 cross-linked concepts in 3 dirs; doctor-clean incl. warnings)
 - [x] End-to-end: index example → search → graph → doctor → export viz (`tests/e2e.stage0.test.ts` drives the real CLI on a temp copy)
-- [!] (Optional) round-trip an OKF sample bundle (GA4 / Stack Overflow /
-      Bitcoin) — blocked on a user-supplied sample; drop one into
-      `docs/context/` (register in REFERENCES.md) to unblock
+- [x] Round-trip an OKF sample bundle — unblocked at Stage 6 by vendoring the
+      reference project's `acme_retail` v0.2 sample (`bundles/acme_retail/`,
+      Apache-2.0): `tests/e2e.acme.test.ts` drives doctor → index → graph →
+      search → stats → export-viz over it, read-only
 
 ---
 
@@ -494,6 +499,87 @@ Goal: the brain improves itself on a schedule.
 
 ---
 
+## Stage 6 — OKF v0.2, GUI refresh, production readiness
+
+### 6.1 Format: OKF v0.2 (spec moved to `open-knowledge-format`, R3)
+- [x] `core/okf/document.ts` — v0.2 readers: `generated`/`verified` events
+      (bare mapping = one-element list), trust tiers, `status` (default
+      stable), `stale_after` (explicit offset or ignored), `sources`
+      (bare mapping tolerated), actor convention, `generatedAt` with the
+      v0.1 `timestamp` fallback (§13.1), `asInstant`
+- [x] Writer emits `generated: { by: <actor>, at }` instead of `timestamp`;
+      `verify` events (one per actor, latest wins); validated `status`,
+      `stale_after`, `sources` (ids assigned); canonical key order; legacy
+      `timestamp`/`last_reviewed` superseded in place; `extra` undefined
+      deletes a key; no-op guard keyed on `generated`
+- [x] Actor model: config `actor` (`okb init --actor`, default
+      `human:<os user>`), `OpContext.actor()`, `okb/<version>` for tool
+      content (clip/rss/import), `okb-enrich/<model>` for the agent,
+      `<client>/<version>` over MCP (from the initialize handshake)
+- [x] Clip + RSS: `sources` (page / feed + article with byline and
+      publication instant) replace `# Citations`; enrich tool merges
+      `sources` (never shrinks), requires ≥1 on minted references, prompts
+      for `[^id]` footnotes
+- [x] Provenance edges: `sources[].resource` → typed `cites` edges;
+      path-valued fields resolve with the spec's root-relative convention
+      (`resolvePathField`); shared by index build, viz export, doctor
+- [x] Doctor: `legacy-timestamp`, `legacy-citations`, `generated-shape`,
+      `verified-shape`, `status-value`, `stale-after-format`,
+      `sources-shape`, `broken-source`, `computation-runtime`,
+      `okf-version` mismatch; `signals` block (trust / status / stale /
+      legacy counts); `okfVersion` in the report
+- [x] `okb upgrade [--dry-run] [--by]` (`core/okf/upgrade.ts`) —
+      timestamp → generated, `# Citations` → sources, `last_reviewed` →
+      verified, clip extras → source signals, root `okf_version` → 0.2;
+      idempotent, metadata-only, one summary log line; example bundle
+      migrated with it (dogfood)
+- [x] Engine schema v4 (`status`, `stale_after`, `trust`; `timestamp` =
+      generated.at, `last_reviewed` = latest human verification);
+      `okb stats` byStatus / byTrust / expired; Resurface: `expired` +
+      `draft` signals, deprecated never queues, `review done` = verified
+      event; `okb list --detail/--type/--tag/--status`; `okb read` signals
+- [x] `okb rm` (`delete_concept`): file + emptied-directory pruning + index
+      chain + `**Deletion**` log + engine/vector removal
+- [x] Tests: `tests/okf.v02.test.ts` (readers, path fields, provenance
+      edges, upgrade, ops), `tests/e2e.acme.test.ts` (upstream sample),
+      v0.2 rewrites of writer/doctor/clip/rss/web/review/stats tests
+
+### 6.2 GUI refresh (every function reachable from the GUI)
+- [x] New views: **Home** (tiles, quick capture, review/inbox previews,
+      recently changed, one-click doctor, build-index prompt), **Browse**
+      (signals, filter/sort), **Concept** reader (provenance, footnotes,
+      links to / cited by, verify / read / suggest / deprecate / delete),
+      **Edit/New** (status, `stale_after`, sources editor; `new_concept`
+      when no id), Graph legend + stale/deprecated styling, Add gained
+      `--auto-tag` + bookmarklet, Stats gained status/trust tiles
+- [x] `localOnly` ops surfaced without becoming ops: brain switcher
+      (`GET /api/brains` names + `x-okb-brain` scoping), status footer
+      (`GET /api/status`), bookmarklet (`GET /api/bookmarklet`), MCP setup
+      snippet in Settings; `jobs` (job subset) and `upgrade` (preview + run)
+      in Maintenance
+- [x] Shared `core/viz/render.js` (markdown via `safe-markdown.js` →
+      footnote attribution → link routing) for the GUI and the static
+      viewer; static viewer shows v0.2 badges + provenance
+- [x] Registry-derived GUI wiring test (no more hand-maintained op list)
+- [x] Driven end-to-end in headless Chromium against the compiled binary:
+      every view, write flows (capture, verify, edit, new, claim, snooze,
+      read), brain switch to a read-only mount, zero page errors, zero
+      external requests
+- [x] Responsive layout (sidebar → top bar under 860px); `/` focuses
+      search; `okb serve --open` (config `serve.open`)
+
+### 6.3 Production packaging
+- [x] `package.json` version 0.1.0, `core/version.ts` (embedded in the
+      binary; `okb --version`; MCP server version)
+- [x] `bun run package` — `scripts/package-release.ts --local`: host-only
+      archive with the vec0 from `node_modules`, fully offline
+- [x] CI + release pin Bun 1.3.14 (B6 was a `latest` drift)
+- [x] Docs: README (v0.2, GUI tour, offline package, upgrade), CONTEXT,
+      CLAUDE.md invariant 1, REFERENCES (R1 updated, R3/R4 added), skills
+- [ ] Tag `v0.1.0` (runs the release workflow) — the maintainer's call
+
+---
+
 ## Cross-cutting (ongoing, never "done")
 - [ ] Cross-platform: every feature green on macOS/Linux/Windows CI
 - [ ] Logging + actionable error messages on every failure path
@@ -521,6 +607,9 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B10 | 2026-07-30 | high | ingest | SSRF guard bypass: `isPrivateIp` matched IPv6 textually, so only the dotted-quad spelling of an IPv4-mapped address was caught. `http://[::ffff:7f00:1]/` reached a loopback server (verified end-to-end); `::ffff:a9fe:a9fe` reaches cloud metadata and `0:0:0:0:0:0:0:1` is loopback. Reachable from `okb clip` / `okb rss` / `okb enrich` | regex matching on the un-expanded literal cannot classify IPv6 — one address has many spellings | fixed | expand to eight groups first, then classify (v4-mapped/compatible → v4 rules; fc00::/7, fe80::/10, ff00::/8); unparseable → refuse. Regression tests in `tests/clip.test.ts` |
 | B11 | 2026-07-30 | med | api | `tokenMatches` compared UTF-16 string length but handed byte buffers to `timingSafeEqual`; a multibyte candidate of equal string length threw `RangeError` instead of returning false, so the auth path answered 500 rather than 401 (reachable by any page that can hit the port) | length check in code units, comparison in bytes | fixed | compare byte lengths before `timingSafeEqual`; regression tests at both unit and HTTP level in `tests/api.test.ts` |
 | B12 | 2026-07-30 | low | api | GUI responses carried no anti-framing headers, though `/` embeds the serve token — a remote page could frame the GUI and drive authenticated writes with hijacked clicks | no `X-Frame-Options`/`frame-ancestors` on the local API | fixed | `X-Frame-Options: DENY` + `frame-ancestors 'none'` + `nosniff` on every response; regression test in `tests/api.test.ts` |
+| B13 | 2026-09-03 | med | gui | `jobs` (admin, not localOnly) had no GUI home although the 3.2 decision promised every network-facing op one; the wiring test listed ops by hand and simply omitted it | hand-maintained expectation list | fixed | Settings → Maintenance runs `jobs` (job subset); the API test now derives the required op set from the registry |
+| B14 | 2026-09-03 | low | authoring | `okb new` derived the directory from the raw type (`Attested Computation` → `Attested Computations/x`, with the space) | `${type}s/` without slugifying | fixed | `slugify(type)+"s"`; test in `tests/okf.v02.test.ts` |
+| B15 | 2026-09-03 | med | ingest | `okb capture` wrote to the `inbox/` directory but never tagged `inbox`, so captures were invisible to `okb inbox`, the Inbox view, and the review queue's inbox signal (the reading inbox is the tag, not the directory) | capture didn't add the tag | fixed | captures carry the `inbox` tag; regression in `tests/authoring.test.ts` |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -555,24 +644,55 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       case-insensitive); decide on a canonical-casing policy before it matters.
 - [ ] Per-page `db_only` (frontmatter flag → sync appends the path to
       `.gitignore`); v1 privacy is per-directory only.
-- [ ] `viz.html` renders concept bodies with marked, which passes raw HTML
-      through — fine for your own notes, but a shared export could carry
-      scripted HTML from ingested content. Consider sanitizing (e.g. vendored
-      DOMPurify) before Stage 4 ingestion lands.
+- [x] `viz.html` and the GUI render concept bodies through
+      `core/viz/safe-markdown.js` (raw HTML escaped, URL schemes gated — B9);
+      the shared `core/viz/render.js` builds on it.
 - [ ] True token streaming for `okb ask` / the SSE endpoint: the gateway
       returns whole chat responses, so the `answer` event arrives in one
       piece; add SSE parsing per dialect when incremental rendering matters.
 - [ ] Per-brain settings: a mount could carry its own retrieval profile /
       provider defaults (today `brains` entries are path + readonly only).
-- [ ] GUI brain switcher: `okb serve` serves one bundle; a mount dropdown
-      would need the server to re-scope per request.
+- [x] GUI brain switcher: the local API re-scopes per request via
+      `x-okb-brain` (read-only policy included); the sidebar has the
+      dropdown.
 - [ ] Claims in review: surface overdue claims (`resolve_by` past) as a
       Resurface signal so settling them becomes part of the daily queue.
+- [ ] Per-directory `log.md` (OKF §9 allows one at any level); okbrain
+      maintains only the root log today.
+- [ ] Upstream-style `index.md` (H1 sections, relative links) as a
+      generator option, for bundles shared with the reference tooling.
+- [ ] `usage_count` / `usage_window` credibility signals from local usage
+      (reads, ask citations) — the spec's adoption signal, sourced from
+      the brain's own telemetry, opt-in.
+- [ ] `verified` events for machine checks (`process:okb-doctor` after a
+      clean doctor run?) — decide whether a conformance pass counts as
+      confirmation; today only humans and agents verify.
+- [ ] Attested Computation execution/attestation (§10) — deliberately out of
+      scope for a personal brain; the contract is displayed, not run.
 
 ---
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-09-03 — **Stage 6: OKF v0.2 + GUI refresh + production.** The spec
+  moved to `open-knowledge-format` and reached v0.2 (provenance / trust /
+  lifecycle, actors, Attested Computations); okbrain now writes it: the
+  writer records `generated` by a per-surface actor, `review done` is a
+  `verified` event, clip/rss/enrich cite `sources`, `status`/`stale_after`
+  flow through doctor, the engine (schema v4), stats, the review queue and
+  every viewer; `sources[].resource` paths become `cites` edges; `okb
+  upgrade` migrates v0.1 bundles (dogfooded on `bundles/example`);
+  `bundles/acme_retail` (upstream sample) is the read-only conformance
+  fixture. New ops: `upgrade`, `delete_concept` (`okb rm`), `list --detail`.
+  GUI rebuilt as a full surface (Home, Browse, Concept reader, Edit with
+  v0.2 fields, brain switcher, jobs/upgrade, MCP setup, bookmarklet) over
+  three dedicated status routes; v0.2 footnotes and link routing through a
+  `render.js` shared with the static viewer (on top of the security audit's
+  `safe-markdown.js`); registry-derived wiring test;
+  driven end-to-end in headless Chromium against the compiled binary.
+  Production: version 0.1.0, `okb --version`, `bun run package` (offline
+  local archive), Bun pinned in CI/release, `okb serve --open`. Fixed
+  B13–B15. 430+ tests green, tsc clean. Next: tag `v0.1.0`; Backlog.
 - 2026-08-08 — **README rewritten as a landing page.** Reordered from a
   ten-step tutorial into a cognitive funnel (what → why → demo → install →
   quick start → commands → config → architecture), and every command, output

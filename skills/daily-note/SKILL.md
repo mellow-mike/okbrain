@@ -1,7 +1,7 @@
 # daily-note — today's working note with a "worth revisiting" section
 
 Parameters:
-- `date` (optional): ISO date, default today (UTC to match `timestamp`s).
+- `date` (optional): ISO date, default today (UTC to match `generated.at`).
 - `focus` (optional): the user's stated priority for the day.
 
 Steps:
@@ -14,8 +14,10 @@ Steps:
    --description "Daily note" --body "<markdown>"` with sections:
    - `# Focus` — the `focus` parameter or a one-liner asked of the user.
    - `# Worth revisiting` — each review-queue item as a link with its
-     *reasons verbatim* (they are the point: "orphan", "stale hub…");
-     the user marks progress with `okb review done <n>` / `snooze <n>`.
+     *reasons verbatim* (they are the point: "orphan", "stale hub…",
+     "stale since …", "still a draft"); the user marks progress with
+     `okb review done <n>` (records a `verified` event by their actor —
+     never run it for them) / `snooze <n>`.
    - `# Inbox` — links to unread items, count in the heading.
    - `# Log` — empty bullet for the user to fill during the day.
 3. If yesterday's `journal/` note has unfinished `# Log` bullets, carry them

@@ -87,9 +87,12 @@ describe("okb capture", () => {
     const id = `inbox/${nowTimestamp().slice(0, 10)}-grab-this`;
     expect(r.stdout).toBe(`created ${id}\n`);
     const doc = await concept(id);
-    expect(doc.frontmatter).toMatchObject({ type: "note", title: "Grab this", description: "Grab this" });
+    expect(doc.frontmatter).toMatchObject({ type: "note", title: "Grab this", description: "Grab this", tags: ["inbox"] });
     expect(doc.body).toBe("# Grab this\n\nBody text.\n");
     await expectClean();
+    // Captures are triage material: they show up in the reading inbox (B12).
+    expect((await okb(["index"])).code).toBe(0);
+    expect((await okb(["inbox"])).stdout).toContain(id);
   });
 
   test("colliding ids get a numeric suffix", async () => {

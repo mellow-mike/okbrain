@@ -14,12 +14,14 @@ already does (`okb help` lists them, `--json` everywhere).
 | "write my daily note", "what should I look at today" | `daily-note/SKILL.md` |
 | "connect my notes", "what should link to what" | `link-suggest/SKILL.md` |
 | "I think/predict X", "settle that claim", "how calibrated am I" | no skill — direct CLI: `okb take`, `okb resolve`, `okb calibrate` |
+| "is my bundle up to date / valid", "migrate to OKF v0.2" | no skill — direct CLI: `okb doctor`, then `okb upgrade --dry-run` / `okb upgrade` |
 
 Ground rules (apply in every skill):
 - **Brain-first:** query the bundle before answering from model memory; cite
   concept ids.
 - **Conformance is free:** all writes go through `okb` commands, which write
-  conformant OKF — never edit frontmatter by hand.
+  conformant OKF v0.2 (`generated` by your actor, `sources` for provenance)
+  — never edit frontmatter by hand, never fake a `verified` event.
 - **No silent spend:** AI extras (`--garnish`, `--auto-tag`, `okb enrich`,
   `okb ask`) only when the task calls for them; deterministic commands first.
 - After any batch of writes: `okb doctor`, and `okb sync` if the user wants

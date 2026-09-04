@@ -1,8 +1,8 @@
 # CLAUDE.md
 
 okbrain is a self-hosted, cross-platform personal knowledge manager. Its on-disk
-storage is a conformant **Open Knowledge Format (OKF)** bundle (markdown + YAML
-frontmatter in git); its runtime borrows gbrain's "thin harness, fat skills"
+storage is a conformant **Open Knowledge Format (OKF v0.2)** bundle (markdown +
+YAML frontmatter in git); its runtime borrows gbrain's "thin harness, fat skills"
 patterns. Stack: **TypeScript on Bun**, single compiled binary, SQLite-class
 embedded engine, AI that runs against a local model or a hosted API.
 
@@ -31,12 +31,17 @@ depend on the DB to be readable by a plain OKF consumer.
 
 ## Cross-cutting invariants (must hold regardless of which file you touch)
 
-1. **OKF conformance on write.** Every concept write goes through
-   `core/okf/document.ts`. Emit `type`, `title`, `description`, `timestamp` (and
-   `resource`/`tags` when applicable); normalize links to bundle-absolute
+1. **OKF v0.2 conformance on write.** Every concept write goes through
+   `core/okf/write.ts` over `document.ts`. Emit `type`, `title`,
+   `description`, and `generated: { by: <actor>, at }` (plus `resource`/
+   `tags` when applicable, and the v0.2 `status` / `stale_after` /
+   `verified` / `sources` families when set — never the v0.1 `timestamp` or
+   a `# Citations` list); every write carries an actor (`OpContext.actor()`;
+   tools and agents are never `human:`); normalize links to bundle-absolute
    (`/dir/x.md`); maintain `index.md` + `log.md`. **On read, be permissive:**
    require only `type` + parseable YAML; tolerate unknown types/keys and broken
-   links; preserve unknown frontmatter keys on round-trip.
+   links; read v0.1 keys as fallbacks; preserve unknown frontmatter keys on
+   round-trip.
 2. **Contract-first surfaces.** `core/operations.ts` is the single registry of
    operations (each with `scope: read|write|admin` and a trust flag). The CLI,
    the GUI's local API, and the MCP server are thin adapters generated over it.
@@ -138,7 +143,8 @@ bun run src/cli.ts <args>                      # run CLI in dev (alias: okb)
 bunx tsc --noEmit                              # typecheck
 bun test                                       # unit tests (capture per rule above)
 bun run build                                  # local binary: bin/okb + bin/vec0.* (side by side)
-bun run scripts/package-release.ts             # all five per-OS release archives → dist/
+bun run package                                # offline release archive for this machine → dist/
+bun run scripts/package-release.ts             # all five per-OS release archives → dist/ (needs network)
 bun run src/cli.ts serve                       # start local GUI + API (later stage)
 bun run src/cli.ts mcp                          # start MCP server (later stage)
 ```
@@ -149,7 +155,7 @@ bun run src/cli.ts mcp                          # start MCP server (later stage)
 |---|---|
 | anything — current tasks, status, bugs | `ROADMAP.md` |
 | the design / why a component exists | `CONTEXT.md` (find the section) |
-| OKF format, frontmatter, conformance | `CONTEXT.md` §Storage & OKF conformance |
+| OKF v0.2 format, frontmatter families, actors, `okb upgrade`, conformance | `CONTEXT.md` §Storage & OKF conformance |
 | graph: links/backlinks/typed edges/viewer | `CONTEXT.md` §Knowledge graph |
 | AI gateway, retrieval, enrichment, MCP | `CONTEXT.md` §AI integration |
 | CLI/GUI/MCP + the ops contract | `CONTEXT.md` §Surfaces |

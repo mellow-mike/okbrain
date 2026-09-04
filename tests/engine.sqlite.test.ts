@@ -11,6 +11,7 @@ function node(id: string, over: Partial<NodeUpsert> = {}): NodeUpsert {
     resource: null,
     timestamp: null,
     lastReviewed: null,
+    status: "stable", staleAfter: null, trust: "unverified",
     bodyLen: 0,
     contentHash: `hash-${id}`,
     body: "",

@@ -17,8 +17,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { openLocalContext } from "../core/context.ts";
+import { isActor } from "../core/okf/document.ts";
 import { operations, runOp, type Operation } from "../core/operations.ts";
 import { hostAllowed } from "../core/serve-token.ts";
+import { VERSION } from "../core/version.ts";
 
 export interface McpOptions {
   bundle: string;
@@ -49,9 +51,21 @@ const toolOf = (op: Operation) => ({
   },
 });
 
+/**
+ * Writes over MCP are attributed to the connected client in the OKF actor
+ * convention (`<producer>/<version>`, §7) — an agent's edits must never read
+ * as a human's. Falls back to a generic agent actor when the client is coy.
+ */
+export function mcpActor(client: { name?: string; version?: string } | undefined): string {
+  const name = (client?.name ?? "").replace(/[\s/:]+/g, "-");
+  const version = (client?.version ?? "").replace(/\s+/g, "-");
+  const actor = `${name || "mcp-client"}/${version || "unknown"}`;
+  return isActor(actor) ? actor : "mcp-client/unknown";
+}
+
 export function createMcpServer(opts: McpOptions): Server {
   const server = new Server(
-    { name: "okbrain", version: "0.0.0" },
+    { name: "okbrain", version: VERSION },
     { capabilities: { tools: {} } },
   );
   server.setRequestHandler(ListToolsRequestSchema, () => ({
@@ -64,7 +78,12 @@ export function createMcpServer(opts: McpOptions): Server {
         content: [{ type: "text", text: `unknown tool: ${req.params.name}` }],
         isError: true,
       };
-    const local = openLocalContext(opts.bundle, opts.trusted, opts.readonly === true);
+    const local = openLocalContext(
+      opts.bundle,
+      opts.trusted,
+      opts.readonly === true,
+      mcpActor(server.getClientVersion()),
+    );
     try {
       const result = await runOp(op, local.ctx, req.params.arguments ?? {});
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };

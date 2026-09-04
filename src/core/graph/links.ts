@@ -1,10 +1,13 @@
 // Link extraction -> directed edges. Markdown links between `.md` concepts are
-// the graph's primary edges (CONTEXT, Knowledge graph). Targets are resolved in
-// the bundle's own forward-slash namespace (posix path math, OS-independent),
-// external/anchor/non-md links are dropped, and unresolved targets are filtered
-// against the known concept set. Edges are directed and deduped.
+// the graph's primary edges (CONTEXT, Knowledge graph); OKF v0.2 `sources`
+// entries whose `resource` names another concept are provenance edges. Targets
+// are resolved in the bundle's own forward-slash namespace (posix path math,
+// OS-independent), external/anchor/non-md links are dropped, and unresolved
+// targets are filtered against the known concept set. Edges are directed and
+// deduped.
 
 import { posix } from "node:path";
+import { fmSources } from "../okf/document.ts";
 
 export interface Edge {
   src: string;
@@ -48,6 +51,26 @@ export function resolveLinkTarget(srcId: string, rawTarget: string): string | nu
 }
 
 /**
+ * Resolve a path-valued frontmatter field (`sources[].resource`, `computation`,
+ * `executor.resource`, … — OKF v0.2 §6.2). Same rules as links, plus the
+ * convention the spec's own examples use: a bare relative path that resolves
+ * to nothing next to the concept is retried from the bundle root
+ * (`policies/x.md` written in `metrics/y.md`). Returns null for URLs, scope
+ * descriptors, and non-`.md` artifacts.
+ */
+export function resolvePathField(
+  srcId: string,
+  raw: string,
+  known?: Set<string>,
+): string | null {
+  const rel = resolveLinkTarget(srcId, raw);
+  if (rel === null || known === undefined || known.has(rel)) return rel;
+  if (raw.startsWith("/") || raw.startsWith(".")) return rel;
+  const fromRoot = resolveLinkTarget("", raw);
+  return fromRoot !== null && known.has(fromRoot) ? fromRoot : rel;
+}
+
+/**
  * Rewrite every resolvable internal link to bundle-absolute form (`/dir/x.md`),
  * the stable form OKF prefers. Anchors and ` "title"` suffixes are preserved;
  * external, broken-syntax, and non-`.md` targets pass through untouched.
@@ -74,19 +97,40 @@ export function extractTargets(srcId: string, body: string): string[] {
   return [...seen];
 }
 
+/** Concept ids named by `sources[].resource` (provenance edges), deduped. */
+export function sourceTargets(
+  srcId: string,
+  fm: Record<string, unknown>,
+  known?: Set<string>,
+): string[] {
+  const seen = new Set<string>();
+  for (const s of fmSources(fm)) {
+    const id = resolvePathField(srcId, s.resource, known);
+    if (id !== null) seen.add(id);
+  }
+  return [...seen];
+}
+
+export interface LinkDoc {
+  id: string;
+  body: string;
+  frontmatter?: Record<string, unknown>;
+}
+
 /**
- * Build directed edges from concepts. Targets not in `known` (broken links) are
- * dropped; `known` defaults to the set of provided ids. Edges are deduped and a
- * concept never links to itself.
+ * Build directed edges from concepts (body links first, then provenance).
+ * Targets not in `known` (broken links) are dropped; `known` defaults to the
+ * set of provided ids. Edges are deduped and a concept never links to itself.
  */
 export function buildEdges(
-  docs: { id: string; body: string }[],
+  docs: LinkDoc[],
   known: Set<string> = new Set(docs.map((d) => d.id)),
 ): Edge[] {
   const edges: Edge[] = [];
   const seen = new Set<string>();
-  for (const { id, body } of docs) {
-    for (const dst of extractTargets(id, body)) {
+  for (const { id, body, frontmatter } of docs) {
+    const targets = [...extractTargets(id, body), ...sourceTargets(id, frontmatter ?? {}, known)];
+    for (const dst of targets) {
       if (dst === id || !known.has(dst)) continue;
       const key = JSON.stringify([id, dst]); // collision-proof (ids may hold spaces)
       if (seen.has(key)) continue;

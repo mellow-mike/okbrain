@@ -28,6 +28,7 @@ const put = (id: string, title: string, body: string) =>
     resource: null,
     timestamp: null,
     lastReviewed: null,
+    status: "stable", staleAfter: null, trust: "unverified",
     bodyLen: body.length,
     contentHash: id,
     body,

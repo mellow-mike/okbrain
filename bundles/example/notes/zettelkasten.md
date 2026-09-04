@@ -2,10 +2,12 @@
 type: note
 title: Zettelkasten
 description: Note-taking method built on linked atomic notes
-timestamp: 2026-07-05T09:00:00Z
 tags:
   - pkm
   - method
+generated:
+  by: human:okbrain
+  at: 2026-07-05T09:00:00Z
 ---
 # Zettelkasten
 

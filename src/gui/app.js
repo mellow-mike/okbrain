@@ -1,23 +1,32 @@
-// okbrain GUI (3.2): a vanilla single-page app over the local API. No build
-// step, no framework — served as-is by api.ts and embedded into the compiled
+// okbrain GUI: a vanilla single-page app over the local API. No build step,
+// no framework — served as-is by api.ts and embedded into the compiled
 // binary via Bun text imports. Every data access goes through /api/op/* (the
-// ops contract); this file is presentation only.
+// ops contract) or one of the small server routes (status, brain mounts,
+// bookmarklet); this file is presentation only. Rendering helpers shared
+// with the static viewer come from render.js (window.okbRender).
 
 'use strict';
 
 var TOKEN = window.OKB_TOKEN;
+var R = window.okbRender;
+var esc = R.esc;
 var view = document.getElementById('view');
+var STATUS = null; // /api/status for the selected brain
+var BRAIN = '';
+try { BRAIN = localStorage.getItem('okb-gui-brain') || ''; } catch (e) {}
 
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
-    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
-  });
+// ---- transport ----------------------------------------------------------
+
+function headers(extra) {
+  var h = { 'x-okb-token': TOKEN };
+  if (BRAIN) h['x-okb-brain'] = BRAIN;
+  return Object.assign(h, extra || {});
 }
 
 async function api(op, params) {
   var res = await fetch('/api/op/' + op, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-okb-token': TOKEN },
+    headers: headers({ 'content-type': 'application/json' }),
     body: JSON.stringify(params || {}),
   });
   var body = await res.json();
@@ -25,16 +34,45 @@ async function api(op, params) {
   return body.result;
 }
 
+async function get(path) {
+  var res = await fetch(path, { headers: headers() });
+  var body = await res.json();
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+
+// ---- small renderers ------------------------------------------------------
+
 function errorBox(e) {
   return '<div class="error">' + esc(e && e.message ? e.message : e) + '</div>';
 }
+function tile(label, value, cls) {
+  return '<div class="tile' + (cls ? ' ' + cls : '') + '"><div class="num">' + esc(value) +
+    '</div><div class="lbl">' + esc(label) + '</div></div>';
+}
+function conceptHref(id) { return '#concept/' + encodeURIComponent(id); }
+function editHref(id) { return '#edit/' + encodeURIComponent(id); }
+function graphHref(id) { return '#graph/' + encodeURIComponent(id); }
+function conceptLink(id, title) {
+  return '<a href="' + conceptHref(id) + '">' + esc(title || id) + '</a>';
+}
+function chips(tags) {
+  return (tags || []).map(function (t) { return '<span class="chip">' + esc(t) + '</span>'; }).join(' ');
+}
+function dateOf(iso) { return iso ? esc(String(iso).slice(0, 10)) : '—'; }
+function typeChip(t) { return '<span class="chip">' + esc(t || '(untyped)') + '</span>'; }
+function badges(s) { return '<span class="badges">' + R.badges(s) + '</span>'; }
+function busy(el, text) { el.innerHTML = '<span class="muted">' + esc(text || 'working…') + '</span>'; }
+function basename(p) { return String(p || '').split(/[\\/]/).filter(Boolean).pop() || p; }
+function jsonNotice(r) { return '<div class="notice">' + esc(JSON.stringify(r, null, 2)) + '</div>'; }
 
-function tile(label, value) {
-  return '<div class="tile"><div class="num">' + esc(value) + '</div>' +
-    '<div class="lbl">' + esc(label) + '</div></div>';
+/** Render a markdown body into `el` with internal links routed to the reader. */
+function renderBody(el, md, baseId) {
+  el.innerHTML = R.renderMarkdown(md);
+  R.wireLinks(el, { baseId: baseId, hrefFor: conceptHref });
 }
 
-// ---- theme --------------------------------------------------------------
+// ---- theme ---------------------------------------------------------------
 
 var themeBtn = document.getElementById('theme');
 function setTheme(mode, persist) {
@@ -50,285 +88,106 @@ themeBtn.addEventListener('click', function () {
   route(); // views with canvas colors (graph) re-read the tokens
 });
 
+// ---- shell: status, brains, quick search ------------------------------------
+
+async function refreshStatus() {
+  var el = document.getElementById('nav-status');
+  try {
+    STATUS = await get('/api/status');
+    document.getElementById('nav-brain').textContent = STATUS.brain || basename(STATUS.bundle);
+    el.innerHTML =
+      '<div><span class="dot' + (STATUS.hasIndex ? ' on' : '') + '"></span>index' +
+      ' <span class="dot' + (STATUS.hasVectors ? ' on' : '') + '"></span>vectors</div>' +
+      '<div>okb ' + esc(STATUS.version) + ' · OKF ' + esc(STATUS.okfVersion) +
+      (STATUS.readonly ? ' · <span class="chip warn">read-only</span>' : '') + '</div>';
+  } catch (e) {
+    STATUS = null;
+    el.innerHTML = '<span class="error">' + esc(e.message) + '</span>';
+  }
+}
+
+async function loadBrains() {
+  var sel = document.getElementById('brain');
+  try {
+    var r = await get('/api/brains');
+    if (!r.brains.length) { sel.hidden = true; return; }
+    sel.innerHTML = '<option value="">served bundle</option>' + r.brains.map(function (b) {
+      return '<option value="' + esc(b.name) + '"' + (b.name === BRAIN ? ' selected' : '') + '>' +
+        esc(b.name) + (b.readonly ? ' (read-only)' : '') + (b.exists ? '' : ' (missing)') + '</option>';
+    }).join('');
+    sel.hidden = false;
+  } catch (e) { sel.hidden = true; }
+}
+document.getElementById('brain').addEventListener('change', function (e) {
+  BRAIN = e.target.value;
+  try { localStorage.setItem('okb-gui-brain', BRAIN); } catch (err) {}
+  refreshStatus().then(route);
+});
+
+document.getElementById('qs').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var q = document.getElementById('qs-in').value.trim();
+  if (q) location.hash = '#search/' + encodeURIComponent(q);
+});
+document.addEventListener('keydown', function (e) {
+  var tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(tag)) {
+    e.preventDefault();
+    var qs = document.getElementById('qs-in');
+    qs.focus();
+    qs.select();
+  }
+});
+
 // ---- router -------------------------------------------------------------
 
 var routes = {
-  graph: renderGraph, search: renderSearch, ask: renderAsk, add: renderAdd,
-  review: renderReview, inbox: renderInbox, claims: renderClaims,
-  stats: renderStats, editor: renderEditor, settings: renderSettings,
+  home: renderHome, browse: renderBrowse, concept: renderConcept, edit: renderEdit,
+  editor: renderEdit, graph: renderGraph, search: renderSearch, ask: renderAsk,
+  add: renderAdd, review: renderReview, inbox: renderInbox, claims: renderClaims,
+  stats: renderStats, settings: renderSettings,
 };
 
 var DIR_MARK = { out: '→', in: '←', both: '↔' };
 
+// Every render gets a generation number; async work checks `stale(seq)` after
+// each await so a render abandoned by navigation never touches the new view.
+var gen = 0;
+function stale(seq) { return seq !== gen; }
+function setHtml(id, html) {
+  var el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+
 function route() {
-  var h = location.hash.slice(1) || 'graph';
+  var h = location.hash.slice(1) || 'home';
   var slash = h.indexOf('/');
   var name = slash < 0 ? h : h.slice(0, slash);
   var arg = slash < 0 ? null : decodeURIComponent(h.slice(slash + 1));
-  var fn = routes[name] || renderGraph;
+  var fn = routes[name] || renderHome;
   document.querySelectorAll('#nav a').forEach(function (a) {
-    a.classList.toggle('active', a.getAttribute('href') === '#' + name);
+    var target = a.getAttribute('data-nav') || a.getAttribute('href').slice(1);
+    a.classList.toggle('active', target === name || (name === 'editor' && target === 'edit'));
   });
   view.className = name === 'graph' ? 'bare' : '';
-  fn(arg);
+  view.scrollTop = 0;
+  fn(arg, ++gen);
 }
 window.addEventListener('hashchange', route);
 
-function editorHref(id) { return '#editor/' + encodeURIComponent(id); }
-function graphHref(id) { return '#graph/' + encodeURIComponent(id); }
+// ---- shared panels ------------------------------------------------------
 
-// ---- graph view ---------------------------------------------------------
-
-// Same validated categorical palettes as the static viewer (fixed CVD-safe
-// slot order; types beyond 8 fold into the muted overflow color).
-var PALETTE = {
-  dark: ['#3987e5', '#199e70', '#c98500', '#008300', '#9085e9', '#e66767', '#d55181', '#d95926'],
-  light: ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7', '#e34948', '#e87ba4', '#eb6834'],
-};
-var OVERFLOW = '#898781';
-
-function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
-
-async function renderGraph(focusId) {
-  view.innerHTML =
-    '<div id="gwrap"><div id="gmain">' +
-    '<div id="gbar"><input id="gsearch" type="search" placeholder="Filter title / id / tags…">' +
-    '<button id="gfit">Fit</button></div><div id="gcy"></div></div>' +
-    '<div id="gdetail"><p class="empty">Click a node.</p></div></div>';
-  var g;
-  try { g = await api('graph_data', {}); }
-  catch (e) { view.className = ''; view.innerHTML = errorBox(e); return; }
-
-  var byId = {}, linksTo = {}, citedBy = {}, types = [];
-  g.nodes.forEach(function (n) {
-    byId[n.id] = n;
-    var t = n.type || '(untyped)';
-    if (types.indexOf(t) < 0) types.push(t);
-  });
-  g.edges.forEach(function (e) {
-    (linksTo[e.src] = linksTo[e.src] || []).push(e.dst);
-    (citedBy[e.dst] = citedBy[e.dst] || []).push(e.src);
-  });
-  types.sort();
-  var mode = document.documentElement.getAttribute('data-theme');
-  var colorOf = {};
-  types.forEach(function (t, i) { colorOf[t] = i < 8 ? PALETTE[mode][i] : OVERFLOW; });
-
-  var cy = cytoscape({
-    container: document.getElementById('gcy'),
-    elements: g.nodes.map(function (n) {
-      return { data: { id: n.id, label: n.title || n.id, type: n.type || '(untyped)',
-        size: 16 + 4 * Math.sqrt(Math.min(n.bodyLen, 20000) / 100) } };
-    }).concat(g.edges.map(function (e) {
-      return { data: { id: JSON.stringify([e.src, e.dst]), source: e.src, target: e.dst } };
-    })),
-    style: [
-      { selector: 'node', style: {
-        'background-color': function (ele) { return colorOf[ele.data('type')]; },
-        width: 'data(size)', height: 'data(size)', label: 'data(label)',
-        'font-size': 9, color: cssVar('--ink-2'),
-        'text-outline-color': cssVar('--surface'), 'text-outline-width': 2,
-        'text-valign': 'bottom', 'text-margin-y': 4,
-        'text-wrap': 'ellipsis', 'text-max-width': '120px' } },
-      { selector: 'edge', style: {
-        width: 1.2, 'line-color': cssVar('--edge-line'),
-        'target-arrow-color': cssVar('--edge-line'),
-        'target-arrow-shape': 'triangle', 'arrow-scale': 0.8, 'curve-style': 'bezier' } },
-      { selector: 'node:selected', style: {
-        'border-width': 3, 'border-color': cssVar('--accent') } },
-      { selector: '.dim', style: { opacity: 0.15 } },
-    ],
-    layout: { name: 'cose', animate: false },
-    wheelSensitivity: 0.2,
-  });
-  window.cy = cy; // console/driver access, like the static viewer
-
-  var detail = document.getElementById('gdetail');
-  function conceptList(ids) {
-    return '<ul>' + ids.map(function (id) {
-      return '<li><a href="#focus" data-id="' + esc(id) + '">' +
-        esc((byId[id] && byId[id].title) || id) + '</a></li>';
-    }).join('') + '</ul>';
-  }
-  function showDetail(id) {
-    var n = byId[id];
-    if (!n) return;
-    var h = '<h2>' + esc(n.title || n.id) + '</h2>' +
-      '<div class="meta"><span class="chip"><span class="swatch" style="background:' +
-      colorOf[n.type || '(untyped)'] + '"></span>' + esc(n.type || '(untyped)') +
-      '</span><code>' + esc(n.id) + '</code></div>' +
-      '<div class="row"><a href="' + editorHref(id) + '"><button>Edit</button></a></div>';
-    if (n.description) h += '<p class="why">' + esc(n.description) + '</p>';
-    if (n.tags.length) h += '<div class="meta">' + n.tags.map(function (t) {
-      return '<span class="chip">' + esc(t) + '</span>';
-    }).join(' ') + '</div>';
-    h += '<div class="body md">' + okbMarkdown(n.body) + '</div>';
-    var out = linksTo[id] || [], back = citedBy[id] || [];
-    if (out.length) h += '<h3>Links to</h3>' + conceptList(out);
-    if (back.length) h += '<h3>Cited by</h3>' + conceptList(back);
-    detail.innerHTML = h;
-    detail.querySelectorAll('a[href]').forEach(function (a) {
-      var href = a.getAttribute('href');
-      if (href.indexOf('#concept:') === 0) {
-        a.setAttribute('data-id', decodeURIComponent(href.slice(9)));
-        a.setAttribute('href', '#focus');
-      } else if (href.indexOf('http') === 0) {
-        a.target = '_blank';
-        a.rel = 'noopener';
-      }
-    });
-  }
-  function focusNode(id) {
-    var node = cy.getElementById(id);
-    if (node.nonempty()) {
-      cy.$(':selected').unselect();
-      node.select();
-      cy.animate({ center: { eles: node } }, { duration: 200 });
-    }
-    showDetail(id);
-  }
-  detail.addEventListener('click', function (e) {
-    var a = e.target.closest('a[href="#focus"]');
-    if (!a) return;
-    e.preventDefault();
-    focusNode(a.getAttribute('data-id'));
-  });
-  cy.on('tap', 'node', function (e) { showDetail(e.target.id()); });
-
-  var search = document.getElementById('gsearch');
-  search.addEventListener('input', function () {
-    var q = search.value.trim().toLowerCase();
-    cy.batch(function () {
-      cy.elements().removeClass('dim');
-      if (!q) return;
-      cy.elements().addClass('dim');
-      cy.nodes().forEach(function (node) {
-        var n = byId[node.id()];
-        if ((n.id + ' ' + n.title + ' ' + n.tags.join(' ')).toLowerCase().indexOf(q) >= 0) {
-          node.removeClass('dim');
-          node.connectedEdges().removeClass('dim');
-        }
-      });
-    });
-  });
-  document.getElementById('gfit').addEventListener('click', function () {
-    cy.fit(undefined, 40);
-  });
-  if (focusId) focusNode(focusId);
-}
-
-// ---- search view --------------------------------------------------------
-
-// Hybrid search (keyword + vector recall, graph expansion) via the `search`
-// op — distinct from the graph view's client-side title filter.
-function renderSearch(initialQ) {
-  view.innerHTML =
-    '<div class="stack"><h2>Search</h2>' +
-    '<form id="sf" class="row">' +
-    '<input id="sq" style="flex:1" placeholder="keyword + vector search…" autofocus>' +
-    '<select id="sp"><option value="">balanced</option><option>lean</option><option>max</option></select>' +
-    '<button class="primary">Search</button></form>' +
-    '<div id="sout" class="stack"></div></div>';
-  var out = document.getElementById('sout');
-  var qEl = document.getElementById('sq');
-  document.getElementById('sf').addEventListener('submit', async function (e) {
-    e.preventDefault();
-    var q = qEl.value.trim();
-    if (!q) return;
-    out.innerHTML = '<span class="muted">searching…</span>';
-    var params = { query: q };
-    var p = document.getElementById('sp').value;
-    if (p) params.profile = p;
-    try {
-      var hits = await api('search', params);
-      out.innerHTML = hits.length
-        ? hits.map(function (h) {
-            return '<div class="card"><div class="title">' +
-              '<a href="' + editorHref(h.id) + '">' + esc(h.title || h.id) + '</a>' +
-              ' <span class="muted">(' + h.score.toFixed(3) + ')</span></div>' +
-              '<div class="why"><code>' + esc(h.id) + '</code> · ' +
-              h.sources.map(function (s) { return '<span class="chip">' + esc(s) + '</span>'; }).join(' ') +
-              '</div>' + (h.description ? '<div class="why">' + esc(h.description) + '</div>' : '') +
-              '<div class="row"><a href="' + editorHref(h.id) + '"><button>Open</button></a>' +
-              '<a href="' + graphHref(h.id) + '"><button>Graph</button></a></div></div>';
-          }).join('')
-        : '<div class="notice">No hits.</div>';
-    } catch (err) { out.innerHTML = errorBox(err); }
-  });
-  if (initialQ) { qEl.value = initialQ; qEl.form.requestSubmit(); }
-}
-
-// ---- ask view -----------------------------------------------------------
-
-function citationLinks(citations) {
-  return citations.map(function (c) {
-    return '<span class="chip"><a href="' + graphHref(c.id) + '">graph</a> · <a href="' +
-      editorHref(c.id) + '">edit</a> ' + esc(c.title || c.id) + '</span>';
-  }).join(' ');
-}
-
-function renderAsk() {
-  view.innerHTML =
-    '<div class="stack"><h2>Ask your brain</h2>' +
-    '<form id="askf" class="row">' +
-    '<input id="askq" style="flex:1" placeholder="What do my notes say about…" autofocus>' +
-    '<select id="askp"><option value="">balanced</option><option>lean</option><option>max</option></select>' +
-    '<button class="primary">Ask</button></form>' +
-    '<div id="askctx"></div><div id="askout" class="md"></div><div id="asksrc"></div></div>';
-  var ctxEl = document.getElementById('askctx');
-  var outEl = document.getElementById('askout');
-  var srcEl = document.getElementById('asksrc');
-  document.getElementById('askf').addEventListener('submit', function (e) {
-    e.preventDefault();
-    var q = document.getElementById('askq').value.trim();
-    if (!q) return;
-    ctxEl.innerHTML = '<span class="muted">retrieving…</span>';
-    outEl.innerHTML = '';
-    srcEl.innerHTML = '';
-    var url = '/api/ask/stream?token=' + encodeURIComponent(TOKEN) +
-      '&question=' + encodeURIComponent(q);
-    var profile = document.getElementById('askp').value;
-    if (profile) url += '&profile=' + encodeURIComponent(profile);
-    var es = new EventSource(url);
-    es.addEventListener('context', function (ev) {
-      var ctx = JSON.parse(ev.data);
-      ctxEl.innerHTML = ctx.length
-        ? '<span class="muted">reading:</span> ' + citationLinks(ctx)
-        : '';
-    });
-    es.addEventListener('answer', function (ev) {
-      outEl.innerHTML = okbMarkdown(JSON.parse(ev.data).answer);
-    });
-    es.addEventListener('done', function (ev) {
-      var r = JSON.parse(ev.data).result;
-      if (r.citations.length)
-        srcEl.innerHTML = '<h3>Sources</h3>' + citationLinks(r.citations);
-      es.close();
-    });
-    es.addEventListener('error', function (ev) {
-      if (ev.data) outEl.innerHTML = errorBox(JSON.parse(ev.data).error);
-      else if (!outEl.innerHTML) outEl.innerHTML = errorBox('stream failed');
-      es.close();
-    });
-  });
-}
-
-// ---- link suggestions (4.4) ---------------------------------------------
-
-// Shared panel: list suggestions for `id`; `actLabel`/`data-act` decide what
-// clicking a row's button does (accept = write via link_accept; insert =
-// editor-local, no write).
+// Link suggestions for `id`; `act` decides what a row's button does
+// (accept = write via link_accept; insert = editor-local, no write).
 async function loadSuggestions(el, id, act, actLabel) {
-  el.innerHTML = '<span class="muted">suggesting…</span>';
+  busy(el, 'suggesting…');
   try {
     var ss = await api('link_suggest', { id: id });
     el.innerHTML = ss.length
       ? ss.map(function (s) {
           return '<div class="row suggestion" data-target="' + esc(s.id) + '">' +
-            '<button data-act="' + act + '">' + actLabel + '</button>' +
-            '<span>' + esc(s.title || s.id) +
+            '<button class="small" data-act="' + act + '">' + actLabel + '</button>' +
+            '<span>' + conceptLink(s.id, s.title) +
             ' <span class="muted">(' + s.score.toFixed(2) + '; ' + esc(s.reasons.join('; ')) + ')</span></span></div>';
         }).join('')
       : '<span class="muted">no suggestions</span>';
@@ -347,47 +206,771 @@ async function acceptSuggestion(btn, conceptId) {
   }
 }
 
-// ---- review view --------------------------------------------------------
+/** Card action buttons shared by review/inbox/home lists. */
+function cardActions(id, extra) {
+  return '<div class="row">' + (extra || '') +
+    '<a href="' + conceptHref(id) + '"><button class="small">Open</button></a>' +
+    '<button class="small" data-act="suggest">Suggest links</button>' +
+    '<a href="' + graphHref(id) + '"><button class="small">Graph</button></a></div>' +
+    '<div class="suggest"></div>';
+}
 
-async function renderReview() {
-  view.innerHTML = '<div class="stack"><h2>Review</h2>' +
-    '<label class="row"><input type="checkbox" id="rgarnish"> AI garnish (connects items to recent notes)</label>' +
-    '<div id="rlist" class="stack"></div></div>';
-  var listEl = document.getElementById('rlist');
-  var garnishEl = document.getElementById('rgarnish');
-  async function load() {
-    listEl.innerHTML = '<span class="muted">scoring…</span>';
-    var q;
-    try { q = await api('review_queue', garnishEl.checked ? { garnish: true } : {}); }
-    catch (e) { listEl.innerHTML = errorBox(e); return; }
-    if (!q.length) { listEl.innerHTML = '<div class="notice">Queue is empty — nothing needs review.</div>'; return; }
-    listEl.innerHTML = q.map(function (it, i) {
-      return '<div class="card" data-id="' + esc(it.id) + '">' +
-        '<div class="title">' + (i + 1) + '. ' + esc(it.title || it.id) +
-        ' <span class="muted">(' + it.score.toFixed(2) + ')</span></div>' +
-        '<div class="why">' + esc(it.reasons.join('; ')) + '</div>' +
-        (it.garnish ? '<div class="garnish">↳ ' + esc(it.garnish) + '</div>' : '') +
-        '<div class="row"><button data-act="done">Done</button>' +
-        '<button data-act="snooze">Snooze 7d</button>' +
-        '<button data-act="suggest">Suggest links</button>' +
-        '<a href="' + editorHref(it.id) + '"><button>Open</button></a>' +
-        '<a href="' + graphHref(it.id) + '"><button>Graph</button></a></div>' +
-        '<div class="suggest"></div></div>';
-    }).join('');
-  }
+/** Delegated click handling for cards: suggest/accept plus custom acts via `handle`. */
+function wireCards(listEl, handle) {
   listEl.addEventListener('click', async function (e) {
     var btn = e.target.closest('button[data-act]');
     if (!btn) return;
-    var card = btn.closest('.card');
+    var card = btn.closest('[data-id]');
     var id = card.getAttribute('data-id');
     var act = btn.getAttribute('data-act');
     if (act === 'suggest') { loadSuggestions(card.querySelector('.suggest'), id, 'accept', 'Link'); return; }
     if (act === 'accept') { acceptSuggestion(btn, id); return; }
     btn.disabled = true;
+    try { await handle(act, id, card); }
+    catch (err) { btn.disabled = false; listEl.insertAdjacentHTML('afterbegin', errorBox(err)); }
+  });
+}
+
+// ---- home ----------------------------------------------------------------
+
+async function renderHome(_arg, seq) {
+  var name = STATUS ? (STATUS.brain || basename(STATUS.bundle)) : 'your brain';
+  view.innerHTML =
+    '<div class="stack wide"><h2>' + esc(name) + '</h2>' +
+    '<div id="h-index"></div><div id="h-tiles" class="tiles"></div>' +
+    '<form id="h-cap" class="row"><input id="h-cap-text" style="flex:1" placeholder="Capture a thought… (lands in inbox/)">' +
+    '<button class="primary">Capture</button><span id="h-cap-msg" class="muted"></span></form>' +
+    '<div class="split"><div><h3>Worth another look</h3><div id="h-review" class="list"></div></div>' +
+    '<div><h3>Inbox</h3><div id="h-inbox" class="list"></div></div>' +
+    '<div><h3>Recently changed</h3><div id="h-recent"></div></div></div>' +
+    '<h3>Health</h3><div class="row"><button id="h-doctor">Check conformance</button>' +
+    '<a href="#stats"><button>Stats</button></a><a href="#settings"><button>Settings</button></a></div>' +
+    '<div id="h-doctor-out"></div></div>';
+
+  if (STATUS && !STATUS.hasIndex) {
+    document.getElementById('h-index').innerHTML =
+      '<div class="notice">This brain has no search index yet — search, graph, review and stats need one. ' +
+      '<button id="h-build" class="primary small">Build index</button></div>';
+    document.getElementById('h-build').addEventListener('click', async function () {
+      this.disabled = true;
+      try { await api('index', {}); await refreshStatus(); route(); }
+      catch (e) { document.getElementById('h-index').innerHTML = errorBox(e); }
+    });
+  }
+
+  document.getElementById('h-cap').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var text = document.getElementById('h-cap-text').value.trim();
+    if (!text) return;
+    var msg = document.getElementById('h-cap-msg');
+    msg.textContent = 'capturing…';
     try {
-      await api(act === 'done' ? 'review_done' : 'review_snooze', { id: id });
-      load();
-    } catch (err) { listEl.insertAdjacentHTML('afterbegin', errorBox(err)); }
+      var r = await api('capture', { text: text });
+      if (stale(seq)) return;
+      document.getElementById('h-cap-text').value = '';
+      msg.innerHTML = 'captured ' + conceptLink(r.id);
+      loadInboxPreview();
+    } catch (err) { msg.innerHTML = errorBox(err); }
+  });
+
+  async function loadTiles() {
+    var el = document.getElementById('h-tiles');
+    try {
+      var s = await api('stats', {});
+      var q = await api('review_queue', {});
+      var reviewed = s.byTrust['human-reviewed'];
+      el.innerHTML =
+        tile('Concepts', s.concepts) + tile('Links', s.edges) +
+        tile('Review due', q.length, q.length ? 'alert' : '') +
+        tile('Inbox', s.inbox, s.inbox ? 'alert' : '') +
+        tile('Orphans', s.orphans) +
+        tile('Past stale_after', s.expired, s.expired ? 'alert' : '') +
+        tile('Drafts', s.byStatus.draft) +
+        tile('Human-reviewed', s.concepts ? Math.round((100 * reviewed) / s.concepts) + '%' : '—', 'good');
+    } catch (e) { el.innerHTML = ''; }
+  }
+
+  async function loadReviewPreview() {
+    var el = document.getElementById('h-review');
+    try {
+      var q = await api('review_queue', {});
+      el.innerHTML = q.length
+        ? q.map(function (it) {
+            return '<div class="card compact" data-id="' + esc(it.id) + '"><div class="title">' +
+              conceptLink(it.id, it.title) + '</div><div class="why">' + esc(it.reasons.join('; ')) + '</div>' +
+              '<div class="row"><button class="small" data-act="done" title="records a verified event by you">Reviewed ✓</button>' +
+              '<button class="small" data-act="snooze">Snooze</button></div></div>';
+          }).join('')
+        : '<div class="empty">Nothing needs review.</div>';
+    } catch (e) { el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
+  }
+  wireCards(document.getElementById('h-review'), async function (act, id) {
+    await api(act === 'done' ? 'review_done' : 'review_snooze', { id: id });
+    loadReviewPreview();
+    loadTiles();
+  });
+
+  async function loadInboxPreview() {
+    var el = document.getElementById('h-inbox');
+    try {
+      var rows = await api('inbox_list', {});
+      el.innerHTML = rows.length
+        ? rows.slice(0, 6).map(function (r) {
+            return '<div class="card compact" data-id="' + esc(r.id) + '"><div class="title">' +
+              conceptLink(r.id, r.title) + '</div><div class="row"><button class="small" data-act="read">Mark read</button></div></div>';
+          }).join('') + (rows.length > 6 ? '<p class="muted"><a href="#inbox">' + (rows.length - 6) + ' more…</a></p>' : '')
+        : '<div class="empty">Inbox is empty.</div>';
+    } catch (e) { el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
+  }
+  wireCards(document.getElementById('h-inbox'), async function (act, id) {
+    await api('inbox_read', { id: id });
+    loadInboxPreview();
+    loadTiles();
+  });
+
+  async function loadRecent() {
+    var el = document.getElementById('h-recent');
+    try {
+      var rows = await api('list_concepts', { detail: true });
+      rows.sort(function (a, b) { return (b.updated || '') < (a.updated || '') ? -1 : 1; });
+      el.innerHTML = rows.length
+        ? '<table class="tbl">' + rows.slice(0, 8).map(function (r) {
+            return '<tr><td>' + conceptLink(r.id, r.title) + '<br>' + badges(r) + '</td>' +
+              '<td class="nowrap muted">' + dateOf(r.updated) + '</td></tr>';
+          }).join('') + '</table>' + (rows.length > 8 ? '<p class="muted"><a href="#browse">browse all ' + rows.length + '…</a></p>' : '')
+        : '<div class="empty">No concepts yet — capture something above or <a href="#edit">write one</a>.</div>';
+    } catch (e) { el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
+  }
+
+  document.getElementById('h-doctor').addEventListener('click', async function () {
+    var out = document.getElementById('h-doctor-out');
+    busy(out, 'checking…');
+    try { out.innerHTML = doctorSummary(await api('doctor', {})); }
+    catch (e) { out.innerHTML = errorBox(e); }
+  });
+
+  loadTiles();
+  loadReviewPreview();
+  loadInboxPreview();
+  loadRecent();
+}
+
+function doctorSummary(r) {
+  var sig = r.signals;
+  var head = (r.ok ? '✓ conformant' : '✗ not conformant') + ' — ' + r.concepts + ' concepts, ' +
+    r.errors + ' errors, ' + r.warnings + ' warnings · okf_version ' + (r.okfVersion || 'undeclared') +
+    '\ntrust: ' + sig.trust['human-reviewed'] + ' human-reviewed, ' + sig.trust['machine-confirmed'] +
+    ' machine-confirmed, ' + sig.trust.unverified + ' unverified · status: ' + sig.status.draft + ' draft, ' +
+    sig.status.deprecated + ' deprecated · ' + sig.stale + ' past stale_after · ' + sig.legacy + ' still v0.1';
+  var lines = r.findings.slice(0, 60).map(function (f) {
+    return (f.severity === 'error' ? 'ERROR ' : 'warn  ') + f.path + '  ' + f.message + ' [' + f.check + ']';
+  });
+  if (r.findings.length > 60) lines.push('… ' + (r.findings.length - 60) + ' more');
+  return '<div class="notice">' + esc(head + (lines.length ? '\n\n' + lines.join('\n') : '')) + '</div>' +
+    (sig.legacy ? '<p class="muted">v0.1 leftovers can be migrated in <a href="#settings">Settings → Maintenance → Upgrade</a>.</p>' : '');
+}
+
+// ---- browse --------------------------------------------------------------
+
+async function renderBrowse(_arg, seq) {
+  view.innerHTML =
+    '<div class="stack wide"><h2>Browse</h2>' +
+    '<div class="toolbar"><input id="b-q" type="search" placeholder="Filter title / id / tags…">' +
+    '<select id="b-type"><option value="">all types</option></select>' +
+    '<select id="b-status"><option value="">any status</option><option>draft</option><option>stable</option><option>deprecated</option></select>' +
+    '<select id="b-sort"><option value="updated">newest first</option><option value="title">title</option><option value="type">type</option></select>' +
+    '<span id="b-count" class="muted right"></span></div><div id="b-out"></div></div>';
+  var out = document.getElementById('b-out');
+  busy(out, 'loading…');
+  var rows;
+  try { rows = await api('list_concepts', { detail: true }); }
+  catch (e) { out.innerHTML = errorBox(e); return; }
+  if (stale(seq)) return;
+  var types = [];
+  rows.forEach(function (r) { if (types.indexOf(r.type) < 0) types.push(r.type); });
+  types.sort();
+  var typeSel = document.getElementById('b-type');
+  types.forEach(function (t) {
+    var o = document.createElement('option');
+    o.value = t;
+    o.textContent = t || '(untyped)';
+    typeSel.appendChild(o);
+  });
+  function draw() {
+    var q = document.getElementById('b-q').value.trim().toLowerCase();
+    var type = typeSel.value, status = document.getElementById('b-status').value;
+    var sort = document.getElementById('b-sort').value;
+    var list = rows.filter(function (r) {
+      if (type && r.type !== type) return false;
+      if (status && r.status !== status) return false;
+      if (q && (r.id + ' ' + r.title + ' ' + r.tags.join(' ')).toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+    list.sort(function (a, b) {
+      if (sort === 'title') return (a.title || a.id).localeCompare(b.title || b.id);
+      if (sort === 'type') return a.type.localeCompare(b.type) || a.id.localeCompare(b.id);
+      return (b.updated || '') < (a.updated || '') ? -1 : (b.updated || '') > (a.updated || '') ? 1 : a.id.localeCompare(b.id);
+    });
+    document.getElementById('b-count').textContent = list.length + ' of ' + rows.length;
+    out.innerHTML = list.length
+      ? '<table class="tbl"><thead><tr><th>Concept</th><th>Type</th><th>Signals</th><th>Updated</th><th>Tags</th></tr></thead><tbody>' +
+        list.map(function (r) {
+          return '<tr><td>' + conceptLink(r.id, r.title) + '<br><code>' + esc(r.id) + '</code>' +
+            (r.description ? '<div class="muted">' + esc(r.description) + '</div>' : '') + '</td>' +
+            '<td>' + typeChip(r.type) + '</td><td>' + badges(r) + '</td>' +
+            '<td class="nowrap muted">' + dateOf(r.updated) + '</td><td>' + chips(r.tags) + '</td></tr>';
+        }).join('') + '</tbody></table>'
+      : '<div class="empty">No concepts match.</div>';
+  }
+  ['b-q', 'b-type', 'b-status', 'b-sort'].forEach(function (id) {
+    document.getElementById(id).addEventListener('input', draw);
+    document.getElementById(id).addEventListener('change', draw);
+  });
+  draw();
+}
+
+// ---- concept (reader) ----------------------------------------------------
+
+async function renderConcept(id, seq) {
+  if (!id) { location.hash = '#browse'; return; }
+  var c;
+  try { c = await api('read_concept', { id: id }); }
+  catch (e) { if (!stale(seq)) view.innerHTML = errorBox(e); return; }
+  if (stale(seq)) return;
+  var fm = c.frontmatter, s = c.signals;
+  var tags = Array.isArray(fm.tags) ? fm.tags : (typeof fm.tags === 'string' ? [fm.tags] : []);
+  var inInbox = tags.indexOf('inbox') >= 0;
+  var verified = Array.isArray(fm.verified) ? fm.verified : (fm.verified ? [fm.verified] : []);
+  var sources = Array.isArray(fm.sources) ? fm.sources : (fm.sources ? [fm.sources] : []);
+  var isComputation = String(fm.type || '').toLowerCase() === 'attested computation';
+
+  var meta = '<dl class="kv">';
+  if (fm.description) meta += '<dt>Description</dt><dd>' + esc(fm.description) + '</dd>';
+  if (fm.resource) meta += '<dt>Resource</dt><dd><a href="' + esc(fm.resource) + '" target="_blank" rel="noopener">' + esc(fm.resource) + '</a></dd>';
+  if (tags.length) meta += '<dt>Tags</dt><dd>' + chips(tags) + '</dd>';
+  meta += '<dt>Generated</dt><dd>' + R.actorLine(fm.generated) + (fm.timestamp && !fm.generated ? ' <span class="muted">(v0.1 timestamp ' + esc(fm.timestamp) + ')</span>' : '') + '</dd>';
+  meta += '<dt>Verified</dt><dd>' + (verified.length ? verified.map(R.actorLine).join('<br>') : '<span class="muted">never</span>') + '</dd>';
+  if (fm.stale_after) meta += '<dt>Stale after</dt><dd>' + esc(fm.stale_after) + '</dd>';
+  meta += '<dt>Sources</dt><dd>' + R.sourcesList(sources) + '</dd>';
+  if (isComputation) {
+    meta += '<dt>Runtime</dt><dd>' + esc(fm.runtime || '(missing — required)') + '</dd>';
+    if (fm.parameters) meta += '<dt>Parameters</dt><dd><code>' + esc(JSON.stringify(fm.parameters)) + '</code></dd>';
+    if (fm.computation) meta += '<dt>Computation</dt><dd>' + esc(fm.computation) + '</dd>';
+    if (fm.executor) meta += '<dt>Executor</dt><dd>' + esc(fm.executor.resource || JSON.stringify(fm.executor)) + '</dd>';
+    if (fm.attester) meta += '<dt>Attester</dt><dd>' + esc(fm.attester.resource || JSON.stringify(fm.attester)) + '</dd>';
+  }
+  if (fm.type === 'claim') {
+    meta += '<dt>Confidence</dt><dd>' + esc(fm.confidence) + '%' + (fm.resolve_by ? ' · resolve by ' + esc(fm.resolve_by) : '') +
+      (fm.outcome ? ' · <strong>' + esc(fm.outcome) + '</strong>' : ' · open') + '</dd>';
+  }
+  meta += '</dl>';
+
+  view.innerHTML =
+    '<div class="concept-layout"><div>' +
+    '<div class="concept-head"><h2>' + esc(fm.title || id) + '</h2>' +
+    '<div class="meta">' + typeChip(fm.type) + '<code>' + esc(id) + '</code>' + badges({ status: s.status, trust: s.trust, stale: s.stale, staleAfter: fm.stale_after }) + '</div>' +
+    '<div class="row" id="c-actions">' +
+    '<a href="' + editHref(id) + '"><button class="primary small">Edit</button></a>' +
+    '<button class="small" data-act="verify" title="records a verified event by you">Verified ✓</button>' +
+    (inInbox ? '<button class="small" data-act="read">Mark read</button>' : '') +
+    '<button class="small" data-act="suggest">Suggest links</button>' +
+    '<a href="' + graphHref(id) + '"><button class="small">Graph</button></a>' +
+    (s.status === 'deprecated'
+      ? '<button class="small" data-act="restore">Restore (stable)</button>'
+      : '<button class="small" data-act="deprecate">Deprecate</button>') +
+    '<button class="small danger" data-act="delete">Delete</button>' +
+    '<span id="c-msg" class="muted"></span></div></div>' +
+    '<div id="c-suggest"></div>' +
+    '<div class="concept-body md" id="c-body"></div></div>' +
+    '<aside class="concept-side"><div class="card">' + meta + '</div>' +
+    '<div class="card" id="c-links"><span class="muted">loading links…</span></div></aside></div>';
+
+  renderBody(document.getElementById('c-body'), c.body, id);
+
+  document.getElementById('c-actions').addEventListener('click', async function (e) {
+    var btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    var act = btn.getAttribute('data-act');
+    var msg = document.getElementById('c-msg');
+    if (act === 'suggest') { loadSuggestions(document.getElementById('c-suggest'), id, 'accept', 'Link'); return; }
+    if (act === 'delete' && !confirm('Delete ' + id + '? The file is removed from the bundle (git history keeps it if you sync).')) return;
+    btn.disabled = true;
+    try {
+      if (act === 'verify') { var r = await api('review_done', { id: id }); msg.textContent = 'verified by ' + r.verifiedBy; if (!stale(seq)) renderConcept(id, seq); }
+      else if (act === 'read') { await api('inbox_read', { id: id }); if (!stale(seq)) renderConcept(id, seq); }
+      else if (act === 'deprecate') { await api('write_concept', { id: id, status: 'deprecated' }); if (!stale(seq)) renderConcept(id, seq); }
+      else if (act === 'restore') { await api('write_concept', { id: id, status: 'stable' }); if (!stale(seq)) renderConcept(id, seq); }
+      else if (act === 'delete') { await api('delete_concept', { id: id }); location.hash = '#browse'; }
+    } catch (err) { btn.disabled = false; msg.innerHTML = errorBox(err); }
+  });
+  document.getElementById('c-suggest').addEventListener('click', function (e) {
+    var btn = e.target.closest('button[data-act="accept"]');
+    if (btn) acceptSuggestion(btn, id);
+  });
+
+  var linksEl = document.getElementById('c-links');
+  if (STATUS && !STATUS.hasIndex) {
+    linksEl.innerHTML = '<span class="muted">Links to / cited by need a search index — build one on <a href="#home">Home</a>.</span>';
+    return;
+  }
+  try {
+    var ns = await api('graph_neighbors', { id: id, depth: 1 });
+    var out = ns.filter(function (n) { return n.dir === 'out' || n.dir === 'both'; });
+    var back = ns.filter(function (n) { return n.dir === 'in' || n.dir === 'both'; });
+    var list = function (arr) {
+      return '<ul class="plain">' + arr.map(function (n) { return '<li>' + conceptLink(n.id, n.title) + '</li>'; }).join('') + '</ul>';
+    };
+    linksEl.innerHTML =
+      '<h3>Links to (' + out.length + ')</h3>' + (out.length ? list(out) : '<span class="muted">none</span>') +
+      '<h3>Cited by (' + back.length + ')</h3>' + (back.length ? list(back) : '<span class="muted">none</span>');
+  } catch (e) {
+    linksEl.innerHTML = '<span class="muted">' + esc(e.message) + '</span>';
+  }
+}
+
+// ---- edit ---------------------------------------------------------------
+
+function field(name, label, value, placeholder, type) {
+  return '<label class="field"><span>' + label + '</span><input id="ed-' + name +
+    '" type="' + (type || 'text') + '" value="' + esc(value || '') + '" placeholder="' + esc(placeholder || '') + '"></label>';
+}
+
+/** ISO instant ⇄ <input type=datetime-local> (browser-local wall time). */
+function isoToLocal(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  var pad = function (n) { return String(n).padStart(2, '0'); };
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+function localToIso(v) {
+  if (!v) return '';
+  var d = new Date(v);
+  return isNaN(d.getTime()) ? v : d.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+async function renderEdit(id, seq) {
+  var fm = {}, body = '', exists = false;
+  if (id) {
+    try {
+      var c = await api('read_concept', { id: id });
+      fm = c.frontmatter;
+      body = c.body;
+      exists = true;
+    } catch (e) { if (!stale(seq)) view.innerHTML = errorBox(e); return; }
+    if (stale(seq)) return;
+  }
+  var tags = Array.isArray(fm.tags) ? fm.tags.join(', ') : (fm.tags || '');
+  var sources = Array.isArray(fm.sources) ? fm.sources : (fm.sources ? [fm.sources] : []);
+  var statusOpts = ['stable', 'draft', 'deprecated'].map(function (s) {
+    return '<option' + ((fm.status || 'stable') === s ? ' selected' : '') + '>' + s + '</option>';
+  }).join('');
+
+  view.innerHTML =
+    '<div class="stack"><h2>' + (exists ? 'Edit concept' : 'New concept') + '</h2>' +
+    '<form id="edf" class="stack">' +
+    field('id', 'Id' + (exists ? '' : ' (optional — derived from type + title)'), id, 'notes/my-note') +
+    '<div class="grid">' + field('type', 'Type', fm.type, 'note') + field('title', 'Title', fm.title, '') + '</div>' +
+    field('description', 'Description', fm.description, 'one sentence') +
+    '<div class="grid">' + field('tags', 'Tags (comma-separated)', tags, '') + field('resource', 'Resource (URI)', fm.resource, '') + '</div>' +
+    '<div class="grid"><label class="field"><span>Status</span><select id="ed-status">' + statusOpts + '</select></label>' +
+    field('stale-after', 'Stale after', isoToLocal(fm.stale_after), '', 'datetime-local') + '</div>' +
+    '<div class="field"><span>Sources (provenance)</span><div class="sources-editor" id="ed-sources"></div>' +
+    '<div class="row"><button type="button" class="small" id="ed-addsrc">+ source</button>' +
+    '<span class="muted">attribute claims in the body with [^id]</span></div></div>' +
+    '<label class="field"><span>Body (markdown; links normalize on save)</span>' +
+    '<textarea id="ed-body" rows="18"></textarea></label>' +
+    '<div class="row">' +
+    '<button class="primary">Save</button>' +
+    '<select id="ed-linkpick"><option value="">insert link to…</option></select>' +
+    (exists ? '<button type="button" id="ed-suggest">Suggest links</button>' : '') +
+    (exists ? '<a href="' + conceptHref(id) + '"><button type="button">Cancel</button></a>' : '') +
+    '<span id="ed-msg" class="muted"></span></div>' +
+    (exists ? '<p class="muted">generated: ' + R.actorLine(fm.generated) + ' · verified: ' +
+      (Array.isArray(fm.verified) ? fm.verified.length : fm.verified ? 1 : 0) + ' event(s)</p>' : '') +
+    '</form><div id="ed-sugg"></div></div>';
+  document.getElementById('ed-body').value = body;
+  if (exists) document.getElementById('ed-id').readOnly = true;
+
+  var srcEl = document.getElementById('ed-sources');
+  function addSource(s) {
+    s = s || {};
+    srcEl.insertAdjacentHTML('beforeend',
+      '<div class="srow"><input placeholder="id" value="' + esc(s.id || '') + '" data-k="id">' +
+      '<input placeholder="resource (URL, /path.md, or scope)" value="' + esc(s.resource || '') + '" data-k="resource">' +
+      '<input placeholder="title" value="' + esc(s.title || '') + '" data-k="title">' +
+      '<input placeholder="author (actor)" value="' + esc(s.author || '') + '" data-k="author">' +
+      '<button type="button" class="small" data-del title="remove">✕</button></div>');
+  }
+  sources.forEach(addSource);
+  document.getElementById('ed-addsrc').addEventListener('click', function () { addSource(); });
+  srcEl.addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-del]');
+    if (b) b.closest('.srow').remove();
+  });
+  function collectSources() {
+    return Array.prototype.map.call(srcEl.querySelectorAll('.srow'), function (row) {
+      var s = {};
+      row.querySelectorAll('input').forEach(function (inp) {
+        var v = inp.value.trim();
+        if (v) s[inp.getAttribute('data-k')] = v;
+      });
+      return s;
+    }).filter(function (s) { return s.resource; });
+  }
+
+  var bodyEl = document.getElementById('ed-body');
+  var msgEl = document.getElementById('ed-msg');
+  function insertAtCursor(text) {
+    var st = bodyEl.selectionStart || 0;
+    bodyEl.value = bodyEl.value.slice(0, st) + text + bodyEl.value.slice(bodyEl.selectionEnd || st);
+    bodyEl.focus();
+    bodyEl.selectionStart = bodyEl.selectionEnd = st + text.length;
+  }
+
+  // Concept-id link autocomplete: pick a concept, get a normalized link.
+  api('list_concepts', {}).then(function (ids) {
+    var pick = document.getElementById('ed-linkpick');
+    if (!pick || stale(seq)) return;
+    ids.forEach(function (cid) {
+      var o = document.createElement('option');
+      o.value = cid;
+      o.textContent = cid;
+      pick.appendChild(o);
+    });
+    pick.addEventListener('change', function () {
+      if (!pick.value) return;
+      insertAtCursor('[' + pick.value.split('/').pop() + '](/' + pick.value + '.md)');
+      pick.value = '';
+    });
+  }).catch(function () {});
+
+  if (exists) {
+    var suggEl = document.getElementById('ed-sugg');
+    document.getElementById('ed-suggest').addEventListener('click', function () {
+      loadSuggestions(suggEl, id, 'insert', 'Insert');
+    });
+    // Inserting is editor-local: the link lands in the textarea and becomes
+    // real (and normalized) only when the user saves.
+    suggEl.addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-act="insert"]');
+      if (!btn) return;
+      var target = btn.closest('.suggestion').getAttribute('data-target');
+      insertAtCursor('[' + target.split('/').pop() + '](/' + target + '.md)');
+      btn.textContent = 'inserted ✓';
+    });
+  }
+
+  document.getElementById('edf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var val = function (n) { return document.getElementById('ed-' + n).value.trim(); };
+    var params = { body: bodyEl.value, tags: val('tags'), status: val('status') };
+    ['type', 'title', 'description', 'resource'].forEach(function (n) { if (val(n)) params[n] = val(n); });
+    var sa = localToIso(val('stale-after'));
+    params['stale-after'] = sa;
+    params.sources = JSON.stringify(collectSources());
+    msgEl.textContent = 'saving…';
+    try {
+      var r;
+      if (val('id')) { params.id = val('id'); r = await api('write_concept', params); }
+      else {
+        // No id: derive it from type + title (the `new` op), which refuses to clobber.
+        if (!params.type || !params.title || !params.description) throw new Error('type, title and description are required');
+        delete params['stale-after'];
+        delete params.sources;
+        r = await api('new_concept', params);
+        if (sa || collectSources().length) await api('write_concept', { id: r.id, 'stale-after': sa, sources: JSON.stringify(collectSources()) });
+      }
+      msgEl.textContent = (r.noop ? 'unchanged ' : r.created ? 'created ' : 'updated ') + r.id;
+      location.hash = conceptHref(r.id).slice(1);
+    } catch (err) {
+      msgEl.textContent = '';
+      view.querySelector('.stack').insertAdjacentHTML('afterbegin', errorBox(err));
+    }
+  });
+}
+
+// ---- graph view ---------------------------------------------------------
+
+// Same validated categorical palettes as the static viewer (fixed CVD-safe
+// slot order; types beyond 8 fold into the muted overflow color).
+var PALETTE = {
+  dark: ['#3987e5', '#199e70', '#c98500', '#008300', '#9085e9', '#e66767', '#d55181', '#d95926'],
+  light: ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7', '#e34948', '#e87ba4', '#eb6834'],
+};
+var OVERFLOW = '#898781';
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+async function renderGraph(focusId, seq) {
+  view.innerHTML =
+    '<div id="gwrap"><div id="gmain">' +
+    '<div id="gbar"><input id="gsearch" type="search" placeholder="Filter title / id / tags…">' +
+    '<select id="glayout"><option value="cose">cose</option><option value="concentric">concentric</option>' +
+    '<option value="breadthfirst">breadth-first</option><option value="circle">circle</option><option value="grid">grid</option></select>' +
+    '<button id="gfit">Fit</button><span id="gstats" class="muted"></span></div>' +
+    '<div id="gcy"></div><div id="glegend"></div></div>' +
+    '<div id="gdetail"><p class="empty">Click a node.</p></div></div>';
+  var g;
+  try { g = await api('graph_data', {}); }
+  catch (e) { if (!stale(seq)) { view.className = ''; view.innerHTML = errorBox(e); } return; }
+  if (stale(seq)) return;
+
+  var byId = {}, linksTo = {}, citedBy = {}, types = [], typeCount = {};
+  g.nodes.forEach(function (n) {
+    byId[n.id] = n;
+    var t = n.type || '(untyped)';
+    typeCount[t] = (typeCount[t] || 0) + 1;
+    if (types.indexOf(t) < 0) types.push(t);
+  });
+  g.edges.forEach(function (e) {
+    (linksTo[e.src] = linksTo[e.src] || []).push(e.dst);
+    (citedBy[e.dst] = citedBy[e.dst] || []).push(e.src);
+  });
+  types.sort();
+  var mode = document.documentElement.getAttribute('data-theme');
+  var colorOf = {};
+  types.forEach(function (t, i) { colorOf[t] = i < 8 ? PALETTE[mode][i] : OVERFLOW; });
+  document.getElementById('gstats').textContent = g.nodes.length + ' concepts · ' + g.edges.length + ' links';
+
+  var cy = cytoscape({
+    container: document.getElementById('gcy'),
+    elements: g.nodes.map(function (n) {
+      return { data: { id: n.id, label: n.title || n.id, type: n.type || '(untyped)',
+        status: n.status, stale: n.stale,
+        size: 16 + 4 * Math.sqrt(Math.min(n.bodyLen, 20000) / 100) } };
+    }).concat(g.edges.map(function (e) {
+      return { data: { id: JSON.stringify([e.src, e.dst]), source: e.src, target: e.dst } };
+    })),
+    style: [
+      { selector: 'node', style: {
+        'background-color': function (ele) { return colorOf[ele.data('type')]; },
+        width: 'data(size)', height: 'data(size)', label: 'data(label)',
+        'font-size': 9, color: cssVar('--ink-2'),
+        'text-outline-color': cssVar('--surface'), 'text-outline-width': 2,
+        'text-valign': 'bottom', 'text-margin-y': 4,
+        'text-wrap': 'ellipsis', 'text-max-width': '120px' } },
+      { selector: 'node[?stale]', style: { 'border-width': 2, 'border-style': 'dashed', 'border-color': cssVar('--danger') } },
+      { selector: 'node[status = "deprecated"]', style: { opacity: 0.45 } },
+      { selector: 'edge', style: {
+        width: 1.2, 'line-color': cssVar('--edge-line'),
+        'target-arrow-color': cssVar('--edge-line'),
+        'target-arrow-shape': 'triangle', 'arrow-scale': 0.8, 'curve-style': 'bezier' } },
+      { selector: 'node:selected', style: {
+        'border-width': 3, 'border-style': 'solid', 'border-color': cssVar('--accent') } },
+      { selector: '.dim', style: { opacity: 0.15 } },
+    ],
+    layout: { name: 'cose', animate: false },
+    wheelSensitivity: 0.2,
+  });
+  window.cy = cy; // console/driver access, like the static viewer
+
+  var checked = {};
+  var legend = document.getElementById('glegend');
+  legend.innerHTML = types.map(function (t) {
+    checked[t] = true;
+    return '<label><input type="checkbox" checked data-type="' + esc(t) + '"><span class="swatch" style="background:' +
+      colorOf[t] + '"></span>' + esc(t) + '<span class="count">' + typeCount[t] + '</span></label>';
+  }).join('');
+  var search = document.getElementById('gsearch');
+  function applyFilters() {
+    var q = search.value.trim().toLowerCase();
+    cy.batch(function () {
+      cy.nodes().forEach(function (node) {
+        node.style('display', checked[node.data('type')] ? 'element' : 'none');
+      });
+      cy.elements().removeClass('dim');
+      if (!q) return;
+      cy.elements().addClass('dim');
+      cy.nodes().forEach(function (node) {
+        var n = byId[node.id()];
+        if ((n.id + ' ' + n.title + ' ' + n.tags.join(' ')).toLowerCase().indexOf(q) >= 0) {
+          node.removeClass('dim');
+          node.connectedEdges().removeClass('dim');
+        }
+      });
+    });
+  }
+  legend.addEventListener('change', function (e) {
+    var cb = e.target;
+    if (cb.getAttribute('data-type') !== null) { checked[cb.getAttribute('data-type')] = cb.checked; applyFilters(); }
+  });
+  search.addEventListener('input', applyFilters);
+  document.getElementById('glayout').addEventListener('change', function (e) {
+    cy.layout({ name: e.target.value, animate: false }).run();
+  });
+  document.getElementById('gfit').addEventListener('click', function () { cy.fit(undefined, 40); });
+
+  var detail = document.getElementById('gdetail');
+  function conceptList(ids) {
+    return '<ul>' + ids.map(function (cid) {
+      return '<li><a href="#focus" data-id="' + esc(cid) + '">' + esc((byId[cid] && byId[cid].title) || cid) + '</a></li>';
+    }).join('') + '</ul>';
+  }
+  function showDetail(id) {
+    var n = byId[id];
+    if (!n) return;
+    var h = '<h2>' + esc(n.title || n.id) + '</h2>' +
+      '<div class="meta"><span class="chip"><span class="swatch" style="background:' +
+      colorOf[n.type || '(untyped)'] + '"></span>' + esc(n.type || '(untyped)') +
+      '</span><code>' + esc(n.id) + '</code></div>' +
+      '<div class="meta">' + badges(n) + '</div>' +
+      '<div class="row"><a href="' + conceptHref(id) + '"><button class="small">Open</button></a>' +
+      '<a href="' + editHref(id) + '"><button class="small">Edit</button></a></div>';
+    if (n.description) h += '<p class="why">' + esc(n.description) + '</p>';
+    if (n.tags.length) h += '<div class="meta">' + chips(n.tags) + '</div>';
+    h += '<dl class="kv"><dt>Generated</dt><dd>' + R.actorLine(n.generated) + '</dd>' +
+      '<dt>Verified</dt><dd>' + (n.verified.length ? n.verified.map(R.actorLine).join('<br>') : '—') + '</dd>' +
+      '<dt>Sources</dt><dd>' + R.sourcesList(n.sources) + '</dd></dl>';
+    h += '<div class="body md" id="gbody"></div>';
+    var out = linksTo[id] || [], back = citedBy[id] || [];
+    if (out.length) h += '<h3>Links to</h3>' + conceptList(out);
+    if (back.length) h += '<h3>Cited by</h3>' + conceptList(back);
+    detail.innerHTML = h;
+    var bodyEl = document.getElementById('gbody');
+    bodyEl.innerHTML = R.renderMarkdown(n.body);
+    // In-graph navigation: internal links focus the node instead of leaving the view.
+    R.wireLinks(bodyEl, { baseId: id, hrefFor: function () { return '#focus'; }, known: function (x) { return !!byId[x]; } });
+  }
+  function focusNode(id) {
+    var node = cy.getElementById(id);
+    if (node.nonempty()) {
+      cy.$(':selected').unselect();
+      node.select();
+      cy.animate({ center: { eles: node } }, { duration: 200 });
+    }
+    showDetail(id);
+  }
+  detail.addEventListener('click', function (e) {
+    var a = e.target.closest('a[href="#focus"]');
+    if (!a) return;
+    e.preventDefault();
+    focusNode(a.getAttribute('data-id'));
+  });
+  cy.on('tap', 'node', function (e) { showDetail(e.target.id()); });
+  if (focusId) focusNode(focusId);
+}
+
+// ---- search view --------------------------------------------------------
+
+function renderSearch(initialQ) {
+  view.innerHTML =
+    '<div class="stack"><h2>Search</h2>' +
+    '<form id="sf" class="row">' +
+    '<input id="sq" style="flex:1" placeholder="keyword + vector search…" autofocus>' +
+    '<select id="sp"><option value="">balanced</option><option>lean</option><option>max</option></select>' +
+    '<button class="primary">Search</button></form>' +
+    '<div id="sout" class="list"></div></div>';
+  var out = document.getElementById('sout');
+  var qEl = document.getElementById('sq');
+  document.getElementById('sf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var q = qEl.value.trim();
+    if (!q) return;
+    busy(out, 'searching…');
+    var params = { query: q };
+    var p = document.getElementById('sp').value;
+    if (p) params.profile = p;
+    try {
+      var hits = await api('search', params);
+      out.innerHTML = hits.length
+        ? hits.map(function (h) {
+            return '<div class="card"><div class="title">' + conceptLink(h.id, h.title) +
+              ' <span class="muted">(' + h.score.toFixed(3) + ')</span></div>' +
+              '<div class="why"><code>' + esc(h.id) + '</code> · ' + chips(h.sources) + '</div>' +
+              (h.description ? '<div class="why">' + esc(h.description) + '</div>' : '') +
+              (h.snippet ? '<div class="muted">' + esc(h.snippet.slice(0, 240)) + '…</div>' : '') +
+              '<div class="row"><a href="' + conceptHref(h.id) + '"><button class="small">Open</button></a>' +
+              '<a href="' + editHref(h.id) + '"><button class="small">Edit</button></a>' +
+              '<a href="' + graphHref(h.id) + '"><button class="small">Graph</button></a></div></div>';
+          }).join('')
+        : '<div class="empty">No hits.</div>';
+    } catch (err) { out.innerHTML = errorBox(err); }
+  });
+  if (initialQ) { qEl.value = initialQ; qEl.form.requestSubmit(); }
+}
+
+// ---- ask view -----------------------------------------------------------
+
+function citationLinks(citations) {
+  return citations.map(function (c) {
+    return '<span class="chip">' + conceptLink(c.id, c.title) + ' · <a href="' + graphHref(c.id) + '">graph</a></span>';
+  }).join(' ');
+}
+
+function renderAsk() {
+  view.innerHTML =
+    '<div class="stack"><h2>Ask your brain</h2>' +
+    '<form id="askf" class="row">' +
+    '<input id="askq" style="flex:1" placeholder="What do my notes say about…" autofocus>' +
+    '<select id="askp"><option value="">balanced</option><option>lean</option><option>max</option></select>' +
+    '<button class="primary">Ask</button></form>' +
+    '<div id="askctx"></div><div id="askout" class="md"></div><div id="asksrc"></div></div>';
+  var ctxEl = document.getElementById('askctx');
+  var outEl = document.getElementById('askout');
+  var srcEl = document.getElementById('asksrc');
+  document.getElementById('askf').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var q = document.getElementById('askq').value.trim();
+    if (!q) return;
+    busy(ctxEl, 'retrieving…');
+    outEl.innerHTML = '';
+    srcEl.innerHTML = '';
+    var url = '/api/ask/stream?token=' + encodeURIComponent(TOKEN) + '&question=' + encodeURIComponent(q);
+    var profile = document.getElementById('askp').value;
+    if (profile) url += '&profile=' + encodeURIComponent(profile);
+    if (BRAIN) url += '&brain=' + encodeURIComponent(BRAIN);
+    var es = new EventSource(url);
+    es.addEventListener('context', function (ev) {
+      var ctx = JSON.parse(ev.data);
+      ctxEl.innerHTML = ctx.length ? '<span class="muted">reading:</span> ' + citationLinks(ctx) : '';
+    });
+    es.addEventListener('answer', function (ev) {
+      outEl.innerHTML = R.renderMarkdown(JSON.parse(ev.data).answer);
+    });
+    es.addEventListener('done', function (ev) {
+      var r = JSON.parse(ev.data).result;
+      if (r.citations.length) srcEl.innerHTML = '<h3>Sources</h3>' + citationLinks(r.citations);
+      es.close();
+    });
+    es.addEventListener('error', function (ev) {
+      if (ev.data) outEl.innerHTML = errorBox(JSON.parse(ev.data).error);
+      else if (!outEl.innerHTML) outEl.innerHTML = errorBox('stream failed');
+      es.close();
+    });
+  });
+}
+
+// ---- review view --------------------------------------------------------
+
+async function renderReview() {
+  view.innerHTML = '<div class="stack"><h2>Review</h2>' +
+    '<p class="muted">A small daily queue with stated reasons. “Reviewed ✓” records a <code>verified</code> event by you (OKF trust tier: human-reviewed).</p>' +
+    '<label class="row"><input type="checkbox" id="rgarnish"> AI garnish (connects items to recent notes)</label>' +
+    '<div id="rlist" class="list"></div></div>';
+  var listEl = document.getElementById('rlist');
+  var garnishEl = document.getElementById('rgarnish');
+  async function load() {
+    busy(listEl, 'scoring…');
+    var q;
+    try { q = await api('review_queue', garnishEl.checked ? { garnish: true } : {}); }
+    catch (e) { listEl.innerHTML = errorBox(e); return; }
+    if (!q.length) { listEl.innerHTML = '<div class="empty">Queue is empty — nothing needs review.</div>'; return; }
+    listEl.innerHTML = q.map(function (it, i) {
+      return '<div class="card" data-id="' + esc(it.id) + '">' +
+        '<div class="title">' + (i + 1) + '. ' + conceptLink(it.id, it.title) +
+        ' <span class="muted">(' + it.score.toFixed(2) + ')</span></div>' +
+        '<div class="why">' + esc(it.reasons.join('; ')) + '</div>' +
+        (it.garnish ? '<div class="garnish">↳ ' + esc(it.garnish) + '</div>' : '') +
+        cardActions(it.id, '<button class="small" data-act="done">Reviewed ✓</button><button class="small" data-act="snooze">Snooze 7d</button>') +
+        '</div>';
+    }).join('');
+  }
+  wireCards(listEl, async function (act, id) {
+    await api(act === 'done' ? 'review_done' : 'review_snooze', { id: id });
+    load();
   });
   garnishEl.addEventListener('change', load);
   load();
@@ -396,43 +979,29 @@ async function renderReview() {
 // ---- inbox view ---------------------------------------------------------
 
 async function renderInbox() {
-  view.innerHTML = '<div class="stack"><h2>Inbox</h2><div id="ilist" class="stack"></div></div>';
+  view.innerHTML = '<div class="stack"><h2>Inbox</h2><div id="ilist" class="list"></div></div>';
   var listEl = document.getElementById('ilist');
   async function load() {
     var rows;
     try { rows = await api('inbox_list', {}); }
     catch (e) { listEl.innerHTML = errorBox(e); return; }
-    if (!rows.length) { listEl.innerHTML = '<div class="notice">Inbox is empty.</div>'; return; }
+    if (!rows.length) { listEl.innerHTML = '<div class="empty">Inbox is empty.</div>'; return; }
     listEl.innerHTML = rows.map(function (r) {
       return '<div class="card" data-id="' + esc(r.id) + '">' +
-        '<div class="title">' + esc(r.title || r.id) + '</div>' +
-        '<div class="why"><code>' + esc(r.id) + '</code></div>' +
-        '<div class="row"><a href="' + editorHref(r.id) + '"><button>Open</button></a>' +
-        '<button data-act="read">Mark read</button>' +
-        '<button data-act="suggest">Suggest links</button>' +
-        '<a href="' + graphHref(r.id) + '"><button>Graph</button></a></div>' +
-        '<div class="suggest"></div></div>';
+        '<div class="title">' + conceptLink(r.id, r.title) + '</div>' +
+        '<div class="why"><code>' + esc(r.id) + '</code> · ' + dateOf(r.timestamp) + '</div>' +
+        cardActions(r.id, '<button class="small" data-act="read">Mark read</button>') + '</div>';
     }).join('');
   }
-  listEl.addEventListener('click', async function (e) {
-    var btn = e.target.closest('button[data-act]');
-    if (!btn) return;
-    var card = btn.closest('.card');
-    var id = card.getAttribute('data-id');
-    var act = btn.getAttribute('data-act');
-    if (act === 'suggest') { loadSuggestions(card.querySelector('.suggest'), id, 'accept', 'Link'); return; }
-    if (act === 'accept') { acceptSuggestion(btn, id); return; }
-    btn.disabled = true;
-    try { await api('inbox_read', { id: id }); load(); }
-    catch (err) { listEl.insertAdjacentHTML('afterbegin', errorBox(err)); }
+  wireCards(listEl, async function (act, id) {
+    await api('inbox_read', { id: id });
+    load();
   });
   load();
 }
 
-// ---- add view (capture / clip / rss / import) ---------------------------
+// ---- add view (capture / clip / rss / import / bookmarklet) ----------------
 
-// One home for the quick-ingest ops that don't need the full editor: capture a
-// note, clip a URL, pull configured feeds, or bulk-import a server-side path.
 function renderAdd() {
   view.innerHTML =
     '<div class="stack"><h2>Add to your brain</h2>' +
@@ -446,21 +1015,39 @@ function renderAdd() {
     '<form id="clipf" class="row">' +
     '<input id="clip-url" style="flex:1" placeholder="https://… page to clip">' +
     '<label class="row" style="gap:5px"><input type="checkbox" id="clip-read"> already read</label>' +
+    '<label class="row" style="gap:5px"><input type="checkbox" id="clip-auto"> auto-tag (AI)</label>' +
     '<button class="primary">Clip</button></form><div id="clip-out"></div>' +
-    '<h3>Pull RSS feeds</h3><div class="row">' +
-    '<button id="rss-run" class="primary">Pull configured feeds</button>' +
-    '<span class="muted">config <code>rss.feeds</code></span></div><div id="rss-out"></div>' +
+    '<p class="muted">Clipped pages arrive as <code>references/</code> concepts with the page recorded under <code>sources</code>.</p>' +
+    '<h3>Bookmarklet</h3><div id="bm-out" class="muted">loading…</div>' +
+    '<h3>Pull RSS feeds</h3><form id="rssf" class="row">' +
+    '<input id="rss-url" style="flex:1" placeholder="feed URL (empty = every configured rss.feeds entry)">' +
+    '<button class="primary">Pull</button></form><div id="rss-out"></div>' +
     '<h3>Import markdown (server-side path)</h3>' +
     '<form id="impf" class="row">' +
     '<input id="imp-path" style="flex:1" placeholder="/path/to/file-or-directory on the okb host">' +
+    '<input id="imp-dest" placeholder="dest dir (optional)" style="width:150px">' +
     '<label class="row" style="gap:5px"><input type="checkbox" id="imp-over"> overwrite</label>' +
     '<button class="primary">Import</button></form><div id="imp-out"></div></div>';
 
-  function out(el, p) { document.getElementById(el).innerHTML = p; }
-  function busy(el) { out(el, '<span class="muted">working…</span>'); }
+  var out = setHtml;
+  function working(el) { setHtml(el, '<span class="muted">working…</span>'); }
   function done(el, id, label) {
-    out(el, '<div class="notice">' + esc(label) + ' — <a href="' + editorHref(id) + '">open</a></div>');
+    out(el, '<div class="notice">' + esc(label) + ' — ' + conceptLink(id, 'open') + '</div>');
   }
+
+  get('/api/bookmarklet').then(function (r) {
+    var el = document.getElementById('bm-out');
+    if (!el) return;
+    var a = document.createElement('a');
+    a.href = r.bookmarklet;
+    a.textContent = '📎 Clip to okbrain';
+    a.className = 'chip';
+    a.title = 'drag me to your bookmarks bar';
+    el.className = '';
+    el.innerHTML = '';
+    el.appendChild(a);
+    el.insertAdjacentHTML('beforeend', ' <span class="muted">drag this to your bookmarks bar; clicking it on any page clips that page (needs okb serve on port ' + esc(r.port) + ')</span>');
+  }).catch(function (e) { out('bm-out', errorBox(e)); });
 
   document.getElementById('capf').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -469,11 +1056,11 @@ function renderAdd() {
     var params = { text: text };
     var tags = document.getElementById('cap-tags').value.trim();
     if (tags) params.tags = tags;
-    busy('cap-out');
+    working('cap-out');
     try {
       var r = await api('capture', params);
-      document.getElementById('cap-text').value = '';
-      document.getElementById('cap-tags').value = '';
+      var form = document.getElementById('capf');
+      if (form) form.reset();
       done('cap-out', r.id, (r.created ? 'captured ' : 'updated ') + r.id);
     } catch (err) { out('cap-out', errorBox(err)); }
   });
@@ -484,7 +1071,8 @@ function renderAdd() {
     if (!url) return;
     var params = { url: url };
     if (document.getElementById('clip-read').checked) params.read = true;
-    busy('clip-out');
+    if (document.getElementById('clip-auto').checked) params['auto-tag'] = true;
+    working('clip-out');
     try {
       var r = await api('clip', params);
       var msg = r.deduped
@@ -494,10 +1082,12 @@ function renderAdd() {
     } catch (err) { out('clip-out', errorBox(err)); }
   });
 
-  document.getElementById('rss-run').addEventListener('click', async function () {
-    busy('rss-out');
+  document.getElementById('rssf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var url = document.getElementById('rss-url').value.trim();
+    working('rss-out');
     try {
-      var feeds = await api('rss', {});
+      var feeds = await api('rss', url ? { url: url } : {});
       out('rss-out', '<div class="notice">' + esc(feeds.map(function (f) {
         if (f.error) return (f.feed || f.url) + ' — FAILED: ' + f.error;
         return (f.feed || f.url) + ': ' + f.added.length + ' added, ' + f.deduped + ' known';
@@ -510,8 +1100,10 @@ function renderAdd() {
     var path = document.getElementById('imp-path').value.trim();
     if (!path) return;
     var params = { path: path };
+    var dest = document.getElementById('imp-dest').value.trim();
+    if (dest) params.dest = dest;
     if (document.getElementById('imp-over').checked) params.overwrite = true;
-    busy('imp-out');
+    working('imp-out');
     try {
       var r = await api('import', params);
       out('imp-out', '<div class="notice">' + esc(
@@ -547,10 +1139,7 @@ async function renderClaims() {
     var statement = document.getElementById('t-statement').value.trim();
     var confidence = document.getElementById('t-confidence').value.trim();
     if (!statement) return;
-    if (confidence === '') {
-      document.getElementById('t-msg').textContent = 'confidence is required (0–100)';
-      return;
-    }
+    if (confidence === '') { document.getElementById('t-msg').textContent = 'confidence is required (0–100)'; return; }
     var params = { statement: statement, confidence: parseInt(confidence, 10) };
     ['resolve-by', 'tags', 'body'].forEach(function (n) {
       var v = document.getElementById('t-' + n).value.trim();
@@ -559,20 +1148,21 @@ async function renderClaims() {
     document.getElementById('t-msg').textContent = 'staking…';
     try {
       var r = await api('take', params);
-      document.getElementById('tf').reset();
-      document.getElementById('t-msg').textContent = 'staked ' + r.id + ' at ' + r.confidence + '%';
+      var form = document.getElementById('tf');
+      if (form) form.reset();
+      setHtml('t-msg', 'staked ' + conceptLink(r.id) + ' at ' + r.confidence + '%');
       loadCalibration();
-    } catch (err) { document.getElementById('t-msg').textContent = ''; document.getElementById('c-out').innerHTML = errorBox(err); }
+    } catch (err) { setHtml('t-msg', ''); setHtml('c-out', errorBox(err)); }
   });
 
   async function loadCalibration() {
     var el = document.getElementById('c-out');
-    el.innerHTML = '<span class="muted">scoring…</span>';
+    busy(el, 'scoring…');
     var c;
     try { c = await api('calibrate', {}); }
     catch (e) { el.innerHTML = errorBox(e); return; }
     var total = c.open.length + c.correct + c.incorrect + c.void;
-    if (!total) { el.innerHTML = '<div class="notice">No claims yet — stake one above.</div>'; return; }
+    if (!total) { el.innerHTML = '<div class="empty">No claims yet — stake one above.</div>'; return; }
     var h = '<h3>Score</h3><div class="tiles">' +
       tile('Correct', c.correct) + tile('Incorrect', c.incorrect) + tile('Void', c.void) +
       tile('Brier', c.brier === null ? '—' : c.brier.toFixed(3)) + '</div>';
@@ -585,13 +1175,12 @@ async function renderClaims() {
     if (c.open.length) {
       h += '<h3>Open claims (' + c.open.length + ')</h3>' + c.open.map(function (o) {
         return '<div class="card" data-id="' + esc(o.id) + '">' +
-          '<div class="title">' + (o.overdue ? '<span class="chip warn">overdue</span> ' : '') +
-          '<a href="' + editorHref(o.id) + '">' + esc(o.title || o.id) + '</a></div>' +
+          '<div class="title">' + (o.overdue ? '<span class="chip warn">overdue</span> ' : '') + conceptLink(o.id, o.title) + '</div>' +
           '<div class="why">' + (o.confidence === null ? '?' : o.confidence + '%') +
           (o.resolveBy ? ' · resolve by ' + esc(o.resolveBy) : '') + '</div>' +
-          '<div class="row"><button data-act="correct">Correct</button>' +
-          '<button data-act="incorrect">Incorrect</button>' +
-          '<button data-act="void">Void</button></div></div>';
+          '<div class="row"><button class="small" data-act="correct">Correct</button>' +
+          '<button class="small" data-act="incorrect">Incorrect</button>' +
+          '<button class="small" data-act="void">Void</button></div></div>';
       }).join('');
     }
     el.innerHTML = h;
@@ -603,7 +1192,7 @@ async function renderClaims() {
     var id = btn.closest('.card').getAttribute('data-id');
     btn.closest('.row').querySelectorAll('button').forEach(function (b) { b.disabled = true; });
     try { await api('resolve', { id: id, outcome: btn.getAttribute('data-act') }); loadCalibration(); }
-    catch (err) { document.getElementById('c-out').insertAdjacentHTML('afterbegin', errorBox(err)); }
+    catch (err) { setHtml('c-out', errorBox(err)); }
   });
 
   loadCalibration();
@@ -613,7 +1202,7 @@ async function renderClaims() {
 
 async function renderStats() {
   view.innerHTML =
-    '<div class="stack"><h2>Stats</h2><div id="st-out"><span class="muted">counting…</span></div>' +
+    '<div class="stack wide"><h2>Stats</h2><div id="st-out"><span class="muted">counting…</span></div>' +
     '<h3>Path between two concepts</h3>' +
     '<form id="pf" class="row">' +
     '<input id="p-from" placeholder="from id"><span class="muted">→</span>' +
@@ -626,14 +1215,19 @@ async function renderStats() {
     var h = '<div class="tiles">' +
       tile('Concepts', s.concepts) + tile('Links', s.edges + (s.typedEdges ? ' · ' + s.typedEdges + ' typed' : '')) +
       tile('Tags', s.tags) + tile('Orphans', s.orphans) + tile('Inbox', s.inbox) +
-      tile('Never reviewed', s.neverReviewed) + tile('Stale >' + s.staleDays + 'd', s.stale) + '</div>';
+      tile('Never reviewed', s.neverReviewed) + tile('Untouched >' + s.staleDays + 'd', s.stale) +
+      tile('Past stale_after', s.expired, s.expired ? 'alert' : '') + '</div>' +
+      '<h3>Lifecycle &amp; trust (OKF v0.2)</h3><div class="tiles">' +
+      tile('Draft', s.byStatus.draft) + tile('Stable', s.byStatus.stable) + tile('Deprecated', s.byStatus.deprecated) +
+      tile('Unverified', s.byTrust.unverified) + tile('Machine-confirmed', s.byTrust['machine-confirmed']) +
+      tile('Human-reviewed', s.byTrust['human-reviewed'], 'good') + '</div>';
     if (s.byType.length) h += '<h3>By type</h3><div class="row">' +
-      s.byType.map(function (t) { return '<span class="chip">' + esc(t.type) + ' ' + t.count + '</span>'; }).join(' ') + '</div>';
+      s.byType.map(function (t) { return '<span class="chip">' + esc(t.type || '(untyped)') + ' ' + t.count + '</span>'; }).join(' ') + '</div>';
     if (s.topTags.length) h += '<h3>Top tags</h3><div class="row">' +
       s.topTags.map(function (t) { return '<span class="chip">' + esc(t.tag) + ' ' + t.count + '</span>'; }).join(' ') + '</div>';
-    if (s.newest) h += '<p class="muted">freshest ' + esc(s.newest.slice(0, 10)) + ' · oldest ' + esc(s.oldest.slice(0, 10)) + '</p>';
-    document.getElementById('st-out').innerHTML = h;
-  } catch (e) { document.getElementById('st-out').innerHTML = errorBox(e); }
+    if (s.newest) h += '<p class="muted">freshest ' + dateOf(s.newest) + ' · oldest ' + dateOf(s.oldest) + '</p>';
+    setHtml('st-out', h);
+  } catch (e) { setHtml('st-out', errorBox(e)); }
 
   document.getElementById('pf').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -641,175 +1235,55 @@ async function renderStats() {
     var to = document.getElementById('p-to').value.trim();
     var el = document.getElementById('p-out');
     if (!from || !to) return;
-    el.innerHTML = '<span class="muted">searching…</span>';
+    busy(el, 'searching…');
     try {
       var hops = await api('graph_path', { from: from, to: to });
-      if (!hops) { el.innerHTML = '<div class="notice">No path found.</div>'; return; }
+      if (!hops) { el.innerHTML = '<div class="empty">No path found.</div>'; return; }
       el.innerHTML = '<div class="notice">' + hops.map(function (hp, i) {
-        var label = '<a href="' + graphHref(hp.id) + '">' + esc(hp.title || hp.id) + '</a>';
-        return i === 0 ? label : ' ' + DIR_MARK[hp.dir] + ' ' + label;
+        return (i === 0 ? '' : ' ' + DIR_MARK[hp.dir] + ' ') + conceptLink(hp.id, hp.title);
       }).join('') + '</div>';
     } catch (err) { el.innerHTML = errorBox(err); }
   });
 
   try {
     var os = await api('orphans', {});
-    document.getElementById('or-out').innerHTML = os.length
-      ? os.map(function (o) {
-          return '<div class="row"><a href="' + editorHref(o.id) + '">' + esc(o.title || o.id) + '</a> ' +
-            '<a href="' + graphHref(o.id) + '" class="muted">graph</a></div>';
-        }).join('')
-      : '<div class="notice">No orphans.</div>';
-  } catch (e) { document.getElementById('or-out').innerHTML = errorBox(e); }
-}
-
-// ---- editor view --------------------------------------------------------
-
-function field(name, label, value, placeholder) {
-  return '<label class="field"><span>' + label + '</span><input id="ed-' + name +
-    '" value="' + esc(value || '') + '" placeholder="' + esc(placeholder || '') + '"></label>';
-}
-
-async function renderEditor(id) {
-  var fm = {}, body = '', exists = false;
-  if (id) {
-    try {
-      var c = await api('read_concept', { id: id });
-      fm = c.frontmatter;
-      body = c.body;
-      exists = true;
-    } catch (e) {
-      view.innerHTML = errorBox(e);
-      return;
-    }
-  }
-  var tags = Array.isArray(fm.tags) ? fm.tags.join(', ') : '';
-  view.innerHTML =
-    '<div class="stack"><h2>' + (exists ? 'Edit concept' : 'New concept') + '</h2>' +
-    '<form id="edf" class="stack">' +
-    field('id', 'Id', id, 'notes/my-note') +
-    '<div class="grid">' +
-    field('type', 'Type', fm.type, 'note') +
-    field('title', 'Title', fm.title, '') +
-    '</div>' +
-    field('description', 'Description', fm.description, 'one line') +
-    '<div class="grid">' +
-    field('tags', 'Tags (comma-separated)', tags, '') +
-    field('resource', 'Resource (URI)', fm.resource, '') +
-    '</div>' +
-    '<label class="field"><span>Body (markdown; links normalize on save)</span>' +
-    '<textarea id="ed-body" rows="16"></textarea></label>' +
-    '<div class="row">' +
-    '<button class="primary">Save</button>' +
-    '<select id="ed-linkpick"><option value="">insert link to…</option></select>' +
-    '<button type="button" id="ed-cite">+ Citations</button>' +
-    (exists ? '<button type="button" id="ed-suggest">Suggest links</button>' : '') +
-    (exists ? '<a href="' + graphHref(id) + '"><button type="button">Open in graph</button></a>' : '') +
-    '<span id="ed-msg" class="muted"></span></div>' +
-    '</form><div id="ed-sugg"></div><div id="ed-back"></div></div>';
-  document.getElementById('ed-body').value = body;
-  if (exists) document.getElementById('ed-id').readOnly = true;
-
-  var bodyEl = document.getElementById('ed-body');
-  var msgEl = document.getElementById('ed-msg');
-  function insertAtCursor(text) {
-    var s = bodyEl.selectionStart || 0;
-    bodyEl.value = bodyEl.value.slice(0, s) + text + bodyEl.value.slice(bodyEl.selectionEnd || s);
-    bodyEl.focus();
-    bodyEl.selectionStart = bodyEl.selectionEnd = s + text.length;
-  }
-
-  // Concept-id link autocomplete: pick a concept, get a normalized link.
-  api('list_concepts', {}).then(function (ids) {
-    var pick = document.getElementById('ed-linkpick');
-    ids.forEach(function (cid) {
-      var o = document.createElement('option');
-      o.value = cid;
-      o.textContent = cid;
-      pick.appendChild(o);
-    });
-    pick.addEventListener('change', function () {
-      if (!pick.value) return;
-      insertAtCursor('[' + pick.value.split('/').pop() + '](/' + pick.value + '.md)');
-      pick.value = '';
-    });
-  }).catch(function () {});
-
-  if (exists) {
-    var suggEl = document.getElementById('ed-sugg');
-    document.getElementById('ed-suggest').addEventListener('click', function () {
-      loadSuggestions(suggEl, id, 'insert', 'Insert');
-    });
-    // Inserting is editor-local: the link lands in the textarea and becomes
-    // real (and normalized) only when the user saves.
-    suggEl.addEventListener('click', function (e) {
-      var btn = e.target.closest('button[data-act="insert"]');
-      if (!btn) return;
-      var target = btn.closest('.suggestion').getAttribute('data-target');
-      insertAtCursor('[' + target.split('/').pop() + '](/' + target + '.md)');
-      btn.textContent = 'inserted ✓';
-    });
-  }
-
-  document.getElementById('ed-cite').addEventListener('click', function () {
-    var url = document.getElementById('ed-resource').value.trim();
-    insertAtCursor('\n# Citations\n\n- [' +
-      (document.getElementById('ed-title').value || 'Source') + '](' + (url || 'https://…') + ')\n');
-  });
-
-  document.getElementById('edf').addEventListener('submit', async function (e) {
-    e.preventDefault();
-    var val = function (n) { return document.getElementById('ed-' + n).value.trim(); };
-    var params = { id: val('id'), body: bodyEl.value, tags: val('tags') };
-    ['type', 'title', 'description', 'resource'].forEach(function (n) {
-      if (val(n)) params[n] = val(n);
-    });
-    msgEl.textContent = 'saving…';
-    try {
-      var r = await api('write_concept', params);
-      msgEl.textContent = (r.created ? 'created ' : 'updated ') + r.id;
-      if (!exists) location.hash = editorHref(r.id).slice(1);
-      else loadBacklinks();
-    } catch (err) {
-      msgEl.textContent = '';
-      view.querySelector('.stack').insertAdjacentHTML('afterbegin', errorBox(err));
-    }
-  });
-
-  async function loadBacklinks() {
-    if (!id) return;
-    var el = document.getElementById('ed-back');
-    try {
-      var ns = await api('graph_neighbors', { id: id, depth: 1 });
-      var back = ns.filter(function (n) { return n.dir === 'in' || n.dir === 'both'; });
-      el.innerHTML = back.length
-        ? '<h3>Cited by</h3>' + back.map(function (n) {
-            return '<div><a href="' + editorHref(n.id) + '">' + esc(n.title || n.id) + '</a></div>';
-          }).join('')
-        : '';
-    } catch (e) {
-      el.innerHTML = '<h3>Cited by</h3><span class="muted">' + esc(e.message) + '</span>';
-    }
-  }
-  loadBacklinks();
+    setHtml('or-out', os.length
+      ? '<ul class="plain">' + os.map(function (o) {
+          return '<li>' + conceptLink(o.id, o.title) + ' <a href="' + graphHref(o.id) + '" class="muted">graph</a></li>';
+        }).join('') + '</ul>'
+      : '<div class="empty">No orphans.</div>');
+  } catch (e) { setHtml('or-out', errorBox(e)); }
 }
 
 // ---- settings view ------------------------------------------------------
 
 async function renderSettings() {
+  var st = STATUS || {};
+  var mcpCmd = 'okb mcp --bundle ' + (st.bundle || '<bundle>');
+  var mcpJson = JSON.stringify({ mcpServers: { okbrain: { command: 'okb', args: ['mcp', '--bundle', st.bundle || '<bundle>'] } } }, null, 2);
   view.innerHTML =
     '<div class="stack"><h2>Settings</h2>' +
+    '<h3>This server</h3><dl class="kv">' +
+    '<dt>okbrain</dt><dd>' + esc(st.version || '?') + ' · writes OKF ' + esc(st.okfVersion || '?') + '</dd>' +
+    '<dt>Bundle</dt><dd><code>' + esc(st.bundle || '?') + '</code>' + (st.brain ? ' (brain <strong>' + esc(st.brain) + '</strong>)' : '') +
+    (st.readonly ? ' <span class="chip warn">read-only</span>' : '') + '</dd>' +
+    '<dt>Caches</dt><dd>index ' + (st.hasIndex ? '✓' : '✗') + ' · vectors ' + (st.hasVectors ? '✓' : '✗') + '</dd>' +
+    '<dt>Port</dt><dd>' + esc(st.port || '?') + ' (127.0.0.1 only)</dd></dl>' +
+    '<h3>Identity</h3><form id="actf" class="row">' +
+    '<label class="field" style="flex:1"><span>Actor (generated.by / verified.by on your writes)</span>' +
+    '<input id="act-in" value="' + esc(st.actor || '') + '" placeholder="human:alice"></label>' +
+    '<button class="primary">Save</button></form><div id="act-out"></div>' +
     '<h3>AI providers (persisted by okb init)</h3>' +
     '<form id="setf" class="stack"><div class="grid">' +
-    field('provider', 'Chat provider', '', 'anthropic | openai | … | local') +
+    field('provider', 'Chat provider', '', 'anthropic | openai | gemini | openrouter | local') +
     field('model', 'Chat model', '', 'provider default') +
-    field('embed-provider', 'Embed provider', '', 'openai | voyage | … | local') +
+    field('embed-provider', 'Embed provider', '', 'openai | voyage | gemini | local') +
     field('embed-model', 'Embed model', '', 'provider default') +
     '</div><div class="row"><label class="field"><span>Retrieval profile</span>' +
     '<select id="ed-retrieval-profile"><option value="">(keep)</option>' +
     '<option>lean</option><option>balanced</option><option>max</option></select></label>' +
     '<button class="primary">Save</button></div></form>' +
-    '<div id="set-out"></div>' +
+    '<div id="set-out"></div><p class="muted">API keys are read from environment variables only (ANTHROPIC_API_KEY, OPENAI_API_KEY, …); a local provider needs none.</p>' +
     '<h3>Sync (git)</h3><div class="row">' +
     '<button id="sync-status">Status</button><button id="sync-run" class="primary">Sync now</button></div>' +
     '<div id="sync-out"></div>' +
@@ -817,23 +1291,42 @@ async function renderSettings() {
     '<form id="enrf" class="stack"><div class="grid">' +
     field('web-seed', 'Seed URLs', '', 'comma-separated http(s) URLs') +
     field('task', 'Task', '', 'what to improve (optional)') +
+    field('concept', 'Focus concept', '', 'existing concept id (optional)') +
     field('web-max-pages', 'Max pages', '', '5') +
     field('web-max-depth', 'Max depth', '', '1') +
     field('allow-host', 'Allowed hosts', '', 'default: the seeds’ hosts') +
     field('deny-path', 'Denied path prefixes', '', 'e.g. /admin,/login') +
-    '</div><div class="row"><label class="field"><span>Web</span>' +
-    '<select id="ed-no-web"><option value="">on</option><option value="1">off (--no-web)</option></select></label>' +
-    '<button class="primary">Run enrich</button></div></form>' +
+    '<label class="field"><span>Web</span><select id="ed-no-web"><option value="">on</option><option value="1">off (--no-web)</option></select></label>' +
+    '</div><div class="row"><button class="primary">Run enrich</button></div></form>' +
     '<div id="enr-out"></div>' +
     '<h3>Maintenance</h3><div class="row">' +
     '<button id="mx-index">Re-index</button><button id="mx-embed">Embed</button>' +
     '<button id="mx-doctor">Doctor</button><button id="mx-viz">Export viz.html</button>' +
-    '<button id="mx-rebuild">Rebuild (wipe + reindex)</button></div><div id="mx-out"></div></div>';
+    '<button id="mx-rebuild" class="danger">Rebuild (wipe + reindex)</button></div>' +
+    '<div class="row"><span class="muted">Jobs:</span>' +
+    ['index', 'embed', 'rss', 'review', 'doctor'].map(function (j) {
+      return '<label class="row" style="gap:4px"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
+    }).join('') + '<button id="mx-jobs">Run jobs</button></div>' +
+    '<div class="row"><span class="muted">OKF v0.2 migration:</span><button id="mx-upgrade-dry">Preview upgrade</button>' +
+    '<button id="mx-upgrade" class="primary">Upgrade bundle</button></div><div id="mx-out"></div>' +
+    '<h3>Agent access (MCP)</h3><p class="muted">Servers cannot start servers — run this in a terminal (add <code>--trusted</code> to expose write tools to a client you fully trust):</p>' +
+    '<pre>' + esc(mcpCmd) + '</pre><p class="muted">Claude Desktop / any MCP client config:</p><pre>' + esc(mcpJson) + '</pre>' +
+    '<h3>Bookmarklet</h3><div id="bm-out" class="muted">loading…</div></div>';
 
-  function show(el, p) { document.getElementById(el).innerHTML = p; }
-  function busy(el) { show(el, '<span class="muted">working…</span>'); }
-  function notice(r) { return '<div class="notice">' + esc(JSON.stringify(r, null, 2)) + '</div>'; }
+  var show = setHtml;
+  function working(el) { setHtml(el, '<span class="muted">working…</span>'); }
 
+  document.getElementById('actf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var actor = document.getElementById('act-in').value.trim();
+    if (!actor) return;
+    working('act-out');
+    try {
+      var r = await api('init', { actor: actor, 'no-default-bundle': true });
+      show('act-out', '<div class="notice">actor: ' + esc(r.actor) + '</div>');
+      refreshStatus();
+    } catch (err) { show('act-out', errorBox(err)); }
+  });
   document.getElementById('setf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var params = { 'no-default-bundle': true };
@@ -841,7 +1334,7 @@ async function renderSettings() {
       var v = document.getElementById('ed-' + n).value.trim();
       if (v) params[n] = v;
     });
-    busy('set-out');
+    working('set-out');
     try {
       var r = await api('init', params);
       show('set-out', '<div class="notice">chat: ' + esc(r.chat.provider + ' / ' + r.chat.model +
@@ -852,7 +1345,7 @@ async function renderSettings() {
   document.getElementById('enrf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var params = {};
-    ['web-seed', 'task', 'allow-host', 'deny-path'].forEach(function (n) {
+    ['web-seed', 'task', 'concept', 'allow-host', 'deny-path'].forEach(function (n) {
       var v = document.getElementById('ed-' + n).value.trim();
       if (v) params[n] = v;
     });
@@ -861,7 +1354,7 @@ async function renderSettings() {
       if (v) params[n] = parseInt(v, 10);
     });
     if (document.getElementById('ed-no-web').value) params['no-web'] = true;
-    busy('enr-out');
+    working('enr-out');
     try {
       var r = await api('enrich', params);
       show('enr-out', '<div class="notice">' + esc(
@@ -871,49 +1364,64 @@ async function renderSettings() {
     } catch (err) { show('enr-out', errorBox(err)); }
   });
   document.getElementById('sync-status').addEventListener('click', async function () {
-    busy('sync-out');
-    try { show('sync-out', notice(await api('sync', { status: true }))); }
+    working('sync-out');
+    try { show('sync-out', jsonNotice(await api('sync', { status: true }))); }
     catch (e) { show('sync-out', errorBox(e)); }
   });
   document.getElementById('sync-run').addEventListener('click', async function () {
-    busy('sync-out');
-    try { show('sync-out', notice(await api('sync', {}))); }
+    working('sync-out');
+    try { show('sync-out', jsonNotice(await api('sync', {}))); }
     catch (e) { show('sync-out', errorBox(e)); }
   });
-  document.getElementById('mx-index').addEventListener('click', async function () {
-    busy('mx-out');
-    try { show('mx-out', notice(await api('index', {}))); }
+  async function maint(op, params, render) {
+    working('mx-out');
+    try { show('mx-out', (render || jsonNotice)(await api(op, params || {}))); await refreshStatus(); }
     catch (e) { show('mx-out', errorBox(e)); }
+  }
+  document.getElementById('mx-index').addEventListener('click', function () { maint('index'); });
+  document.getElementById('mx-embed').addEventListener('click', function () { maint('embed'); });
+  document.getElementById('mx-doctor').addEventListener('click', function () { maint('doctor', {}, doctorSummary); });
+  document.getElementById('mx-viz').addEventListener('click', function () {
+    maint('export_viz', {}, function (r) { return '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>'; });
   });
-  document.getElementById('mx-embed').addEventListener('click', async function () {
-    busy('mx-out');
-    try { show('mx-out', notice(await api('embed', {}))); }
-    catch (e) { show('mx-out', errorBox(e)); }
-  });
-  document.getElementById('mx-doctor').addEventListener('click', async function () {
-    busy('mx-out');
-    try {
-      var r = await api('doctor', {});
-      show('mx-out', '<div class="notice">' + esc(
-        r.findings.map(function (f) {
-          return (f.severity === 'error' ? 'ERROR ' : 'warn  ') + f.path + '  ' + f.message;
-        }).concat([(r.ok ? 'ok' : 'not conformant') + ' — ' + r.concepts + ' concepts, ' +
-          r.errors + ' errors, ' + r.warnings + ' warnings']).join('\n')) + '</div>');
-    } catch (e) { show('mx-out', errorBox(e)); }
-  });
-  document.getElementById('mx-viz').addEventListener('click', async function () {
-    busy('mx-out');
-    try {
-      var r = await api('export_viz', {});
-      show('mx-out', '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>');
-    } catch (e) { show('mx-out', errorBox(e)); }
-  });
-  document.getElementById('mx-rebuild').addEventListener('click', async function () {
+  document.getElementById('mx-rebuild').addEventListener('click', function () {
     if (!confirm('Rebuild wipes the derived index and rebuilds it from the bundle. Continue?')) return;
-    busy('mx-out');
-    try { show('mx-out', notice(await api('rebuild', { 'confirm-destructive': true }))); }
-    catch (e) { show('mx-out', errorBox(e)); }
+    maint('rebuild', { 'confirm-destructive': true });
   });
+  document.getElementById('mx-jobs').addEventListener('click', function () {
+    var only = Array.prototype.map.call(document.querySelectorAll('.jobcb:checked'), function (cb) { return cb.value; });
+    if (!only.length) return;
+    maint('jobs', { only: only.join(',') }, function (rs) {
+      return '<div class="notice">' + esc(rs.map(function (j) {
+        return (j.skipped ? '[skip] ' : j.ok ? '[ ok ] ' : '[FAIL] ') + j.name + ' — ' + j.detail;
+      }).join('\n')) + '</div>';
+    });
+  });
+  var upgradeRender = function (u) {
+    var verb = u.dryRun ? 'would upgrade' : 'upgraded';
+    return '<div class="notice">' + esc(u.upgraded.map(function (x) { return verb + ' ' + x.id + ' — ' + x.changes.join(', '); })
+      .concat([u.upgraded.length + ' ' + verb + ', ' + u.unchanged + ' already v' + u.okfVersion +
+        (u.declared ? '; root index.md declares okf_version ' + u.okfVersion : '')]).join('\n')) + '</div>';
+  };
+  document.getElementById('mx-upgrade-dry').addEventListener('click', function () { maint('upgrade', { 'dry-run': true }, upgradeRender); });
+  document.getElementById('mx-upgrade').addEventListener('click', function () {
+    if (!confirm('Rewrite v0.1 conventions (timestamp, # Citations, last_reviewed) as OKF v0.2 frontmatter across the bundle?')) return;
+    maint('upgrade', {}, upgradeRender);
+  });
+  get('/api/bookmarklet').then(function (r) {
+    var el = document.getElementById('bm-out');
+    if (!el) return;
+    el.className = '';
+    el.innerHTML = '';
+    var a = document.createElement('a');
+    a.href = r.bookmarklet;
+    a.textContent = '📎 Clip to okbrain';
+    a.className = 'chip';
+    el.appendChild(a);
+    el.insertAdjacentHTML('beforeend', ' <span class="muted">drag to your bookmarks bar</span>');
+  }).catch(function (e) { show('bm-out', errorBox(e)); });
 }
 
-route();
+// ---- boot ----------------------------------------------------------------
+
+refreshStatus().then(function () { loadBrains(); route(); });
