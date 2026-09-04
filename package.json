@@ -1,6 +1,6 @@
 {
   "name": "okbrain",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Self-hosted, OKF-native personal knowledge manager (TypeScript on Bun).",
   "license": "MIT",
   "type": "module",
@@ -11,7 +11,8 @@
     "okb": "bun run src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "bun build --compile --outfile bin/okb src/cli.ts && bun run scripts/copy-vec0.ts bin"
+    "build": "bun build --compile --outfile bin/okb src/cli.ts && bun run scripts/copy-vec0.ts bin",
+    "package": "bun run scripts/package-release.ts --local"
   },
   "engines": {
     "bun": ">=1.1.0"

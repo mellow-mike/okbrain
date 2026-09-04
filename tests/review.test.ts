@@ -24,6 +24,7 @@ const row = (id: string, over: Partial<ReviewRow> = {}): ReviewRow => ({
   title: id,
   timestamp: daysAgo(0),
   lastReviewed: null,
+  status: "stable", staleAfter: null, trust: "unverified",
   inbox: false,
   snoozeUntil: null,
   ...over,
@@ -152,6 +153,9 @@ describe("engine v2 review surface", () => {
       resource: null,
       timestamp: daysAgo(10),
       lastReviewed: daysAgo(3),
+      status: "stable" as const,
+      staleAfter: null,
+      trust: "unverified" as const,
       bodyLen: 1,
       contentHash: "h",
       body: "x",
@@ -166,6 +170,9 @@ describe("engine v2 review surface", () => {
         title: "N",
         timestamp: daysAgo(10),
         lastReviewed: daysAgo(3),
+        status: "stable",
+        staleAfter: null,
+        trust: "unverified",
         inbox: true,
         snoozeUntil: daysAgo(-5),
       },
@@ -206,7 +213,7 @@ describe("metadata-only writes", () => {
   });
   afterAll(() => rm(root, { recursive: true, force: true }));
 
-  test("keeps timestamp, skips log.md, preserves unknown keys", async () => {
+  test("keeps generated, skips log.md, preserves unknown keys", async () => {
     await writeConcept(root, {
       id: "notes/keep",
       type: "note",
@@ -224,7 +231,7 @@ describe("metadata-only writes", () => {
       metadataOnly: true,
     });
     const after = await readFile(join(root, "notes", "keep.md"), "utf8");
-    expect(after).toContain(before.match(/timestamp: .*/)![0]); // unchanged
+    expect(after).toContain(before.match(/generated:\n  by: .*\n  at: .*/)![0]); // unchanged
     expect(after).toContain("last_reviewed: 2026-07-11T09:00:00Z");
     expect(after).toContain("custom: kept");
     expect(await readFile(join(root, "log.md"), "utf8")).toBe(log); // no new entry
@@ -287,24 +294,41 @@ describe("okb review (CLI on a fixture bundle)", () => {
     expect(human.stdout).toMatch(/^1\. inbox\/clip — Clip \(3\.61\)/);
   });
 
-  test("done by position stamps last_reviewed without touching content", async () => {
+  test("done by position records a human verified event without touching content", async () => {
     const before = await readFile(at("orphans/lonely"), "utf8");
     const r = await okb(["review", "done", "3", "--bundle", root]); // position 3 = lonely
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("reviewed orphans/lonely");
+    expect(r.stdout).toContain("reviewed orphans/lonely (verified by human:");
 
     const after = await readFile(at("orphans/lonely"), "utf8");
-    expect(after).toContain(`timestamp: ${TS.lonely}`); // content timestamp kept
-    expect(after).toMatch(/last_reviewed: \d{4}-/);
+    expect(after).toContain(`timestamp: ${TS.lonely}`); // legacy content marker kept (metadata-only)
+    expect(after).toMatch(/verified:\n  - by: human:\S+\n    at: \d{4}-/);
+    expect(after).not.toContain("last_reviewed");
     expect((await okb(["doctor", "--bundle", root])).code).toBe(0);
 
     // Out of the queue for the cooldown; log.md untouched by the stamp.
     const q = JSON.parse((await okb(["review", "--json", "--bundle", root])).stdout);
     expect(q.map((i: { id: string }) => i.id)).toEqual(["inbox/clip", "hubs/hub"]);
-    expect(before).not.toContain("last_reviewed");
+    expect(before).not.toContain("verified");
   });
 
-  test("snooze hides; rebuild forgets the snooze but keeps last_reviewed", async () => {
+  test("v0.2 lifecycle signals: past stale_after ranks first, drafts nudge, deprecated never queues", () => {
+    const rows = [
+      row("expired", { timestamp: daysAgo(10), staleAfter: daysAgo(1) }),
+      row("draft", { timestamp: daysAgo(10), status: "draft" }),
+      row("dead", { timestamp: daysAgo(400), status: "deprecated" }),
+      row("future", { timestamp: daysAgo(10), staleAfter: daysAgo(-30) }),
+    ];
+    const edges = [{ src: "expired", dst: "draft" }, { src: "draft", dst: "future" }, { src: "future", dst: "expired" }];
+    const q = queue(rows, edges);
+    expect(q.map((i) => i.id)).toEqual(["expired", "draft", "future"]);
+    expect(q[0]!.reasons[0]).toBe(`stale since ${daysAgo(1).slice(0, 10)}`);
+    expect(q[0]!.score).toBeCloseTo(2.0 + 10 / 365, 5);
+    expect(q[1]!.reasons).toContain("still a draft");
+    expect(q.find((i) => i.id === "dead")).toBeUndefined();
+  });
+
+  test("snooze hides; rebuild forgets the snooze but keeps the verified event", async () => {
     const r = await okb(["review", "snooze", "hubs/hub", "--days", "3", "--bundle", root]);
     expect(r.code).toBe(0);
     let q = JSON.parse((await okb(["review", "--json", "--bundle", root])).stdout);
@@ -315,7 +339,7 @@ describe("okb review (CLI on a fixture bundle)", () => {
     ).toBe(0);
     q = JSON.parse((await okb(["review", "--json", "--bundle", root])).stdout);
     expect(q.map((i: { id: string }) => i.id)).toEqual(["inbox/clip", "hubs/hub"]); // snooze gone
-    // lonely still cooled down: last_reviewed lives in the bundle.
+    // lonely still cooled down: the verified event lives in the bundle.
     expect(q.map((i: { id: string }) => i.id)).not.toContain("orphans/lonely");
   });
 

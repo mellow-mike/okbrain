@@ -14,9 +14,13 @@ Steps:
    - Seeds should already be authoritative (docs, papers, primary sources);
      the crawler may only follow links it discovers on them.
    - `--no-web` runs purely from the bundle (reorganize/summarize passes).
-2. Read the run report: every `created`/`enriched` id, then open each and
-   check the `# Citations` section actually supports the claims. Delete or
-   fix anything the model asserted without a source.
+2. Read the run report: every `created`/`enriched` id, then open each
+   (`okb read <id> --json`) and check that its `sources` entries actually
+   support the claims (specific claims should carry `[^id]` footnotes keyed
+   to `sources[].id`). Delete or fix anything the model asserted without a
+   source. Agent writes are attributed to `okb-enrich/<model>` in
+   `generated.by` — leave them that way; only a human review
+   (`okb review done <id>`) records a human verification.
 3. `okb doctor` after the pass; then `okb links suggest` on new references
    to weave them into the graph.
 4. Report spend honestly: pages fetched, concepts written, what was skipped.

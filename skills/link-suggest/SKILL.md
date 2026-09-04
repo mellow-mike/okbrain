@@ -12,7 +12,7 @@ Steps:
 2. Judge each candidate by opening it (`okb read <target>`): would a reader
    of `<id>` genuinely want this next? Accept only those:
    `okb links accept <id> <target>` — appends a normalized link under
-   `# Related` (a content change: timestamp + log update, correctly).
+   `# Related` (a content change: `generated` + log update, correctly).
 3. Prefer editing prose over `# Related` when a suggestion belongs in a
    sentence: open the concept and link the mention inline instead (the
    editor's insert button, or edit the body with `okb write`).

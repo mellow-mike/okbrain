@@ -1,8 +1,8 @@
 // Resurface scoring (F-B.1): pure, deterministic ranking of what deserves
 // another look, computed from engine rows + resolved edges — no AI, no I/O.
 // Every contributing signal adds a human-readable reason; the reasons are the
-// UX. Config values are code defaults until the Stage-2.1 config file wires
-// `review.*` keys.
+// UX. OKF v0.2 lifecycle joins in: a concept past its `stale_after` is the
+// strongest "look again" signal, drafts nudge, deprecated concepts never queue.
 
 import type { LinkEdge, ReviewRow } from "../engine/interface.ts";
 
@@ -16,6 +16,10 @@ export interface ReviewConfig {
     neighborActivity: number;
     inbox: number;
     anniversary: number;
+    /** Past `stale_after` (OKF v0.2 §5.5). */
+    expired: number;
+    /** `status: draft` (§5.4). */
+    draft: number;
   };
 }
 
@@ -29,6 +33,8 @@ export const defaultReviewConfig: ReviewConfig = {
     neighborActivity: 1.0,
     inbox: 1.5,
     anniversary: 0.5,
+    expired: 2.0,
+    draft: 1.0,
   },
 };
 
@@ -78,6 +84,7 @@ export function reviewQueue(
   const w = cfg.weights;
   const ranked: { item: ReviewItem; ts: string }[] = [];
   for (const r of rows) {
+    if (r.status === "deprecated") continue; // kept for links and history, not for review
     const reviewed = daysSince(r.lastReviewed, now);
     if (reviewed !== null && reviewed < cfg.cooldownDays) continue;
     if (r.snoozeUntil !== null && Date.parse(r.snoozeUntil) > now.getTime()) continue;
@@ -92,6 +99,9 @@ export function reviewQueue(
       score += points;
       reasons.push(reason);
     };
+    if (r.staleAfter !== null && Date.parse(r.staleAfter) <= now.getTime())
+      add(w.expired, `stale since ${r.staleAfter.slice(0, 10)}`);
+    if (r.status === "draft") add(w.draft, "still a draft");
     if (d !== null) add((w.staleness * Math.min(d, 365)) / 365, `untouched ${age(d)}`);
     if ((degree.get(r.id) ?? 0) === 0)
       add(w.orphan, d !== null ? `orphan for ${age(d)}` : "orphan");

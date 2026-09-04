@@ -23,6 +23,7 @@ const ctx = (trusted = true): OpContext => ({
   },
   hasVectors: () => false,
   config: () => ({}),
+  actor: () => "human:test",
 });
 
 beforeEach(async () => {
@@ -65,9 +66,10 @@ describe("writeConcept: create", () => {
     expect(r).toMatchObject({ id: "notes/alpha", created: true });
 
     const raw = await readFile(r.path, "utf8");
-    expect(raw.startsWith("---\ntype: note\ntitle: Alpha\ndescription: First note\ntimestamp: ")).toBe(true);
+    expect(raw.startsWith("---\ntype: note\ntitle: Alpha\ndescription: First note\ntags:\n  - t1\ngenerated:\n  by: human:")).toBe(true);
     const { frontmatter, body } = parse(raw);
-    expect(frontmatter.timestamp).toMatch(ISO);
+    expect((frontmatter.generated as { at: string }).at).toMatch(ISO);
+    expect(frontmatter.timestamp).toBeUndefined(); // v0.2: no legacy key
     expect(frontmatter.tags).toEqual(["t1"]);
     expect(body).toBe("Hello [beta](/notes/beta.md).\n"); // normalized + trailing LF
 
@@ -98,9 +100,9 @@ describe("writeConcept: update", () => {
       "---\ntype: note\ntitle: Old\ndescription: Keep me\ntimestamp: 2020-01-01T00:00:00Z\ncustom_key: 42\ntags: [x]\n---\nOld body.\n",
     );
 
-  test("preserves unknown keys and unspecified fields; refreshes timestamp", async () => {
+  test("preserves unknown keys and unspecified fields; a content write supersedes the v0.1 timestamp", async () => {
     await seed();
-    const r = await writeConcept(root, { id: "a", title: "New" });
+    const r = await writeConcept(root, { id: "a", title: "New", actor: "human:me" });
     expect(r.created).toBe(false);
     const { frontmatter, body } = parse(await readFile(r.path, "utf8"));
     expect(frontmatter).toMatchObject({
@@ -109,10 +111,63 @@ describe("writeConcept: update", () => {
       description: "Keep me",
       custom_key: 42,
       tags: ["x"],
+      generated: { by: "human:me" },
     });
-    expect(frontmatter.timestamp).toMatch(ISO);
-    expect(frontmatter.timestamp).not.toBe("2020-01-01T00:00:00Z");
+    expect((frontmatter.generated as { at: string }).at).toMatch(ISO);
+    expect(frontmatter.timestamp).toBeUndefined(); // superseded by generated.at
     expect(body).toBe("Old body.\n");
+  });
+
+  test("metadata-only writes keep a legacy timestamp (no actor is invented)", async () => {
+    await seed();
+    await writeConcept(root, { id: "a", tags: ["y"], metadataOnly: true });
+    const { frontmatter } = parse(await readFile(join(root, "a.md"), "utf8"));
+    expect(frontmatter.timestamp).toBe("2020-01-01T00:00:00Z");
+    expect(frontmatter.generated).toBeUndefined();
+    expect(frontmatter.tags).toEqual(["y"]);
+  });
+
+  test("status / stale_after / sources: validated, written in canonical order, cleared by empty values", async () => {
+    await writeConcept(root, {
+      id: "notes/s", type: "note", title: "S", description: "d", actor: "human:me",
+      status: "draft", staleAfter: "2030-01-01T00:00:00Z",
+      sources: [{ resource: "https://ex.test/page", title: "Page", author: "human:ada" }, { resource: "/notes/other.md" }, { resource: "https://ex.test/again" }],
+    });
+    const raw = await readFile(join(root, "notes", "s.md"), "utf8");
+    expect(raw).toMatch(/^---\ntype: note\ntitle: S\ndescription: d\nstatus: draft\ngenerated:\n  by: human:me\n  at: .*\nstale_after: 2030-01-01T00:00:00Z\nsources:\n/);
+    const fm = parse(raw).frontmatter;
+    expect(fm.sources).toEqual([
+      { id: "ex-test", resource: "https://ex.test/page", title: "Page", author: "human:ada" },
+      { id: "other", resource: "/notes/other.md" },
+      { id: "ex-test-2", resource: "https://ex.test/again" }, // ids stay unique
+    ]);
+    await expect(writeConcept(root, { id: "notes/s", status: "wip" })).rejects.toThrow(/status must be one of/);
+    await expect(writeConcept(root, { id: "notes/s", staleAfter: "2030-01-01" })).rejects.toThrow(/ISO 8601 instant/);
+    await expect(writeConcept(root, { id: "notes/s", sources: [{ resource: "" }] })).rejects.toThrow(/needs a resource/);
+    await expect(writeConcept(root, { id: "notes/s", actor: "just-a-name" })).rejects.toThrow(/actor convention/);
+
+    await writeConcept(root, { id: "notes/s", status: "", staleAfter: "", sources: [] });
+    const cleared = parse(await readFile(join(root, "notes", "s.md"), "utf8")).frontmatter;
+    expect(cleared.status).toBeUndefined();
+    expect(cleared.stale_after).toBeUndefined();
+    expect(cleared.sources).toBeUndefined();
+  });
+
+  test("verify: one event per actor (replaced, not appended); legacy last_reviewed retired", async () => {
+    await writeFile(
+      join(root, "v.md"),
+      "---\ntype: note\ntitle: V\ndescription: d\ngenerated:\n  by: human:me\n  at: 2026-01-01T00:00:00Z\nlast_reviewed: 2025-01-01T00:00:00Z\n---\nBody.\n",
+    );
+    await writeConcept(root, { id: "v", verify: { by: "process:nightly", at: "2026-02-01T00:00:00Z" }, metadataOnly: true });
+    await writeConcept(root, { id: "v", verify: { by: "human:me", at: "2026-03-01T00:00:00Z" }, metadataOnly: true });
+    await writeConcept(root, { id: "v", verify: { by: "human:me", at: "2026-04-01T00:00:00Z" }, metadataOnly: true });
+    const fm = parse(await readFile(join(root, "v.md"), "utf8")).frontmatter;
+    expect(fm.verified).toEqual([
+      { by: "process:nightly", at: "2026-02-01T00:00:00Z" },
+      { by: "human:me", at: "2026-04-01T00:00:00Z" },
+    ]);
+    expect(fm.generated).toEqual({ by: "human:me", at: "2026-01-01T00:00:00Z" }); // metadata-only: untouched
+    expect(fm.last_reviewed).toBeUndefined();
   });
 
   test("tags: [] clears; undefined keeps", async () => {
@@ -128,12 +183,12 @@ describe("writeConcept: update", () => {
 });
 
 describe("writeConcept: no-op detection", () => {
-  test("a byte-identical update is skipped: no rewrite, no timestamp bump, no log entry", async () => {
+  test("a byte-identical update is skipped: no rewrite, no generated bump, no log entry", async () => {
     // Author through the writer so the on-disk bytes are already canonical.
     await writeConcept(root, { id: "notes/a", type: "note", title: "A", description: "d", body: "Body." });
     const path = join(root, "notes", "a.md");
     const before = await readFile(path, "utf8");
-    const ts0 = parse(before).frontmatter.timestamp;
+    const gen0 = parse(before).frontmatter.generated;
     const logBefore = await readFile(join(root, "log.md"), "utf8");
 
     // Re-write the exact same content (same fields, same body).
@@ -141,22 +196,23 @@ describe("writeConcept: no-op detection", () => {
     expect(r).toMatchObject({ id: "notes/a", created: false, noop: true });
 
     const after = await readFile(path, "utf8");
-    expect(after).toBe(before); // byte-identical, timestamp untouched
-    expect(parse(after).frontmatter.timestamp).toBe(ts0);
+    expect(after).toBe(before); // byte-identical, generated untouched
+    expect(parse(after).frontmatter.generated).toEqual(gen0);
     // No spurious **Update** entry appended to the log.
     expect(await readFile(join(root, "log.md"), "utf8")).toBe(logBefore);
   });
 
-  test("a real change still rewrites and refreshes the timestamp", async () => {
+  test("a real change still rewrites and records a fresh generated event", async () => {
     await writeFile(
       join(root, "a.md"),
-      "---\ntype: note\ntitle: Old\ndescription: keep\ntimestamp: 2020-01-01T00:00:00Z\n---\nOne.\n",
+      "---\ntype: note\ntitle: Old\ndescription: keep\ngenerated:\n  by: human:old\n  at: 2020-01-01T00:00:00Z\n---\nOne.\n",
     );
-    const r = await writeConcept(root, { id: "a", body: "Two." });
+    const r = await writeConcept(root, { id: "a", body: "Two.", actor: "human:new" });
     expect(r.noop).toBeUndefined();
     const { frontmatter, body } = parse(await readFile(join(root, "a.md"), "utf8"));
     expect(body).toBe("Two.\n");
-    expect(frontmatter.timestamp).not.toBe("2020-01-01T00:00:00Z");
+    expect(frontmatter.generated).toMatchObject({ by: "human:new" });
+    expect((frontmatter.generated as { at: string }).at).not.toBe("2020-01-01T00:00:00Z");
   });
 
   test("a non-canonical existing file is not a no-op — it is rewritten canonically", async () => {
@@ -164,7 +220,7 @@ describe("writeConcept: no-op detection", () => {
     // normalize to LF, so it is a real change (never falsely detected as no-op).
     await writeFile(
       join(root, "a.md"),
-      "---\r\ntype: note\r\ntitle: A\r\ndescription: d\r\ntimestamp: 2020-01-01T00:00:00Z\r\n---\r\nBody.\r\n",
+      "---\r\ntype: note\r\ntitle: A\r\ndescription: d\r\ngenerated:\r\n  by: human:a\r\n  at: 2020-01-01T00:00:00Z\r\n---\r\nBody.\r\n",
     );
     const r = await writeConcept(root, { id: "a", type: "note", title: "A", description: "d", body: "Body." });
     expect(r.noop).toBeUndefined();

@@ -5,10 +5,12 @@
 // caller not explicitly trusted, before the handler is ever reached.
 
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile, rm, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import { createApiServer } from "../api.ts";
 import { runMcpHttp, runMcpStdio } from "../mcp/server.ts";
-import { createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
+import { AiError, createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
+import { openInBrowser } from "./browser.ts";
 import { listBrains, loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { calibration, CLAIM_TYPE, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
@@ -26,9 +28,29 @@ import { FeedError, pullFeed, type RssPullResult } from "./ingest/rss.ts";
 import { defaultLimits, runEnrich, type EnrichResult } from "./ingest/web.ts";
 import { listConcepts, readConceptPermissive } from "./okf/bundle.ts";
 import { runDoctor, type DoctorReport } from "./okf/doctor.ts";
-import { fmString, fmTags, OkfParseError, parse, type OkfDocument } from "./okf/document.ts";
+import {
+  fmStatus,
+  fmString,
+  fmTags,
+  generatedAt,
+  isActor,
+  isStale,
+  lastVerifiedAt,
+  OkfParseError,
+  parse,
+  STATUSES,
+  trustTier,
+  type OkfDocument,
+  type SourceEntry,
+  type Status,
+  type TrustTier,
+} from "./okf/document.ts";
+import { regenerateIndexes } from "./okf/indexmd.ts";
+import { appendLog } from "./okf/logmd.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
+import { upgradeBundle, type UpgradeResult } from "./okf/upgrade.ts";
 import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
+import { TOOL_ACTOR } from "./version.ts";
 import { askBrain, type AskResult } from "./retrieval/ask.ts";
 import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./retrieval/embed.ts";
 import { hybridRetrieve, type HybridArms, type HybridHit } from "./retrieval/hybrid.ts";
@@ -64,6 +86,8 @@ export interface OpContext {
   hasVectors(): boolean;
   /** User config (config.json via okb init); adapter-loaded, {} when absent. */
   config(): OkbConfig;
+  /** Who this caller's writes are attributed to (OKF actor, §7). */
+  actor(): string;
 }
 
 export interface ParamSpec {
@@ -113,11 +137,40 @@ export class OpError extends Error {
   }
 }
 
+/** OKF v0.2 signals derived from a concept's frontmatter (one rule set, every surface). */
+interface ConceptSignals {
+  status: Status;
+  trust: TrustTier;
+  stale: boolean;
+  /** Last content change (`generated.at`, else legacy `timestamp`). */
+  updated: string | null;
+  /** Latest verification instant, any actor. */
+  verified: string | null;
+}
+
 interface ConceptView {
   id: string;
   frontmatter: Record<string, unknown>;
   body: string;
   raw: string;
+  signals: ConceptSignals;
+}
+
+const signalsOf = (fm: Record<string, unknown>): ConceptSignals => ({
+  status: fmStatus(fm),
+  trust: trustTier(fm),
+  stale: isStale(fm),
+  updated: generatedAt(fm),
+  verified: lastVerifiedAt(fm),
+});
+
+/** One row of `okb list --detail`: the index-free browse listing. */
+interface ConceptRow extends ConceptSignals {
+  id: string;
+  type: string;
+  title: string;
+  description: string;
+  tags: string[];
 }
 
 type Dir = "out" | "in" | "both";
@@ -179,7 +232,46 @@ async function readConceptView(bundle: string, id: string): Promise<ConceptView>
     if (!(e instanceof OkfParseError)) throw e;
     doc = { frontmatter: {}, body: raw }; // permissive read; doctor flags it
   }
-  return { id, frontmatter: doc.frontmatter, body: doc.body, raw };
+  return { id, frontmatter: doc.frontmatter, body: doc.body, raw, signals: signalsOf(doc.frontmatter) };
+}
+
+/** `sources` from a surface: a JSON array (GUI/MCP) or comma-separated resources (CLI). */
+function parseSources(v: unknown): SourceEntry[] | undefined {
+  if (v === undefined) return undefined;
+  const text = (v as string).trim();
+  if (text === "") return [];
+  if (text.startsWith("[")) {
+    let arr: unknown;
+    try {
+      arr = JSON.parse(text);
+    } catch {
+      throw new OpError("sources must be a JSON array of {resource, id?, title?} or comma-separated URLs", "bad_params");
+    }
+    if (!Array.isArray(arr)) throw new OpError("sources must be a JSON array", "bad_params");
+    return arr.map((s) =>
+      typeof s === "string" ? { resource: s } : (s as SourceEntry),
+    );
+  }
+  return text.split(",").map((r) => r.trim()).filter((r) => r !== "").map((resource) => ({ resource }));
+}
+
+const requireActor = (v: unknown): string => {
+  if (!isActor(v))
+    throw new OpError(
+      `actor must follow the OKF convention: human:<id>, process:<id>, or <producer>/<version> (got ${String(v)})`,
+      "bad_params",
+    );
+  return v;
+};
+
+/** The enrichment agent's actor: `okb-enrich/<chat model>` (§7 producer/version). */
+function enrichActor(ctx: OpContext): string {
+  try {
+    return `okb-enrich/${resolveCall("chat", ctx.config().ai ?? {}, process.env).model.replace(/\s+/g, "-")}`;
+  } catch (e) {
+    if (e instanceof AiError) return "okb-enrich/unknown";
+    throw e;
+  }
 }
 
 const renderStats = (r: unknown): string => {
@@ -452,13 +544,50 @@ export const operations: readonly Operation[] = [
   {
     name: "list_concepts",
     cliName: "list",
-    summary: "List all concept ids in the bundle",
+    summary: "List concept ids (or, with --detail, a browsable listing with status/trust)",
     scope: "read",
-    params: [],
-    handler: (ctx) => listConcepts(ctx.bundle),
+    params: [
+      { name: "detail", type: "boolean", description: "return title/type/description/tags plus OKF v0.2 signals per concept" },
+      { name: "type", type: "string", description: "only concepts of this type" },
+      { name: "tag", type: "string", description: "only concepts carrying this tag" },
+      { name: "status", type: "string", description: "only this lifecycle status: draft|stable|deprecated" },
+      { name: "limit", type: "int", description: "maximum rows" },
+    ],
+    handler: async (ctx, p) => {
+      if (p.status !== undefined && !(STATUSES as readonly unknown[]).includes(p.status))
+        throw new OpError(`status must be one of ${STATUSES.join(", ")}`, "bad_params");
+      const filtered = p.type !== undefined || p.tag !== undefined || p.status !== undefined;
+      const ids = await listConcepts(ctx.bundle);
+      if (p.detail !== true && !filtered) return ids.slice(0, (p.limit as number | undefined) ?? ids.length);
+      const rows: ConceptRow[] = [];
+      for (const id of ids) {
+        const fm = (await readConceptPermissive(ctx.bundle, id)).doc.frontmatter;
+        const row: ConceptRow = {
+          id,
+          type: fmString(fm.type),
+          title: fmString(fm.title),
+          description: fmString(fm.description),
+          tags: fmTags(fm.tags),
+          ...signalsOf(fm),
+        };
+        if (p.type !== undefined && row.type !== p.type) continue;
+        if (p.tag !== undefined && !row.tags.includes(p.tag as string)) continue;
+        if (p.status !== undefined && row.status !== p.status) continue;
+        rows.push(row);
+        if (rows.length === (p.limit as number | undefined)) break;
+      }
+      return p.detail === true ? rows : rows.map((r) => r.id);
+    },
     render: (r) => {
-      const ids = r as string[];
-      return ids.length === 0 ? "(empty bundle)" : ids.join("\n");
+      const rows = r as (string | ConceptRow)[];
+      if (rows.length === 0) return "(no concepts)";
+      return rows
+        .map((x) =>
+          typeof x === "string"
+            ? x
+            : `${x.id} — ${x.title || "(untitled)"}  [${x.type || "?"} · ${x.status} · ${x.trust}${x.stale ? " · STALE" : ""}]`,
+        )
+        .join("\n");
     },
   },
   {
@@ -572,7 +701,9 @@ export const operations: readonly Operation[] = [
       if (s.topTags.length > 0)
         lines.push("top tags: " + s.topTags.map((t) => `${t.tag} ${t.count}`).join(", "));
       lines.push(
-        `orphans ${s.orphans}, inbox ${s.inbox}, never reviewed ${s.neverReviewed}, stale ${s.stale} (>${s.staleDays}d)`,
+        `orphans ${s.orphans}, inbox ${s.inbox}, never reviewed ${s.neverReviewed}, stale ${s.stale} (>${s.staleDays}d), past stale_after ${s.expired}`,
+        `status:   draft ${s.byStatus.draft}, stable ${s.byStatus.stable}, deprecated ${s.byStatus.deprecated}`,
+        `trust:    unverified ${s.byTrust.unverified}, machine-confirmed ${s.byTrust["machine-confirmed"]}, human-reviewed ${s.byTrust["human-reviewed"]}`,
       );
       if (s.newest) lines.push(`freshest ${s.newest.slice(0, 10)}, oldest ${s.oldest!.slice(0, 10)}`);
       return lines.join("\n");
@@ -591,7 +722,8 @@ export const operations: readonly Operation[] = [
         ...rep.findings.map(
           (f) => `${f.severity === "error" ? "ERROR" : "warn "}  ${f.path}  ${f.message} [${f.check}]`,
         ),
-        `${rep.ok ? "ok" : "not conformant"} — ${rep.files} files, ${rep.concepts} concepts, ${rep.errors} errors, ${rep.warnings} warnings`,
+        `${rep.ok ? "ok" : "not conformant"} — ${rep.files} files, ${rep.concepts} concepts, ${rep.errors} errors, ${rep.warnings} warnings (okf_version ${rep.okfVersion ?? "undeclared"})`,
+        `signals — trust: ${rep.signals.trust["human-reviewed"]} human-reviewed, ${rep.signals.trust["machine-confirmed"]} machine-confirmed, ${rep.signals.trust.unverified} unverified; status: ${rep.signals.status.draft} draft, ${rep.signals.status.deprecated} deprecated; ${rep.signals.stale} past stale_after; ${rep.signals.legacy} still v0.1`,
       ].join("\n");
     },
     exitCode: (r) => ((r as DoctorReport).ok ? 0 : 1),
@@ -609,6 +741,9 @@ export const operations: readonly Operation[] = [
       { name: "body", type: "string", description: "markdown body; links are normalized to bundle-absolute" },
       { name: "tags", type: "string", description: "comma-separated tags (empty string clears)" },
       { name: "resource", type: "string", description: "canonical URI for reference concepts" },
+      { name: "status", type: "string", description: "lifecycle: draft|stable|deprecated (empty string clears)" },
+      { name: "stale-after", type: "string", description: "ISO instant after which the content is stale, e.g. 2026-12-31T00:00:00Z (empty clears)" },
+      { name: "sources", type: "string", description: "provenance: comma-separated URLs/paths, or a JSON array of {resource,id,title,…} (empty clears)" },
     ],
     handler: async (ctx, p) => {
       const r = await writing(() =>
@@ -620,6 +755,10 @@ export const operations: readonly Operation[] = [
           body: p.body as string | undefined,
           resource: p.resource as string | undefined,
           tags: parseTags(p.tags),
+          status: p.status as string | undefined,
+          staleAfter: p["stale-after"] as string | undefined,
+          sources: parseSources(p.sources),
+          actor: ctx.actor(),
         }),
       );
       await reindex(ctx, [r.id]);
@@ -639,11 +778,13 @@ export const operations: readonly Operation[] = [
       { name: "body", type: "string", description: "markdown body" },
       { name: "tags", type: "string", description: "comma-separated tags" },
       { name: "resource", type: "string", description: "canonical URI for reference concepts" },
+      { name: "status", type: "string", description: "lifecycle: draft|stable|deprecated (default stable)" },
       { name: "id", type: "string", description: "override the derived id (default <type>s/<title-slug>)" },
     ],
     handler: async (ctx, p) => {
       const r = await writing(async () => {
-        const id = (p.id as string | undefined) ?? `${p.type}s/${slugify(p.title as string)}`;
+        const id =
+          (p.id as string | undefined) ?? `${slugify(p.type as string)}s/${slugify(p.title as string)}`;
         if (existsSync(idToAbsPath(ctx.bundle, id)))
           throw new OpError(`concept exists: ${id} (update it with \`okb write\`)`, "refused");
         return writeConcept(ctx.bundle, {
@@ -654,6 +795,8 @@ export const operations: readonly Operation[] = [
           body: p.body as string | undefined,
           resource: p.resource as string | undefined,
           tags: parseTags(p.tags),
+          status: p.status as string | undefined,
+          actor: ctx.actor(),
         });
       });
       await reindex(ctx, [r.id]);
@@ -677,6 +820,7 @@ export const operations: readonly Operation[] = [
           text: p.text as string,
           title: p.title as string | undefined,
           tags: parseTags(p.tags),
+          actor: ctx.actor(),
         }),
       );
       await reindex(ctx, [r.id]);
@@ -702,6 +846,7 @@ export const operations: readonly Operation[] = [
           type: p.type as string | undefined,
           dest: p.dest as string | undefined,
           overwrite: p.overwrite as boolean | undefined,
+          actor: TOOL_ACTOR,
         }),
       );
       await reindex(ctx, r.imported);
@@ -882,22 +1027,24 @@ export const operations: readonly Operation[] = [
   {
     name: "review_done",
     cliName: "review done",
-    summary: "Mark a concept reviewed (stamps last_reviewed; content untouched)",
+    summary: "Mark a concept reviewed: records a `verified` event by you (content untouched)",
     scope: "write",
     params: [
       { name: "id", type: "string", required: true, positional: true, description: "concept id or queue position" },
     ],
     handler: async (ctx, p) => {
       const id = resolveReviewTarget(ctx, p.id as string);
-      const lastReviewed = nowTimestamp();
-      await writing(() =>
-        writeConcept(ctx.bundle, { id, extra: { last_reviewed: lastReviewed }, metadataOnly: true }),
-      );
+      const by = ctx.actor();
+      const at = nowTimestamp();
+      await writing(() => writeConcept(ctx.bundle, { id, verify: { by, at }, metadataOnly: true }));
       await reindex(ctx, [id]);
       ctx.engine().clearSnooze(id);
-      return { id, lastReviewed };
+      return { id, verifiedBy: by, verifiedAt: at };
     },
-    render: (r) => `reviewed ${(r as { id: string }).id}`,
+    render: (r) => {
+      const x = r as { id: string; verifiedBy: string };
+      return `reviewed ${x.id} (verified by ${x.verifiedBy})`;
+    },
   },
   {
     name: "review_snooze",
@@ -954,6 +1101,7 @@ export const operations: readonly Operation[] = [
             maxBodyBytes: clip?.maxBodyBytes,
             defaultTags: clip?.defaultTags,
             stripParams: clip?.stripParams,
+            actor: ctx.actor(),
           },
         ),
       );
@@ -1039,7 +1187,7 @@ export const operations: readonly Operation[] = [
       const withSection = /^# Related$/m.test(body)
         ? body.replace(/^# Related$/m, `# Related\n\n${line}`)
         : `${body}\n\n# Related\n\n${line}`;
-      await writing(() => writeConcept(ctx.bundle, { id, body: withSection }));
+      await writing(() => writeConcept(ctx.bundle, { id, body: withSection, actor: ctx.actor() }));
       await reindex(ctx, [id]);
       return { id, target, added: true };
     },
@@ -1106,6 +1254,7 @@ export const operations: readonly Operation[] = [
       const gw = createGateway(ctx.config().ai ?? {});
       const r = await runEnrich(ctx.bundle, task, seeds, limits, {
         chat: async (messages) => (await gw.chat(messages)).text,
+        actor: enrichActor(ctx),
         suggestLinks: ctx.hasIndex() ? (id) => suggestFor(ctx, id) : undefined,
         listConcepts: async () => {
           if (ctx.hasIndex()) {
@@ -1306,6 +1455,7 @@ export const operations: readonly Operation[] = [
           body: p.body as string | undefined,
           tags: parseTags(p.tags),
           extra: { confidence, ...(resolveBy === undefined ? {} : { resolve_by: resolveBy }) },
+          actor: ctx.actor(),
         });
       });
       await reindex(ctx, [r.id]);
@@ -1343,7 +1493,7 @@ export const operations: readonly Operation[] = [
           "refused",
         );
       const resolved = nowTimestamp();
-      await writing(() => writeConcept(ctx.bundle, { id, extra: { outcome, resolved } }));
+      await writing(() => writeConcept(ctx.bundle, { id, extra: { outcome, resolved }, actor: ctx.actor() }));
       await reindex(ctx, [id]);
       return { id, outcome, resolved };
     },
@@ -1383,6 +1533,61 @@ export const operations: readonly Operation[] = [
     },
   },
   {
+    name: "upgrade",
+    cliName: "upgrade",
+    summary: "Migrate v0.1 conventions to OKF v0.2 (timestamp → generated, # Citations → sources, …)",
+    scope: "write",
+    params: [
+      { name: "dry-run", type: "boolean", description: "report what would change without writing" },
+      { name: "by", type: "string", description: "actor to credit for legacy timestamps/reviews (default: your actor)" },
+    ],
+    handler: async (ctx, p) => {
+      const actor = p.by === undefined ? ctx.actor() : requireActor(p.by);
+      const r = await writing(() => upgradeBundle(ctx.bundle, { actor, dryRun: p["dry-run"] === true }));
+      if (!r.dryRun) await reindex(ctx, r.upgraded.map((u) => u.id));
+      return r;
+    },
+    render: (r) => {
+      const u = r as UpgradeResult;
+      const verb = u.dryRun ? "would upgrade" : "upgraded";
+      return [
+        ...u.upgraded.map((x) => `${verb} ${x.id} — ${x.changes.join(", ")}`),
+        ...u.skipped.map((id) => `skipped ${id} — unparseable frontmatter (see okb doctor)`),
+        `${u.upgraded.length} ${verb}, ${u.unchanged} already v${u.okfVersion}${u.declared ? `; root index.md declares okf_version ${u.okfVersion}` : ""}`,
+      ].join("\n");
+    },
+  },
+  {
+    name: "delete_concept",
+    cliName: "rm",
+    summary: "Delete a concept file (index.md/log.md and the derived caches follow)",
+    scope: "write",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "concept id to delete" },
+    ],
+    handler: async (ctx, p) => {
+      const id = p.id as string;
+      const view = await readConceptView(ctx.bundle, id); // not_found / bad id first
+      await unlink(idToAbsPath(ctx.bundle, id));
+      // Directories left with nothing but their generated index.md are pruned
+      // (so parent listings drop them), then the surviving chain regenerates.
+      let dir = id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "";
+      while (dir !== "") {
+        const abs = join(ctx.bundle, ...dir.split("/"));
+        const left = (await readdir(abs)).filter((n) => n !== "index.md");
+        if (left.length > 0) break;
+        await rm(abs, { recursive: true, force: true });
+        dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
+      }
+      await regenerateIndexes(ctx.bundle, dir);
+      await appendLog(ctx.bundle, "Deletion", id, fmString(view.frontmatter.title) || id);
+      if (ctx.hasIndex()) ctx.engine().removeNode(id);
+      if (ctx.hasVectors()) ctx.vectors().remove(id);
+      return { id, deleted: true };
+    },
+    render: (r) => `deleted ${(r as { id: string }).id}`,
+  },
+  {
     name: "brains",
     cliName: "brains",
     summary: "List configured brain mounts (config.json `brains`; use --brain <name>)",
@@ -1419,12 +1624,14 @@ export const operations: readonly Operation[] = [
       { name: "embed-provider", type: "string", description: "embedding provider: openai|voyage|gemini|ollama|llamacpp|lmstudio|local" },
       { name: "embed-model", type: "string", description: "embedding model" },
       { name: "retrieval-profile", type: "string", description: "default retrieval profile: lean|balanced|max" },
+      { name: "actor", type: "string", description: "who your writes are attributed to, e.g. human:alice (default human:<os user>)" },
       { name: "no-default-bundle", type: "boolean", description: "don't change which bundle okb uses by default" },
     ],
     handler: async (ctx, p) => {
       const local = (v: unknown): string | undefined =>
         v === "local" ? "ollama" : (v as string | undefined);
       const cfg = loadConfig();
+      if (p.actor !== undefined) cfg.actor = requireActor(p.actor);
       const ai: AiSettings = { ...cfg.ai };
       if (p.provider !== undefined) ai.provider = local(p.provider);
       if (p.model !== undefined) ai.model = p.model as string;
@@ -1456,6 +1663,9 @@ export const operations: readonly Operation[] = [
       cfg.ai = ai;
       if (p["no-default-bundle"] !== true) cfg.defaultBundle = ctx.bundle;
       const path = saveConfig(cfg);
+      // A brain starts life conformant: seed the root index.md (okf_version)
+      // when the directory has none yet.
+      if (!existsSync(idToAbsPath(ctx.bundle, "index"))) await regenerateIndexes(ctx.bundle, "");
       const describe = (r: typeof chat) => ({
         provider: r.provider,
         model: r.model,
@@ -1465,6 +1675,7 @@ export const operations: readonly Operation[] = [
       return {
         path,
         defaultBundle: cfg.defaultBundle ?? null,
+        actor: ctx.actor(),
         chat: describe(chat),
         embed: describe(embed),
       };
@@ -1473,12 +1684,14 @@ export const operations: readonly Operation[] = [
       const x = r as {
         path: string;
         defaultBundle: string | null;
+        actor: string;
         chat: { provider: string; model: string; keyStatus: string };
         embed: { provider: string; model: string; keyStatus: string };
       };
       return [
         `wrote ${x.path}`,
         ...(x.defaultBundle ? [`default bundle: ${x.defaultBundle}`] : []),
+        `actor: ${x.actor}`,
         `chat:  ${x.chat.provider} / ${x.chat.model} (${x.chat.keyStatus})`,
         `embed: ${x.embed.provider} / ${x.embed.model} (${x.embed.keyStatus})`,
         "switch anytime: okb init --provider local | --provider anthropic …",
@@ -1493,6 +1706,7 @@ export const operations: readonly Operation[] = [
     localOnly: true,
     params: [
       { name: "port", type: "int", description: `port on 127.0.0.1 (default ${DEFAULT_PORT})` },
+      { name: "open", type: "boolean", description: "open the GUI in your browser (also config serve.open)" },
     ],
     handler: async (ctx, p) => {
       const { url } = createApiServer({
@@ -1502,6 +1716,7 @@ export const operations: readonly Operation[] = [
       });
       log.info(`serving ${ctx.bundle} at ${url} — Ctrl-C to stop`);
       log.info("clip from the browser: `okb bookmarklet`");
+      if (p.open === true || ctx.config().serve?.open === true) openInBrowser(url);
       return new Promise(() => {}); // lives until interrupted
     },
     render: () => "",

@@ -20,6 +20,15 @@ next to its own executable (then the `sqlite-vec` npm package in dev, with
 
 Local single-platform build: `bun run build` → `bin/okb` + `bin/vec0.*`.
 
+Offline local package: `bun run package` (= `scripts/package-release.ts
+--local`) builds this machine's archive into `dist/` using the vec0 already
+in `node_modules` — no registry fetch, no network. The archive is the whole
+product: CLI, local API, embedded GUI, MCP server, extension, README and
+LICENSE.
+
+Both workflows pin the Bun version (`bun-version: 1.3.14`); bump it
+deliberately — a floating `latest` once broke Windows CI (B6).
+
 ## Signing (not automated)
 
 Artifacts are **unsigned** until org certificates exist; the hooks belong

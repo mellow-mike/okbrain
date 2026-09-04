@@ -5,7 +5,7 @@
 // separator. Pure given an injected Platform, so it is fully testable.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ReviewConfig } from "./review/score.ts";
 
@@ -65,11 +65,22 @@ export interface AiSettings {
 export interface OkbConfig {
   /** Bundle used when neither --bundle nor $OKB_BUNDLE is given. */
   defaultBundle?: string;
+  /**
+   * Who local writes are attributed to (`generated.by` / `verified[].by`),
+   * in the OKF actor convention — `human:<id>` for a person. Default:
+   * `human:<os user>`.
+   */
+  actor?: string;
   ai?: AiSettings;
   review?: {
     cooldownDays?: number;
     queueSize?: number;
     weights?: Partial<ReviewConfig["weights"]>;
+  };
+  /** Local API + GUI (`okb serve`). */
+  serve?: {
+    /** Open the GUI in the default browser on start (also `--open`). */
+    open?: boolean;
   };
   clip?: {
     maxBodyBytes?: number;
@@ -126,6 +137,21 @@ export function saveConfig(cfg: OkbConfig, p: Platform = currentPlatform()): str
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n", "utf8");
   return path;
+}
+
+/**
+ * The actor local (trusted) writes are attributed to: config `actor`, else
+ * `human:<os user>`. The `human:` prefix is what trust tiers key off (§7).
+ */
+export function resolveActor(cfg: OkbConfig = loadConfig()): string {
+  if (typeof cfg.actor === "string" && cfg.actor.trim() !== "") return cfg.actor.trim();
+  let user = "";
+  try {
+    user = userInfo().username;
+  } catch {
+    /* no passwd entry (some containers) — fall through */
+  }
+  return `human:${(user || process.env.USER || process.env.USERNAME || "user").replace(/\s+/g, "-")}`;
 }
 
 /**

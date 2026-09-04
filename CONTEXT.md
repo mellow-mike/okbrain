@@ -34,6 +34,18 @@ This file supersedes it as the source of truth for design.
   implementations (local or API).
 - **Brain-first** — consult the brain (search op) before answering.
 - **System of record** — the bundle; the DB is a derived, rebuildable cache.
+- **Actor** — who did something, in OKF's convention (§7): `human:<id>`,
+  `process:<id>`, or `<producer>/<version>` for tools and agents. Every
+  local write is attributed to the configured actor (`okb init --actor`).
+- **Generated / verified** — OKF v0.2 trust family: `generated: { by, at }`
+  records the last content change; `verified: [{ by, at }]` records who
+  confirmed the content. Trust tier is derived: unverified →
+  machine-confirmed → human-reviewed.
+- **Sources** — OKF v0.2 provenance: `sources: [{ id, resource, title,
+  author, last_modified, usage_count }]`; body claims cite them with `[^id]`
+  footnotes.
+- **Status / stale_after** — OKF v0.2 lifecycle: `draft | stable |
+  deprecated` and the instant after which content is stale.
 
 ---
 
@@ -59,68 +71,94 @@ engine; the engine is always rebuildable from the store (`okb rebuild`).
 
 ## Storage & OKF conformance
 
-### Format (OKF v0.1)
-A bundle is a directory of UTF-8 markdown files. Reserved filenames at any level:
-`index.md` (directory listing / progressive disclosure) and `log.md` (update
-history). All other `.md` files are concepts. Relationships beyond the directory
-tree are plain markdown links; bundle-absolute links (`/dir/x.md`) are preferred
-for stability. Citations go under a `# Citations` heading; external sources may
-be mirrored as first-class concepts under `references/`.
+### Format (OKF v0.2)
+A bundle is a directory of UTF-8 markdown files. Reserved filenames at any
+level: `index.md` (directory listing / progressive disclosure) and `log.md`
+(update history). All other `.md` files are concepts. Relationships beyond
+the directory tree are plain markdown links; bundle-absolute links
+(`/dir/x.md`) are preferred for stability. OKF v0.2 (the current spec, at
+`GoogleCloudPlatform/open-knowledge-format`) adds optional frontmatter
+families that make an agent-maintained corpus self-describing: provenance
+(`sources` + `usage_window`), trust (`generated`, `verified`), lifecycle
+(`status`, `stale_after`), the actor convention, and the `Attested
+Computation` concept type. Two v0.1 conventions are superseded: `timestamp`
+(now `generated.at`) and a `# Citations` body list (now `sources`). External
+sources may still be mirrored as first-class concepts under `references/`.
 
 ### Frontmatter contract
-- **On write:** always emit `type`, `title`, `description`, `timestamp`; include
-  `resource` (canonical URI) and `tags` when applicable. This satisfies both the
-  OKF spec (which requires only `type`) and the OKF reference implementation
-  (which also requires `title`/`description`/`timestamp`), and makes index/search
-  output good.
+- **On write:** always emit `type`, `title`, `description`, and
+  `generated: { by: <actor>, at: <ISO instant> }`; include `resource` and
+  `tags` when applicable, `status` when not the default, `stale_after`,
+  `verified` and `sources` when set. Canonical key order: type, title,
+  description, resource, tags, status, generated, verified, stale_after,
+  sources, then unknown keys verbatim. This satisfies the spec (only `type`
+  is required) and makes index/search/trust output good.
 - **On read/consume:** require only `type` + parseable YAML. Tolerate unknown
-  `type` values, unknown extra keys, and broken links. Preserve unknown keys on
-  round-trip. This is the permissive consumer OKF mandates, so bundles authored
-  by other tools open cleanly.
+  `type` values, unknown extra keys, and broken links. Preserve unknown keys
+  on round-trip. A bare `verified` mapping is a one-element list; a missing
+  `status` is `stable`; `stale_after` without an explicit offset (a bare
+  date) is ignored rather than guessed at; a v0.1 `timestamp` is read as the
+  last-change instant when `generated` is absent, and okbrain's own legacy
+  `last_reviewed` counts as a review when no human `verified` event exists.
+  This is the permissive consumer OKF mandates, so bundles authored by other
+  tools (see `bundles/acme_retail/`) open cleanly.
 
 ### Writer guarantees (`core/okf/write.ts` over `document.ts`)
 Every write produces a conformant bundle (`writeConcept`, exposed as the
 `write_concept` op / `okb write`):
 - Valid delimited YAML; body preserved where possible; unknown frontmatter keys
   preserved verbatim on edit (canonical scaffold keys first, unknowns after).
-- Full scaffold present: create requires `type`/`title`/`description`;
-  `timestamp` (ISO-8601 UTC, second precision) is refreshed on every write;
-  `resource`/`tags` included when applicable (`tags: []` clears).
+- Full scaffold present: create requires `type`/`title`/`description`.
+- **`generated` is the change record.** A content write records
+  `{ by: <actor>, at: now }` — the actor is the caller's (`OpContext.actor()`:
+  the configured human for CLI/GUI, `okb/<version>` for content the tool
+  produces such as clips/feeds/imports, `okb-enrich/<model>` for the
+  enrichment agent, `<client>/<version>` over MCP). A metadata-only write
+  (verification stamps, inbox-tag clears) keeps `generated` untouched.
+  Imports and upgrades may pass an explicit `generated` event.
+- **`verified` events are per actor.** `verify: { by, at }` replaces an
+  earlier event by the same actor and appends otherwise, so "how recently"
+  is always the latest `at` and the list never balloons.
+- **`status`, `stale_after`, `sources` are validated**, not just carried:
+  status ∈ draft|stable|deprecated, `stale_after` an ISO instant with
+  explicit offset, every source has a `resource`; missing source `id`s are
+  assigned (host name, file name, or `source`, made unique) so footnotes can
+  cite them. Empty values clear the key.
+- **Legacy keys are superseded in place.** A content write that records
+  `generated` drops a v0.1 `timestamp`; writing a `verified` event drops
+  `last_reviewed`. Nothing else touches them — `okb upgrade` is the bulk
+  path.
 - **No-op writes are skipped.** An update whose serialized output would match
-  the on-disk bytes but for the refreshed `timestamp` is a no-op: the file is
-  not rewritten, `timestamp` is not bumped, no `log.md` entry is appended, and
-  the index is not regenerated. `writeConcept` detects this by reserializing
-  the candidate with the *existing* timestamp and comparing byte-for-byte;
-  `WriteResult.noop` marks it (`okb write` renders `unchanged`). This keeps
-  re-imports and repeated agent passes over unchanged content out of git
-  history and preserves `timestamp`'s meaning ("last content change").
-  Non-canonical existing files (CRLF endings, a missing timestamp) never
-  match, so they are still normalized on the next write.
+  the on-disk bytes but for the refreshed `generated` event is a no-op: no
+  rewrite, no bump, no `log.md` entry, no index regeneration.
+  `WriteResult.noop` marks it. Non-canonical existing files (CRLF, a v0.1
+  `timestamp`) never match, so they are normalized on the next write.
 - Links normalized to bundle-absolute form (`#anchors` and `"title"` suffixes
   survive; destinations with spaces/parens get `<…>` wrapped).
-- Reserved ids (`index`, `log` basenames) are refused — those files belong to
-  the Stage-1.2 generators; a concept whose frontmatter won't parse is never
-  overwritten (fix by hand, per doctor).
+- Reserved ids (`index`, `log` basenames) are refused; a concept whose
+  frontmatter won't parse is never overwritten (fix by hand, per doctor).
 - `index.md` regenerated for the touched directory and every ancestor
   (`core/okf/indexmd.ts`): each index keeps a human-editable head (H1 +
   intro paragraphs before the first `##`, preserved on regeneration) above
   regenerated sections — `## Directories` (immediate subdirs that have an
   `index.md`, described by the first intro line) and one `## <type>` section
   per concept type (rows `- [Title](/id.md) — Description`, title-sorted).
-  Missing intros get a deterministic placeholder. `okf_version: "0.1"` is
+  Missing intros get a deterministic placeholder. `okf_version: "0.2"` is
   maintained in the root `index.md` frontmatter (the only `index.md` where
-  frontmatter is allowed; unknown root keys are preserved).
+  frontmatter is allowed; unknown root keys are preserved; an existing
+  declaration is kept until `okb upgrade` bumps it).
 - Root `log.md` appended per write (`core/okf/logmd.ts`): `## YYYY-MM-DD`
-  headings (UTC, matching `timestamp`), newest first; entries are
-  `**Creation**`/`**Update**`/`**Deprecation**`: `[Title](/id.md) — summary`,
-  same-day entries sharing one section.
+  headings (UTC, matching `generated.at`), newest first; entries are
+  `**Creation**`/`**Update**`/`**Deprecation**`/`**Deletion**`:
+  `[Title](/id.md) — summary`, same-day entries sharing one section.
 
-### Authoring ops (`okb new` / `okb capture` / `okb import`)
-All three are thin front-ends over `writeConcept`:
-- **`new <type> <title> <description>`** — creates at `<type>s/<slugify(title)>`
-  (naive plural matches OKF reference layouts: `notes/`, `references/`,
-  `tables/`; `--id` overrides for irregular cases). Create-only: an existing id
-  is refused (`okb write` is the update path).
+### Authoring ops (`okb new` / `okb capture` / `okb import` / `okb rm`)
+All are thin front-ends over `writeConcept`:
+- **`new <type> <title> <description>`** — creates at
+  `<slug(type)>s/<slugify(title)>` (naive plural matches OKF reference
+  layouts: `notes/`, `references/`, `attested-computations/`; `--id`
+  overrides for irregular cases; `--status` for drafts). Create-only: an
+  existing id is refused (`okb write` is the update path).
 - **`capture [text]`** — zero-metadata capture; reads piped stdin when no
   argument (declared via `stdinFallback` on the param spec, filled generically
   by the CLI adapter). Type `note`, id `inbox/<YYYY-MM-DD>-<slug(title)>` with
@@ -128,26 +166,57 @@ All three are thin front-ends over `writeConcept`:
   (leading `#` stripped, clipped at 80/120 chars).
 - **`import <path>`** (`core/ingest/import.ts`) — maps a markdown file or tree
   onto concepts: ids mirror the source's relative layout with each segment
-  slugified (optionally under `--dest`); `type`/`title`/`description`/
-  `resource`/`tags` come from source frontmatter when present, else are
-  derived (first H1 → title, first prose line → description, `--type` default
-  `note`); unknown source frontmatter keys are carried via the writer's
-  `extra` input (overrides existing unknown keys, never scaffold keys);
-  reserved files are skipped, unparseable frontmatter becomes body. Dedupe is
-  by id: existing concepts are skipped unless `--overwrite`, and when two
-  sources slugify to one id the first (sorted) wins.
+  slugified (optionally under `--dest`); scaffold keys come from source
+  frontmatter when present, else are derived (first H1 → title, first prose
+  line → description, `--type` default `note`); well-formed v0.2 families
+  ride along (`status`, `stale_after`, `sources`, `verified`, and a foreign
+  `generated` is kept as the source's own provenance — otherwise the import
+  is attributed to `okb/<version>`); unknown source keys are carried via the
+  writer's `extra` input; reserved files are skipped, unparseable frontmatter
+  becomes body. Dedupe is by id: existing concepts are skipped unless
+  `--overwrite`, and when two sources slugify to one id the first (sorted)
+  wins.
+- **`rm <id>`** (`delete_concept`) — removes the file, prunes directories
+  left with nothing but their generated `index.md`, regenerates the
+  surviving index chain, appends a `**Deletion**` log entry, and drops the
+  concept from the keyword index and vector store. Deletion is a write op
+  (gated for untrusted callers and read-only mounts); git history keeps the
+  file when the bundle is synced.
+
+### Upgrade (`okb upgrade`, `core/okf/upgrade.ts`)
+The v0.1 → v0.2 migration the spec describes in §13, as a deterministic,
+idempotent, representation-only rewrite: `timestamp` → `generated: { by:
+<actor>, at: timestamp }` (the actor is stated, `--by`, default yours —
+never invented), `last_reviewed` → a human `verified` event, a `# Citations`
+bullet list → `sources` entries (links, bare URLs, ` — byline` suffixes),
+clip's v0.1 `author`/`published` extras → the page source's `author` /
+`last_modified`, and the root `index.md` declaration → `"0.2"`. Writes are
+metadata-only (no new `generated` event, no per-concept log lines) with one
+summary `**Update**` log entry; `--dry-run` reports without writing;
+unparseable concepts are skipped and named. `okb doctor` points at it
+whenever it finds v0.1 leftovers.
 
 ### Conformance checklist (`okb doctor` asserts)
 `core/okf/doctor.ts` walks every `.md` file and reports findings at two
-severities. **Errors** (conformance violations; CLI exits 1): unparseable YAML
-frontmatter; missing/empty `type` on a concept; frontmatter in a non-root
-`index.md`; a `log.md` heading that isn't `## YYYY-MM-DD`. **Warnings** (what a
-permissive consumer must tolerate anyway — flagged, never fatal): missing
-recommended keys (`title`/`description`/`timestamp`); broken internal links;
-root `index.md` without `okf_version`; `log.md` dates not newest-first; a
-directory with concepts (or the root) lacking `index.md`. Links to reserved
-files (`/index.md`, `/notes/log.md`) are valid targets. The consumer itself
-never rejects on any warning class — doctor is the only strict surface.
+severities. **Errors** (conformance violations, §11; CLI exits 1):
+unparseable YAML frontmatter; missing/empty `type` on a concept; frontmatter
+in a non-root `index.md`; a `log.md` heading that isn't `## YYYY-MM-DD`.
+**Warnings** (what a permissive consumer must tolerate anyway — flagged,
+never fatal): missing recommended keys (`title`/`description`); broken
+internal links; a `sources[].resource` that names a concept which doesn't
+exist (`broken-source`); root `index.md` without `okf_version`, or declaring
+a version other than the one okb writes; `log.md` dates not newest-first; a
+directory with concepts (or the root) lacking `index.md`; v0.1 leftovers
+(`legacy-timestamp`, `legacy-citations`); malformed v0.2 families
+(`generated` without a `by` actor or with a non-ISO `at`, `verified` entries
+without `by`, non-actor `by` values, `status` outside draft|stable|deprecated,
+`stale_after` without an explicit offset, `sources` entries without
+`resource` or with a non-ISO `last_modified`); an `Attested Computation`
+without `runtime`. Links to reserved files (`/index.md`, `/notes/log.md`) are
+valid targets. The report also carries **signals** — counts by trust tier and
+status, concepts past `stale_after`, and concepts still on v0.1 — so the walk
+doubles as the health report the GUI's Home shows. The consumer itself never
+rejects on any warning class — doctor is the only strict surface.
 
 ### System of record, sync, rebuild
 - The bundle is a git repo; multi-device "sync" IS git (the other machine
@@ -186,6 +255,14 @@ never rejects on any warning class — doctor is the only strict surface.
   `](….md)` links, resolve relative/absolute against the bundle root, drop
   external (`://`) and unresolved targets, dedupe. Directed and (on disk)
   untyped, per OKF — relationship meaning lives in the prose.
+- **Provenance edges** = `sources[].resource` entries that name another
+  concept (OKF v0.2 §5.1: "the derivation edge already exists in the bundle
+  graph"). Path-valued frontmatter fields (`resolvePathField`) follow the
+  link rules plus the convention the spec's own examples use: a bare
+  relative path that resolves to nothing next to the concept is retried
+  from the bundle root (`policies/x.md` written in `metrics/y.md`). URLs,
+  scope descriptors, and non-`.md` artifacts (`attesters/x.py`) are not
+  edges. A body link to the same target wins the dedupe.
 - **Backlinks** = reverse edges → "Cited by".
 - **Tags** = facets for filtering and a synthesized tag-browse view.
 
@@ -196,15 +273,19 @@ the format: classification is deterministic and local — the clause directly
 before the link wins ("depends on [X]" → `depends-on`), else the nearest
 preceding heading (`# Citations` → `cites`, `# Joins` → `joins-with`; an
 unknown heading means untyped, it does not inherit an earlier one), else
-null. One shared `REL_VOCAB` phrase table drives both the classifier and
-the relational query detector. The markdown file stays a plain OKF link;
-okbrain just knows more. The "cache" is the index itself: rels are
-recomputed by every index build and per-concept write refresh.
+null. Provenance edges from `sources` are typed `cites`. One shared
+`REL_VOCAB` phrase table drives both the classifier and the relational
+query detector. The markdown file stays a plain OKF link; okbrain just
+knows more. The "cache" is the index itself: rels are recomputed by every
+index build and per-concept write refresh.
 
 ### Storage & queries
 SQLite tables: `nodes(id, type, title, description, resource, timestamp,
-last_reviewed, body_len, content_hash)`, `edges(src, dst, rel)` (schema v3;
-`rel` nullable, derived — see typed edges above), `tags(node_id, tag)`,
+last_reviewed, status, stale_after, trust, body_len, content_hash)` (schema
+v4 — `timestamp` is `generated.at` with the v0.1 key as fallback,
+`last_reviewed` the latest human `verified.at` (or the legacy stamp),
+`status`/`stale_after`/`trust` the derived v0.2 signals), `edges(src, dst,
+rel)` (`rel` nullable, derived — see typed edges above), `tags(node_id, tag)`,
 `review_state(node_id, snooze_until)` (Resurface's DB-only snooze), and an
 FTS5 table sharing `nodes.rowid`. The index lives at `<bundle>/.okb/index.db`
 — inside the bundle so it travels with context but gitignored and always
@@ -237,7 +318,14 @@ body rendering): type-colored nodes, directed edges, node hover tooltips
 (title/type/description), detail panel with rendered body and rewired internal
 links, "Links to" + "Cited by" lists, search over title/id/tags (dims
 non-matches), type filter with per-type counts, switchable layouts (cose /
-concentric / breadth-first / circle / grid), fit-to-view. Theming: **dark mode
+concentric / breadth-first / circle / grid), fit-to-view. OKF v0.2 signals
+render as badges (status / trust tier / stale) and in the detail panel
+(`generated`, `verified`, `sources` with credibility signals); stale nodes get
+a dashed border, deprecated ones fade. Body rendering is shared with the
+GUI through `core/viz/render.js` (one source, embedded in both): markdown →
+`[^id]` footnote attribution → **DOMPurify** sanitization — a clipped page can
+never run script — → internal-link resolution (`#concept:` anchors,
+bundle-absolute, or relative to the concept). Theming: **dark mode
 default**, light via a persisted toggle (`localStorage`); chrome colors live
 once as CSS custom properties on `:root[data-theme=…]` and the Cytoscape
 styles read them back via `getComputedStyle`, so both surfaces render from one
@@ -250,9 +338,10 @@ color-alone.
   current DB, click-through to the editor.
 - **Static export:** `okb export-viz` writes the single HTML file to the fixed
   path `<bundle>/viz.html` — no backend, shareable, committable next to the
-  bundle. Built straight from a bundle walk (works without an index). Cytoscape
-  and marked are vendored minified builds (`core/viz/vendor/`), inlined into
-  the page and embedded in the compiled binary via Bun text imports. Internal
+  bundle. Built straight from a bundle walk (works without an index).
+  Cytoscape, marked, and DOMPurify are vendored minified builds
+  (`core/viz/vendor/`), inlined into the page and embedded in the compiled
+  binary via Bun text imports. Internal
   `.md` links in bodies are rewired to `#concept:<encoded-id>` anchors the
   viewer intercepts to focus the target node; external/broken links pass
   through untouched (external ones open in a new tab). The op is scope `read`
@@ -279,28 +368,37 @@ edges + tags):
 | stale hub | in-degree ≥ 3 and stale > 90d | 1.5 |
 | neighbor activity | a neighbor changed ≤ 7d, self stale > 30d | 1.0 |
 | inbox | has `inbox` tag (Clip synergy) | 1.5 |
-| anniversary | `timestamp` ≈ n·365d ago (±1d) | 0.5 |
+| anniversary | last change ≈ n·365d ago (±1d) | 0.5 |
+| expired | past `stale_after` (OKF v0.2 §5.5) | 2.0 |
+| draft | `status: draft` (§5.4) | 1.0 |
 
-Exclusions: `last_reviewed` within the cooldown (default 30d) or an active
-snooze. Queue size defaults to 5. Ordering is fully deterministic: score
-desc, then older `timestamp`, then id. Anniversary uses `timestamp` (last
-content change) — creation dates aren't tracked in frontmatter. Weights,
-cooldown, and queue size are code defaults until the 2.1 config file wires
-`review.*` keys. A signal only adds its reason string when it contributes.
+Exclusions: `status: deprecated` (kept for links and history, never
+queued), a human verification within the cooldown (default 30d), or an
+active snooze. Queue size defaults to 5. Ordering is fully deterministic:
+score desc, then older last change, then id. Staleness and anniversary use
+`generated.at` (last content change, with the v0.1 `timestamp` as fallback)
+— creation dates aren't tracked in frontmatter. Weights, cooldown, and queue
+size come from `review.*` in config. A signal only adds its reason string
+when it contributes.
 
 ### State — what survives a rebuild
-- **`last_reviewed`** (ISO 8601 UTC) is user knowledge → frontmatter, via the
-  conformance writer in **metadata-only mode**: `timestamp` is *not* refreshed
-  (it means content change) and no `log.md` entry is appended (less churn).
-  It's an okbrain extension key — OKF-safe because consumers tolerate and
-  preserve unknown keys.
+- **"I reviewed this" is a `verified` event** (OKF v0.2 §5.2): `okb review
+  done` writes `verified: [{ by: <your actor>, at: now }]` through the
+  conformance writer in **metadata-only mode** — `generated` is *not*
+  refreshed (it means content change) and no `log.md` entry is appended
+  (less churn). One event per actor is kept (the latest `at`), so the trust
+  tier of a reviewed concept is exactly the spec's *human-reviewed*, and an
+  agent marking review over MCP yields *machine-confirmed*, never a human
+  claim. okbrain's pre-v0.2 `last_reviewed` key is still read as a review
+  and retired by the next verification (or by `okb upgrade`).
 - **Snooze** is an ephemeral scheduling preference → DB-only (`review_state`
   table), lost on `okb rebuild` by design.
 - The queue itself is recomputed on every call; no cache table at CLI scale.
 
 ### Ops & surfaces
-`review_queue` (read) → top-N with scores + reasons; `review_done` /
-`review_snooze` (write). CLI: `okb review`, `okb review done <id|n>`,
+`review_queue` (read) → top-N with scores + reasons; `review_done` (write:
+the verification stamp) / `review_snooze` (write). CLI: `okb review`,
+`okb review done <id|n>`,
 `okb review snooze <id|n> [--days 7]` — `n` is a 1-based queue position;
 a pure-integer argument within queue range is read as a position, otherwise
 as an id. GUI card stack lands with 3.2, cron recompute with 4.5, the
@@ -348,7 +446,12 @@ with or without an index; offline it fails fast (no queue in v1).
    suffix when a different URL collides on slug), `type: reference`,
    `resource:` canonical URL, description from page metadata, tags = user
    tags + `inbox` (`--read` skips it), body = extracted markdown capped at
-   100KB (truncation noted in the body), `# Citations` with the source link.
+   100KB (truncation noted in the body), and OKF v0.2 provenance instead of
+   a body citation list: `sources: [{ id: <host slug>, resource: <canonical
+   URL>, title, author: <byline>, last_modified: <published, as an ISO
+   instant> }]`. The clip is attributed to `okb/<version>` (`generated.by`
+   — the tool produced the content); a highlight appended by a re-clip is a
+   content change by the caller's actor.
 5. Hooks that ride along without changing clip: embedding (2.2, on write),
    **autoTag** (F-B.8, `--auto-tag` flag or `clip.autoTag` config): one chat
    call suggests ≤5 kebab-case topic tags for a *new* clip, offered the
@@ -381,8 +484,9 @@ Feeds are the second ingest source (after import/capture/clip): `okb rss
 (what the jobs worker runs). `core/ingest/rss.ts` parses RSS 2.0 / RSS 1.0
 (RDF) / Atom with linkedom's XML parser (no new deps) and writes each new
 item as a conformant `references/<slug>` concept: type `reference`, tags
-`inbox` + `rss`, entry content/summary converted to markdown, `# Citations`
-naming the feed, `author`/`published`/`feed` as extension keys. Dedupe is
+`inbox` + `rss`, entry content/summary converted to markdown, and two
+`sources` entries — the feed (`id: feed`) and the article itself with the
+entry's author and publication instant as credibility signals. Dedupe is
 clip's exact rule — normalized item URL against every concept's normalized
 `resource` (plus in-run) — so a feed entry and a hand-clipped article of the
 same page can never duplicate, and re-pulls are idempotent. Entries keep the
@@ -539,9 +643,16 @@ embed it).
   reports its real reason), and a step cap so a chatty run always ends.
   Guard refusals and bad writes come back as error observations the model
   can correct; two unparseable replies abort. `guardedFetch` (clip's SSRF
-  guard) sits underneath. Writes flow through the conformance writer and
-  the standard reindex hook (index + vectors), which is why the sketched
-  `embed_doc` tool doesn't exist; `link_suggest` joins the toolset with 4.4.
+  guard) sits underneath. **Provenance is frontmatter, enforced in the
+  tool:** `write_concept` takes `sources` (entries or bare URLs); on an
+  existing concept they merge onto what it already cites (never shrink), a
+  minted reference must cite at least one, the prompt asks for `[^id]`
+  footnotes on specific claims, and every write is attributed to
+  `okb-enrich/<chat model>` (`generated.by`, the spec's producer/version
+  form) — so agent writes are distinguishable from yours forever. Writes
+  flow through the conformance writer and the standard reindex hook (index
+  + vectors), which is why the sketched `embed_doc` tool doesn't exist;
+  `link_suggest` joins the toolset with 4.4.
 
 ### MCP server (`okb mcp`, `src/mcp/server.ts`)
 External agents (Claude, etc.) use the brain as a tool. Tools and their JSON
@@ -555,7 +666,10 @@ appear on this surface at all. Transports: stdio (default — stdout carries
 only protocol JSON, logs go to stderr) and Streamable HTTP via `--http`
 (stateless server-per-request, binds 127.0.0.1, Host-checked like the local
 API). Filesystem confinement is the ops' own: concept ids reject traversal
-segments before any path is built.
+segments before any path is built. Writes over MCP are attributed to the
+connected client — `<client name>/<client version>` from the MCP initialize
+handshake (`mcp-client/unknown` when it withholds them) — so an agent's
+edits and review stamps read as machine-confirmed, never as a human's.
 
 ---
 
@@ -564,53 +678,69 @@ segments before any path is built.
 ### Contract-first ops (`core/operations.ts`)
 Every operation is declared once as data: name, typed param specs, handler,
 `scope: read|write|admin` (plus, for the CLI surface, `cliName` and a human
-`render`; `localOnly` arrives with MCP). `runOp` validates trust (fail-closed:
-untrusted ⇒ read-scope only) and params before any handler runs. Three adapters
+`render`; `localOnly` for ops that only make sense on the host). `runOp`
+validates trust (fail-closed: untrusted ⇒ read-scope only), the read-only
+mount policy, and params before any handler runs; the `OpContext` also
+carries the caller's `actor()` so every write is attributed. Three adapters
 are generated: the CLI, the GUI's local HTTP API, and the MCP server. Add a
-capability once → it appears in all three. CLI/GUI can't drift.
+capability once → it appears in all three. CLI/GUI can't drift: an API test
+derives the list of ops the GUI must wire from the registry itself.
 
-### CLI surface (illustrative)
+### CLI surface
 | Command | Scope | Purpose |
 |---|---|---|
-| `okb init` | admin | Create/attach a bundle; pick engine + AI provider; write config |
+| `okb init [--actor …]` | admin | Attach a bundle as default; pick AI providers + your actor; seed root `index.md` |
 | `okb new <type> <title> <description>` | write | Create a conformant concept at `<type>s/<slug>` |
-| `okb capture [text]` | write | Quick-capture text/stdin → `inbox/` concept (link suggestions later) |
+| `okb capture [text]` | write | Quick-capture text/stdin → `inbox/` concept |
 | `okb import <path>` | write | Map existing markdown (file/tree) → concepts; dedupe by id |
-| `okb enrich [--web-seed …]` | write | Run the enrichment agent (guardrailed) |
+| `okb write <id> [--status …] [--stale-after …] [--sources …]` | write | Create/update through the conformance writer |
+| `okb rm <id>` | write | Delete a concept (indexes, log, caches follow) |
+| `okb enrich [--web-seed …]` | write | Run the enrichment agent (guardrailed, sources-cited) |
 | `okb search <query>` | read | Hybrid + graph retrieval (`--json` for agents) |
 | `okb ask <question>` | read | Retrieval-augmented answer with citations |
-| `okb graph <id> [--depth N]` | read | Neighborhood with `→`/`←`/`↔` direction tags |
+| `okb read <id>` | read | Frontmatter, body, and derived signals (status/trust/stale) |
+| `okb list [--detail] [--type] [--tag] [--status]` | read | Concept ids, or a browse listing with signals |
+| `okb graph <id> [--depth N]` | read | Neighborhood with `→`/`←`/`↔` direction tags (incl. provenance edges) |
 | `okb path <from> <to>` | read | Shortest link chain between two concepts |
 | `okb orphans` | read | Concepts with no links in or out |
-| `okb stats` | read | Counts by type/tag, links, orphans, freshness snapshot |
+| `okb stats` | read | Counts by type/tag/status/trust, links, orphans, freshness, past `stale_after` |
 | `okb links suggest <id>` | read | Propose cross-links (deterministic, with reasons) |
 | `okb links accept <id> <target>` | write | Accept one: normalized link under `# Related` |
+| `okb review` / `review done` / `review snooze` | read/write | The Resurface queue; done = a `verified` event by you |
+| `okb inbox` / `inbox read` | read/write | Unread clips and notes |
+| `okb clip` / `okb rss` | write | Web page / feed → cited `references/` concepts |
 | `okb index` / `okb embed` | admin | (Re)build FTS / vectors incrementally |
 | `okb rebuild --confirm-destructive` | admin | Wipe + regenerate index from bundle |
-| `okb doctor` / `okb lint` | read | OKF conformance + health report |
+| `okb doctor` | read | OKF v0.2 conformance + health report (signals) |
+| `okb upgrade [--dry-run] [--by …]` | write | Migrate v0.1 conventions to v0.2 |
+| `okb jobs [--only …]` | admin | One maintenance pass under a lock |
 | `okb sync` | write | git commit/push/pull |
-| `okb take <statement> --confidence N` | write | Stake a claim (opinion/prediction) |
-| `okb resolve <id> <outcome>` | write | Settle a claim: correct/incorrect/void |
-| `okb calibrate` | read | Brier score + calibration over resolved claims |
-| `okb brains` | read | List configured brain mounts (CLI-only) |
-| `okb serve` | admin | Start local GUI + API |
-| `okb mcp` | admin | Start MCP server |
+| `okb take` / `resolve` / `calibrate` | write/read | Claims and calibration |
+| `okb brains` | read (localOnly) | List configured brain mounts |
+| `okb serve [--open]` / `okb mcp` / `okb bookmarklet` | admin (localOnly) | Local GUI+API, MCP server, clip bookmarklet |
 | `okb export-viz` | read | Self-contained OKF-style graph HTML |
+| `okb version` / `--version` | — | okbrain's version |
 
 Global flags: `--json` everywhere, `--bundle <path>`, `--brain <name>`
-(named mount; also `$OKB_BRAIN`).
+(named mount; also `$OKB_BRAIN`), `--version`.
 
 ### Local API (`src/api.ts`, started by `okb serve`)
 The GUI's backend and the bookmarklet's target — a thin adapter generated
 over the registry, trusted like the CLI but defended like a network surface:
-- **Routes:** `GET /api/ops` (public op descriptors, for surface generation),
-  `POST /api/op/<name>` (JSON params → `runOp` → `{ result }`),
-  `GET /api/ask/stream` (SSE via the generic `Operation.stream` hook: events
-  `context` — packed sources before synthesis — then `answer`, then `done`
-  with the full result, or `error`; the gateway doesn't stream tokens yet, so
-  `answer` arrives whole — Backlog), `GET /clip` (bookmarklet), `GET /`
-  (GUI page; placeholder until 3.2). Ops marked `localOnly` (`serve`,
-  `bookmarklet`) never appear on network adapters.
+- **Routes:** `GET /api/ops` (public op descriptors), `POST /api/op/<name>`
+  (JSON params → `runOp` → `{ result }`), `GET /api/ask/stream` (SSE via the
+  generic `Operation.stream` hook: events `context` → `answer` → `done` or
+  `error`; the gateway doesn't stream tokens yet, so `answer` arrives whole
+  — Backlog), `GET /clip` (bookmarklet), `GET /` + `/gui/*` (the app and its
+  vendored assets). Three small dedicated routes cover what `localOnly` ops
+  provide on the host without exposing them as ops: `GET /api/status`
+  (version, OKF version, active bundle path, brain, read-only, index/vector
+  presence, actor, port), `GET /api/brains` (mount **names** + policy —
+  never mount paths, per the 5.2 decision), `GET /api/bookmarklet`.
+- **Brain scoping:** a request may name a configured mount with the
+  `x-okb-brain` header (or `?brain=` for SSE); the request then runs against
+  that bundle with its read-only policy, so the GUI's brain switcher never
+  re-opens a read-only brain. Unknown names are a 400.
 - **Security (fail-closed):** binds 127.0.0.1 only; the Host header must be
   the server's own `127.0.0.1/localhost/[::1]:port` (defeats DNS rebinding);
   every `/api` and `/clip` request must present the per-install token
@@ -627,64 +757,76 @@ over the registry, trusted like the CLI but defended like a network surface:
 A vanilla single-page app (`src/gui/`: index.html + app.js + style.css) —
 no framework, no build step; api.ts serves the files and Bun text imports
 embed them into the compiled binary (the viz-vendor pattern). Presentation
-only: every data access is a `/api/op/*` call. Hash routing; dark default +
-persisted light toggle using the viewer's token system and validated
-palettes. Every non-`localOnly` op has a home on one of the views below — the
-GUI is a full surface over the ops contract, not a subset. Views:
-- **Graph** — live Cytoscape fed by the `graph_data` op (whole graph as
-  JSON; also `okb graph-data --json` for agents/scripts); search filter,
-  type-colored nodes, detail panel with rendered body (internal links
-  rewired to focus their node), click-through to the editor.
-- **Search** — hybrid `search` op (keyword + vector recall, graph
-  expansion, optional profile) with per-hit recall-source chips; distinct
-  from the Graph view's client-side title filter. Each hit links to
-  editor + graph.
-- **Ask** — SSE streaming: retrieved context appears as chips before the
-  answer arrives; verified citations link to graph and editor.
-- **Add** — the quick-ingest hub for the ops that don't need the full
-  editor: quick `capture` (note → `inbox/`), `clip` a URL, pull configured
-  feeds (`rss`), and bulk `import` of a server-side path.
-- **Review** — card stack with scores + reasons, optional garnish toggle;
-  done / snooze / suggest-links (accepts write) / open / graph per card.
-- **Inbox** — unread clips/notes; open / mark-read / suggest-links.
-- **Claims** — calibration dashboard (`calibrate`: correct/incorrect/void
-  tallies, Brier score, per-decade buckets); a stake form (`take`) and
-  per-open-claim resolve controls (`resolve`), overdue claims flagged.
-- **Stats** — brain-at-a-glance tiles (`stats`), a two-concept path finder
-  (`graph_path`), and an orphan list (`orphans`).
-- **Editor** — scaffold fields (type/title/description/tags/resource) + a
-  markdown body textarea; concept-id link picker inserting normalized
-  links; citation-section helper; live backlinks; suggest-links panel
-  (insert-only — a suggestion lands in the textarea and becomes real on
-  save); saves via `write_concept`, so every save is conformant.
-  Deliberately not a rich editor: the bundle is plain markdown and external
-  editors remain first-class.
-- **Settings** — AI providers + retrieval profile (backed by `init`, which
-  persists them), git sync (status / run), enrichment guardrails + run
-  (`enrich`), and maintenance (re-index, embed, doctor, export viz.html,
-  and a confirm-gated rebuild).
-Cross-platform free (it's a web app); an optional Tauri wrapper later gives
-a native desktop app over the same local API.
+only: every data access is a `/api/op/*` call or one of the three status
+routes. Hash routing; dark default + persisted light toggle using the
+viewer's token system and validated palettes; responsive down to phone
+widths (the sidebar becomes a top bar). Every non-`localOnly` op has a home
+on one of the views below — a registry-derived test enforces it — and the
+`localOnly` ones surface as a brain switcher, a status footer, the
+bookmarklet, and MCP setup instructions. Rendered markdown goes through the
+shared `render.js` (footnotes, DOMPurify, link routing), so a clipped page
+cannot exfiltrate the API token. Views:
+- **Home** — the habit-forming front page: tiles (`stats`), quick `capture`,
+  today's review queue with Reviewed/Snooze, inbox preview, recently
+  changed (`list_concepts --detail`), one-click `doctor` with the v0.2
+  signal summary, and a "build index" prompt when there is none.
+- **Browse** — every concept (`list_concepts --detail`) with type, status,
+  trust tier, staleness, tags; client-side filter and sort.
+- **Concept** — the reader: rendered body with footnote attribution and
+  routed internal links, badges, provenance (`generated`, `verified`,
+  `sources` with credibility signals), Attested Computation contract fields
+  when present, links to / cited by (`graph_neighbors`), and actions:
+  Edit, Reviewed ✓ (`review_done`), Mark read, Suggest links (accept =
+  `link_accept`), Graph, Deprecate/Restore (`write_concept --status`),
+  Delete (`delete_concept`, confirm-gated).
+- **Edit / New** — scaffold fields, status, `stale_after`, a sources editor
+  (id / resource / title / author rows), markdown body with a concept-id
+  link picker and insert-only link suggestions; saves via `write_concept`,
+  or `new_concept` when no id is given (derived from type + title).
+- **Graph** — live Cytoscape fed by `graph_data`; type legend with toggles
+  and counts, search dimming, stale/deprecated styling, detail panel with
+  badges and provenance, Open/Edit.
+- **Search** — hybrid `search` with per-hit recall-source chips and
+  snippets. **Ask** — SSE streaming: context chips before the answer;
+  verified citations link to the reader.
+- **Add** — quick `capture`, `clip` (with auto-tag opt-in), `rss` (one URL
+  or every configured feed), bulk `import`, and the bookmarklet.
+- **Review** / **Inbox** — card stacks with reasons / unread items;
+  Reviewed ✓, Snooze, Mark read, Suggest links, Open, Graph.
+- **Claims** — `calibrate` dashboard, `take` form, per-claim `resolve`.
+- **Stats** — tiles incl. status and trust tiers and past-`stale_after`,
+  by type, top tags, `graph_path` finder, `orphans`.
+- **Settings** — server status, your actor (`init --actor`), AI providers +
+  retrieval profile (`init`), git `sync`, `enrich` guardrails, maintenance
+  (`index`, `embed`, `doctor`, `export_viz`, confirm-gated `rebuild`, `jobs`
+  with a job subset, `upgrade` preview + run), MCP setup snippets, the
+  bookmarklet.
+Deliberately not a rich editor: the bundle is plain markdown and external
+editors remain first-class. Cross-platform free (it's a web app); an
+optional Tauri wrapper later gives a native desktop app over the same
+local API.
 
 ### Trust boundary
-Each op call carries a trust flag. CLI + local GUI are trusted; MCP/remote is
-untrusted unless explicitly local. Not-strictly-trusted ⇒ untrusted
-(fail-closed). Untrusted callers get read ops; write/admin are gated and
-filesystem confinement tightens.
+Each op call carries a trust flag and an actor. CLI + local GUI are trusted
+and attributed to the configured human actor; MCP/remote is untrusted unless
+explicitly local and attributed to the connecting client. Not-strictly-trusted
+⇒ untrusted (fail-closed). Untrusted callers get read ops; write/admin are
+gated and filesystem confinement tightens.
 
 ### Multi-brain mounts (Stage 5)
 The gbrain "brains" axis: config `brains` maps a name to a bundle path
 (string form) or `{ path, readonly }` (policy form) — `~` expands, paths
 must otherwise be absolute (a config file resolving against cwd would be a
 footgun). Selection is `okb --brain <name>` / `$OKB_BRAIN` (mutually
-exclusive with `--bundle`); `okb brains` lists mounts and is `localOnly` —
-mount paths are host filesystem topology and never belong on a network
-surface. The **read-only policy is a third gate in the ops layer**, distinct
-from trust: `checkOpCall` refuses write/admin on a readonly context before
-any handler runs, and the flag is threaded through every adapter (CLI, each
-local-API request, MCP even with `--trusted`), so serving a read-only brain
-cannot re-open it. Each mount is its own repo + its own `.okb/` index —
-nothing is shared between brains.
+exclusive with `--bundle`), the GUI's sidebar switcher (per-request
+`x-okb-brain`), and `okb brains` lists mounts (`localOnly` — mount paths are
+host filesystem topology and never belong on a network surface; the GUI
+route returns names and policy only). The **read-only policy is a third gate
+in the ops layer**, distinct from trust: `checkOpCall` refuses write/admin on
+a readonly context before any handler runs, and the flag is threaded through
+every adapter (CLI, each local-API request, MCP even with `--trusted`), so
+serving a read-only brain cannot re-open it. Each mount is its own repo +
+its own `.okb/` index — nothing is shared between brains.
 
 ---
 
@@ -695,8 +837,9 @@ nothing is shared between brains.
 - **Engine (default):** SQLite + `sqlite-vec` (vectors) + FTS5 (keyword) —
   embedded, file-based, zero-config, cross-platform.
 - **Graph:** SQLite tables + recursive CTEs.
-- **Viewer:** Cytoscape.js + marked.js (from OKF's viewer), bundled into the
-  static export and reused live in the GUI.
+- **Viewer:** Cytoscape.js + marked.js (from OKF's viewer) + DOMPurify
+  (sanitization), bundled into the static export and reused live in the GUI
+  through one shared `render.js`.
 - **MCP:** the MCP TypeScript SDK.
 - **AI:** HTTP clients per recipe (OpenAI-compatible for most local + several
   API providers).
@@ -713,9 +856,14 @@ the pair beats hidden temp-file extraction. `bun run build` copies the
 platform vec0 into `bin/`; `scripts/package-release.ts` (driven by
 `.github/workflows/release.yml` on `v*` tags) cross-compiles all five
 targets from one Linux runner and pairs each with its platform vec0 from
-the npm registry (tar.gz/zip + SHA256SUMS.txt). Homebrew/Scoop manifest
-templates live in `packaging/`; artifacts stay unsigned until org
-certificates exist (hook points documented in `packaging/README.md`).
+the npm registry (tar.gz/zip + SHA256SUMS.txt), and `bun run package`
+(`--local`) builds the same archive for the host machine with the vec0
+already in `node_modules` — a fully offline packaging path. The archive is
+the complete offline product: CLI, local API, embedded GUI, MCP server, and
+the extension. CI and the release workflow pin the Bun version (a floating
+`latest` once broke Windows CI, B6). Homebrew/Scoop manifest templates live
+in `packaging/`; artifacts stay unsigned until org certificates exist (hook
+points documented in `packaging/README.md`).
 
 ### Scale path (opt-in, behind the same interfaces)
 More files / faster search → swap engine to **Postgres + pgvector** (ops
@@ -735,22 +883,26 @@ stays the default. Switching engines = point at the new engine +
 okbrain/
 ├── src/
 │   ├── core/
-│   │   ├── operations.ts        # the ONE contract (scope + trust + readonly)
-│   │   ├── config.ts            # bundle path, config/data dirs, brain mounts
+│   │   ├── operations.ts        # the ONE contract (scope + trust + readonly + actor)
+│   │   ├── config.ts            # bundle path, config/data dirs, actor, brain mounts
+│   │   ├── version.ts           # okbrain's version + the tool actor (okb/<version>)
 │   │   ├── claims.ts            # calibration: takes vs facts (Brier, buckets)
-│   │   ├── stats.ts             # okb stats: brain-wide counts/orphans/freshness
+│   │   ├── stats.ts             # okb stats: counts, status/trust, orphans, freshness
+│   │   ├── browser.ts           # `okb serve --open` (per-OS opener, argv spawn)
 │   │   ├── log.ts               # structured logger
-│   │   ├── okf/                 # document, paths, bundle, indexmd, logmd, doctor
-│   │   ├── engine/              # interface, sqlite, index-build  (postgres later)
-│   │   ├── graph/               # links, typed-edges, backlinks, queries
-│   │   ├── ai/                  # gateway, recipes/*
+│   │   ├── okf/                 # document (v0.2 readers), paths, bundle, write,
+│   │   │                        #   indexmd, logmd, doctor, upgrade (v0.1 → v0.2)
+│   │   ├── engine/              # interface, sqlite (schema v4), index-build
+│   │   ├── graph/               # links (+ path fields, provenance), typed-edges, queries
+│   │   ├── ai/                  # gateway, recipes
 │   │   ├── retrieval/           # chunk, hybrid (rrf), relational, rerank, profiles
-│   │   ├── ingest/              # import, capture, rss, web (crawler pass)
+│   │   ├── ingest/              # import, capture, clip, rss, web (crawler pass)
+│   │   ├── viz/                 # export (viz.html), render.js (shared), vendor/
 │   │   └── sync.ts              # git
 │   ├── cli.ts                   # generated from operations.ts (trusted)
-│   ├── api.ts                   # local HTTP for the GUI (trusted)
-│   ├── mcp/server.ts            # MCP server (untrusted-by-default)
-│   └── gui/                     # graph view (adapted viz) + editor + ask + settings
+│   ├── api.ts                   # local HTTP for the GUI (trusted; brain scoping)
+│   ├── mcp/server.ts            # MCP server (untrusted-by-default; client actor)
+│   └── gui/                     # the app: index.html + app.js + style.css
 ├── skills/                      # fat markdown procedures
 │   ├── RESOLVER.md              # thin router: intent → which skill
 │   ├── capture/SKILL.md
@@ -759,7 +911,8 @@ okbrain/
 │   ├── query/SKILL.md
 │   ├── daily-note/SKILL.md
 │   └── link-suggest/SKILL.md
-├── bundles/example/             # tiny conformant OKF bundle for tests/demos
+├── bundles/example/             # tiny OKF v0.2 bundle written by okbrain (tests/demos)
+├── bundles/acme_retail/         # upstream OKF v0.2 sample, read-only conformance fixture
 ├── scripts/                     # build/release helpers (copy-vec0, package-release)
 ├── packaging/                   # Homebrew/Scoop templates + release/signing docs
 ├── docs/
@@ -822,6 +975,80 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-09-03 — **OKF v0.2 adopted end to end; v0.1 keys are superseded,
+  not duplicated.** The spec moved to its own repository
+  (`GoogleCloudPlatform/open-knowledge-format`; the `knowledge-catalog`
+  copy is a frozen snapshot with the same SPEC.md) and its v0.2 makes
+  provenance/trust/lifecycle first-class. okbrain maps its existing
+  semantics onto the spec instead of adding parallel keys: `timestamp` →
+  `generated.at` (with the change's actor as `generated.by`), the
+  Resurface `last_reviewed` stamp → a human `verified` event, clip/RSS/
+  enrich `# Citations` lists → `sources` entries with credibility signals,
+  and `status`/`stale_after` become writer inputs, doctor checks, index
+  columns, review signals, and GUI badges. A content write drops a legacy
+  `timestamp` rather than carrying both (two "last changed" values would
+  drift); metadata-only writes leave legacy keys alone because no actor can
+  honestly be invented for them — that is `okb upgrade`'s job, with a stated
+  `--by`. Readers stay permissive with explicit fallbacks (§13.1), so v0.1
+  bundles keep working untouched.
+- 2026-09-03 — **Reviewing is verifying.** `okb review done` records a
+  `verified` event by the caller's actor rather than a private
+  `last_reviewed` key: the spec's trust tier *human-reviewed* is exactly
+  what a human looking at a concept again means, and it makes okbrain's
+  review data legible to every other OKF consumer. One event per actor is
+  kept (latest wins) so a daily habit does not grow an unbounded list; the
+  cooldown uses the latest *human* verification so a nightly process
+  confirming content never silences the human queue.
+- 2026-09-03 — **Every write has an actor; tools and agents are never
+  humans.** `OpContext.actor()` is resolved per surface: the configured
+  `actor` (`okb init --actor`, default `human:<os user>`) for CLI/GUI,
+  `okb/<version>` for content the tool itself extracts (clips, feeds,
+  imports without their own provenance), `okb-enrich/<model>` for the
+  enrichment agent, and `<client>/<version>` from the MCP handshake. The
+  writer validates the actor convention. Getting this wrong would poison
+  trust tiers (an agent's write reading as human-reviewed), so it is
+  enforced in the writer, not left to callers.
+- 2026-09-03 — **Provenance is graph.** `sources[].resource` entries that
+  name concepts become `cites` edges in the index (§5.1 says the derivation
+  edge "already exists in the bundle graph"), and path-valued fields resolve
+  with a root-relative fallback because the spec's own examples write
+  `policies/x.md` from `metrics/y.md`. Body links keep priority in the
+  dedupe. The static viewer and `graph_data` share the same edge builder,
+  so all three graph surfaces agree.
+- 2026-09-03 — **The enrichment agent must cite in frontmatter, and the
+  tool enforces it.** `write_concept` merges `sources` (never shrinks — the
+  reference agent's augmentation guard, minus its BigQuery specifics),
+  refuses a minted reference with zero sources, and stamps the agent actor.
+  Prompts are advice; tools are law, as with the fetch guardrails.
+- 2026-09-03 — **GUI refresh: same three static files, now a full product
+  surface.** Views were added for the gaps a real user hits (Home, Browse,
+  a Concept reader, delete, jobs, upgrade, the v0.2 fields in the editor)
+  and the `localOnly` ops got dedicated GUI affordances (brain switcher
+  over `x-okb-brain`, status footer, bookmarklet, MCP snippet) rather than
+  being exposed as ops. The framework-free decision stands: three files
+  embedded in the binary keep `bun build --compile` the entire build.
+  Rendered markdown is now sanitized with vendored DOMPurify through one
+  shared `render.js` (GUI + static viewer) — the Backlog XSS concern became
+  urgent once the app embeds a write-capable API token in its page. A
+  registry-derived test replaced the hand-maintained op list that had let
+  `jobs` ship without a GUI home.
+- 2026-09-03 — **`okb rm` exists.** Deleting a concept was the one everyday
+  action the product had no path for except editing the filesystem; the op
+  deletes the file, prunes emptied directories, regenerates indexes, logs a
+  `**Deletion**`, and drops the caches. No confirm flag on the CLI (`rm`
+  semantics are understood and git keeps history); the GUI confirms.
+- 2026-09-03 — **The upstream sample is the conformance fixture.** The
+  Stage-0 acceptance item "round-trip an OKF sample bundle" was blocked on a
+  user-supplied sample; the reference project's `acme_retail` bundle (v0.2
+  throughout, agent-style indexes, a `log.md` with frontmatter, non-md
+  artifacts) is vendored under Apache-2.0 and driven read-only through
+  doctor/index/graph/search/stats/export. `bundles/example` stays the tiny
+  writer-authored bundle.
+- 2026-09-03 — **Production packaging: pinned Bun, offline local package.**
+  CI and releases pin Bun 1.3.14 (B6 was a `latest` drift), and
+  `bun run package` builds the host's archive with the vec0 already in
+  `node_modules` — no registry fetch — so the "fully offline local package"
+  is a one-command build, not only a release-runner artifact.
 - 2026-07-22 — **The GUI is a full surface over the ops contract, not a
   curated subset.** Stage 3.2 shipped the GUI with the everyday views, but
   a dozen non-`localOnly` ops (`search`, `graph_path`, `orphans`, `stats`,
@@ -1290,6 +1517,12 @@ sections above as current truth; this log says *why/when*.
 
 ### Open questions (decide as they come up; record the answer here)
 - Concept `type` vocabulary: ship a small non-binding default set (Note, Person,
-  Project, Reference, Idea, Meeting…) vs fully free-form?
-- Acceptance test: round-trip the three OKF sample bundles (GA4, Stack Overflow,
-  Bitcoin) as a conformance gate?
+  Project, Reference, Idea, Meeting…) vs fully free-form? (okbrain writes
+  lowercase types; upstream samples use Title Case — both are conformant.)
+- `index.md` style: okbrain generates `##` sections with bundle-absolute
+  links under a preserved human head; the reference agent emits H1 sections
+  with relative links. Both are conformant (§8 fixes neither); offer the
+  upstream style as an option if interop with its tooling ever needs it.
+- Attested Computations (§10): okbrain reads and displays the contract
+  (`runtime`, parameters, executor, attester) and doctor checks `runtime`;
+  executing/attesting is deliberately out of scope for a personal brain.

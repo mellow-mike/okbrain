@@ -10,6 +10,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { corsHeaders, createApiServer, hostAllowed, type ApiServer } from "../src/api.ts";
+import { loadConfig, saveConfig } from "../src/core/config.ts";
+import { OKF_VERSION } from "../src/core/okf/indexmd.ts";
+import { operations } from "../src/core/operations.ts";
+import { VERSION } from "../src/core/version.ts";
 import {
   bookmarkletJs,
   ensureServeToken,
@@ -115,26 +119,22 @@ describe("request guards", () => {
     const page = await (await fetch(base)).text();
     expect(page).toContain(`window.OKB_TOKEN = "${TOKEN}"`);
     for (const link of [
-      "#graph", "#search", "#ask", "#add", "#review", "#inbox",
-      "#claims", "#stats", "#editor", "#settings",
+      "#home", "#browse", "#graph", "#search", "#ask", "#review", "#inbox",
+      "#add", "#edit", "#claims", "#stats", "#settings",
     ])
       expect(page).toContain(`href="${link}"`);
   });
 
-  test("the GUI JS wires every non-localOnly op to a surface", async () => {
+  test("the GUI JS wires every non-localOnly op in the registry to a surface", async () => {
     const appJs = await (await fetch(base + "gui/app.js")).text();
-    // Each op the GUI exposes appears as an api() call target...
-    for (const op of [
-      "search", "read_concept", "list_concepts", "graph_neighbors",
-      "graph_path", "orphans", "stats", "doctor", "write_concept", "capture",
-      "import", "graph_data", "export_viz", "index", "rebuild", "embed", "sync",
-      "review_queue", "review_done", "review_snooze", "clip", "rss",
-      "link_suggest", "link_accept", "enrich", "inbox_list", "inbox_read",
-      "take", "resolve", "calibrate", "init",
-    ])
-      expect(appJs).toContain(`'${op}'`);
+    // Derived from the registry, so a new network-facing op cannot ship without a GUI home.
+    for (const op of operations.filter((o) => !o.localOnly && o.name !== "ask"))
+      expect(appJs).toContain(`'${op.name}'`);
     // ...except `ask`, which the GUI drives over the SSE stream endpoint.
     expect(appJs).toContain("/api/ask/stream");
+    // localOnly ops have dedicated routes or documented terminal recipes instead.
+    for (const needle of ["/api/status", "/api/brains", "/api/bookmarklet", "okb mcp"])
+      expect(appJs).toContain(needle);
   });
 
   test("GUI assets served tokenless with correct content types", async () => {
@@ -143,6 +143,8 @@ describe("request guards", () => {
       ["gui/style.css", "text/css", "--accent"],
       ["gui/cytoscape.js", "application/javascript", "cytoscape"],
       ["gui/marked.js", "application/javascript", "marked"],
+      ["gui/purify.js", "application/javascript", "DOMPurify"],
+      ["gui/render.js", "application/javascript", "okbRender"],
     ];
     for (const [path, type, needle] of cases) {
       const r = await fetch(base + path);
@@ -216,6 +218,64 @@ describe("op routes", () => {
     expect(((await bad.json()) as { error: string }).error).toContain("unknown parameter");
     expect((await post("read_concept", { id: "notes/ghost" })).status).toBe(404);
     expect((await post("search", "just a string")).status).toBe(400);
+  });
+});
+
+describe("server routes for the GUI", () => {
+  test("GET /api/status describes the served bundle", async () => {
+    const r = await call("api/status");
+    expect(r.status).toBe(200);
+    const s = (await r.json()) as Record<string, unknown>;
+    expect(s).toMatchObject({ version: VERSION, okfVersion: OKF_VERSION, bundle, brain: null, readonly: false, hasIndex: true, hasVectors: false, port: api.port });
+    expect(typeof s.actor).toBe("string");
+  });
+
+  test("GET /api/brains lists mount names + policy, never paths; GET /api/bookmarklet embeds the token", async () => {
+    expect(((await (await call("api/brains")).json()) as { brains: unknown[] }).brains).toEqual([]);
+    const bm = (await (await call("api/bookmarklet")).json()) as { port: number; bookmarklet: string };
+    expect(bm.port).toBe(api.port);
+    expect(bm.bookmarklet).toContain(`token=${TOKEN}`);
+    expect(bm.bookmarklet).toContain(`:${api.port}/clip`);
+  });
+
+  test("x-okb-brain scopes a request to a configured mount (read-only policy included)", async () => {
+    const saved = loadConfig();
+    const ref = await mkdtemp(join(tmpdir(), "okb-api-ref-"));
+    await writeFile(join(ref, "beta.md"), "---\ntype: note\ntitle: Beta\ndescription: b\n---\nRef body.\n");
+    try {
+      saveConfig({ ...saved, brains: { ref: { path: ref, readonly: true } } });
+      const brains = (await (await call("api/brains")).json()) as { brains: Record<string, unknown>[] };
+      expect(brains.brains).toEqual([{ name: "ref", readonly: true, exists: true, active: false }]);
+
+      const scoped = (init: RequestInit = {}) =>
+        call("api/op/read_concept", { ...init, method: "POST", body: JSON.stringify({ id: "beta" }), headers: { "x-okb-brain": "ref" } });
+      const read = await scoped();
+      expect(read.status).toBe(200);
+      expect(((await read.json()) as { result: { raw: string } }).result.raw).toContain("Ref body");
+      const status = (await (await call("api/status", { headers: { "x-okb-brain": "ref" } })).json()) as { brain: string; readonly: boolean };
+      expect(status).toMatchObject({ brain: "ref", readonly: true });
+
+      const write = await call("api/op/capture", { method: "POST", body: JSON.stringify({ text: "nope" }), headers: { "x-okb-brain": "ref" } });
+      expect(write.status).toBe(403); // read-only mount
+      // An engine-backed read on the never-indexed mount is a precondition failure, not a server fault.
+      const unindexed = await call("api/op/graph_neighbors", { method: "POST", body: JSON.stringify({ id: "beta" }), headers: { "x-okb-brain": "ref" } });
+      expect(unindexed.status).toBe(409);
+      expect(((await unindexed.json()) as { error: string }).error).toContain("okb index");
+      expect((await call("api/status", { headers: { "x-okb-brain": "ghost" } })).status).toBe(400);
+    } finally {
+      saveConfig(saved);
+      await rm(ref, { recursive: true, force: true });
+    }
+  });
+
+  test("delete_concept removes the file, the index row, and logs a Deletion", async () => {
+    await post("write_concept", { id: "notes/doomed", type: "note", title: "Doomed", description: "d" });
+    expect((await post("delete_concept", { id: "notes/doomed" })).status).toBe(200);
+    expect((await post("read_concept", { id: "notes/doomed" })).status).toBe(404);
+    const { result } = (await (await post("search", { query: "Doomed" })).json()) as { result: { id: string }[] };
+    expect(result.some((h) => h.id === "notes/doomed")).toBe(false);
+    expect(readFileSync(join(bundle, "log.md"), "utf8")).toContain("**Deletion**: [Doomed](/notes/doomed.md)");
+    expect((await post("delete_concept", { id: "notes/doomed" })).status).toBe(404);
   });
 });
 

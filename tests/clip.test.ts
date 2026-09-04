@@ -8,6 +8,7 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clipUrl, normalizeUrl } from "../src/core/ingest/clip.ts";
+import { parse } from "../src/core/okf/document.ts";
 import { extractArticle } from "../src/core/ingest/extract.ts";
 import {
   FetchGuardError,
@@ -164,13 +165,21 @@ describe("clipUrl pipeline (injected fetcher)", () => {
     const doc = await refFile("test-article.md");
     expect(doc).toContain("type: reference");
     expect(doc).toContain("resource: https://example.com/articles/test-article");
-    expect(doc).toContain("author: Ada Fixture");
-    expect(doc).toContain("published: 2026-01-15T10:00:00Z");
     expect(doc).toContain("A clipper that produces a well-formed note");
     expect(doc).toMatch(/tags:\n +- inbox/);
-    expect(doc).toContain("# Citations");
-    expect(doc).toContain("[Test Article](https://example.com/articles/test-article)");
-    expect(doc.indexOf("# Highlights")).toBeLessThan(doc.indexOf("# Citations"));
+    expect(doc).toContain("generated:\n  by: okb/"); // the tool produced the content
+    // OKF v0.2 provenance: the page itself, with byline + publication date as signals.
+    expect(parse(doc).frontmatter.sources).toEqual([
+      {
+        id: "example-com",
+        resource: "https://example.com/articles/test-article",
+        title: "Test Article",
+        author: "Ada Fixture",
+        last_modified: "2026-01-15T10:00:00Z",
+      },
+    ]);
+    expect(doc).not.toContain("# Citations");
+    expect(doc).not.toContain("published:");
     expect(doc).toContain('"Reasons are the user experience."');
     expect((await okb(["doctor", "--bundle", root])).code).toBe(0);
   });
@@ -270,7 +279,7 @@ describe("okb clip / inbox (CLI)", () => {
 
     const after = await readFile(join(root, "references", "test-article.md"), "utf8");
     expect(after).not.toContain("inbox");
-    expect(after).toContain(before.match(/timestamp: .*/)![0]); // untouched
+    expect(after).toContain(before.match(/generated:\n  by: .*\n  at: .*/)![0]); // untouched
     expect(await readFile(join(root, "log.md"), "utf8")).toBe(logBefore);
 
     expect((await okb(["inbox", "--bundle", root])).stdout).toContain("(inbox is empty)");

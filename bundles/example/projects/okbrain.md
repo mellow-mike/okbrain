@@ -2,10 +2,12 @@
 type: project
 title: okbrain
 description: Self-hosted OKF-native personal knowledge manager
-timestamp: 2026-07-05T09:00:00Z
 resource: https://github.com/mellow-mike/okbrain
 tags:
   - software
+generated:
+  by: human:okbrain
+  at: 2026-07-05T09:00:00Z
 ---
 # okbrain
 

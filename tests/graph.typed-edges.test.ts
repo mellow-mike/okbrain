@@ -69,6 +69,7 @@ const node = (id: string, title: string, body = ""): NodeUpsert => ({
   resource: null,
   timestamp: null,
   lastReviewed: null,
+  status: "stable", staleAfter: null, trust: "unverified",
   bodyLen: body.length,
   contentHash: id,
   body,

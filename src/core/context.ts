@@ -4,7 +4,7 @@
 // close via the returned handle.
 
 import { existsSync } from "node:fs";
-import { loadConfig, type OkbConfig } from "./config.ts";
+import { loadConfig, resolveActor, type OkbConfig } from "./config.ts";
 import type { Engine, VectorStore } from "./engine/interface.ts";
 import { defaultDbPath, EngineError, openSqliteEngine } from "./engine/sqlite.ts";
 import { defaultVectorsPath, openVectorStore } from "./engine/vectors.ts";
@@ -15,7 +15,12 @@ export interface LocalContext {
   close(): void;
 }
 
-export function openLocalContext(bundle: string, trusted = true, readonly = false): LocalContext {
+export function openLocalContext(
+  bundle: string,
+  trusted = true,
+  readonly = false,
+  actor?: string,
+): LocalContext {
   let engine: Engine | undefined;
   let vectors: VectorStore | undefined;
   let cfg: OkbConfig | undefined;
@@ -23,6 +28,7 @@ export function openLocalContext(bundle: string, trusted = true, readonly = fals
     bundle,
     trusted,
     readonly,
+    actor: () => actor ?? resolveActor((cfg ??= loadConfig())),
     engine: (createIfMissing = false) => {
       if (!engine) {
         const db = defaultDbPath(bundle);

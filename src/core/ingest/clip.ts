@@ -1,15 +1,18 @@
 // Clip (F-A.3/4): URL → conformant `references/<slug>` concept tagged `inbox`.
 // Dedupe is by normalized canonical URL against every concept's `resource`
 // (both sides normalized — hand-written resources count too); a re-clip
-// appends to `# Highlights` instead of creating a duplicate. Works with or
-// without an index (caller passes engine rows, else the bundle is scanned)
-// and with zero AI providers. Offline fails fast — no queue in v1.
+// appends to `# Highlights` instead of creating a duplicate. Provenance is
+// OKF v0.2 `sources` frontmatter (the page itself, with its byline and
+// publication date as credibility signals). Works with or without an index
+// (caller passes engine rows, else the bundle is scanned) and with zero AI
+// providers. Offline fails fast — no queue in v1.
 
 import { existsSync } from "node:fs";
-import { fmString } from "../okf/document.ts";
+import { asInstant, fmString, type SourceEntry } from "../okf/document.ts";
 import { listConcepts, readConceptPermissive } from "../okf/bundle.ts";
 import { idToAbsPath, slugify } from "../okf/paths.ts";
 import { nowTimestamp, writeConcept } from "../okf/write.ts";
+import { TOOL_ACTOR } from "../version.ts";
 import { guardedFetch, type FetchedPage } from "./fetch-guard.ts";
 import { extractArticle, type ExtractedArticle } from "./extract.ts";
 
@@ -50,6 +53,8 @@ export interface ClipOptions {
   maxBodyBytes?: number;
   defaultTags?: string[];
   stripParams?: string[];
+  /** Actor for the highlight append (a human note); the clip itself is okb's. */
+  actor?: string;
 }
 
 export interface ClipResult {
@@ -101,13 +106,13 @@ const highlightEntry = (quote?: string, note?: string): string | null => {
 };
 
 /** Append to the concept's `# Highlights` section (created when missing). */
-async function appendHighlight(root: string, id: string, entry: string): Promise<void> {
+async function appendHighlight(root: string, id: string, entry: string, actor?: string): Promise<void> {
   const { doc } = await readConceptPermissive(root, id);
   const body = doc.body.replace(/\s+$/, "");
   const withSection = /^# Highlights$/m.test(body)
     ? body.replace(/^# Highlights$/m, `# Highlights\n\n${entry}`)
     : `${body}\n\n# Highlights\n\n${entry}`;
-  await writeConcept(root, { id, body: withSection });
+  await writeConcept(root, { id, body: withSection, actor });
 }
 
 function capBytes(s: string, max: number): { text: string; truncated: boolean } {
@@ -122,6 +127,15 @@ function capBytes(s: string, max: number): { text: string; truncated: boolean } 
   };
 }
 
+/** The page as an OKF v0.2 source entry: byline and publication date are its credibility signals. */
+export function pageSource(url: string, art: ExtractedArticle): SourceEntry {
+  const s: SourceEntry = { resource: url, title: art.title };
+  if (art.byline) s.author = art.byline;
+  const published = asInstant(art.published);
+  if (published !== null) s.last_modified = published;
+  return s;
+}
+
 export async function clipUrl(
   root: string,
   input: ClipInput,
@@ -133,7 +147,7 @@ export async function clipUrl(
   const entry = highlightEntry(input.quote, input.note);
 
   const finish = async (id: string): Promise<ClipResult> => {
-    if (entry !== null) await appendHighlight(root, id, entry);
+    if (entry !== null) await appendHighlight(root, id, entry, opts.actor);
     return {
       id,
       created: false,
@@ -161,20 +175,9 @@ export async function clipUrl(
 
   const autoTags = opts.suggestTags ? await opts.suggestTags(art) : [];
   const { text, truncated } = capBytes(art.markdown, opts.maxBodyBytes ?? CLIP_MAX_BODY_BYTES);
-  const cite = `- [${art.title}](${canonical})${art.byline ? ` — ${art.byline}` : ""}`;
-  const body = [
-    text,
-    ...(entry !== null ? ["", "# Highlights", "", entry] : []),
-    "",
-    "# Citations",
-    "",
-    cite,
-  ].join("\n");
+  const body = [text, ...(entry !== null ? ["", "# Highlights", "", entry] : [])].join("\n");
 
   const host = new URL(canonical).hostname;
-  const extra: Record<string, unknown> = {};
-  if (art.byline) extra.author = art.byline;
-  if (art.published) extra.published = art.published;
   await writeConcept(root, {
     id,
     type: "reference",
@@ -190,7 +193,8 @@ export async function clipUrl(
       ]),
     ],
     body,
-    extra,
+    sources: [pageSource(canonical, art)],
+    actor: TOOL_ACTOR,
   });
   return { id, created: true, deduped: false, appended: entry !== null, truncated, autoTags };
 }

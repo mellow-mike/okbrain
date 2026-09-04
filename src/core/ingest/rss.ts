@@ -2,13 +2,17 @@
 // deduped by normalized item URL against every concept's `resource` — the
 // same rule as clip, so a feed entry and a hand-clipped article of the same
 // page can never duplicate. Entries keep the feed's own summary/content;
-// fetching the full page stays clip's (or the enrich pass's) job. Zero AI,
-// idempotent re-pulls, works with or without an index.
+// fetching the full page stays clip's (or the enrich pass's) job. Provenance
+// is OKF v0.2 `sources`: the feed and the article itself (with author and
+// publication date as credibility signals). Zero AI, idempotent re-pulls,
+// works with or without an index.
 
 import { existsSync } from "node:fs";
 import { DOMParser } from "linkedom";
+import { asInstant, type SourceEntry } from "../okf/document.ts";
 import { idToAbsPath, slugify } from "../okf/paths.ts";
 import { writeConcept } from "../okf/write.ts";
+import { TOOL_ACTOR } from "../version.ts";
 import { allResources, findByResource, normalizeUrl } from "./clip.ts";
 import { htmlToMarkdown } from "./extract.ts";
 import { guardedFetch, type FetchedPage } from "./fetch-guard.ts";
@@ -163,10 +167,12 @@ export async function pullFeed(
     const markdown = item.contentHtml === "" ? "" : htmlToMarkdown(item.contentHtml);
     const title = item.title || canonical;
     const host = new URL(canonical).hostname;
-    const cite = `- [${title}](${canonical})${feed.title ? ` — ${feed.title}` : ""}`;
-    const extra: Record<string, unknown> = { feed: page.url };
-    if (item.author) extra.author = item.author;
-    if (item.published) extra.published = item.published;
+    const article: SourceEntry = { resource: canonical, title };
+    if (item.author) article.author = item.author;
+    const published = asInstant(item.published);
+    if (published !== null) article.last_modified = published;
+    const feedSource: SourceEntry = { id: "feed", resource: page.url };
+    if (feed.title) feedSource.title = feed.title;
 
     await writeConcept(root, {
       id,
@@ -175,8 +181,9 @@ export async function pullFeed(
       description: describe(markdown, feed.title, host),
       resource: canonical,
       tags: ["inbox", "rss"],
-      body: [...(markdown === "" ? [] : [markdown, ""]), "# Citations", "", cite].join("\n"),
-      extra,
+      body: markdown === "" ? "" : markdown + "\n",
+      sources: [feedSource, article],
+      actor: TOOL_ACTOR,
     });
     resources.push({ id, resource: canonical }); // in-run dedupe
     result.added.push({ id, title });

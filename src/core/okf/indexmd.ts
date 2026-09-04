@@ -11,7 +11,8 @@ import { readConceptPermissive } from "./bundle.ts";
 import { fmString, OkfParseError, parse, serialize } from "./document.ts";
 import { isReservedName } from "./paths.ts";
 
-export const OKF_VERSION = "0.1";
+/** The OKF spec version okbrain writes (declared in the root index.md). */
+export const OKF_VERSION = "0.2";
 
 const skipDir = (name: string) => name.startsWith(".") || name === "node_modules";
 

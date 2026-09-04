@@ -21,6 +21,7 @@ const row = (id: string, over: Partial<ReviewRow> = {}): ReviewRow => ({
   title: id,
   timestamp: daysAgo(0),
   lastReviewed: null,
+  status: "stable", staleAfter: null, trust: "unverified",
   inbox: false,
   snoozeUntil: null,
   ...over,
@@ -81,6 +82,18 @@ describe("computeStats (pure)", () => {
     expect(s.oldest).toBe(daysAgo(400));
     expect(s.stale).toBe(1); // only "ancient" (>180d); "undated" never counts
     expect(s.staleDays).toBe(180);
+  });
+
+  test("OKF v0.2 signals: status, trust tiers, and concepts past stale_after", () => {
+    const rows = [
+      row("a", { status: "draft", trust: "human-reviewed", lastReviewed: daysAgo(1) }),
+      row("b", { status: "deprecated", trust: "machine-confirmed", staleAfter: daysAgo(2) }),
+      row("c", { staleAfter: daysAgo(-2) }),
+    ];
+    const s = computeStats(rows, [], [], NOW);
+    expect(s.byStatus).toEqual({ draft: 1, stable: 1, deprecated: 1 });
+    expect(s.byTrust).toEqual({ unverified: 1, "machine-confirmed": 1, "human-reviewed": 1 });
+    expect(s.expired).toBe(1); // b is past stale_after; c is not yet
   });
 
   test("topTags is capped and empty bundles report zeros", () => {

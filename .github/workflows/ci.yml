@@ -20,7 +20,7 @@ jobs:
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14 # pinned: `latest` once broke Windows CI (B6)
 
       # bun:sqlite links Apple's SQLite, which can't load extensions; the
       # engine swaps in Homebrew's via Database.setCustomSQLite (sqlite-vec).

@@ -3,12 +3,22 @@
 // 127.0.0.1 only, Host-checked (DNS rebinding), CORS locked to its own
 // localhost origins, and every /api and /clip request must present the
 // per-install token (CSRF fail-closed; see CONTEXT §Clip). `localOnly` ops
-// (serve, bookmarklet) are never exposed.
+// (serve, bookmarklet, mcp, brains) are never exposed as ops; the GUI's
+// server-side needs they cover are small dedicated routes instead (status,
+// brain mounts by name, the bookmarklet), and a request may select a
+// configured brain mount with `x-okb-brain` (read-only policy travels along).
 //
 // operations.ts imports this file for the `serve` op, so nothing here may
 // touch an operations.ts binding at module top level (ESM cycle).
 
+import { existsSync } from "node:fs";
+import { AiError } from "./core/ai/gateway.ts";
+import { ConfigError, listBrains, resolveBrain } from "./core/config.ts";
 import { openLocalContext, type LocalContext } from "./core/context.ts";
+import { defaultDbPath, EngineError } from "./core/engine/sqlite.ts";
+import { SyncError } from "./core/sync.ts";
+import { defaultVectorsPath } from "./core/engine/vectors.ts";
+import { OKF_VERSION } from "./core/okf/indexmd.ts";
 import {
   checkOpCall,
   getOp,
@@ -17,19 +27,32 @@ import {
   runOp,
   type Operation,
 } from "./core/operations.ts";
-import { DEFAULT_PORT, ensureServeToken, hostAllowed, tokenMatches } from "./core/serve-token.ts";
+import {
+  bookmarkletJs,
+  DEFAULT_PORT,
+  ensureServeToken,
+  hostAllowed,
+  tokenMatches,
+} from "./core/serve-token.ts";
+import { VERSION } from "./core/version.ts";
 import cytoscapeJs from "./core/viz/vendor/cytoscape.min.js" with { type: "text" };
 import markedJs from "./core/viz/vendor/marked.umd.js" with { type: "text" };
+import purifyJs from "./core/viz/vendor/purify.min.js" with { type: "text" };
+import renderJs from "./core/viz/render.js" with { type: "text" };
 import guiAppJs from "./gui/app.js" with { type: "text" };
 import guiIndexHtml from "./gui/index.html" with { type: "text" };
 import guiStyleCss from "./gui/style.css" with { type: "text" };
 
+const JS = "application/javascript; charset=utf-8";
+
 /** GUI static assets (tokenless, like `/`): body + content type per route. */
 const GUI_ASSETS: Record<string, [string, string]> = {
-  "/gui/app.js": [guiAppJs, "application/javascript; charset=utf-8"],
+  "/gui/app.js": [guiAppJs, JS],
   "/gui/style.css": [guiStyleCss, "text/css; charset=utf-8"],
-  "/gui/cytoscape.js": [cytoscapeJs, "application/javascript; charset=utf-8"],
-  "/gui/marked.js": [markedJs, "application/javascript; charset=utf-8"],
+  "/gui/cytoscape.js": [cytoscapeJs, JS],
+  "/gui/marked.js": [markedJs, JS],
+  "/gui/purify.js": [purifyJs, JS],
+  "/gui/render.js": [renderJs, JS],
 };
 
 export interface ApiOptions {
@@ -60,7 +83,7 @@ export function corsHeaders(
     return undefined;
   return {
     "access-control-allow-origin": origin!,
-    "access-control-allow-headers": "content-type, x-okb-token, authorization",
+    "access-control-allow-headers": "content-type, x-okb-token, x-okb-brain, authorization",
     "access-control-allow-methods": "GET, POST, OPTIONS",
   };
 }
@@ -86,7 +109,19 @@ const OP_STATUS: Record<OpError["code"], number> = {
   refused: 403,
 };
 
-const errStatus = (e: unknown): number => (e instanceof OpError ? OP_STATUS[e.code] : 500);
+// Operational failures the caller can act on ("run okb index first", git
+// state, an unreachable provider) are not server faults: 409 / 502, with
+// the same actionable message the CLI prints; anything unexpected is a 500.
+const errStatus = (e: unknown): number =>
+  e instanceof OpError
+    ? OP_STATUS[e.code]
+    : e instanceof ConfigError
+      ? 400
+      : e instanceof EngineError || e instanceof SyncError
+        ? 409
+        : e instanceof AiError
+          ? 502
+          : 500;
 
 const errBody = (e: unknown): { error: string; code?: string } =>
   e instanceof OpError
@@ -104,13 +139,37 @@ const opDescriptors = (): unknown =>
     .filter((o) => !o.localOnly)
     .map(({ name, summary, scope, params }) => ({ name, summary, scope, params }));
 
+interface ServeState {
+  bundle: string;
+  port: number;
+  token: string;
+  readonly: boolean;
+}
+
+/** The bundle a request addresses: the served one, or a named brain mount. */
+interface Scope {
+  bundle: string;
+  readonly: boolean;
+  brain: string | null;
+}
+
+/** Resolve `x-okb-brain` / `?brain=` to a mount (ConfigError on unknown names). */
+function scopeOf(req: Request, url: URL, o: ServeState): Scope {
+  const name = req.headers.get("x-okb-brain") ?? url.searchParams.get("brain");
+  if (name === null || name === "") return { bundle: o.bundle, readonly: o.readonly, brain: null };
+  const brain = resolveBrain(name);
+  return { bundle: brain.path, readonly: brain.readonly, brain: name };
+}
+
+const open = (s: Scope): LocalContext => openLocalContext(s.bundle, true, s.readonly);
+
 async function runJsonOp(
   op: Operation,
-  o: ServeState,
+  scope: Scope,
   raw: Record<string, unknown>,
   cors: Hdrs = {},
 ): Promise<Response> {
-  const local = openLocalContext(o.bundle, true, o.readonly);
+  const local = open(scope);
   try {
     return json(200, { result: await runOp(op, local.ctx, raw) }, cors);
   } catch (e) {
@@ -141,14 +200,14 @@ function sse(local: LocalContext, run: (send: (event: string, data: unknown) => 
   });
 }
 
-function askStream(url: URL, o: ServeState, cors: Hdrs): Response {
+function askStream(url: URL, scope: Scope, cors: Hdrs): Response {
   const op = getOp("ask")!;
   const raw: Record<string, unknown> = {};
   for (const k of ["question", "profile"]) {
     const v = url.searchParams.get(k);
     if (v !== null) raw[k] = v;
   }
-  const local = openLocalContext(o.bundle, true, o.readonly);
+  const local = open(scope);
   try {
     const params = checkOpCall(op, local.ctx, raw);
     return sse(local, (send) => op.stream!(local.ctx, params, send), cors);
@@ -158,14 +217,14 @@ function askStream(url: URL, o: ServeState, cors: Hdrs): Response {
   }
 }
 
-async function clipNav(url: URL, o: ServeState): Promise<Response> {
+async function clipNav(url: URL, scope: Scope): Promise<Response> {
   const op = getOp("clip")!;
   const raw: Record<string, unknown> = {};
   for (const k of ["url", "quote", "note", "tags"]) {
     const v = url.searchParams.get(k);
     if (v !== null && v !== "") raw[k] = v;
   }
-  const local = openLocalContext(o.bundle, true, o.readonly);
+  const local = open(scope);
   try {
     const result = await runOp(op, local.ctx, raw);
     return html(200, clipPage(op.render(result), true));
@@ -176,11 +235,24 @@ async function clipNav(url: URL, o: ServeState): Promise<Response> {
   }
 }
 
-interface ServeState {
-  bundle: string;
-  port: number;
-  token: string;
-  readonly: boolean;
+/** What the GUI needs to describe the server it talks to (no mount paths beyond the active bundle). */
+function status(scope: Scope, o: ServeState): unknown {
+  const local = open(scope);
+  try {
+    return {
+      version: VERSION,
+      okfVersion: OKF_VERSION,
+      bundle: scope.bundle,
+      brain: scope.brain,
+      readonly: scope.readonly,
+      hasIndex: existsSync(defaultDbPath(scope.bundle)),
+      hasVectors: existsSync(defaultVectorsPath(scope.bundle)),
+      actor: local.ctx.actor(),
+      port: o.port,
+    };
+  } finally {
+    local.close();
+  }
 }
 
 export async function handleRequest(req: Request, opts: ServeState): Promise<Response> {
@@ -210,11 +282,36 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   if (!tokenMatches(presented, opts.token))
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
 
-  if (url.pathname === "/api/ops" && req.method === "GET")
-    return json(200, { ops: opDescriptors() }, cors);
-  if (url.pathname === "/api/ask/stream" && req.method === "GET")
-    return askStream(url, opts, cors ?? {});
-  if (url.pathname === "/clip" && req.method === "GET") return clipNav(url, opts);
+  let scope: Scope;
+  try {
+    scope = scopeOf(req, url, opts);
+  } catch (e) {
+    if (!(e instanceof ConfigError)) throw e;
+    return json(400, { error: e.message }, cors);
+  }
+
+  if (req.method === "GET") {
+    if (url.pathname === "/api/ops") return json(200, { ops: opDescriptors() }, cors);
+    if (url.pathname === "/api/status") return json(200, status(scope, opts), cors);
+    if (url.pathname === "/api/brains")
+      try {
+        // Names and policy only — mount paths are host topology (5.2 decision).
+        const brains = listBrains().map((b) => ({
+          name: b.name,
+          readonly: b.readonly,
+          exists: existsSync(b.path),
+          active: b.path === scope.bundle,
+        }));
+        return json(200, { brains }, cors);
+      } catch (e) {
+        if (!(e instanceof ConfigError)) throw e;
+        return json(400, { error: e.message }, cors);
+      }
+    if (url.pathname === "/api/bookmarklet")
+      return json(200, { port: opts.port, bookmarklet: bookmarkletJs(opts.port, opts.token) }, cors);
+    if (url.pathname === "/api/ask/stream") return askStream(url, scope, cors ?? {});
+    if (url.pathname === "/clip") return clipNav(url, scope);
+  }
 
   const m = /^\/api\/op\/([a-z_]+)$/.exec(url.pathname);
   if (m && req.method === "POST") {
@@ -229,7 +326,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     }
     if (typeof raw !== "object" || raw === null || Array.isArray(raw))
       return json(400, { error: "request body must be a JSON object of parameters" }, cors);
-    return runJsonOp(op, opts, raw as Record<string, unknown>, cors);
+    return runJsonOp(op, scope, raw as Record<string, unknown>, cors);
   }
 
   return json(404, { error: "not found" }, cors);

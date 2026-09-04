@@ -8,3 +8,7 @@ declare module "*.umd.js" {
   const text: string;
   export default text;
 }
+declare module "*/render.js" {
+  const text: string;
+  export default text;
+}

@@ -87,6 +87,7 @@ describe("read-only policy (ops layer, fail-closed)", () => {
     },
     hasVectors: () => false,
     config: () => ({}),
+    actor: () => "human:test",
   });
 
   test("write and admin ops are refused before the handler runs", async () => {

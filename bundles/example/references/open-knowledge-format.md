@@ -2,10 +2,12 @@
 type: reference
 title: Open Knowledge Format
 description: Markdown + YAML frontmatter convention for portable knowledge bundles
-timestamp: 2026-07-05T09:00:00Z
 resource: https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf
 tags:
   - format
+generated:
+  by: human:okbrain
+  at: 2026-07-05T09:00:00Z
 ---
 # Open Knowledge Format
 

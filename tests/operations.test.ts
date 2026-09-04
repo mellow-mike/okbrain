@@ -19,6 +19,7 @@ const ctx = (trusted = true): OpContext => ({
   },
   hasVectors: () => false,
   config: () => ({}),
+  actor: () => "human:test",
 });
 const op = (name: string) => getOp(name)!;
 

@@ -9,10 +9,20 @@
 // doctor` is where it gets flagged.
 
 import { createHash } from "node:crypto";
+import { sourceTargets } from "../graph/links.ts";
 import { classifyTargets, type TypedTarget } from "../graph/typed-edges.ts";
 import { log } from "../log.ts";
 import { listConcepts, readConceptPermissive, type PermissiveConcept } from "../okf/bundle.ts";
-import { fmString, fmTags } from "../okf/document.ts";
+import {
+  fmStatus,
+  fmString,
+  fmTags,
+  generatedAt,
+  isIsoInstant,
+  lastVerifiedAt,
+  trustTier,
+  type OkfDocument,
+} from "../okf/document.ts";
 import type { EdgeRecord, Engine } from "./interface.ts";
 
 export interface IndexStats {
@@ -35,8 +45,11 @@ function upsertConcept(engine: Engine, { id, doc, parsed }: PermissiveConcept, h
     title: fmString(fm.title),
     description: fmString(fm.description),
     resource: typeof fm.resource === "string" ? fm.resource : null,
-    timestamp: fmString(fm.timestamp) || null,
-    lastReviewed: fmString(fm.last_reviewed) || null,
+    timestamp: generatedAt(fm),
+    lastReviewed: lastVerifiedAt(fm, true) ?? (fmString(fm.last_reviewed) || null),
+    status: fmStatus(fm),
+    staleAfter: isIsoInstant(fm.stale_after) ? fm.stale_after : null,
+    trust: trustTier(fm),
     bodyLen: doc.body.length,
     contentHash: hash,
     body: doc.body,
@@ -44,13 +57,22 @@ function upsertConcept(engine: Engine, { id, doc, parsed }: PermissiveConcept, h
   });
 }
 
-/** Extracted typed targets minus self-links (dangling targets kept; see header). */
-const outgoing = (id: string, body: string): TypedTarget[] =>
-  classifyTargets(id, body).filter((t) => t.dst !== id);
+/**
+ * Outgoing typed targets: body links (classified), then `sources` provenance
+ * edges typed `cites` — minus self-links (dangling targets kept; see header).
+ */
+function outgoing(id: string, doc: OkfDocument, known: Set<string>): TypedTarget[] {
+  const out = classifyTargets(id, doc.body);
+  const seen = new Set(out.map((t) => t.dst));
+  for (const dst of sourceTargets(id, doc.frontmatter, known))
+    if (!seen.has(dst)) out.push({ dst, rel: "cites" });
+  return out.filter((t) => t.dst !== id);
+}
 
 /** (Re)index the bundle at `root` into `engine`. Safe to run repeatedly. */
 export async function buildIndex(root: string, engine: Engine): Promise<IndexStats> {
   const ids = await listConcepts(root);
+  const known = new Set(ids);
   const have = engine.contentHashes();
   const edges: EdgeRecord[] = [];
   let indexed = 0;
@@ -58,7 +80,7 @@ export async function buildIndex(root: string, engine: Engine): Promise<IndexSta
 
   for (const id of ids) {
     const concept = await readConceptPermissive(root, id);
-    for (const t of outgoing(id, concept.doc.body)) edges.push({ src: id, dst: t.dst, rel: t.rel });
+    for (const t of outgoing(id, concept.doc, known)) edges.push({ src: id, dst: t.dst, rel: t.rel });
 
     const hash = hashOf(concept.raw);
     if (have.get(id) === hash) {
@@ -85,5 +107,5 @@ export async function buildIndex(root: string, engine: Engine): Promise<IndexSta
 export async function updateIndexFor(root: string, id: string, engine: Engine): Promise<void> {
   const concept = await readConceptPermissive(root, id);
   upsertConcept(engine, concept, hashOf(concept.raw));
-  engine.replaceEdgesFor(id, outgoing(id, concept.doc.body));
+  engine.replaceEdgesFor(id, outgoing(id, concept.doc, new Set([...engine.listNodeIds(), id])));
 }

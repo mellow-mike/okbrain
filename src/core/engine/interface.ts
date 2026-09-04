@@ -3,16 +3,24 @@
 // later drop-in. Canonical knowledge never lives only here — `wipe` + a bundle
 // re-index must always restore full state.
 
+import type { Status, TrustTier } from "../okf/document.ts";
+
 export interface NodeRecord {
   id: string;
   type: string;
   title: string;
   description: string;
   resource: string | null;
-  /** Frontmatter `timestamp` (last content change); null when absent/unparseable. */
+  /** When the content last changed: `generated.at`, else the v0.1 `timestamp`; null when unknown. */
   timestamp: string | null;
-  /** Frontmatter `last_reviewed` (Resurface stamp); null when never reviewed. */
+  /** Latest human `verified[].at` (else okbrain's legacy `last_reviewed`); null when never reviewed. */
   lastReviewed: string | null;
+  /** Lifecycle status (OKF v0.2 §5.4); absent ⇒ stable. */
+  status: Status;
+  /** `stale_after` when it is a valid ISO instant; null otherwise. */
+  staleAfter: string | null;
+  /** Trust tier derived from `verified` (§5.3). */
+  trust: TrustTier;
   bodyLen: number;
   /** Hash of the raw concept file; lets index builds skip unchanged files. */
   contentHash: string;
@@ -47,13 +55,16 @@ export interface Neighbor {
   depth: number;
 }
 
-/** One node's review-relevant fields (Resurface feeds these to the scorer). */
+/** One node's review-relevant fields (Resurface + stats feed these to the scorers). */
 export interface ReviewRow {
   id: string;
   type: string;
   title: string;
   timestamp: string | null;
   lastReviewed: string | null;
+  status: Status;
+  staleAfter: string | null;
+  trust: TrustTier;
   inbox: boolean;
   /** DB-only snooze (`review_state`); gone after a rebuild, by design. */
   snoozeUntil: string | null;

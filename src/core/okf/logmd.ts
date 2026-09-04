@@ -1,22 +1,17 @@
 // log.md maintenance (Stage 1.2): append an entry under a `## YYYY-MM-DD`
 // heading in the root log.md, keeping date sections newest-first (per the
-// conformance checklist). Dates are UTC, matching the `timestamp` frontmatter.
+// conformance checklist). Dates are UTC, matching `generated.at`.
 
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export type LogKind = "Creation" | "Update" | "Deprecation";
+export type LogKind = "Creation" | "Update" | "Deprecation" | "Deletion";
 
 /** Emitted date format for log headings. */
 export const todayUtc = (): string => new Date().toISOString().slice(0, 10);
 
-export async function appendLog(
-  root: string,
-  kind: LogKind,
-  id: string,
-  title: string,
-  summary = "",
-): Promise<void> {
+/** Append one prose entry under today's date section (created if needed). */
+export async function appendLogEntry(root: string, entry: string): Promise<void> {
   const path = join(root, "log.md");
   let text: string;
   try {
@@ -27,7 +22,6 @@ export async function appendLog(
   }
 
   const today = todayUtc();
-  const entry = `**${kind}**: [${title}](/${id}.md)${summary ? ` — ${summary}` : ""}`;
   const at = text.search(/^## /m);
   const pre = (at === -1 ? text : text.slice(0, at)).replace(/\s+$/, "");
   const sections =
@@ -41,4 +35,15 @@ export async function appendLog(
   else sections.unshift(`${head}\n\n${entry}`); // new day goes first (newest-first)
 
   await writeFile(path, (pre ? pre + "\n\n" : "") + sections.join("\n\n") + "\n", "utf8");
+}
+
+/** Append a `**Kind**: [Title](/id.md) — summary` entry. */
+export function appendLog(
+  root: string,
+  kind: LogKind,
+  id: string,
+  title: string,
+  summary = "",
+): Promise<void> {
+  return appendLogEntry(root, `**${kind}**: [${title}](/${id}.md)${summary ? ` — ${summary}` : ""}`);
 }

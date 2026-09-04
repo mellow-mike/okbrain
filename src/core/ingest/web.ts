@@ -4,12 +4,15 @@
 // the depth cap, host allowlist, path filters, and only ever fetches URLs
 // that were given as seeds or discovered on already-fetched pages (an
 // invented URL is refused). Writes may enrich an existing concept or mint a
-// new one under references/ — nothing else. The gateway's chat is plain text,
-// so the protocol is one JSON object per model turn.
+// new one under references/ — nothing else — and carry OKF v0.2 provenance:
+// `sources` entries (merged, never shrunk, on existing concepts; required on
+// new ones) and a `generated` event naming the agent + model. The gateway's
+// chat is plain text, so the protocol is one JSON object per model turn.
 
 import { parseHTML } from "linkedom";
 import type { ChatMessage } from "../ai/gateway.ts";
 import { readConceptPermissive } from "../okf/bundle.ts";
+import { fmSources, type SourceEntry } from "../okf/document.ts";
 import { idToAbsPath, validateId, InvalidIdError } from "../okf/paths.ts";
 import { OkfWriteError, writeConcept } from "../okf/write.ts";
 import { existsSync } from "node:fs";
@@ -48,6 +51,8 @@ export class WebPassError extends Error {}
 export interface EnrichDeps {
   /** One model turn: full message history in, reply text out. */
   chat(messages: ChatMessage[]): Promise<string>;
+  /** Actor recorded as `generated.by` on every write (e.g. `okb-enrich/<model>`). */
+  actor?: string;
   /** Injectable for tests; defaults to the guarded fetcher. */
   fetcher?(url: string): Promise<FetchedPage>;
   /** Concept ids + titles the list tool returns (engine or bundle scan). */
@@ -68,6 +73,7 @@ const PAGE_CHARS = 6_000;
 const PAGE_LINKS = 50;
 const LIST_CAP = 200;
 const BAD_REPLY_STRIKES = 2;
+const DEFAULT_ACTOR = "okb-enrich/unknown";
 
 const hostAllowed = (host: string, allow: string[]): boolean =>
   allow.some((h) => host === h || host.endsWith(`.${h}`));
@@ -115,7 +121,19 @@ function pageLinks(html: string, pageUrl: string): string[] {
   return out;
 }
 
-const SYSTEM = `You are okbrain's enrichment agent, working inside a personal OKF knowledge bundle.
+/** The model's `sources` argument as entries (strings are bare resources). */
+function sourcesArg(v: unknown): SourceEntry[] {
+  if (!Array.isArray(v)) return [];
+  const out: SourceEntry[] = [];
+  for (const s of v) {
+    if (typeof s === "string" && s !== "") out.push({ resource: s });
+    else if (typeof s === "object" && s !== null && typeof (s as SourceEntry).resource === "string")
+      out.push(s as SourceEntry);
+  }
+  return out;
+}
+
+const SYSTEM = `You are okbrain's enrichment agent, working inside a personal Open Knowledge Format (OKF v0.2) bundle.
 Improve the bundle per the task: enrich existing concepts, mint new reference concepts, or skip when nothing is worth writing.
 
 Respond with EXACTLY one JSON object per turn (no prose), one of:
@@ -123,13 +141,13 @@ Respond with EXACTLY one JSON object per turn (no prose), one of:
 {"action":"read_concept","id":"<concept id>"}
 {"action":"fetch_url","url":"<seed or discovered url>"}
 {"action":"link_suggest","id":"<concept id>"}
-{"action":"write_concept","id":"<id>","type":"<type>","title":"...","description":"one line","body":"<markdown>","tags":["optional"]}
+{"action":"write_concept","id":"<id>","type":"<type>","title":"...","description":"one line","body":"<markdown>","tags":["optional"],"sources":[{"id":"short-key","resource":"<url you fetched>","title":"page title"}]}
 {"action":"done","summary":"<what you did and why>"}
 
 Rules:
 - Only fetch URLs given as seeds or listed in a previous fetch result's "links".
-- Every fact taken from the web must be cited: put its source links under a "# Citations" heading in the body you write.
-- New concepts must have an id under references/ (e.g. references/some-topic). Existing concepts may be updated; omit fields to keep their current values.
+- Provenance is frontmatter, not prose: every web page a write draws on must appear in "sources" (resource = the fetched URL). Attribute specific claims in the body with a footnote whose label is the source id, e.g. "…as documented.[^short-key]". Never write a "# Citations" section.
+- New concepts must have an id under references/ (e.g. references/some-topic) and at least one source. Existing concepts may be updated; omit fields to keep their current values — existing sources are kept and merged.
 - Prefer few, high-value writes. When finished (or nothing qualifies), send done.`;
 
 /**
@@ -145,6 +163,7 @@ export async function runEnrich(
   deps: EnrichDeps,
 ): Promise<EnrichResult> {
   const fetcher = deps.fetcher ?? guardedFetch;
+  const actor = deps.actor ?? DEFAULT_ACTOR;
   // The crawl frontier: URL → depth. Only entries here are ever fetchable.
   const frontier = new Map<string, number>(seeds.map((s) => [s, 0]));
   const result: EnrichResult = { written: [], fetched: [], summary: "", steps: 0 };
@@ -192,6 +211,14 @@ export async function runEnrich(
       throw new WebPassError(
         `new concepts must live under references/ (got ${id}); existing concepts may be enriched in place`,
       );
+    // Provenance: merge onto what the concept already cites (never shrink), and
+    // a minted reference must cite at least one source.
+    const given = sourcesArg(a.sources);
+    const have = exists ? fmSources((await readConceptPermissive(root, id)).doc.frontmatter) : [];
+    const known = new Set(have.map((s) => s.resource));
+    const sources = [...have, ...given.filter((s) => !known.has(s.resource))];
+    if (!exists && sources.length === 0)
+      throw new WebPassError("a new reference concept needs at least one sources entry (the page it was drawn from)");
     const r = await writeConcept(root, {
       id,
       type: a.type as string | undefined,
@@ -199,9 +226,11 @@ export async function runEnrich(
       description: a.description as string | undefined,
       body: a.body as string | undefined,
       tags: Array.isArray(a.tags) ? (a.tags as string[]).map(String) : undefined,
+      sources: sources.length > 0 ? sources : undefined,
+      actor,
     });
     result.written.push({ id: r.id, created: r.created });
-    return { written: r.id, created: r.created };
+    return { written: r.id, created: r.created, sources: sources.length };
   };
 
   const messages: ChatMessage[] = [
