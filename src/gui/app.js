@@ -3,7 +3,8 @@
 // binary via Bun text imports. Every data access goes through /api/op/* (the
 // ops contract) or one of the small server routes (status, brain mounts,
 // bookmarklet); this file is presentation only. Rendering helpers shared
-// with the static viewer come from render.js (window.okbRender).
+// with the static viewer come from render.js (window.okbRender); theme,
+// motion and the graph palette from the design system's okb.js (window.Okb).
 
 'use strict';
 
@@ -60,11 +61,58 @@ function chips(tags) {
   return (tags || []).map(function (t) { return '<span class="chip">' + esc(t) + '</span>'; }).join(' ');
 }
 function dateOf(iso) { return iso ? esc(String(iso).slice(0, 10)) : '—'; }
-function typeChip(t) { return '<span class="chip">' + esc(t || '(untyped)') + '</span>'; }
 function badges(s) { return '<span class="badges">' + R.badges(s) + '</span>'; }
-function busy(el, text) { el.innerHTML = '<span class="muted">' + esc(text || 'working…') + '</span>'; }
 function basename(p) { return String(p || '').split(/[\\/]/).filter(Boolean).pop() || p; }
 function jsonNotice(r) { return '<div class="notice">' + esc(JSON.stringify(r, null, 2)) + '</div>'; }
+
+// Concept types in sorted order: type i owns graph slot i+1 (its nodes,
+// legend row and type chips); the ninth type onward shares graph-other.
+// Refreshed by every view that lists the whole bundle.
+var TYPES = [];
+function typeName(t) { return t || '(untyped)'; }
+function setTypes(types) {
+  var seen = {};
+  types.forEach(function (t) { seen[typeName(t)] = true; });
+  TYPES = Object.keys(seen).sort();
+}
+function slotOf(t) {
+  var i = TYPES.indexOf(typeName(t));
+  return i < 0 ? null : i < 8 ? 'graph-' + (i + 1) : 'graph-other';
+}
+function typeChip(t, count) {
+  var slot = slotOf(t);
+  return '<span class="chip">' + (slot ? '<span class="swatch" style="background:var(--' + slot + ')"></span>' : '') +
+    esc(typeName(t)) + (count === undefined ? '' : ' ' + esc(count)) + '</span>';
+}
+
+/** A live "verb…" line in the element with this id (still on screen). */
+function working(id, verb) {
+  var el = document.getElementById(id);
+  if (el) Okb.working(el, verb);
+}
+/** App-level work (index, embed, sync, ask…) waves the wordmark until it settles. */
+async function appWork(p) {
+  Okb.busy(true);
+  try { return await p; } finally { Okb.busy(false); }
+}
+/** File a card away once its act is recorded; an emptied list says so. */
+async function fileAway(card, kind, empty) {
+  var list = card.parentNode;
+  await Okb.fileAway(card, kind);
+  if (!list.querySelector('.card')) list.innerHTML = '<div class="empty">' + empty + '</div>';
+}
+/** Stat-tile figures by label, so a redraw can flash the ones that changed. */
+function figures(el) {
+  var f = {};
+  el.querySelectorAll('.tile').forEach(function (t) { f[t.querySelector('.lbl').textContent] = t.querySelector('.num').textContent; });
+  return f;
+}
+function flashChanged(el, before) {
+  el.querySelectorAll('.tile').forEach(function (t) {
+    var was = before[t.querySelector('.lbl').textContent];
+    if (was !== undefined && was !== t.querySelector('.num').textContent) Okb.flash(t);
+  });
+}
 
 /** Render a markdown body into `el` with internal links routed to the reader. */
 function renderBody(el, md, baseId) {
@@ -74,19 +122,19 @@ function renderBody(el, md, baseId) {
 
 // ---- theme ---------------------------------------------------------------
 
+// Okb.theme restored the saved choice before first paint (index.html); the
+// toggle floods the new theme out from the button. The label and canvas
+// colours (a mounted graph) follow the attribute, so they change inside the
+// flood rather than after it.
 var themeBtn = document.getElementById('theme');
-function setTheme(mode, persist) {
-  document.documentElement.setAttribute('data-theme', mode);
-  themeBtn.textContent = mode === 'dark' ? '☼ light' : '☾ dark';
-  if (persist) try { localStorage.setItem('okb-gui-theme', mode); } catch (e) {}
+var repaint = null; // the mounted graph's restyle, while one is on screen
+function themeChanged() {
+  themeBtn.textContent = Okb.theme.get() === 'dark' ? '☼ light' : '☾ dark';
+  if (repaint) repaint();
 }
-try { setTheme(localStorage.getItem('okb-gui-theme') || 'dark', false); }
-catch (e) { setTheme('dark', false); }
-themeBtn.addEventListener('click', function () {
-  var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-  setTheme(next, true);
-  route(); // views with canvas colors (graph) re-read the tokens
-});
+themeChanged();
+new MutationObserver(themeChanged).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+themeBtn.addEventListener('click', function () { Okb.theme.toggle(themeBtn); });
 
 // ---- shell: status, brains, quick search ------------------------------------
 
@@ -159,19 +207,36 @@ function setHtml(id, html) {
   if (el) el.innerHTML = html;
 }
 
+// Title carry: the concept link clicked in a card or table row morphs into
+// the reader's title during the page turn.
+var carry = null;
+view.addEventListener('click', function (e) {
+  var a = e.target.closest('a[href^="#concept/"]');
+  var row = a && a.closest('.card, tr');
+  carry = row && row.querySelector('.title a, td > a:first-child');
+});
+
+// Each route is a page turn (Okb.go): the render runs inside one view
+// transition, which captures the new view once the render has settled.
 function route() {
   var h = location.hash.slice(1) || 'home';
   var slash = h.indexOf('/');
   var name = slash < 0 ? h : h.slice(0, slash);
   var arg = slash < 0 ? null : decodeURIComponent(h.slice(slash + 1));
   var fn = routes[name] || renderHome;
-  document.querySelectorAll('#nav a').forEach(function (a) {
-    var target = a.getAttribute('data-nav') || a.getAttribute('href').slice(1);
-    a.classList.toggle('active', target === name || (name === 'editor' && target === 'edit'));
-  });
-  view.className = name === 'graph' ? 'bare' : '';
-  view.scrollTop = 0;
-  fn(arg, ++gen);
+  var seq = ++gen;
+  var shared = name === 'concept' && carry && carry.getAttribute('href') === location.hash ? carry : null;
+  carry = null;
+  return Okb.go(function () {
+    repaint = null;
+    document.querySelectorAll('#nav > a').forEach(function (a) { // not the wordmark's link
+      var target = a.getAttribute('data-nav') || a.getAttribute('href').slice(1);
+      a.classList.toggle('active', target === name || (name === 'editor' && target === 'edit'));
+    });
+    view.className = name === 'graph' ? 'bare' : '';
+    view.scrollTop = 0;
+    return fn(arg, seq);
+  }, shared);
 }
 window.addEventListener('hashchange', route);
 
@@ -180,7 +245,7 @@ window.addEventListener('hashchange', route);
 // Link suggestions for `id`; `act` decides what a row's button does
 // (accept = write via link_accept; insert = editor-local, no write).
 async function loadSuggestions(el, id, act, actLabel) {
-  busy(el, 'suggesting…');
+  Okb.working(el, 'suggesting');
   try {
     var ss = await api('link_suggest', { id: id });
     el.innerHTML = ss.length
@@ -215,7 +280,7 @@ function cardActions(id, extra) {
     '<div class="suggest"></div>';
 }
 
-/** Delegated click handling for cards: suggest/accept plus custom acts via `handle`. */
+/** Delegated click handling for cards: suggest/accept plus custom acts via `handle(act, id, card)`. */
 function wireCards(listEl, handle) {
   listEl.addEventListener('click', async function (e) {
     var btn = e.target.closest('button[data-act]');
@@ -236,8 +301,8 @@ function wireCards(listEl, handle) {
 async function renderHome(_arg, seq) {
   var name = STATUS ? (STATUS.brain || basename(STATUS.bundle)) : 'your brain';
   view.innerHTML =
-    '<div class="stack wide"><h2>' + esc(name) + '</h2>' +
-    '<div id="h-index"></div><div id="h-tiles" class="tiles"></div>' +
+    '<div class="stack wide"><h2 class="display">' + esc(name) + '</h2>' +
+    '<div id="h-index"></div><div id="h-tiles"></div>' +
     '<form id="h-cap" class="row"><input id="h-cap-text" style="flex:1" placeholder="Capture a thought… (lands in inbox/)">' +
     '<button class="primary">Capture</button><span id="h-cap-msg" class="muted"></span></form>' +
     '<div class="split"><div><h3>Worth another look</h3><div id="h-review" class="list"></div></div>' +
@@ -253,8 +318,8 @@ async function renderHome(_arg, seq) {
       '<button id="h-build" class="primary small">Build index</button></div>';
     document.getElementById('h-build').addEventListener('click', async function () {
       this.disabled = true;
-      try { await api('index', {}); await refreshStatus(); route(); }
-      catch (e) { document.getElementById('h-index').innerHTML = errorBox(e); }
+      try { await appWork(api('index', {})); await refreshStatus(); route(); }
+      catch (e) { setHtml('h-index', errorBox(e)); }
     });
   }
 
@@ -263,13 +328,14 @@ async function renderHome(_arg, seq) {
     var text = document.getElementById('h-cap-text').value.trim();
     if (!text) return;
     var msg = document.getElementById('h-cap-msg');
-    msg.textContent = 'capturing…';
+    Okb.working(msg, 'capturing');
     try {
       var r = await api('capture', { text: text });
       if (stale(seq)) return;
       document.getElementById('h-cap-text').value = '';
       msg.innerHTML = 'captured ' + conceptLink(r.id);
       loadInboxPreview();
+      loadTiles();
     } catch (err) { msg.innerHTML = errorBox(err); }
   });
 
@@ -279,14 +345,16 @@ async function renderHome(_arg, seq) {
       var s = await api('stats', {});
       var q = await api('review_queue', {});
       var reviewed = s.byTrust['human-reviewed'];
-      el.innerHTML =
+      var before = figures(el);
+      el.innerHTML = '<div class="tiles">' +
         tile('Concepts', s.concepts) + tile('Links', s.edges) +
         tile('Review due', q.length, q.length ? 'alert' : '') +
         tile('Inbox', s.inbox, s.inbox ? 'alert' : '') +
         tile('Orphans', s.orphans) +
         tile('Past stale_after', s.expired, s.expired ? 'alert' : '') +
         tile('Drafts', s.byStatus.draft) +
-        tile('Human-reviewed', s.concepts ? Math.round((100 * reviewed) / s.concepts) + '%' : '—', 'good');
+        tile('Human-reviewed', s.concepts ? Math.round((100 * reviewed) / s.concepts) + '%' : '—', 'good') + '</div>';
+      flashChanged(el, before);
     } catch (e) { el.innerHTML = ''; }
   }
 
@@ -302,15 +370,16 @@ async function renderHome(_arg, seq) {
               '<button class="small" data-act="snooze">Snooze</button></div></div>';
           }).join('')
         : '<div class="empty">Nothing needs review.</div>';
+      Okb.enter(el);
     } catch (e) { el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
   }
-  wireCards(document.getElementById('h-review'), async function (act, id) {
+  wireCards(document.getElementById('h-review'), async function (act, id, card) {
     await api(act === 'done' ? 'review_done' : 'review_snooze', { id: id });
-    loadReviewPreview();
-    loadTiles();
+    await fileAway(card, act === 'done' ? 'done' : 'snooze', 'Nothing needs review.');
+    if (!stale(seq)) loadTiles();
   });
 
-  async function loadInboxPreview() {
+  async function loadInboxPreview(first) {
     var el = document.getElementById('h-inbox');
     try {
       var rows = await api('inbox_list', {});
@@ -320,10 +389,13 @@ async function renderHome(_arg, seq) {
               conceptLink(r.id, r.title) + '</div><div class="row"><button class="small" data-act="read">Mark read</button></div></div>';
           }).join('') + (rows.length > 6 ? '<p class="muted"><a href="#inbox">' + (rows.length - 6) + ' more…</a></p>' : '')
         : '<div class="empty">Inbox is empty.</div>';
+      if (first) Okb.enter(el);
     } catch (e) { el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
   }
-  wireCards(document.getElementById('h-inbox'), async function (act, id) {
+  wireCards(document.getElementById('h-inbox'), async function (act, id, card) {
     await api('inbox_read', { id: id });
+    await Okb.fileAway(card, 'done');
+    if (stale(seq)) return;
     loadInboxPreview();
     loadTiles();
   });
@@ -332,6 +404,7 @@ async function renderHome(_arg, seq) {
     var el = document.getElementById('h-recent');
     try {
       var rows = await api('list_concepts', { detail: true });
+      setTypes(rows.map(function (r) { return r.type; }));
       rows.sort(function (a, b) { return (b.updated || '') < (a.updated || '') ? -1 : 1; });
       el.innerHTML = rows.length
         ? '<table class="tbl">' + rows.slice(0, 8).map(function (r) {
@@ -344,20 +417,20 @@ async function renderHome(_arg, seq) {
 
   document.getElementById('h-doctor').addEventListener('click', async function () {
     var out = document.getElementById('h-doctor-out');
-    busy(out, 'checking…');
+    Okb.working(out, 'checking');
     try { out.innerHTML = doctorSummary(await api('doctor', {})); }
     catch (e) { out.innerHTML = errorBox(e); }
   });
 
   loadTiles();
   loadReviewPreview();
-  loadInboxPreview();
+  loadInboxPreview(true);
   loadRecent();
 }
 
 function doctorSummary(r) {
   var sig = r.signals;
-  var head = (r.ok ? '✓ conformant' : '✗ not conformant') + ' — ' + r.concepts + ' concepts, ' +
+  var head = (r.ok ? '✓ conformant' : 'not conformant') + ' — ' + r.concepts + ' concepts, ' +
     r.errors + ' errors, ' + r.warnings + ' warnings · okf_version ' + (r.okfVersion || 'undeclared') +
     '\ntrust: ' + sig.trust['human-reviewed'] + ' human-reviewed, ' + sig.trust['machine-confirmed'] +
     ' machine-confirmed, ' + sig.trust.unverified + ' unverified · status: ' + sig.status.draft + ' draft, ' +
@@ -381,11 +454,12 @@ async function renderBrowse(_arg, seq) {
     '<select id="b-sort"><option value="updated">newest first</option><option value="title">title</option><option value="type">type</option></select>' +
     '<span id="b-count" class="muted right"></span></div><div id="b-out"></div></div>';
   var out = document.getElementById('b-out');
-  busy(out, 'loading…');
+  Okb.working(out, 'loading');
   var rows;
   try { rows = await api('list_concepts', { detail: true }); }
   catch (e) { out.innerHTML = errorBox(e); return; }
   if (stale(seq)) return;
+  setTypes(rows.map(function (r) { return r.type; }));
   var types = [];
   rows.forEach(function (r) { if (types.indexOf(r.type) < 0) types.push(r.type); });
   types.sort();
@@ -427,11 +501,13 @@ async function renderBrowse(_arg, seq) {
     document.getElementById(id).addEventListener('change', draw);
   });
   draw();
+  Okb.enter(out.querySelector('tbody'));
 }
 
 // ---- concept (reader) ----------------------------------------------------
 
-async function renderConcept(id, seq) {
+/** The reader; `was` (the trust tier before an act) stamps a tier that just changed. */
+async function renderConcept(id, seq, was) {
   if (!id) { location.hash = '#browse'; return; }
   var c;
   try { c = await api('read_concept', { id: id }); }
@@ -445,7 +521,6 @@ async function renderConcept(id, seq) {
   var isComputation = String(fm.type || '').toLowerCase() === 'attested computation';
 
   var meta = '<dl class="kv">';
-  if (fm.description) meta += '<dt>Description</dt><dd>' + esc(fm.description) + '</dd>';
   if (fm.resource) meta += '<dt>Resource</dt><dd><a href="' + esc(fm.resource) + '" target="_blank" rel="noopener">' + esc(fm.resource) + '</a></dd>';
   if (tags.length) meta += '<dt>Tags</dt><dd>' + chips(tags) + '</dd>';
   meta += '<dt>Generated</dt><dd>' + R.actorLine(fm.generated) + (fm.timestamp && !fm.generated ? ' <span class="muted">(v0.1 timestamp ' + esc(fm.timestamp) + ')</span>' : '') + '</dd>';
@@ -468,6 +543,7 @@ async function renderConcept(id, seq) {
   view.innerHTML =
     '<div class="concept-layout"><div>' +
     '<div class="concept-head"><h2>' + esc(fm.title || id) + '</h2>' +
+    (fm.description ? '<p class="lead">' + esc(fm.description) + '</p>' : '') +
     '<div class="meta">' + typeChip(fm.type) + '<code>' + esc(id) + '</code>' + badges({ status: s.status, trust: s.trust, stale: s.stale, staleAfter: fm.stale_after }) + '</div>' +
     '<div class="row" id="c-actions">' +
     '<a href="' + editHref(id) + '"><button class="primary small">Edit</button></a>' +
@@ -483,9 +559,10 @@ async function renderConcept(id, seq) {
     '<div id="c-suggest"></div>' +
     '<div class="concept-body md" id="c-body"></div></div>' +
     '<aside class="concept-side"><div class="card">' + meta + '</div>' +
-    '<div class="card" id="c-links"><span class="muted">loading links…</span></div></aside></div>';
+    '<div class="card" id="c-links"></div></aside></div>';
 
   renderBody(document.getElementById('c-body'), c.body, id);
+  if (was && was !== s.trust) Okb.stamp(view.querySelector('.concept-head .badge.trust-' + s.trust));
 
   document.getElementById('c-actions').addEventListener('click', async function (e) {
     var btn = e.target.closest('button[data-act]');
@@ -496,7 +573,7 @@ async function renderConcept(id, seq) {
     if (act === 'delete' && !confirm('Delete ' + id + '? The file is removed from the bundle (git history keeps it if you sync).')) return;
     btn.disabled = true;
     try {
-      if (act === 'verify') { var r = await api('review_done', { id: id }); msg.textContent = 'verified by ' + r.verifiedBy; if (!stale(seq)) renderConcept(id, seq); }
+      if (act === 'verify') { await api('review_done', { id: id }); if (!stale(seq)) renderConcept(id, seq, s.trust); }
       else if (act === 'read') { await api('inbox_read', { id: id }); if (!stale(seq)) renderConcept(id, seq); }
       else if (act === 'deprecate') { await api('write_concept', { id: id, status: 'deprecated' }); if (!stale(seq)) renderConcept(id, seq); }
       else if (act === 'restore') { await api('write_concept', { id: id, status: 'stable' }); if (!stale(seq)) renderConcept(id, seq); }
@@ -509,6 +586,7 @@ async function renderConcept(id, seq) {
   });
 
   var linksEl = document.getElementById('c-links');
+  Okb.working(linksEl, 'loading links');
   if (STATUS && !STATUS.hasIndex) {
     linksEl.innerHTML = '<span class="muted">Links to / cited by need a search index — build one on <a href="#home">Home</a>.</span>';
     return;
@@ -576,7 +654,7 @@ async function renderEdit(id, seq) {
     '<div class="grid"><label class="field"><span>Status</span><select id="ed-status">' + statusOpts + '</select></label>' +
     field('stale-after', 'Stale after', isoToLocal(fm.stale_after), '', 'datetime-local') + '</div>' +
     '<div class="field"><span>Sources (provenance)</span><div class="sources-editor" id="ed-sources"></div>' +
-    '<div class="row"><button type="button" class="small" id="ed-addsrc">+ source</button>' +
+    '<div class="row"><button type="button" class="small" id="ed-addsrc">Add source</button>' +
     '<span class="muted">attribute claims in the body with [^id]</span></div></div>' +
     '<label class="field"><span>Body (markdown; links normalize on save)</span>' +
     '<textarea id="ed-body" rows="18"></textarea></label>' +
@@ -600,7 +678,7 @@ async function renderEdit(id, seq) {
       '<input placeholder="resource (URL, /path.md, or scope)" value="' + esc(s.resource || '') + '" data-k="resource">' +
       '<input placeholder="title" value="' + esc(s.title || '') + '" data-k="title">' +
       '<input placeholder="author (actor)" value="' + esc(s.author || '') + '" data-k="author">' +
-      '<button type="button" class="small" data-del title="remove">✕</button></div>');
+      '<button type="button" class="small" data-del title="remove" aria-label="remove source">✕</button></div>');
   }
   sources.forEach(addSource);
   document.getElementById('ed-addsrc').addEventListener('click', function () { addSource(); });
@@ -669,7 +747,7 @@ async function renderEdit(id, seq) {
     var sa = localToIso(val('stale-after'));
     params['stale-after'] = sa;
     params.sources = JSON.stringify(collectSources());
-    msgEl.textContent = 'saving…';
+    Okb.working(msgEl, 'saving');
     try {
       var r;
       if (val('id')) { params.id = val('id'); r = await api('write_concept', params); }
@@ -692,17 +770,8 @@ async function renderEdit(id, seq) {
 
 // ---- graph view ---------------------------------------------------------
 
-// Same validated categorical palettes as the static viewer (fixed CVD-safe
-// slot order; types beyond 8 fold into the muted overflow color).
-var PALETTE = {
-  dark: ['#3987e5', '#199e70', '#c98500', '#008300', '#9085e9', '#e66767', '#d55181', '#d95926'],
-  light: ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7', '#e34948', '#e87ba4', '#eb6834'],
-};
-var OVERFLOW = '#898781';
-
-function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
+/** A duration token in ms (0 under prefers-reduced-motion). */
+function ms(token) { return parseFloat(Okb.token(token)) || 0; }
 
 async function renderGraph(focusId, seq) {
   view.innerHTML =
@@ -714,31 +783,37 @@ async function renderGraph(focusId, seq) {
     '<div id="gcy"></div><div id="glegend"></div></div>' +
     '<div id="gdetail"><p class="empty">Click a node.</p></div></div>';
   var g;
-  try { g = await api('graph_data', {}); }
+  // Node labels are canvas text in Literata, and a canvas never loads a face itself.
+  try { g = (await Promise.all([api('graph_data', {}), document.fonts.load('9px Literata')]))[0]; }
   catch (e) { if (!stale(seq)) { view.className = ''; view.innerHTML = errorBox(e); } return; }
   if (stale(seq)) return;
 
-  var byId = {}, linksTo = {}, citedBy = {}, types = [], typeCount = {};
+  var byId = {}, linksTo = {}, citedBy = {}, typeCount = {};
   g.nodes.forEach(function (n) {
     byId[n.id] = n;
-    var t = n.type || '(untyped)';
-    typeCount[t] = (typeCount[t] || 0) + 1;
-    if (types.indexOf(t) < 0) types.push(t);
+    typeCount[typeName(n.type)] = (typeCount[typeName(n.type)] || 0) + 1;
   });
   g.edges.forEach(function (e) {
     (linksTo[e.src] = linksTo[e.src] || []).push(e.dst);
     (citedBy[e.dst] = citedBy[e.dst] || []).push(e.src);
   });
-  types.sort();
-  var mode = document.documentElement.getAttribute('data-theme');
-  var colorOf = {};
-  types.forEach(function (t, i) { colorOf[t] = i < 8 ? PALETTE[mode][i] : OVERFLOW; });
+  setTypes(g.nodes.map(function (n) { return n.type; }));
   document.getElementById('gstats').textContent = g.nodes.length + ' concepts · ' + g.edges.length + ' links';
+
+  // The canvas takes concrete colours: the current theme's, re-read when it flips.
+  var fill = {}, tok = {};
+  function readTheme() {
+    var p = Okb.graphPalette();
+    TYPES.forEach(function (t, i) { fill[t] = i < 8 ? p.slots[i] : p.other; });
+    ['ink-2', 'surface', 'danger', 'edge-line', 'accent'].forEach(function (k) { tok[k] = Okb.token(k); });
+  }
+  function themed(k) { return function () { return tok[k]; }; }
+  readTheme();
 
   var cy = cytoscape({
     container: document.getElementById('gcy'),
     elements: g.nodes.map(function (n) {
-      return { data: { id: n.id, label: n.title || n.id, type: n.type || '(untyped)',
+      return { data: { id: n.id, label: n.title || n.id, type: typeName(n.type),
         status: n.status, stale: n.stale,
         size: 16 + 4 * Math.sqrt(Math.min(n.bodyLen, 20000) / 100) } };
     }).concat(g.edges.map(function (e) {
@@ -746,33 +821,36 @@ async function renderGraph(focusId, seq) {
     })),
     style: [
       { selector: 'node', style: {
-        'background-color': function (ele) { return colorOf[ele.data('type')]; },
+        'background-color': function (ele) { return fill[ele.data('type')]; },
         width: 'data(size)', height: 'data(size)', label: 'data(label)',
-        'font-size': 9, color: cssVar('--ink-2'),
-        'text-outline-color': cssVar('--surface'), 'text-outline-width': 2,
+        'font-family': Okb.token('font-read'), 'font-size': 9, color: themed('ink-2'),
+        'text-outline-color': themed('surface'), 'text-outline-width': 2,
         'text-valign': 'bottom', 'text-margin-y': 4,
         'text-wrap': 'ellipsis', 'text-max-width': '120px' } },
-      { selector: 'node[?stale]', style: { 'border-width': 2, 'border-style': 'dashed', 'border-color': cssVar('--danger') } },
-      { selector: 'node[status = "deprecated"]', style: { opacity: 0.45 } },
+      { selector: 'node[?stale]', style: { 'border-width': 2, 'border-style': 'dashed', 'border-color': themed('danger') } },
+      { selector: 'node[status = "deprecated"]', style: { opacity: Number(Okb.token('opacity-deprecated')) } },
       { selector: 'edge', style: {
-        width: 1.2, 'line-color': cssVar('--edge-line'),
-        'target-arrow-color': cssVar('--edge-line'),
+        width: 1.2, 'line-color': themed('edge-line'), 'target-arrow-color': themed('edge-line'),
         'target-arrow-shape': 'triangle', 'arrow-scale': 0.8, 'curve-style': 'bezier' } },
-      { selector: 'node:selected', style: {
-        'border-width': 3, 'border-style': 'solid', 'border-color': cssVar('--accent') } },
-      { selector: '.dim', style: { opacity: 0.15 } },
+      { selector: 'node:selected', style: { 'border-width': 2, 'border-style': 'solid', 'border-color': themed('accent') } },
+      { selector: '.dim, .faded', style: { opacity: Number(Okb.token('opacity-dim')) } },
     ],
     layout: { name: 'cose', animate: false },
     wheelSensitivity: 0.2,
   });
   window.cy = cy; // console/driver access, like the static viewer
+  repaint = function () { readTheme(); cy.style().update(); };
+
+  // Hover dims everything outside the node's neighbourhood.
+  cy.on('mouseover', 'node', function (e) { cy.elements().difference(e.target.closedNeighborhood()).addClass('faded'); });
+  cy.on('mouseout', 'node', function () { cy.elements().removeClass('faded'); });
 
   var checked = {};
   var legend = document.getElementById('glegend');
-  legend.innerHTML = types.map(function (t) {
+  legend.innerHTML = TYPES.map(function (t) {
     checked[t] = true;
-    return '<label><input type="checkbox" checked data-type="' + esc(t) + '"><span class="swatch" style="background:' +
-      colorOf[t] + '"></span>' + esc(t) + '<span class="count">' + typeCount[t] + '</span></label>';
+    return '<label><input type="checkbox" checked data-type="' + esc(t) + '"><span class="swatch" style="background:var(--' +
+      slotOf(t) + ')"></span>' + esc(t) + '<span class="count">' + typeCount[t] + '</span></label>';
   }).join('');
   var search = document.getElementById('gsearch');
   function applyFilters() {
@@ -799,7 +877,9 @@ async function renderGraph(focusId, seq) {
   });
   search.addEventListener('input', applyFilters);
   document.getElementById('glayout').addEventListener('change', function (e) {
-    cy.layout({ name: e.target.value, animate: false }).run();
+    var d = ms('dur-deliberate');
+    cy.layout({ name: e.target.value, animate: d > 0 ? 'end' : false, animationDuration: d,
+      animationEasing: Okb.token('ease-in-out') }).run();
   });
   document.getElementById('gfit').addEventListener('click', function () { cy.fit(undefined, 40); });
 
@@ -813,9 +893,7 @@ async function renderGraph(focusId, seq) {
     var n = byId[id];
     if (!n) return;
     var h = '<h2>' + esc(n.title || n.id) + '</h2>' +
-      '<div class="meta"><span class="chip"><span class="swatch" style="background:' +
-      colorOf[n.type || '(untyped)'] + '"></span>' + esc(n.type || '(untyped)') +
-      '</span><code>' + esc(n.id) + '</code></div>' +
+      '<div class="meta">' + typeChip(n.type) + '<code>' + esc(n.id) + '</code></div>' +
       '<div class="meta">' + badges(n) + '</div>' +
       '<div class="row"><a href="' + conceptHref(id) + '"><button class="small">Open</button></a>' +
       '<a href="' + editHref(id) + '"><button class="small">Edit</button></a></div>';
@@ -839,7 +917,7 @@ async function renderGraph(focusId, seq) {
     if (node.nonempty()) {
       cy.$(':selected').unselect();
       node.select();
-      cy.animate({ center: { eles: node } }, { duration: 200 });
+      cy.animate({ center: { eles: node } }, { duration: ms('dur-slow'), easing: Okb.token('ease-in-out') });
     }
     showDetail(id);
   }
@@ -869,7 +947,7 @@ function renderSearch(initialQ) {
     e.preventDefault();
     var q = qEl.value.trim();
     if (!q) return;
-    busy(out, 'searching…');
+    Okb.working(out, 'searching');
     var params = { query: q };
     var p = document.getElementById('sp').value;
     if (p) params.profile = p;
@@ -887,6 +965,7 @@ function renderSearch(initialQ) {
               '<a href="' + graphHref(h.id) + '"><button class="small">Graph</button></a></div></div>';
           }).join('')
         : '<div class="empty">No hits.</div>';
+      Okb.enter(out);
     } catch (err) { out.innerHTML = errorBox(err); }
   });
   if (initialQ) { qEl.value = initialQ; qEl.form.requestSubmit(); }
@@ -915,7 +994,7 @@ function renderAsk() {
     e.preventDefault();
     var q = document.getElementById('askq').value.trim();
     if (!q) return;
-    busy(ctxEl, 'retrieving…');
+    Okb.working(ctxEl, 'retrieving');
     outEl.innerHTML = '';
     srcEl.innerHTML = '';
     var url = '/api/ask/stream?token=' + encodeURIComponent(TOKEN) + '&question=' + encodeURIComponent(q);
@@ -923,22 +1002,25 @@ function renderAsk() {
     if (profile) url += '&profile=' + encodeURIComponent(profile);
     if (BRAIN) url += '&brain=' + encodeURIComponent(BRAIN);
     var es = new EventSource(url);
+    Okb.busy(true);
+    function end() { es.close(); Okb.busy(false); } // a closed stream fires nothing more
     es.addEventListener('context', function (ev) {
       var ctx = JSON.parse(ev.data);
       ctxEl.innerHTML = ctx.length ? '<span class="muted">reading:</span> ' + citationLinks(ctx) : '';
     });
     es.addEventListener('answer', function (ev) {
       outEl.innerHTML = R.renderMarkdown(JSON.parse(ev.data).answer);
+      Okb.settle(outEl);
     });
     es.addEventListener('done', function (ev) {
       var r = JSON.parse(ev.data).result;
       if (r.citations.length) srcEl.innerHTML = '<h3>Sources</h3>' + citationLinks(r.citations);
-      es.close();
+      end();
     });
     es.addEventListener('error', function (ev) {
       if (ev.data) outEl.innerHTML = errorBox(JSON.parse(ev.data).error);
       else if (!outEl.innerHTML) outEl.innerHTML = errorBox('stream failed');
-      es.close();
+      end();
     });
   });
 }
@@ -953,24 +1035,25 @@ async function renderReview() {
   var listEl = document.getElementById('rlist');
   var garnishEl = document.getElementById('rgarnish');
   async function load() {
-    busy(listEl, 'scoring…');
+    Okb.working(listEl, 'scoring');
     var q;
-    try { q = await api('review_queue', garnishEl.checked ? { garnish: true } : {}); }
+    try { q = await (garnishEl.checked ? appWork(api('review_queue', { garnish: true })) : api('review_queue', {})); }
     catch (e) { listEl.innerHTML = errorBox(e); return; }
-    if (!q.length) { listEl.innerHTML = '<div class="empty">Queue is empty — nothing needs review.</div>'; return; }
-    listEl.innerHTML = q.map(function (it, i) {
+    if (!q.length) { listEl.innerHTML = '<div class="empty">Nothing needs review.</div>'; return; }
+    listEl.innerHTML = q.map(function (it) {
       return '<div class="card" data-id="' + esc(it.id) + '">' +
-        '<div class="title">' + (i + 1) + '. ' + conceptLink(it.id, it.title) +
+        '<div class="title">' + conceptLink(it.id, it.title) +
         ' <span class="muted">(' + it.score.toFixed(2) + ')</span></div>' +
         '<div class="why">' + esc(it.reasons.join('; ')) + '</div>' +
         (it.garnish ? '<div class="garnish">↳ ' + esc(it.garnish) + '</div>' : '') +
         cardActions(it.id, '<button class="small" data-act="done">Reviewed ✓</button><button class="small" data-act="snooze">Snooze 7d</button>') +
         '</div>';
     }).join('');
+    Okb.enter(listEl);
   }
-  wireCards(listEl, async function (act, id) {
+  wireCards(listEl, async function (act, id, card) {
     await api(act === 'done' ? 'review_done' : 'review_snooze', { id: id });
-    load();
+    await fileAway(card, act === 'done' ? 'done' : 'snooze', 'Nothing needs review.');
   });
   garnishEl.addEventListener('change', load);
   load();
@@ -982,6 +1065,7 @@ async function renderInbox() {
   view.innerHTML = '<div class="stack"><h2>Inbox</h2><div id="ilist" class="list"></div></div>';
   var listEl = document.getElementById('ilist');
   async function load() {
+    Okb.working(listEl, 'loading');
     var rows;
     try { rows = await api('inbox_list', {}); }
     catch (e) { listEl.innerHTML = errorBox(e); return; }
@@ -992,15 +1076,32 @@ async function renderInbox() {
         '<div class="why"><code>' + esc(r.id) + '</code> · ' + dateOf(r.timestamp) + '</div>' +
         cardActions(r.id, '<button class="small" data-act="read">Mark read</button>') + '</div>';
     }).join('');
+    Okb.enter(listEl);
   }
-  wireCards(listEl, async function (act, id) {
+  wireCards(listEl, async function (act, id, card) {
     await api('inbox_read', { id: id });
-    load();
+    await fileAway(card, 'done', 'Inbox is empty.');
   });
   load();
 }
 
 // ---- add view (capture / clip / rss / import / bookmarklet) ----------------
+
+/** The clip bookmarklet as a chip to drag to the bookmarks bar (Add, Settings). */
+function showBookmarklet() {
+  working('bm-out', 'loading');
+  get('/api/bookmarklet').then(function (r) {
+    var el = document.getElementById('bm-out');
+    if (!el) return;
+    var a = document.createElement('a');
+    a.href = r.bookmarklet;
+    a.textContent = 'Clip to okbrain';
+    a.className = 'chip';
+    a.title = 'drag me to your bookmarks bar';
+    el.replaceChildren(a);
+    el.insertAdjacentHTML('beforeend', ' <span class="muted">drag this to your bookmarks bar; clicking it on any page clips that page (needs okb serve on port ' + esc(r.port) + ')</span>');
+  }).catch(function (e) { setHtml('bm-out', errorBox(e)); });
+}
 
 function renderAdd() {
   view.innerHTML =
@@ -1016,38 +1117,24 @@ function renderAdd() {
     '<input id="clip-url" style="flex:1" placeholder="https://… page to clip">' +
     '<label class="row" style="gap:5px"><input type="checkbox" id="clip-read"> already read</label>' +
     '<label class="row" style="gap:5px"><input type="checkbox" id="clip-auto"> auto-tag (AI)</label>' +
-    '<button class="primary">Clip</button></form><div id="clip-out"></div>' +
+    '<button>Clip</button></form><div id="clip-out"></div>' +
     '<p class="muted">Clipped pages arrive as <code>references/</code> concepts with the page recorded under <code>sources</code>.</p>' +
-    '<h3>Bookmarklet</h3><div id="bm-out" class="muted">loading…</div>' +
+    '<h3>Bookmarklet</h3><div id="bm-out"></div>' +
     '<h3>Pull RSS feeds</h3><form id="rssf" class="row">' +
     '<input id="rss-url" style="flex:1" placeholder="feed URL (empty = every configured rss.feeds entry)">' +
-    '<button class="primary">Pull</button></form><div id="rss-out"></div>' +
+    '<button>Pull</button></form><div id="rss-out"></div>' +
     '<h3>Import markdown (server-side path)</h3>' +
     '<form id="impf" class="row">' +
     '<input id="imp-path" style="flex:1" placeholder="/path/to/file-or-directory on the okb host">' +
     '<input id="imp-dest" placeholder="dest dir (optional)" style="width:150px">' +
     '<label class="row" style="gap:5px"><input type="checkbox" id="imp-over"> overwrite</label>' +
-    '<button class="primary">Import</button></form><div id="imp-out"></div></div>';
+    '<button>Import</button></form><div id="imp-out"></div></div>';
 
   var out = setHtml;
-  function working(el) { setHtml(el, '<span class="muted">working…</span>'); }
   function done(el, id, label) {
     out(el, '<div class="notice">' + esc(label) + ' — ' + conceptLink(id, 'open') + '</div>');
   }
-
-  get('/api/bookmarklet').then(function (r) {
-    var el = document.getElementById('bm-out');
-    if (!el) return;
-    var a = document.createElement('a');
-    a.href = r.bookmarklet;
-    a.textContent = '📎 Clip to okbrain';
-    a.className = 'chip';
-    a.title = 'drag me to your bookmarks bar';
-    el.className = '';
-    el.innerHTML = '';
-    el.appendChild(a);
-    el.insertAdjacentHTML('beforeend', ' <span class="muted">drag this to your bookmarks bar; clicking it on any page clips that page (needs okb serve on port ' + esc(r.port) + ')</span>');
-  }).catch(function (e) { out('bm-out', errorBox(e)); });
+  showBookmarklet();
 
   document.getElementById('capf').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -1056,7 +1143,7 @@ function renderAdd() {
     var params = { text: text };
     var tags = document.getElementById('cap-tags').value.trim();
     if (tags) params.tags = tags;
-    working('cap-out');
+    working('cap-out', 'capturing');
     try {
       var r = await api('capture', params);
       var form = document.getElementById('capf');
@@ -1072,7 +1159,7 @@ function renderAdd() {
     var params = { url: url };
     if (document.getElementById('clip-read').checked) params.read = true;
     if (document.getElementById('clip-auto').checked) params['auto-tag'] = true;
-    working('clip-out');
+    working('clip-out', 'clipping');
     try {
       var r = await api('clip', params);
       var msg = r.deduped
@@ -1085,11 +1172,11 @@ function renderAdd() {
   document.getElementById('rssf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var url = document.getElementById('rss-url').value.trim();
-    working('rss-out');
+    working('rss-out', 'pulling');
     try {
-      var feeds = await api('rss', url ? { url: url } : {});
+      var feeds = await appWork(api('rss', url ? { url: url } : {}));
       out('rss-out', '<div class="notice">' + esc(feeds.map(function (f) {
-        if (f.error) return (f.feed || f.url) + ' — FAILED: ' + f.error;
+        if (f.error) return (f.feed || f.url) + ' — failed: ' + f.error;
         return (f.feed || f.url) + ': ' + f.added.length + ' added, ' + f.deduped + ' known';
       }).join('\n')) + '</div>');
     } catch (err) { out('rss-out', errorBox(err)); }
@@ -1103,9 +1190,9 @@ function renderAdd() {
     var dest = document.getElementById('imp-dest').value.trim();
     if (dest) params.dest = dest;
     if (document.getElementById('imp-over').checked) params.overwrite = true;
-    working('imp-out');
+    working('imp-out', 'importing');
     try {
-      var r = await api('import', params);
+      var r = await appWork(api('import', params));
       out('imp-out', '<div class="notice">' + esc(
         r.imported.map(function (id) { return 'imported ' + id; })
           .concat(r.skipped.map(function (s) { return 'skipped ' + s.path + ' — ' + s.reason; }))
@@ -1145,7 +1232,7 @@ async function renderClaims() {
       var v = document.getElementById('t-' + n).value.trim();
       if (v) params[n] = v;
     });
-    document.getElementById('t-msg').textContent = 'staking…';
+    working('t-msg', 'staking');
     try {
       var r = await api('take', params);
       var form = document.getElementById('tf');
@@ -1155,9 +1242,11 @@ async function renderClaims() {
     } catch (err) { setHtml('t-msg', ''); setHtml('c-out', errorBox(err)); }
   });
 
-  async function loadCalibration() {
+  async function loadCalibration(first) {
     var el = document.getElementById('c-out');
-    busy(el, 'scoring…');
+    if (!el) return;
+    if (first) Okb.working(el, 'scoring');
+    var before = figures(el);
     var c;
     try { c = await api('calibrate', {}); }
     catch (e) { el.innerHTML = errorBox(e); return; }
@@ -1184,34 +1273,41 @@ async function renderClaims() {
       }).join('');
     }
     el.innerHTML = h;
+    flashChanged(el, before);
   }
 
   document.getElementById('c-out').addEventListener('click', async function (e) {
     var btn = e.target.closest('button[data-act]');
     if (!btn) return;
-    var id = btn.closest('.card').getAttribute('data-id');
+    var card = btn.closest('.card');
     btn.closest('.row').querySelectorAll('button').forEach(function (b) { b.disabled = true; });
-    try { await api('resolve', { id: id, outcome: btn.getAttribute('data-act') }); loadCalibration(); }
-    catch (err) { setHtml('c-out', errorBox(err)); }
+    try {
+      await api('resolve', { id: card.getAttribute('data-id'), outcome: btn.getAttribute('data-act') });
+      await Okb.fileAway(card, 'done');
+      loadCalibration();
+    } catch (err) { setHtml('c-out', errorBox(err)); }
   });
 
-  loadCalibration();
+  loadCalibration(true);
 }
 
 // ---- stats view (stats / orphans / path) --------------------------------
 
 async function renderStats() {
   view.innerHTML =
-    '<div class="stack wide"><h2>Stats</h2><div id="st-out"><span class="muted">counting…</span></div>' +
+    '<div class="stack wide"><h2>Stats</h2><div id="st-out"></div>' +
     '<h3>Path between two concepts</h3>' +
     '<form id="pf" class="row">' +
     '<input id="p-from" placeholder="from id"><span class="muted">→</span>' +
     '<input id="p-to" placeholder="to id"><button class="primary">Find path</button></form>' +
     '<div id="p-out"></div>' +
-    '<h3>Orphans (no links in or out)</h3><div id="or-out"><span class="muted">loading…</span></div></div>';
+    '<h3>Orphans (no links in or out)</h3><div id="or-out"></div></div>';
+  working('st-out', 'counting');
+  working('or-out', 'loading');
 
   try {
     var s = await api('stats', {});
+    setTypes(s.byType.map(function (t) { return t.type; }));
     var h = '<div class="tiles">' +
       tile('Concepts', s.concepts) + tile('Links', s.edges + (s.typedEdges ? ' · ' + s.typedEdges + ' typed' : '')) +
       tile('Tags', s.tags) + tile('Orphans', s.orphans) + tile('Inbox', s.inbox) +
@@ -1222,7 +1318,7 @@ async function renderStats() {
       tile('Unverified', s.byTrust.unverified) + tile('Machine-confirmed', s.byTrust['machine-confirmed']) +
       tile('Human-reviewed', s.byTrust['human-reviewed'], 'good') + '</div>';
     if (s.byType.length) h += '<h3>By type</h3><div class="row">' +
-      s.byType.map(function (t) { return '<span class="chip">' + esc(t.type || '(untyped)') + ' ' + t.count + '</span>'; }).join(' ') + '</div>';
+      s.byType.map(function (t) { return typeChip(t.type, t.count); }).join(' ') + '</div>';
     if (s.topTags.length) h += '<h3>Top tags</h3><div class="row">' +
       s.topTags.map(function (t) { return '<span class="chip">' + esc(t.tag) + ' ' + t.count + '</span>'; }).join(' ') + '</div>';
     if (s.newest) h += '<p class="muted">freshest ' + dateOf(s.newest) + ' · oldest ' + dateOf(s.oldest) + '</p>';
@@ -1235,7 +1331,7 @@ async function renderStats() {
     var to = document.getElementById('p-to').value.trim();
     var el = document.getElementById('p-out');
     if (!from || !to) return;
-    busy(el, 'searching…');
+    Okb.working(el, 'searching');
     try {
       var hops = await api('graph_path', { from: from, to: to });
       if (!hops) { el.innerHTML = '<div class="empty">No path found.</div>'; return; }
@@ -1267,12 +1363,12 @@ async function renderSettings() {
     '<dt>okbrain</dt><dd>' + esc(st.version || '?') + ' · writes OKF ' + esc(st.okfVersion || '?') + '</dd>' +
     '<dt>Bundle</dt><dd><code>' + esc(st.bundle || '?') + '</code>' + (st.brain ? ' (brain <strong>' + esc(st.brain) + '</strong>)' : '') +
     (st.readonly ? ' <span class="chip warn">read-only</span>' : '') + '</dd>' +
-    '<dt>Caches</dt><dd>index ' + (st.hasIndex ? '✓' : '✗') + ' · vectors ' + (st.hasVectors ? '✓' : '✗') + '</dd>' +
+    '<dt>Caches</dt><dd>' + (st.hasIndex ? 'index ✓' : 'no index') + ' · ' + (st.hasVectors ? 'vectors ✓' : 'no vectors') + '</dd>' +
     '<dt>Port</dt><dd>' + esc(st.port || '?') + ' (127.0.0.1 only)</dd></dl>' +
     '<h3>Identity</h3><form id="actf" class="row">' +
     '<label class="field" style="flex:1"><span>Actor (generated.by / verified.by on your writes)</span>' +
     '<input id="act-in" value="' + esc(st.actor || '') + '" placeholder="human:alice"></label>' +
-    '<button class="primary">Save</button></form><div id="act-out"></div>' +
+    '<button>Save</button></form><div id="act-out"></div>' +
     '<h3>AI providers (persisted by okb init)</h3>' +
     '<form id="setf" class="stack"><div class="grid">' +
     field('provider', 'Chat provider', '', 'anthropic | openai | gemini | openrouter | local') +
@@ -1282,10 +1378,10 @@ async function renderSettings() {
     '</div><div class="row"><label class="field"><span>Retrieval profile</span>' +
     '<select id="ed-retrieval-profile"><option value="">(keep)</option>' +
     '<option>lean</option><option>balanced</option><option>max</option></select></label>' +
-    '<button class="primary">Save</button></div></form>' +
+    '<button>Save</button></div></form>' +
     '<div id="set-out"></div><p class="muted">API keys are read from environment variables only (ANTHROPIC_API_KEY, OPENAI_API_KEY, …); a local provider needs none.</p>' +
     '<h3>Sync (git)</h3><div class="row">' +
-    '<button id="sync-status">Status</button><button id="sync-run" class="primary">Sync now</button></div>' +
+    '<button id="sync-status">Status</button><button id="sync-run">Sync now</button></div>' +
     '<div id="sync-out"></div>' +
     '<h3>Enrichment (guardrailed web pass)</h3>' +
     '<form id="enrf" class="stack"><div class="grid">' +
@@ -1297,7 +1393,7 @@ async function renderSettings() {
     field('allow-host', 'Allowed hosts', '', 'default: the seeds’ hosts') +
     field('deny-path', 'Denied path prefixes', '', 'e.g. /admin,/login') +
     '<label class="field"><span>Web</span><select id="ed-no-web"><option value="">on</option><option value="1">off (--no-web)</option></select></label>' +
-    '</div><div class="row"><button class="primary">Run enrich</button></div></form>' +
+    '</div><div class="row"><button>Run enrich</button></div></form>' +
     '<div id="enr-out"></div>' +
     '<h3>Maintenance</h3><div class="row">' +
     '<button id="mx-index">Re-index</button><button id="mx-embed">Embed</button>' +
@@ -1308,19 +1404,19 @@ async function renderSettings() {
       return '<label class="row" style="gap:4px"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
     }).join('') + '<button id="mx-jobs">Run jobs</button></div>' +
     '<div class="row"><span class="muted">OKF v0.2 migration:</span><button id="mx-upgrade-dry">Preview upgrade</button>' +
-    '<button id="mx-upgrade" class="primary">Upgrade bundle</button></div><div id="mx-out"></div>' +
+    '<button id="mx-upgrade">Upgrade bundle</button></div><div id="mx-out"></div>' +
     '<h3>Agent access (MCP)</h3><p class="muted">Servers cannot start servers — run this in a terminal (add <code>--trusted</code> to expose write tools to a client you fully trust):</p>' +
     '<pre>' + esc(mcpCmd) + '</pre><p class="muted">Claude Desktop / any MCP client config:</p><pre>' + esc(mcpJson) + '</pre>' +
-    '<h3>Bookmarklet</h3><div id="bm-out" class="muted">loading…</div></div>';
+    '<h3>Bookmarklet</h3><div id="bm-out"></div></div>';
 
   var show = setHtml;
-  function working(el) { setHtml(el, '<span class="muted">working…</span>'); }
+  showBookmarklet();
 
   document.getElementById('actf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var actor = document.getElementById('act-in').value.trim();
     if (!actor) return;
-    working('act-out');
+    working('act-out', 'saving');
     try {
       var r = await api('init', { actor: actor, 'no-default-bundle': true });
       show('act-out', '<div class="notice">actor: ' + esc(r.actor) + '</div>');
@@ -1334,7 +1430,7 @@ async function renderSettings() {
       var v = document.getElementById('ed-' + n).value.trim();
       if (v) params[n] = v;
     });
-    working('set-out');
+    working('set-out', 'saving');
     try {
       var r = await api('init', params);
       show('set-out', '<div class="notice">chat: ' + esc(r.chat.provider + ' / ' + r.chat.model +
@@ -1354,9 +1450,9 @@ async function renderSettings() {
       if (v) params[n] = parseInt(v, 10);
     });
     if (document.getElementById('ed-no-web').value) params['no-web'] = true;
-    working('enr-out');
+    working('enr-out', 'enriching');
     try {
-      var r = await api('enrich', params);
+      var r = await appWork(api('enrich', params));
       show('enr-out', '<div class="notice">' + esc(
         r.fetched.map(function (u) { return 'fetched ' + u; })
           .concat(r.written.map(function (w) { return (w.created ? 'created ' : 'enriched ') + w.id; }))
@@ -1364,34 +1460,34 @@ async function renderSettings() {
     } catch (err) { show('enr-out', errorBox(err)); }
   });
   document.getElementById('sync-status').addEventListener('click', async function () {
-    working('sync-out');
+    working('sync-out', 'checking');
     try { show('sync-out', jsonNotice(await api('sync', { status: true }))); }
     catch (e) { show('sync-out', errorBox(e)); }
   });
   document.getElementById('sync-run').addEventListener('click', async function () {
-    working('sync-out');
-    try { show('sync-out', jsonNotice(await api('sync', {}))); }
+    working('sync-out', 'syncing');
+    try { show('sync-out', jsonNotice(await appWork(api('sync', {})))); }
     catch (e) { show('sync-out', errorBox(e)); }
   });
-  async function maint(op, params, render) {
-    working('mx-out');
-    try { show('mx-out', (render || jsonNotice)(await api(op, params || {}))); await refreshStatus(); }
+  async function maint(op, verb, params, render) {
+    working('mx-out', verb);
+    try { show('mx-out', (render || jsonNotice)(await appWork(api(op, params || {})))); await refreshStatus(); }
     catch (e) { show('mx-out', errorBox(e)); }
   }
-  document.getElementById('mx-index').addEventListener('click', function () { maint('index'); });
-  document.getElementById('mx-embed').addEventListener('click', function () { maint('embed'); });
-  document.getElementById('mx-doctor').addEventListener('click', function () { maint('doctor', {}, doctorSummary); });
+  document.getElementById('mx-index').addEventListener('click', function () { maint('index', 'indexing'); });
+  document.getElementById('mx-embed').addEventListener('click', function () { maint('embed', 'embedding'); });
+  document.getElementById('mx-doctor').addEventListener('click', function () { maint('doctor', 'checking', {}, doctorSummary); });
   document.getElementById('mx-viz').addEventListener('click', function () {
-    maint('export_viz', {}, function (r) { return '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>'; });
+    maint('export_viz', 'exporting', {}, function (r) { return '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>'; });
   });
   document.getElementById('mx-rebuild').addEventListener('click', function () {
     if (!confirm('Rebuild wipes the derived index and rebuilds it from the bundle. Continue?')) return;
-    maint('rebuild', { 'confirm-destructive': true });
+    maint('rebuild', 'rebuilding', { 'confirm-destructive': true });
   });
   document.getElementById('mx-jobs').addEventListener('click', function () {
     var only = Array.prototype.map.call(document.querySelectorAll('.jobcb:checked'), function (cb) { return cb.value; });
     if (!only.length) return;
-    maint('jobs', { only: only.join(',') }, function (rs) {
+    maint('jobs', 'running jobs', { only: only.join(',') }, function (rs) {
       return '<div class="notice">' + esc(rs.map(function (j) {
         return (j.skipped ? '[skip] ' : j.ok ? '[ ok ] ' : '[FAIL] ') + j.name + ' — ' + j.detail;
       }).join('\n')) + '</div>';
@@ -1403,25 +1499,14 @@ async function renderSettings() {
       .concat([u.upgraded.length + ' ' + verb + ', ' + u.unchanged + ' already v' + u.okfVersion +
         (u.declared ? '; root index.md declares okf_version ' + u.okfVersion : '')]).join('\n')) + '</div>';
   };
-  document.getElementById('mx-upgrade-dry').addEventListener('click', function () { maint('upgrade', { 'dry-run': true }, upgradeRender); });
+  document.getElementById('mx-upgrade-dry').addEventListener('click', function () { maint('upgrade', 'previewing', { 'dry-run': true }, upgradeRender); });
   document.getElementById('mx-upgrade').addEventListener('click', function () {
     if (!confirm('Rewrite v0.1 conventions (timestamp, # Citations, last_reviewed) as OKF v0.2 frontmatter across the bundle?')) return;
-    maint('upgrade', {}, upgradeRender);
+    maint('upgrade', 'upgrading', {}, upgradeRender);
   });
-  get('/api/bookmarklet').then(function (r) {
-    var el = document.getElementById('bm-out');
-    if (!el) return;
-    el.className = '';
-    el.innerHTML = '';
-    var a = document.createElement('a');
-    a.href = r.bookmarklet;
-    a.textContent = '📎 Clip to okbrain';
-    a.className = 'chip';
-    el.appendChild(a);
-    el.insertAdjacentHTML('beforeend', ' <span class="muted">drag to your bookmarks bar</span>');
-  }).catch(function (e) { show('bm-out', errorBox(e)); });
 }
 
 // ---- boot ----------------------------------------------------------------
 
+Okb.wordmark(document.querySelector('#nav .brand strong'));
 refreshStatus().then(function () { loadBrains(); route(); });

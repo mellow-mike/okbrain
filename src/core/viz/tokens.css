@@ -1,0 +1,58 @@
+/* okbrain design tokens (docs/context/REFERENCES.md R5), shared by the GUI and
+   the static viewer. Ink on a ground: dark is the default, light an explicit
+   choice. Colour only means something — state (ok / warn / danger, always
+   beside a word) and concept types (graph-1…8, sorted type order; the ninth
+   type onward shares graph-other). accent is ink, never a hue. */
+
+:root, [data-theme="dark"] {
+  --plane: #000000; --surface: #0b0b0a; --raised: #161615; --code-bg: #141413;
+  --ink: #ffffff; --ink-2: #c9c9c3; --muted: #908f89;
+  --line: #262624; --line-strong: #6f6e69; --edge-line: #63635e;
+  --ok: #4be6d4; --warn: #feb503; --danger: #e36462;
+  --chip-bg: #ffffff12;
+  --graph-1: #3987e5; --graph-2: #d95926; --graph-3: #199e70; --graph-4: #c98500;
+  --graph-5: #d55181; --graph-6: #008300; --graph-7: #9085e9; --graph-8: #e66767;
+  --graph-other: #898781;
+  --shadow: 0 0 0 1px #2c2c2a, 0 16px 40px -8px #000000cc;
+  --focus-ring: 0 0 0 2px #0b0b0a, 0 0 0 4px #ffffff;
+}
+[data-theme="light"] {
+  --plane: #f2f2ef; --surface: #ffffff; --raised: #ffffff; --code-bg: #f2f2ef;
+  --ink: #0b0b0a; --ink-2: #3c3c38; --muted: #67665f;
+  --line: #e3e3de; --line-strong: #8a8983; --edge-line: #92918b;
+  --ok: #047b62; --warn: #8f5d02; --danger: #900e26;
+  --chip-bg: #0b0b0a0d;
+  --graph-1: #2a78d6; --graph-2: #eb6834; --graph-3: #1baf7a; --graph-4: #eda100;
+  --graph-5: #e87ba4; --graph-6: #008300; --graph-7: #4a3aa7; --graph-8: #e34948;
+  --graph-other: #898781;
+  --shadow: 0 0 0 1px #0b0b0a14, 0 16px 40px -12px #0b0b0a33;
+  --focus-ring: 0 0 0 2px #ffffff, 0 0 0 4px #0b0b0a;
+}
+:root {
+  --accent: var(--ink); --accent-ink: var(--surface); --focus: var(--ink);
+
+  /* Literata reads the bundle's words; Recursive speaks for okbrain. */
+  --font-sans: "Recursive Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-read: Literata, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --font-mono: "Recursive Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --space-half: 2px; --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-12: 48px;
+  --radius-xs: 2px; --radius-sm: 4px; --radius-md: 6px; --radius-full: 999px;
+
+  --dur-instant: 90ms; --dur-quick: 150ms; --dur-base: 240ms; --dur-slow: 380ms;
+  --dur-deliberate: 620ms; --dur-loop: 1200ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-ink: cubic-bezier(0.76, 0, 0.24, 1);
+  --ease-spring: linear(0, .116 5%, .402 11%, .719 18%, .943 26%, 1.037 35%, 1.041 45%, 1.017 56%, 1.001 68%, .998 82%, 1);
+
+  --opacity-dim: 0.15; --opacity-deprecated: 0.45; --opacity-disabled: 0.4;
+
+  --nav-width: 216px; --measure: 66ch; --side-width: 288px; --detail-width: 320px;
+  --control-h: 32px; --control-h-sm: 26px;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-instant: 0ms; --dur-quick: 0ms; --dur-base: 0ms; --dur-slow: 0ms; --dur-deliberate: 0ms; }
+}

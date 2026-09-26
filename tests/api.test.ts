@@ -167,6 +167,8 @@ describe("request guards", () => {
     const cases: [string, string, string][] = [
       ["gui/app.js", "application/javascript", "renderGraph"],
       ["gui/style.css", "text/css", "--accent"],
+      ["gui/tokens.css", "text/css", "--graph-1"],
+      ["gui/okb.js", "application/javascript", "window.Okb"],
       ["gui/cytoscape.js", "application/javascript", "cytoscape"],
       ["gui/marked.js", "application/javascript", "marked"],
       ["gui/safe-markdown.js", "application/javascript", "okbMarkdown"],
@@ -177,6 +179,24 @@ describe("request guards", () => {
       expect(r.status).toBe(200);
       expect(r.headers.get("content-type")).toContain(type);
       expect(await r.text()).toContain(needle);
+    }
+  });
+
+  test("every asset the shell and stylesheet reference is served — fonts as woff2", async () => {
+    const shell = await (await fetch(base)).text();
+    const css = await (await fetch(base + "gui/style.css")).text();
+    const refs = [
+      ...[...shell.matchAll(/(?:href|src)="\/(gui\/[^"]+)"/g)].map((m) => m[1]!),
+      ...[...css.matchAll(/url\("\/(gui\/[^"]+)"\)/g)].map((m) => m[1]!),
+    ];
+    expect(refs).toContain("gui/tokens.css");
+    const fonts = refs.filter((r) => r.endsWith(".woff2"));
+    expect(fonts).toHaveLength(4);
+    for (const ref of refs) expect((await fetch(base + ref)).status).toBe(200);
+    for (const font of fonts) {
+      const r = await fetch(base + font);
+      expect(r.headers.get("content-type")).toBe("font/woff2");
+      expect(new TextDecoder().decode((await r.bytes()).subarray(0, 4))).toBe("wOF2");
     }
   });
 

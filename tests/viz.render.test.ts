@@ -15,6 +15,7 @@ interface Render {
   resolveInternal(href: string, baseId?: string): string | null;
   badges(s: { status: string; trust: string; stale: boolean; staleAfter?: string | null }): string;
   sourcesList(s: unknown[]): string;
+  actorLine(ev: { by?: string; at?: string } | null): string;
 }
 
 function load(): Render {
@@ -84,5 +85,12 @@ describe("badges + sources", () => {
     expect(h).toContain("human:ada · modified 2026-06-15 · 3 uses");
     expect(h).toContain('<a href="policies/x.md">policies/x.md</a>');
     expect(R.sourcesList([])).toContain("—");
+  });
+
+  test("actor lines set the actor apart (mono) and escape it", () => {
+    expect(R.actorLine({ by: "human:<ada>", at: "2026-06-15T00:00:00Z" })).toBe(
+      '<span class="actor">human:&lt;ada&gt;</span> <span class="muted">· 2026-06-15T00:00:00Z</span>',
+    );
+    expect(R.actorLine(null)).toBe("—");
   });
 });
