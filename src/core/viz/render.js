@@ -116,7 +116,7 @@
 
   function actorLine(ev) {
     if (!ev || !ev.by) return '—';
-    return esc(ev.by) + (ev.at ? ' <span class="muted">· ' + esc(ev.at) + '</span>' : '');
+    return '<span class="actor">' + esc(ev.by) + '</span>' + (ev.at ? ' <span class="muted">· ' + esc(ev.at) + '</span>' : '');
   }
 
   /** `sources` entries as a list with credibility signals. */

@@ -16,7 +16,7 @@ still there, readable by any editor you like.
 > Pre-1.0 and not yet published to a package registry, so installing means a
 > one-command build from source (or `bun run package` for an offline archive).
 > Stages 0–6 of the [roadmap](ROADMAP.md) are complete: CLI, local web GUI,
-> and MCP server all work today, with 437 tests green on macOS, Linux,
+> and MCP server all work today, with 443 tests green on macOS, Linux,
 > and Windows.
 
 ## Why
@@ -264,8 +264,11 @@ verify / deprecate / delete), an editor with the v0.2 fields and a sources
 editor, the live graph, search, ask, review, inbox, add (capture, clip, feeds,
 import, the bookmarklet), claims, stats, and settings (your actor, providers,
 sync, enrichment, maintenance including jobs and the v0.2 upgrade, MCP setup,
-a brain switcher). Every request is token-gated, and rendered markdown never
-executes HTML from a clipped page. MCP tool schemas are generated from the
+a brain switcher). It is dark-first ink on a ground — colour only marks
+state and concept types, your notes read in Literata while okbrain speaks in
+Recursive — and its fonts ship inside the binary, so it needs no network.
+Every request is token-gated, and rendered markdown never executes HTML from
+a clipped page. MCP tool schemas are generated from the
 same contract as the CLI; writes made over MCP are attributed to the connected
 client, and admin operations (`rebuild`, `init`, `serve`) never appear there.
 `okb mcp --http` serves Streamable HTTP on port 6523.
@@ -371,7 +374,7 @@ ever living behind it.
 bun install
 bun run okb <args>     # run the CLI from source
 bun run typecheck      # tsc --noEmit, strict
-bun test               # 437 tests, no network
+bun test               # 443 tests, no network
 bun run build          # bin/okb + vec0 beside it
 bun run package        # offline release archive for this machine → dist/
 ```

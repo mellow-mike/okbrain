@@ -4,11 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>okbrain</title>
+<link rel="stylesheet" href="/gui/tokens.css">
 <link rel="stylesheet" href="/gui/style.css">
+<script src="/gui/okb.js"></script>
+<script>Okb.theme.restore();</script>
 </head>
-<body>
+<body class="app">
 <nav id="nav" aria-label="okbrain">
-  <div class="brand"><a href="#home"><strong>okbrain</strong></a><span id="nav-brain" class="muted"></span></div>
+  <div class="brand"><a href="#home"><strong>okbrain</strong></a><span id="nav-brain"></span></div>
   <select id="brain" title="brain mount" hidden></select>
   <form id="qs" class="qs" role="search"><input id="qs-in" type="search" placeholder="Search…  ( / )" aria-label="search the brain"></form>
   <div class="group">Knowledge</div>
@@ -28,7 +31,7 @@
   <a href="#settings">Settings</a>
   <div class="foot">
     <button id="theme" title="toggle light/dark" type="button"></button>
-    <div id="nav-status" class="muted"></div>
+    <div id="nav-status"></div>
   </div>
 </nav>
 <main id="view" tabindex="-1"></main>

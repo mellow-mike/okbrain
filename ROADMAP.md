@@ -578,6 +578,35 @@ Goal: the brain improves itself on a schedule.
       CLAUDE.md invariant 1, REFERENCES (R1 updated, R3/R4 added), skills
 - [ ] Tag `v0.1.0` (runs the release workflow) — the maintainer's call
 
+### 6.4 Design system (R5)
+- [x] `core/viz/tokens.css` from the system's tokens: both themes, families,
+      spacing, radii, shadows, motion (zeroed under reduced motion),
+      opacities, shell measures; shared by the GUI and `viz.html`
+- [x] `gui/style.css` = the system's stylesheet over the tokens + four
+      `@font-face` rules; `<body class="app">`; Home title as `t-display`
+- [x] Fonts (Recursive Sans/Mono, Literata roman/italic; subset woff2,
+      366 KB, OFL) embedded via Bun `file` imports, served at `/gui/fonts/`
+- [x] `core/viz/okb.js` (`window.Okb`) wired through the GUI: theme restore
+      in `<head>` + ink-flood toggle, page turn with title carry, file-away
+      (review / inbox / home previews / claims), enter, settle (Ask), tile
+      flash (Home, Claims), trust stamp (Verified ✓), working lines,
+      wordmark wave for app-level ops
+- [x] Graph (GUI + viewer): token palette in sorted-type slot order,
+      Literata labels, 2px selection ring, hover-neighbourhood dimming,
+      token-timed focus pan and layout changes; type chips carry the slot
+      swatch (Browse, reader, graph detail, Stats)
+- [x] Static viewer restyled on the tokens (no embedded fonts), own theme
+      key `okb-viz-theme`
+- [x] Copy per the content rules: no emoji (bookmarklet chip), no ✗ glyphs,
+      "Nothing needs review.", one primary button per view, verb-first
+      buttons ("Add source")
+- [x] Tests: `tests/gui.tokens.test.ts` (theme parity, every token read is
+      defined, font files exist), GUI asset + font serving, viewer
+      self-containment and token use, `actorLine` escaping
+- [x] Driven in headless Chromium against the compiled binary: every view in
+      both themes, reduced motion, 390px, `viz.html`; zero page errors,
+      zero external requests
+
 ---
 
 ## Cross-cutting (ongoing, never "done")
@@ -609,6 +638,8 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B12 | 2026-07-30 | low | api | GUI responses carried no anti-framing headers, though `/` embeds the serve token — a remote page could frame the GUI and drive authenticated writes with hijacked clicks | no `X-Frame-Options`/`frame-ancestors` on the local API | fixed | `X-Frame-Options: DENY` + `frame-ancestors 'none'` + `nosniff` on every response; regression test in `tests/api.test.ts` |
 | B13 | 2026-09-03 | med | gui | `jobs` (admin, not localOnly) had no GUI home although the 3.2 decision promised every network-facing op one; the wiring test listed ops by hand and simply omitted it | hand-maintained expectation list | fixed | Settings → Maintenance runs `jobs` (job subset); the API test now derives the required op set from the registry |
 | B14 | 2026-09-03 | low | authoring | `okb new` derived the directory from the raw type (`Attested Computation` → `Attested Computations/x`, with the space) | `${type}s/` without slugifying | fixed | `slugify(type)+"s"`; test in `tests/okf.v02.test.ts` |
+| B16 | 2026-09-26 | low | gui | The router toggled `active` on every `#nav a`, including the wordmark's own `#home` link — on Home the wordmark took the nav highlight (under the design system: the active tick and weight 720) | selector matched the brand link | fixed | router uses `#nav > a`; found and re-checked by the Chromium drive (no unit surface for it) |
+| B17 | 2026-09-26 | low | viz/gui | `sources[].resource` bundle paths (root-relative per OKF, e.g. `policies/x.md`) render as struck-through "broken" links in `viz.html` (the viewer runs `wireLinks` over the whole detail panel, which resolves them relative to the concept) and navigate to a 401/404 JSON page from the GUI reader | `sourcesList` emits the raw path as `href`; neither surface routes it through `resolvePathField` semantics | open | — |
 | B15 | 2026-09-03 | med | ingest | `okb capture` wrote to the `inbox/` directory but never tagged `inbox`, so captures were invisible to `okb inbox`, the Inbox view, and the review queue's inbox signal (the reading inbox is the tag, not the directory) | capture didn't add the tag | fixed | captures carry the `inbox` tag; regression in `tests/authoring.test.ts` |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
@@ -669,11 +700,26 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       confirmation; today only humans and agents verify.
 - [ ] Attested Computation execution/attestation (§10) — deliberately out of
       scope for a personal brain; the contract is displayed, not run.
+- [ ] `okb export-viz --fonts`: embed the design system's faces in
+      `viz.html` (+~490 KB base64) for a pixel-faithful shared export
+- [ ] One graph component for both surfaces: the GUI graph view and the
+      static viewer duplicate their Cytoscape wiring (styles, filters,
+      detail panel); a shared `core/viz` module would halve it
 
 ---
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-09-26 — **Design system implemented (6.4).** The GUI and the static
+  viewer now wear the okbrain design system (R5): dark-first ink on a
+  ground, colour only for state and concept types, Literata for the
+  bundle's words and Recursive for okbrain's, the four subset fonts inside
+  the binary, and the system's `window.Okb` motion helpers wired through
+  every view (page turns, file-away, ink-flood theme toggle, stamps,
+  flashes, working lines, wordmark wave), all off under reduced motion.
+  Tokens live once in `core/viz/tokens.css`, shared with `viz.html`. Fixed
+  B16; logged B17. 443 tests green, tsc clean; driven in Chromium against
+  the compiled binary (52 checks). Next: B17; tag `v0.1.0`.
 - 2026-09-03 — **Stage 6: OKF v0.2 + GUI refresh + production.** The spec
   moved to `open-knowledge-format` and reached v0.2 (provenance / trust /
   lifecycle, actors, Attested Computations); okbrain now writes it: the

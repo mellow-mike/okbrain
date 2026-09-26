@@ -327,23 +327,27 @@ through `core/viz/safe-markdown.js` (raw HTML escaped to source text, unsafe
 URL schemes dropped — a clipped page can never run script) → `[^id]`
 footnote attribution, swapped in after rendering so it never bypasses the
 sanitizer → internal-link resolution (`#concept:` anchors, bundle-absolute,
-or relative to the concept). Theming: **dark mode
-default**, light via a persisted toggle (`localStorage`); chrome colors live
-once as CSS custom properties on `:root[data-theme=…]` and the Cytoscape
-styles read them back via `getComputedStyle`, so both surfaces render from one
-token set. Node colors are per-mode categorical palettes in a fixed CVD-safe
-slot order (validated for lightness/chroma/CVD-separation/contrast against
-each surface); a bundle with more than 8 types folds the overflow into a muted
-gray, and every node keeps a visible text label so identity is never
-color-alone.
+or relative to the concept). Look and theming come from the design system
+(§Surfaces → Look & feel): **dark default**, light an explicit persisted
+choice; both surfaces share `core/viz/tokens.css` and the `window.Okb`
+helpers (`core/viz/okb.js`), and the Cytoscape styles take the current
+theme's concrete token values (`Okb.graphPalette()`, `Okb.token()`),
+re-read when the theme flips. Types take the slots `graph-1…8` in sorted
+order (a validated CVD-safe palette per theme); a ninth type onward folds
+into `graph-other`, and every node keeps a visible Literata label so identity
+is never colour-alone. Stale nodes get a dashed `danger` ring, deprecated
+ones fade to `opacity-deprecated`, the selected one takes a 2px `accent`
+ring, and hovering a node dims everything outside its neighbourhood.
 - **Live (GUI):** same component fed by the engine over the local API; reflects
   current DB, click-through to the editor.
 - **Static export:** `okb export-viz` writes the single HTML file to the fixed
   path `<bundle>/viz.html` — no backend, shareable, committable next to the
   bundle. Built straight from a bundle walk (works without an index). Cytoscape
   and marked are vendored minified builds (`core/viz/vendor/`), inlined into
-  the page together with okbrain's own `safe-markdown.js` + `render.js` and
-  embedded in the compiled binary via Bun text imports. Internal
+  the page together with okbrain's own `safe-markdown.js` + `render.js` +
+  `tokens.css` + `okb.js` and embedded in the compiled binary via Bun text
+  imports. The web fonts stay out of `viz.html` (they would roughly double
+  it); its families fall back through their stacks. Internal
   `.md` links in bodies are rewired to `#concept:<encoded-id>` anchors the
   viewer intercepts to focus the target node; external/broken links pass
   through untouched (external ones open in a new tab). The op is scope `read`
@@ -756,13 +760,14 @@ over the registry, trusted like the CLI but defended like a network surface:
   server never holds the index hostage from a concurrent CLI.
 
 ### GUI (local web app, `okb serve`)
-A vanilla single-page app (`src/gui/`: index.html + app.js + style.css) —
-no framework, no build step; api.ts serves the files and Bun text imports
-embed them into the compiled binary (the viz-vendor pattern). Presentation
-only: every data access is a `/api/op/*` call or one of the three status
-routes. Hash routing; dark default + persisted light toggle using the
-viewer's token system and validated palettes; responsive down to phone
-widths (the sidebar becomes a top bar). Every non-`localOnly` op has a home
+A vanilla single-page app (`src/gui/`: index.html + app.js + style.css +
+fonts/) — no framework, no build step; api.ts serves the files and Bun text
+imports embed them into the compiled binary (the viz-vendor pattern; the
+fonts via `file` imports). Presentation only: every data access is a
+`/api/op/*` call or one of the three status routes. Hash routing, each route
+a page turn; look, type and motion from the design system (Look & feel,
+below); responsive down to phone widths (the sidebar becomes a top bar).
+Every non-`localOnly` op has a home
 on one of the views below — a registry-derived test enforces it — and the
 `localOnly` ones surface as a brain switcher, a status footer, the
 bookmarklet, and MCP setup instructions. Rendered markdown goes through the
@@ -775,9 +780,10 @@ Views:
   signal summary, and a "build index" prompt when there is none.
 - **Browse** — every concept (`list_concepts --detail`) with type, status,
   trust tier, staleness, tags; client-side filter and sort.
-- **Concept** — the reader: rendered body with footnote attribution and
-  routed internal links, badges, provenance (`generated`, `verified`,
-  `sources` with credibility signals), Attested Computation contract fields
+- **Concept** — the reader: title and description (the lead) over the
+  rendered body with footnote attribution and routed internal links,
+  badges, provenance (`generated`, `verified`, `sources` with credibility
+  signals), Attested Computation contract fields
   when present, links to / cited by (`graph_neighbors`), and actions:
   Edit, Reviewed ✓ (`review_done`), Mark read, Suggest links (accept =
   `link_accept`), Graph, Deprecate/Restore (`write_concept --status`),
@@ -787,8 +793,8 @@ Views:
   link picker and insert-only link suggestions; saves via `write_concept`,
   or `new_concept` when no id is given (derived from type + title).
 - **Graph** — live Cytoscape fed by `graph_data`; type legend with toggles
-  and counts, search dimming, stale/deprecated styling, detail panel with
-  badges and provenance, Open/Edit.
+  and counts, search and hover-neighbourhood dimming, stale/deprecated
+  styling, detail panel with badges and provenance, Open/Edit.
 - **Search** — hybrid `search` with per-hit recall-source chips and
   snippets. **Ask** — SSE streaming: context chips before the answer;
   verified citations link to the reader.
@@ -808,6 +814,39 @@ Deliberately not a rich editor: the bundle is plain markdown and external
 editors remain first-class. Cross-platform free (it's a web app); an
 optional Tauri wrapper later gives a native desktop app over the same
 local API.
+
+### Look & feel (the design system)
+The okbrain design system (`docs/context/REFERENCES.md` R5) is the source of
+truth for how both browser surfaces look and move: ink on a ground, no
+brand hue. The code carries it in three files:
+- **`core/viz/tokens.css`** — every colour for both themes (`accent` is an
+  alias of `ink`, never a hue), the three families, the 4px spacing scale,
+  radii, the two shadows, durations and easings (zeroed under
+  `prefers-reduced-motion`), three fixed opacities, shell measures. Served
+  to the GUI as `/gui/tokens.css`, inlined into `viz.html`. A test holds
+  both themes to the same token set and resolves every `var(--…)` /
+  `Okb.token()` the surfaces read.
+- **`gui/style.css`** — the system's stylesheet over those tokens (it kept
+  the GUI's selectors), plus the four `@font-face` rules.
+- **`core/viz/okb.js`** — the system's `window.Okb` helpers, one per moment
+  that explains a change: theme restore before first paint and the ink-flood
+  toggle; the page turn (every route, the clicked title carried into the
+  reader's title); file-away for reviewed / snoozed / read / resolved cards;
+  list enter, answer settle, tile flash, trust-tier stamp; the working line
+  ("scoring…"); the wordmark wave while app-level work runs (index, embed,
+  sync, enrich, jobs, ask…); the graph palette. Each degrades to an instant
+  change without the browser API or under reduced motion.
+
+Rules the views follow: colour only means something — `ok`/`warn`/`danger`
+beside a word, graph slots for concept types (nodes, legend, type chips);
+the bundle's words (titles, descriptions, bodies) are Literata, everything
+okbrain says is Recursive Sans, identifiers Recursive Mono; borders, not
+shadows (only floating layers take `shadow`); at most one inverted
+(primary) button per view; no emoji and no icon font (a few Unicode glyphs;
+an inline Lucide SVG if a view ever needs a pictogram). The faces —
+Recursive Sans/Mono and Literata roman/italic, subset woff2, 366 KB,
+OFL-1.1 (`gui/fonts/README.md`) — are embedded in the binary and served at
+`/gui/fonts/`; nothing is fetched from a network.
 
 ### Trust boundary
 Each op call carries a trust flag and an actor. CLI + local GUI are trusted
@@ -901,12 +940,13 @@ okbrain/
 │   │   ├── ai/                  # gateway, recipes
 │   │   ├── retrieval/           # chunk, hybrid (rrf), relational, rerank, profiles
 │   │   ├── ingest/              # import, capture, clip, rss, web (crawler pass)
-│   │   ├── viz/                 # export (viz.html), render.js (shared), vendor/
+│   │   ├── viz/                 # export (viz.html), vendor/; shared with the GUI:
+│   │   │                        #   render.js, tokens.css + okb.js (design system)
 │   │   └── sync.ts              # git
 │   ├── cli.ts                   # generated from operations.ts (trusted)
 │   ├── api.ts                   # local HTTP for the GUI (trusted; brain scoping)
 │   ├── mcp/server.ts            # MCP server (untrusted-by-default; client actor)
-│   └── gui/                     # the app: index.html + app.js + style.css
+│   └── gui/                     # the app: index.html + app.js + style.css + fonts/
 ├── skills/                      # fat markdown procedures
 │   ├── RESOLVER.md              # thin router: intent → which skill
 │   ├── capture/SKILL.md
@@ -978,6 +1018,19 @@ the agent handles it:
 
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
+
+- 2026-09-26 — **The GUI and the viewer wear the okbrain design system
+  (R5).** Dark-first ink on a ground replaces the blue accent; three faces
+  say whose words are on screen (Literata for the bundle, Recursive for
+  okbrain); motion only where something changed. Kept vanilla: the system's
+  own stylesheet and `window.Okb` helpers drop into the no-build GUI, so a
+  component framework (HeroUI v3 would need React 19 + Tailwind 4 and a
+  build step) was not adopted — it would break the 3.2 "no build" decision
+  for no gain. The four fonts (366 KB) ride inside the binary rather than a
+  CDN (offline invariant); `viz.html` omits them to stay the size of its
+  libraries. The graph palette's slot order now follows the system's tokens
+  (blue, orange, aqua first: distinct for every colour-vision type), so a
+  type may change colour once.
 
 - 2026-09-03 — **OKF v0.2 adopted end to end; v0.1 keys are superseded,
   not duplicated.** The spec moved to its own repository

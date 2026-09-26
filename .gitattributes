@@ -2,3 +2,4 @@
 # checkouts from converting line endings and breaking the OKF round-trip tests.
 * text=auto eol=lf
 *.png binary
+*.woff2 binary

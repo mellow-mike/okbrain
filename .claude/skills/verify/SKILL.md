@@ -80,6 +80,12 @@ must show status/trust badges and the `sources` list.
 - A crashed driver leaves its `okb serve` running; the next run then talks to
   the stale server (and its stale binary) — kill it and remove
   `/tmp/okb-gui-e2e-*` first.
+- Motion (design system, `window.Okb`): every route is a view-transition
+  page turn (~380 ms, input swallowed meanwhile) and the theme toggle an ink
+  flood (`html.flooding` until done). Wait for the new view's selector, and
+  for `flooding` to clear, before the next action; computed `font-weight` /
+  outline settle ~150 ms after a state change. Assert fonts with
+  `document.fonts.check('14px "Recursive Sans"')` after `document.fonts.ready`.
 - `bun run src/cli.ts` needs no build; the binary path is
   `bun build --compile --outfile bin/okb src/cli.ts` (plus vec0 beside it)
   when embedding (GUI assets, vendored libs) is what's under test.

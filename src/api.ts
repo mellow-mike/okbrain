@@ -37,22 +37,40 @@ import {
 import { VERSION } from "./core/version.ts";
 import cytoscapeJs from "./core/viz/vendor/cytoscape.min.js" with { type: "text" };
 import markedJs from "./core/viz/vendor/marked.umd.js" with { type: "text" };
+import okbJs from "./core/viz/okb.js" with { type: "text" };
 import renderJs from "./core/viz/render.js" with { type: "text" };
 import safeMarkdownJs from "./core/viz/safe-markdown.js" with { type: "text" };
+import tokensCss from "./core/viz/tokens.css" with { type: "text" };
 import guiAppJs from "./gui/app.js" with { type: "text" };
+import literataItalic from "./gui/fonts/Literata-Italic-VF.woff2" with { type: "file" };
+import literata from "./gui/fonts/Literata-VF.woff2" with { type: "file" };
+import recursiveMono from "./gui/fonts/RecursiveMono-VF.woff2" with { type: "file" };
+import recursiveSans from "./gui/fonts/RecursiveSans-VF.woff2" with { type: "file" };
 import guiIndexHtml from "./gui/index.html" with { type: "text" };
 import guiStyleCss from "./gui/style.css" with { type: "text" };
 
 const JS = "application/javascript; charset=utf-8";
+const CSS = "text/css; charset=utf-8";
+const WOFF2 = "font/woff2";
 
-/** GUI static assets (tokenless, like `/`): body + content type per route. */
-const GUI_ASSETS: Record<string, [string, string]> = {
+/**
+ * GUI static assets (tokenless, like `/`): body + content type per route.
+ * Fonts are `file` imports — a path on disk in dev, embedded in the
+ * compiled binary — read per request.
+ */
+const GUI_ASSETS: Record<string, [string | Blob, string]> = {
   "/gui/app.js": [guiAppJs, JS],
-  "/gui/style.css": [guiStyleCss, "text/css; charset=utf-8"],
+  "/gui/style.css": [guiStyleCss, CSS],
+  "/gui/tokens.css": [tokensCss, CSS],
+  "/gui/okb.js": [okbJs, JS],
   "/gui/cytoscape.js": [cytoscapeJs, JS],
   "/gui/marked.js": [markedJs, JS],
   "/gui/safe-markdown.js": [safeMarkdownJs, JS],
   "/gui/render.js": [renderJs, JS],
+  "/gui/fonts/RecursiveSans-VF.woff2": [Bun.file(recursiveSans), WOFF2],
+  "/gui/fonts/RecursiveMono-VF.woff2": [Bun.file(recursiveMono), WOFF2],
+  "/gui/fonts/Literata-VF.woff2": [Bun.file(literata), WOFF2],
+  "/gui/fonts/Literata-Italic-VF.woff2": [Bun.file(literataItalic), WOFF2],
 };
 
 export interface ApiOptions {

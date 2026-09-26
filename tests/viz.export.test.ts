@@ -116,7 +116,18 @@ describe("renderHtml", () => {
     const json = /<script id="okb-graph"[^>]*>([\s\S]*?)<\/script>/.exec(html)![1]!;
     expect((JSON.parse(json) as VizGraph).nodes[0]!.body).toBe("</script><b>bad</b>");
     // self-contained: the document shell references no external resources
-    expect(html.replace(/<script[\s\S]*?<\/script>/g, "")).not.toMatch(/\bsrc=|href=/);
+    expect(html.replace(/<script[\s\S]*?<\/script>/g, "")).not.toMatch(/\bsrc=|href=|url\(/);
+  });
+
+  test("wears the design system: tokens, Okb helpers, its own theme key", () => {
+    const html = renderHtml(graph);
+    expect(html).toContain("--graph-other:"); // tokens.css inlined
+    expect(html).toContain("window.Okb"); // okb.js inlined
+    expect(html).toContain("Okb.theme.key = 'okb-viz-theme'"); // not the GUI's saved choice
+    // Every colour comes from the tokens: the viewer's own CSS and script hard-code none.
+    const styles = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]!);
+    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!);
+    for (const own of [styles[1]!, scripts.at(-1)!]) expect(own).not.toMatch(/#[0-9a-f]{3,8}\b/i);
   });
 });
 

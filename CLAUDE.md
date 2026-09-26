@@ -159,6 +159,7 @@ bun run src/cli.ts mcp                          # start MCP server (later stage)
 | graph: links/backlinks/typed edges/viewer | `CONTEXT.md` §Knowledge graph |
 | AI gateway, retrieval, enrichment, MCP | `CONTEXT.md` §AI integration |
 | CLI/GUI/MCP + the ops contract | `CONTEXT.md` §Surfaces |
+| GUI / viewer look: tokens, fonts, motion, copy | `CONTEXT.md` §Surfaces → Look & feel (design system R5) |
 | stack, libs, repo layout, scale path | `CONTEXT.md` §Tech stack / §Repo layout |
 | user-supplied extra context | `docs/context/REFERENCES.md` |
 
