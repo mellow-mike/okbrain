@@ -41,6 +41,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   app-managed personal HTTPS sync from the Mac or web app.
 - [x] Restore a shared GitHub brain onto a second device from the Mac or web
   app, validate the bundle, and rebuild local search and graph data.
+- [x] Schedule recurring maintenance in the Mac and web apps with per-brain
+  status, pause and resume, and approval for network jobs.
 
 ### Stage 8 — Enterprise coding
 
@@ -506,9 +508,9 @@ Goal: the brain improves itself on a schedule.
 
 ### 4.5 Jobs / cron
 - [x] `core/jobs/worker.ts` — sequential runner + `.okb/jobs.lock` (exclusive
-      create; stale lock — dead pid, unreadable, or >24 h — reclaimed once);
-      scheduling belongs to the OS (cron/launchd/Task Scheduler invoking
-      `okb jobs`), no daemon in v1
+      create; stale lock — dead pid, unreadable, or >24 h — reclaimed once).
+      The app schedules jobs while its local server is open. External
+      schedulers can invoke the single-pass `okb jobs` command.
 - [x] `okb jobs [--only …]` runs: index refresh (also regenerates edges/
       backlinks wholesale), embed backfill (only when a vector store already
       exists — never creates one), rss pull (config `rss.feeds`), review
@@ -801,6 +803,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added per-brain maintenance schedules to the Mac and web apps,
+  with persisted outcomes and separate RSS and embedding approval.
 - 2026-11-22 — Added in-app GitHub brain restore with local checkout validation,
   selected-branch tracking, opt-in credential storage, and offline indexing.
 - 2026-11-22 — Added project run presets for recurring task, query, and profile

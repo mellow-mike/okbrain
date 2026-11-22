@@ -1148,8 +1148,14 @@ vector store already exists), rss pull (`rss.feeds`), review-queue
 recompute (surfaced in the run report — the queue itself is on-demand),
 doctor. Nothing in the list spends AI implicitly; enrich-stale is
 deliberately not a job — `okb enrich` is always an explicit decision.
-Scheduling belongs to the OS (cron / launchd / Task Scheduler invoking
-`okb jobs`); no daemon, no queue infra in v1.
+The Mac and local web apps keep per-brain maintenance schedules in private
+application data. An open app server claims at most one overdue occurrence
+per brain and runs the same maintenance under the bundle's jobs lock. A
+schedule binds to a writable folder and its named mount when present. RSS
+approval binds to the configured feeds and limit. Scheduled embedding binds
+to the configured provider, model, and endpoint, with a cap of 100 public
+notes and an existing vector store. Job receipts contain timing and outcomes.
+External schedulers can still invoke `okb jobs` for a one-time pass.
 
 ---
 

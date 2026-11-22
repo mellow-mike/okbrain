@@ -2710,6 +2710,225 @@ function mountGitSync(panel, seq) {
   void perform('Checking Git…', async function () { await refresh(); if (active()) notice(''); });
 }
 
+function mountMaintenanceSchedule(panel, readonly, seq) {
+  var headersForBrain = headers();
+  var brain = BRAIN;
+  var jobLabels = { index: 'Re-index', review: 'Review queue', doctor: 'Doctor', rss: 'Pull saved RSS feeds', embed: 'Build embeddings' };
+  var statusLabels = { running: 'Running', completed: 'Completed', failed: 'Failed', skipped: 'Skipped', interrupted: 'Interrupted' };
+  panel.innerHTML = '<summary>Schedule maintenance</summary><div class="stack brain-mount-body">' +
+    '<p>Maintenance runs while the local app or server is open. Missed runs are combined into one run when it reopens.</p>' +
+    (readonly ? '<p class="muted">Open a writable brain to change its schedule.</p>' : '') +
+    '<p data-schedule-state role="status">Loading maintenance schedule…</p><dl class="kv">' +
+    '<dt>Next run</dt><dd data-schedule-next></dd><dt>Latest run</dt><dd data-schedule-latest></dd>' +
+    '<dt>Scheduled jobs</dt><dd data-schedule-jobs></dd></dl>' +
+    '<div data-schedule-results hidden></div><form class="stack"><label class="field"><span id="maintenance-cadence-label">Run schedule</span>' +
+    '<select name="cadence" aria-labelledby="maintenance-cadence-label"><option value="6h">Every 6 hours</option>' +
+    '<option value="daily" selected>Daily</option><option value="weekly">Weekly</option></select></label>' +
+    '<div class="row">' + ['index', 'review', 'doctor'].map(function (job) {
+      return '<label class="row"><input type="checkbox" name="job" value="' + job + '" checked> ' + jobLabels[job] + '</label>';
+    }).join('') + '</div>' +
+    '<div data-schedule-network hidden><div class="stack"><div data-schedule-option="rss" hidden>' +
+    '<label class="row"><input type="checkbox" name="job" value="rss" aria-describedby="maintenance-rss"> ' + jobLabels.rss + '</label>' +
+    '<p class="muted" id="maintenance-rss"></p></div>' +
+    '<div data-schedule-option="embed" hidden>' +
+    '<label class="row"><input type="checkbox" name="job" value="embed" aria-describedby="maintenance-embed"> ' + jobLabels.embed + '</label>' +
+    '<dl class="kv" id="maintenance-embed"><dt>Provider</dt><dd data-embed-provider></dd><dt>Model</dt><dd><code data-embed-model></code></dd>' +
+    '<dt>Endpoint</dt><dd><code data-embed-endpoint></code></dd><dt>Public notes per run</dt><dd data-embed-limit></dd></dl></div></div></div>' +
+    '<p data-schedule-approval class="muted" role="status" hidden></p><div class="row">' +
+    '<span><button type="submit" class="primary" disabled>Save schedule</button></span><span data-schedule-pause hidden>' +
+    '<button type="button">Pause schedule</button></span><span data-schedule-remove hidden>' +
+    '<button type="button">Remove schedule</button></span></div></form><div data-schedule-feedback role="status"></div></div>';
+  var form = panel.querySelector('form');
+  var cadence = form.elements.cadence;
+  var jobs = Array.from(form.elements.job);
+  var pause = panel.querySelector('[data-schedule-pause] button');
+  var remove = panel.querySelector('[data-schedule-remove] button');
+  var save = form.querySelector('[type="submit"]');
+  var stateLine = panel.querySelector('[data-schedule-state]');
+  var approvalLine = panel.querySelector('[data-schedule-approval]');
+  var feedback = panel.querySelector('[data-schedule-feedback]');
+  var specs = [
+    { job: 'rss', key: 'rss', box: jobs.find(function (input) { return input.value === 'rss'; }), block: panel.querySelector('[data-schedule-option="rss"]') },
+    { job: 'embed', key: 'embedding', box: jobs.find(function (input) { return input.value === 'embed'; }), block: panel.querySelector('[data-schedule-option="embed"]') },
+  ];
+  var state, timer, revision = 0, busy = false, polling = false, dirty = false;
+  var approvals = {};
+
+  function active() { return panel.isConnected && !stale(seq) && BRAIN === brain; }
+  function dates(value) { return new Date(value).toLocaleString(); }
+  function notice(message, error) {
+    feedback.className = error ? 'error' : message ? 'notice' : '';
+    feedback.textContent = message;
+  }
+  function syncControls() {
+    var locked = readonly || busy || !state;
+    cadence.disabled = locked;
+    jobs.forEach(function (input) { input.disabled = locked || input.closest('[data-schedule-option]')?.hidden === true; });
+    save.disabled = locked || !jobs.some(function (input) { return input.checked && !input.disabled; });
+    pause.disabled = remove.disabled = locked;
+    pause.parentElement.hidden = !state?.schedule?.enabled || readonly;
+    remove.parentElement.hidden = !state?.schedule || readonly;
+    save.parentElement.hidden = readonly;
+    save.textContent = state?.schedule && !state.schedule.enabled ? 'Resume schedule' : 'Save schedule';
+  }
+  function paint(next, reset) {
+    var previous = state;
+    state = next;
+    var schedule = next.schedule;
+    var last = schedule?.lastRun;
+    var needsApproval = [];
+    stateLine.textContent = !schedule ? 'No maintenance schedule.' :
+      schedule.bindingAvailable === false ? 'The brain bound to this schedule is unavailable.' :
+      schedule.enabled ? 'Maintenance schedule active.' : 'Maintenance schedule paused.';
+    panel.querySelector('[data-schedule-next]').textContent = schedule?.nextAt != null && schedule.enabled
+      ? dates(schedule.nextAt) : schedule && !schedule.enabled ? 'Paused' : 'Unscheduled';
+    panel.querySelector('[data-schedule-latest]').textContent = last
+      ? statusLabels[last.status] + ' · ' + dates(last.finishedAt ?? last.startedAt) : 'No scheduled runs yet.';
+    panel.querySelector('[data-schedule-jobs]').textContent = schedule?.jobs.map(function (job) {
+      return jobLabels[job] || job;
+    }).join(', ') || 'None';
+    var result = panel.querySelector('[data-schedule-results]');
+    result.hidden = !last?.message && !last?.jobs?.length;
+    result.replaceChildren();
+    if (last?.message) {
+      var explanation = document.createElement('p');
+      explanation.className = 'muted';
+      explanation.textContent = last.message;
+      result.append(explanation);
+    }
+    if (last?.jobs?.length) {
+      var details = document.createElement('ul');
+      details.className = 'plain';
+      last.jobs.forEach(function (job) {
+        var item = document.createElement('li');
+        item.textContent = (jobLabels[job.name] || job.name) + ' · ' + statusLabels[job.status] + ' · ' + job.ms + ' ms';
+        details.append(item);
+      });
+      result.append(details);
+    }
+    if (reset) {
+      cadence.value = schedule?.cadence || 'daily';
+      jobs.forEach(function (input) { input.checked = (schedule?.jobs || ['index', 'review', 'doctor']).includes(input.value); });
+    }
+    specs.forEach(function (spec) {
+      var option = next[spec.key];
+      var wasChecked = spec.box.checked;
+      spec.block.hidden = !option;
+      if (reset) {
+        spec.box.checked = spec.box.checked && Boolean(option?.approved);
+        if (spec.box.checked) approvals[spec.job] = option.id;
+        else delete approvals[spec.job];
+      } else if (!option || (approvals[spec.job] && approvals[spec.job] !== option.id) ||
+          (previous?.[spec.key]?.approved && !option.approved)) {
+        spec.box.checked = false;
+        delete approvals[spec.job];
+      }
+      if (!spec.box.checked && (schedule?.jobs.includes(spec.job) || (!reset && wasChecked)))
+        needsApproval.push(jobLabels[spec.job]);
+    });
+    panel.querySelector('[data-schedule-network]').hidden = !next.rss && !next.embedding;
+    if (next.rss) panel.querySelector('#maintenance-rss').textContent =
+      next.rss.count + (next.rss.count === 1 ? ' saved feed.' : ' saved feeds.');
+    if (next.embedding) {
+      panel.querySelector('[data-embed-provider]').textContent = next.embedding.provider;
+      panel.querySelector('[data-embed-model]').textContent = next.embedding.model;
+      panel.querySelector('[data-embed-endpoint]').textContent = next.embedding.endpoint;
+      panel.querySelector('[data-embed-limit]').textContent = next.embedding.limit;
+    }
+    approvalLine.textContent = needsApproval.length ? 'Review the current settings before selecting ' + needsApproval.join(' and ') + ' again.' : '';
+    approvalLine.hidden = readonly || !needsApproval.length;
+    syncControls();
+  }
+  async function call(input) {
+    var res = await fetch('/api/maintenance', input ? {
+      method: 'POST', cache: 'no-store', headers: { ...headersForBrain, 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    } : { cache: 'no-store', headers: headersForBrain });
+    var payload = await res.json();
+    if (!res.ok) throw new Error(payload.error || 'Could not check the maintenance schedule.');
+    return payload.result;
+  }
+  async function refresh() {
+    clearTimeout(timer);
+    if (!active() || !panel.open || polling || busy) return;
+    polling = true;
+    var current = revision;
+    try {
+      var next = await call();
+      if (active() && revision === current) {
+        if (!state) notice('');
+        paint(next, !dirty);
+      }
+    } catch (error) {
+      if (active() && !state) notice(error.message, true);
+    } finally { polling = false; pollAgain(); }
+  }
+  function pollAgain() {
+    clearTimeout(timer);
+    if (active() && panel.open) timer = setTimeout(refresh, 15000);
+  }
+  async function change(input, message) {
+    if (readonly || busy || !state || !active()) return;
+    revision++;
+    busy = true;
+    var changed = false;
+    syncControls();
+    notice('Updating maintenance schedule…');
+    try {
+      var next = await call(input);
+      if (!active()) return;
+      dirty = false;
+      paint(next, true);
+      notice(message);
+      changed = true;
+    } catch (error) {
+      if (!active()) return;
+      try {
+        var current = await call();
+        if (active()) paint(current, false);
+      } catch (_) {}
+      if (active()) notice(error.message, true);
+    } finally {
+      busy = false;
+      syncControls();
+      if (active() && changed && input.action !== 'save') save.focus();
+      pollAgain();
+    }
+  }
+
+  panel.addEventListener('toggle', function () { if (panel.open) void refresh(); else clearTimeout(timer); });
+  form.addEventListener('change', function (event) {
+    if (!active() || !state || readonly || busy) return;
+    dirty = true;
+    var spec = specs.find(function (candidate) { return candidate.box === event.target; });
+    if (spec) {
+      var option = state[spec.key];
+      if (spec.box.checked && option) approvals[spec.job] = option.id;
+      else delete approvals[spec.job];
+    }
+    syncControls();
+  });
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (save.disabled || !active()) return;
+    var chosen = jobs.filter(function (input) { return input.checked && !input.disabled; }).map(function (input) { return input.value; });
+    var confirmed = {};
+    for (var spec of specs) {
+      if (!chosen.includes(spec.job)) continue;
+      if (approvals[spec.job] !== state[spec.key]?.id) {
+        notice('Review the current settings and select ' + jobLabels[spec.job] + ' again.', true);
+        return;
+      }
+      confirmed[spec.job] = approvals[spec.job];
+    }
+    void change({ action: 'save', cadence: cadence.value, jobs: chosen,
+      ...(Object.keys(confirmed).length ? { approvals: confirmed } : {}) }, 'Maintenance schedule saved.');
+  });
+  pause.addEventListener('click', function () { void change({ action: 'pause' }, ''); });
+  remove.addEventListener('click', function () { void change({ action: 'remove' }, 'Maintenance schedule removed.'); });
+  syncControls();
+}
+
 async function renderSettings(_arg, seq) {
   var st = STATUS || {};
   var mcpArgs = st.brain ? ['--brain', st.brain, 'mcp'] : ['--bundle', st.bundle || '<bundle>', 'mcp'];
@@ -2802,6 +3021,7 @@ async function renderSettings(_arg, seq) {
     '<button id="mx-index">Re-index</button>' +
     '<button id="mx-doctor">Doctor</button>' +
     '<button id="mx-rebuild" class="danger">Rebuild (wipe + reindex)</button></div>' +
+    '<details id="maintenance-schedule"></details>' +
     (st.readonly ? '' : '<form id="folder-log-form" class="stack"><h4>Folder change log</h4>' +
       '<p class="muted">Record future changes to a folder and its subfolders in a separate log.md.</p>' +
       '<label class="field"><span>Folder path in this brain</span><input name="folder" placeholder="notes/projects" required></label>' +
@@ -2851,6 +3071,7 @@ async function renderSettings(_arg, seq) {
   mountCacheSettings(document.getElementById('cache-settings'));
   showBookmarklet();
   mountBundleWatch(document.getElementById('bundle-watch'), Boolean(st.readonly), seq);
+  mountMaintenanceSchedule(document.getElementById('maintenance-schedule'), Boolean(st.readonly), seq);
   renderBrainMounts(document.getElementById('brain-mount-settings'), Boolean(st.readonly), seq);
   renderProviderKeys(document.getElementById('provider-keys'), Boolean(st.readonly));
   window.okbMcpSettings.mount(document.getElementById('mcp-settings'), { readonly: Boolean(st.readonly), requestHeaders: headers });

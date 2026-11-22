@@ -528,6 +528,77 @@ try {
   assert.equal(stats.embedded, 1);
   assert.ok(stats.pending > 0);
 
+  const scheduler = page.locator("#maintenance-schedule");
+  await scheduler.getByText("Schedule maintenance", { exact: true }).click();
+  await scheduler.getByText("No maintenance schedule.", { exact: true }).waitFor();
+  await scheduler.getByText("No scheduled runs yet.", { exact: true }).waitFor();
+  assert.equal(await scheduler.locator("[data-schedule-next]").textContent(), "Unscheduled");
+  await scheduler.getByRole("combobox", { name: "Run schedule", exact: true }).selectOption("weekly");
+  await scheduler.getByRole("checkbox", { name: "Doctor", exact: true }).uncheck();
+  async function changeSchedule(label: string) {
+    const reply = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/maintenance" &&
+      response.request().method() === "POST");
+    await scheduler.getByRole("button", { name: label, exact: true }).click();
+    const response = await reply;
+    const payload = await response.json();
+    assert.ok(response.ok(), payload.error);
+    return { input: response.request().postDataJSON(), schedule: payload.result.schedule };
+  }
+  const scheduled = await changeSchedule("Save schedule");
+  assert.deepEqual(scheduled.input, { action: "save", cadence: "weekly", jobs: ["index", "review"] });
+  assert.equal(scheduled.schedule.enabled, true);
+  assert.ok(scheduled.schedule.nextAt > Date.now());
+  await scheduler.getByText("Maintenance schedule active.", { exact: true }).waitFor();
+  assert.equal(await scheduler.locator("[data-schedule-next]").textContent(),
+    await page.evaluate((value) => new Date(value).toLocaleString(), scheduled.schedule.nextAt));
+  assert.equal(await scheduler.locator("[data-schedule-jobs]").textContent(), "Re-index, Review queue");
+  const paused = await changeSchedule("Pause schedule");
+  assert.deepEqual(paused.input, { action: "pause" });
+  assert.equal(paused.schedule.enabled, false);
+  await scheduler.getByText("Maintenance schedule paused.", { exact: true }).waitFor();
+  assert.equal(await scheduler.locator("[data-schedule-next]").textContent(), "Paused");
+  const resumed = await changeSchedule("Resume schedule");
+  assert.deepEqual(resumed.input, scheduled.input);
+  assert.equal(resumed.schedule.enabled, true);
+  const removed = await changeSchedule("Remove schedule");
+  assert.deepEqual(removed.input, { action: "remove" });
+  assert.equal(removed.schedule, null);
+  await scheduler.getByText("Maintenance schedule removed.", { exact: true }).waitFor();
+  assert.equal(await scheduler.locator("[data-schedule-next]").textContent(), "Unscheduled");
+
+  async function setScheduledFeeds(feeds: string) {
+    const response = await fetch(new URL("api/rss-settings", server.url), {
+      method: "POST", headers: { "x-okb-token": server.token, "content-type": "application/json" },
+      body: JSON.stringify({ feeds }),
+    });
+    assert.ok(response.ok, await response.text());
+    const current = await fetch(new URL("api/maintenance", server.url), { headers: { "x-okb-token": server.token } });
+    assert.ok(current.ok);
+    return (await current.json()).result.rss;
+  }
+  const oldFeed = "https://example.invalid/maintenance.xml";
+  const oldRss = await setScheduledFeeds(oldFeed);
+  await scheduler.getByText("Schedule maintenance", { exact: true }).click();
+  await scheduler.getByText("Schedule maintenance", { exact: true }).click();
+  await scheduler.getByText("1 saved feed.", { exact: true }).waitFor();
+  const pullScheduledFeeds = scheduler.getByRole("checkbox", { name: "Pull saved RSS feeds", exact: true });
+  await pullScheduledFeeds.check();
+  const newRss = await setScheduledFeeds(oldFeed + "\nhttps://example.invalid/second-maintenance.xml");
+  const staleRss = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/maintenance" &&
+    response.request().method() === "POST");
+  await scheduler.getByRole("button", { name: "Save schedule", exact: true }).click();
+  const staleRssResponse = await staleRss;
+  assert.equal(staleRssResponse.status(), 409);
+  assert.deepEqual(staleRssResponse.request().postDataJSON().approvals, { rss: oldRss.id });
+  await scheduler.getByText("2 saved feeds.", { exact: true }).waitFor();
+  assert.equal(await pullScheduledFeeds.isChecked(), false);
+  await pullScheduledFeeds.check();
+  const freshRss = await changeSchedule("Save schedule");
+  assert.deepEqual(freshRss.input.approvals, { rss: newRss.id });
+  assert.ok(freshRss.schedule.nextAt > Date.now());
+  await changeSchedule("Remove schedule");
+  await setScheduledFeeds("");
+
   const gitSync = page.getByRole("region", { name: "Git sync", exact: true });
   const git = (...args: string[]) => {
     const result = Bun.spawnSync(["git", "-C", bundle, ...args]);

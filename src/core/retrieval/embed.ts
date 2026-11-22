@@ -62,6 +62,8 @@ export interface EmbedOptions {
   /** Texts per embed call. */
   batchSize?: number;
   includePrivate?: boolean;
+  /** Public-only maintenance preserves manually embedded private notes and an existing cache key. */
+  preservePrivateVectors?: boolean;
 }
 
 interface Job {
@@ -100,6 +102,8 @@ export async function embedBundle(
   const ids = await listConcepts(root);
   const meta = await store.meta();
   const needReset = meta === null || meta.provider !== emb.provider || meta.model !== emb.model;
+  if (opts.preservePrivateVectors && meta && needReset)
+    throw new VecError("The embedding provider or model changed. Run Embed manually to update the vector index.");
   const have = needReset ? new Map<string, string>() : await store.embeddedHashes();
 
   // Drop concepts that vanished from the bundle (reset wipes everything anyway).
@@ -117,8 +121,9 @@ export async function embedBundle(
   let skipped = 0;
   for (const id of ids) {
     const { doc, parsed } = await readConceptPermissive(root, id);
-    if (!opts.includePrivate && (!parsed || isPrivateConcept(id, doc.frontmatter))) {
-      if (have.has(id)) { await store.remove(id, meta); removed++; }
+    const isPrivate = parsed && isPrivateConcept(id, doc.frontmatter);
+    if (!opts.includePrivate && (!parsed || isPrivate)) {
+      if (have.has(id) && !(isPrivate && opts.preservePrivateVectors)) { await store.remove(id, meta); removed++; }
       continue;
     }
     const p = prepare(doc);

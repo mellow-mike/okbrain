@@ -4,13 +4,14 @@
 // Trust is fail-closed (invariant 3): `runOp` refuses write/admin scope for any
 // caller not explicitly trusted, before the handler is ever reached.
 
+import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { readdir, readFile, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { createApiServer } from "../api.ts";
 import { runMcpHttp, runMcpStdio } from "../mcp/server.ts";
-import { AiError, createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
+import { AiError, createGateway, RECIPES, resolveCall, type AiOptions } from "./ai/gateway.ts";
 import { CHATGPT_USAGE, createChatgptPlan, type ChatgptPlanStatus } from "./ai/chatgpt-plan.ts";
 import { gatewayEnvironment } from "./ai/local-keys.ts";
 import { focusedMap, MAP_SOURCES } from "./graph/focus.ts";
@@ -19,7 +20,7 @@ import { changeBrainMount, restoreBrainMount } from "./brain-mounts.ts";
 import type { CodingSessionResult, CodingSessionStatusResult } from "./coding/durable.ts";
 import { CodingProjectProfileError, parseCodingProjectProfile } from "./coding/project-profile.ts";
 import type { RepositoryContextManifest, RepositoryContextSelection, RepositoryContextOptions } from "./coding/repository-context.ts";
-import { listBrains, loadConfig, resolveBrain, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
+import { brainAiDefaults, listBrains, loadConfig, resolveBrain, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { calibration, CLAIM_TYPE, isClaimDeadline, overdueClaimDates, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
 import { watchBundleInForeground, type BundleWatchStatus } from "./engine/bundle-watch.ts";
 import { buildIndex, updateIndexFor, withIndexWrite, type IndexStats } from "./engine/index-build.ts";
@@ -92,7 +93,7 @@ import { garnishQueue, pickRecent, type GarnishNote } from "./review/garnish.ts"
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
 import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken, publishDesktopAddress } from "./serve-token.ts";
 import { computeStats, type BrainStats } from "./stats.ts";
-import { JobLockError, runJobs, type Job, type JobResult } from "./jobs/worker.ts";
+import { jobReadOnly, jobShutdown, JobLockError, runJobs, type Job, type JobResult } from "./jobs/worker.ts";
 import {
   protectUnsharedNote, sameDir, syncBundle, syncRebaseInProgress, syncSettings, syncStatus, withSyncRepository, type SyncResult, type SyncStatus,
 } from "./sync.ts";
@@ -292,7 +293,7 @@ interface PathHop {
 const DIR_MARK: Record<Dir, string> = { out: "→", in: "←", both: "↔" };
 
 /** Incrementally refresh written concepts in the derived caches — where they exist. */
-async function reindex(ctx: OpContext, ids: string[]): Promise<void> {
+async function reindex(ctx: OpContext, ids: string[], refreshVectors = true): Promise<void> {
   if (ids.length === 0) return;
   await afterMarkdownWrite(async () => {
     await withIndexWrite(ctx.bundle, async () => {
@@ -301,6 +302,7 @@ async function reindex(ctx: OpContext, ids: string[]): Promise<void> {
       for (const id of ids) await updateIndexFor(ctx.bundle, id, engine);
     });
   });
+  if (!refreshVectors) return;
   try {
     if (!(await ctx.hasVectors())) return;
     const vectors = await ctx.vectors();
@@ -596,7 +598,7 @@ function renderChatgptStatus(result: unknown): string {
  * explicit URL fails loudly; a configured multi-pull records per-feed errors
  * so one dead feed can't block the rest.
  */
-async function pullFeeds(ctx: OpContext, urls: string[], limit?: number): Promise<RssPullResult[]> {
+async function pullFeeds(ctx: OpContext, urls: string[], limit?: number, refreshVectors = true): Promise<RssPullResult[]> {
   const results: RssPullResult[] = [];
   for (const url of urls) {
     try {
@@ -607,7 +609,7 @@ async function pullFeeds(ctx: OpContext, urls: string[], limit?: number): Promis
           stripParams: ctx.config().clip?.stripParams,
         }),
       );
-      await reindex(ctx, r.added.map((a) => a.id));
+      await reindex(ctx, r.added.map((a) => a.id), refreshVectors);
       results.push(r);
     } catch (e) {
       if (urls.length === 1) throw e;
@@ -790,6 +792,165 @@ export function runRssSettings(ctx: OpContext, input?: unknown): { feeds: string
   const saved = [...feeds];
   saveConfig({ ...cfg, rss: { ...cfg.rss, feeds: saved } });
   return { feeds: saved };
+}
+
+const scheduledEmbedLimit = 100;
+const maintenanceId = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+export interface MaintenanceApprovals {
+  embedding: { provider: string; model: string; endpoint: string; id: string; limit: number } | null;
+  rss: { id: string; count: number } | null;
+}
+
+interface ScheduledMaintenanceOptions {
+  jobs: readonly string[];
+  approvals?: { embed?: string; rss?: string };
+  canWrite: () => boolean;
+  signal: AbortSignal;
+}
+
+type MaintenanceJobStatus = "completed" | "failed" | "skipped";
+export interface MaintenanceOutcome {
+  status: MaintenanceJobStatus;
+  jobs?: { name: string; status: MaintenanceJobStatus; ms: number }[];
+  message?: string;
+}
+
+function scheduledRss(cfg: OkbConfig) {
+  const feeds = cfg.rss?.feeds;
+  if (!Array.isArray(feeds) || !feeds.length || feeds.some((feed) => {
+    const url = typeof feed === "string" ? URL.parse(feed) : null;
+    return !url || !["http:", "https:"].includes(url.protocol) || url.username || url.password;
+  })) return null;
+  const maxItems = cfg.rss?.maxItems;
+  const limit = typeof maxItems === "number" && Number.isInteger(maxItems) ? Math.max(0, Math.min(100, maxItems)) : 10;
+  const id = maintenanceId(["okbrain-scheduled-rss-v1", feeds, limit]);
+  return { feeds: [...feeds], limit, approval: { id, count: feeds.length } };
+}
+
+async function scheduledEmbedding(ctx: OpContext) {
+  const ai = ctx.config().ai ?? {};
+  const env = gatewayEnvironment();
+  // An API key or chat provider alone does not authorize background embedding.
+  if (!ai.embedProvider && !ai[brainAiDefaults]?.embedProvider && !env.OKB_EMBED_PROVIDER) return null;
+  try {
+    const { provider, model, baseUrl, apiKey, recipe } = resolveCall("embed", ai, env);
+    const url = URL.parse(baseUrl);
+    if (!url || !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash ||
+      baseUrl.length > 2048 || !model || model.length > 256 || (recipe.kind === "api" && !apiKey) || !await ctx.hasVectors()) return null;
+    const id = maintenanceId(["okbrain-scheduled-embedding-v1", provider, model, baseUrl, scheduledEmbedLimit]);
+    return { ai, provider, model, baseUrl, apiKey,
+      approval: { id, provider, model, endpoint: url.href, limit: scheduledEmbedLimit } };
+  } catch (error) {
+    if (error instanceof AiError || error instanceof EngineError) return null;
+    throw error;
+  }
+}
+
+export async function maintenanceApprovals(ctx: OpContext): Promise<MaintenanceApprovals> {
+  if (!ctx.trusted || ctx.readonly) return { embedding: null, rss: null };
+  const embedding = await scheduledEmbedding(ctx);
+  return { embedding: embedding?.approval ?? null, rss: scheduledRss(ctx.config())?.approval ?? null };
+}
+
+async function refreshMaintenanceVectors(ctx: OpContext, ai: AiSettings, pinned?: AiOptions, limit?: number) {
+  const s = await embedBundle(ctx.bundle, await ctx.vectors(), gatewayEmbedder(ai, pinned), {
+    limit, includePrivate: false, preservePrivateVectors: pinned !== undefined,
+  });
+  return `embedded ${s.embedded}, skipped ${s.skipped}, removed ${s.removed}${s.pending > 0 ? `, ${s.pending} pending` : ""}`;
+}
+
+async function refreshMaintenanceFeeds(ctx: OpContext, feeds: string[], limit?: number, scheduled = false) {
+  // Scheduled RSS updates search, but embedding requires a separate allowance.
+  const rs = await pullFeeds(ctx, feeds, limit, !scheduled);
+  const added = rs.reduce((n, r) => n + r.added.length, 0);
+  const failed = rs.filter((r) => r.error !== undefined);
+  if (scheduled && failed.length) throw new Error("A configured RSS feed could not update.");
+  return `${added} added across ${rs.length} feeds${failed.length > 0 ? `; failed: ${failed.map((f) => f.url).join(", ")}` : ""}`;
+}
+
+function maintenanceJobs(ctx: OpContext, options?: ScheduledMaintenanceOptions, notices?: Set<string>): Job[] {
+  const cfg = options ? undefined : ctx.config();
+  const feeds = cfg?.rss?.feeds ?? [];
+  const explain = (reason: string) => { notices?.add(reason); return reason; };
+  let approvedEmbed: Awaited<ReturnType<typeof scheduledEmbedding>> = null;
+  let approvedRss: ReturnType<typeof scheduledRss> = null;
+  return [
+    {
+      name: "index",
+      run: async () => renderStats(await withIndexWrite(ctx.bundle, async () => buildIndex(ctx.bundle, await ctx.engine(true)))),
+    },
+    {
+      name: "embed",
+      skip: async () => {
+        if (!options) return await ctx.hasVectors() ? undefined : "no vector store — run `okb embed` once to opt in";
+        const selected = await scheduledEmbedding(ctx);
+        if (!selected) return explain("Set an embedding provider and build its vector index in Settings to schedule embedding.");
+        if (selected.approval.id !== options.approvals?.embed) return explain("Review the embedding settings and approve scheduled embedding again.");
+        const meta = await (await ctx.vectors()).meta();
+        if (meta && (meta.provider !== selected.provider || meta.model !== selected.model))
+          return explain("Run Embed in Settings to update the vector index for this provider and model.");
+        approvedEmbed = selected;
+      },
+      run: async () => {
+        if (!options) return refreshMaintenanceVectors(ctx, cfg?.ai ?? {});
+        const { ai, provider, model, baseUrl, apiKey, approval } = approvedEmbed!;
+        return refreshMaintenanceVectors(ctx, ai, { provider, model, baseUrl, apiKey }, approval.limit);
+      },
+    },
+    {
+      name: "rss",
+      skip: async () => {
+        if (!options) return feeds.length > 0 ? undefined : "no rss.feeds configured";
+        const selected = scheduledRss(ctx.config());
+        if (!selected) return explain("Configure RSS feeds in Settings before scheduling updates.");
+        if (selected.approval.id !== options.approvals?.rss) return explain("Review the RSS feed settings and approve scheduled updates again.");
+        approvedRss = selected;
+      },
+      run: async () => options
+        ? refreshMaintenanceFeeds(ctx, approvedRss!.feeds, approvedRss!.limit, true)
+        : refreshMaintenanceFeeds(ctx, feeds, cfg?.rss?.maxItems),
+    },
+    {
+      // F-B.7's queue is computed on demand, so the job surfaces today's queue.
+      name: "review",
+      run: async () => {
+        const q = await queueFor(ctx);
+        return q.length === 0
+          ? "queue empty"
+          : q.map((it, i) => `${i + 1}. ${it.id} (${it.score.toFixed(2)}) — ${it.reasons.join("; ")}`).join("\n");
+      },
+    },
+    {
+      name: "doctor",
+      run: async () => {
+        const rep = await runDoctor(ctx.bundle);
+        if (options && !rep.ok) throw new Error("The brain has conformance errors.");
+        return `${rep.ok ? "ok" : "NOT CONFORMANT"} — ${rep.errors} errors, ${rep.warnings} warnings`;
+      },
+    },
+  ];
+}
+
+export async function runScheduledMaintenance(ctx: OpContext, options: ScheduledMaintenanceOptions): Promise<MaintenanceOutcome> {
+  const notices = new Set<string>();
+  const picked = maintenanceJobs(ctx, options, notices).filter(({ name }) => options.jobs.includes(name));
+  if (!picked.length || options.jobs.some((name) => !picked.some((job) => job.name === name)))
+    return { status: "failed", message: "Choose supported maintenance jobs in Settings." };
+  try {
+    const results = await runJobs(ctx.bundle, picked, { signal: options.signal,
+      canWrite: () => ctx.trusted && !ctx.readonly && options.canWrite() });
+    const jobs = results.map(({ name, skipped, ok, ms }) => ({ name, status: skipped ? "skipped" as const : ok ? "completed" as const : "failed" as const, ms }));
+    const failed = jobs.some((job) => job.status === "failed");
+    if (failed) notices.add("A maintenance job failed. Run it manually in Settings for details.");
+    if (results.some(({ detail }) => detail === jobShutdown)) notices.add("Maintenance stopped when the app closed.");
+    if (results.some(({ detail }) => detail === jobReadOnly)) notices.add("Open a writable brain to run its maintenance schedule.");
+    return { status: failed ? "failed" : jobs.some((job) => job.status === "completed") ? "completed" : "skipped",
+      jobs, ...(notices.size ? { message: [...notices].join(" ") } : {}) };
+  } catch (error) {
+    if (error instanceof JobLockError) return { status: "skipped", message: "Another maintenance run holds the brain’s job lock." };
+    return { status: "failed", message: "Maintenance could not start. Check the brain and try again in Settings." };
+  }
 }
 
 export const operations: readonly Operation[] = [
@@ -2256,9 +2417,7 @@ export const operations: readonly Operation[] = [
     },
   },
   {
-    // No AI-spending job runs implicitly: embed only backfills an existing
-    // store, and enrich-stale is deliberately absent (run `okb enrich` when
-    // you mean to spend). Scheduling belongs to the OS (cron/Task Scheduler).
+    // The CLI and API still run one pass. Scheduled network jobs need separate approval.
     name: "jobs",
     cliName: "jobs",
     summary: "Run the maintenance jobs once, under a lock (schedule via OS cron)",
@@ -2267,50 +2426,7 @@ export const operations: readonly Operation[] = [
       { name: "only", type: "string", description: "comma-separated subset of: index,embed,rss,review,doctor" },
     ],
     handler: async (ctx, p) => {
-      const cfg = ctx.config();
-      const feeds = cfg.rss?.feeds ?? [];
-      const jobs: Job[] = [
-        {
-          name: "index",
-          run: async () => renderStats(await withIndexWrite(ctx.bundle, async () => buildIndex(ctx.bundle, await ctx.engine(true)))),
-        },
-        {
-          name: "embed",
-          skip: async () => await ctx.hasVectors() ? undefined : "no vector store — run `okb embed` once to opt in",
-          run: async () => {
-            const s = await embedBundle(ctx.bundle, await ctx.vectors(), gatewayEmbedder(cfg.ai ?? {}));
-            return `embedded ${s.embedded}, skipped ${s.skipped}, removed ${s.removed}${s.pending > 0 ? `, ${s.pending} pending` : ""}`;
-          },
-        },
-        {
-          name: "rss",
-          skip: feeds.length > 0 ? undefined : "no rss.feeds configured",
-          run: async () => {
-            const rs = await pullFeeds(ctx, feeds, cfg.rss?.maxItems);
-            const added = rs.reduce((n, r) => n + r.added.length, 0);
-            const failed = rs.filter((r) => r.error !== undefined);
-            return `${added} added across ${rs.length} feeds${failed.length > 0 ? `; failed: ${failed.map((f) => f.url).join(", ")}` : ""}`;
-          },
-        },
-        {
-          // F-B.7 nightly recompute: the queue is on-demand, so "recompute"
-          // means surfacing today's queue in the run report.
-          name: "review",
-          run: async () => {
-            const q = await queueFor(ctx);
-            return q.length === 0
-              ? "queue empty"
-              : q.map((it, i) => `${i + 1}. ${it.id} (${it.score.toFixed(2)}) — ${it.reasons.join("; ")}`).join("\n");
-          },
-        },
-        {
-          name: "doctor",
-          run: async () => {
-            const rep = await runDoctor(ctx.bundle);
-            return `${rep.ok ? "ok" : "NOT CONFORMANT"} — ${rep.errors} errors, ${rep.warnings} warnings`;
-          },
-        },
-      ];
+      const jobs = maintenanceJobs(ctx);
       let picked = jobs;
       if (p.only !== undefined) {
         const names = (p.only as string).split(",").map((s) => s.trim()).filter((s) => s !== "");

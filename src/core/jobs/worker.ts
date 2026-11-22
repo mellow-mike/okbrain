@@ -1,8 +1,6 @@
-// Jobs worker (4.5): one sequential maintenance run guarded by a lock file —
-// no queue infra, per the lightweight-core invariant; scheduling belongs to
-// the OS (cron / launchd / Task Scheduler invoking `okb jobs`). The lock is
-// `.okb/jobs.lock`, created exclusively; a stale lock (dead pid, or older
-// than a day) is reclaimed so one crash can't wedge the nightly run forever.
+// One sequential maintenance run guarded by the shared `.okb/jobs.lock`. A stale
+// lock (dead pid or older than a day) is reclaimed after a crash. The CLI and
+// server use the same lock and supply their own shutdown signal.
 // Jobs run in order, each failure is captured (later jobs still run), and
 // SIGINT/SIGTERM stop cleanly between jobs.
 
@@ -78,30 +76,56 @@ export interface JobResult {
   ms: number;
 }
 
+export const jobShutdown = "skipped: shutting down";
+export const jobReadOnly = "skipped: the brain mount changed or is read-only";
+
+interface JobRunOptions {
+  signal?: AbortSignal;
+  canWrite?: () => boolean;
+}
+
 /**
  * Run jobs in order under the bundle lock. Each failure is captured so later
- * jobs still run; SIGINT/SIGTERM finish the current job, then stop.
+ * jobs still run. Stop after the current job when the caller aborts.
  */
-export async function runJobs(bundle: string, jobs: Job[]): Promise<JobResult[]> {
-  const release = acquireJobsLock(bundle);
+export async function runJobs(bundle: string, jobs: Job[], options: JobRunOptions = {}): Promise<JobResult[]> {
   let stopping = false;
+  const guard = (): string | undefined => {
+    if (stopping || options.signal?.aborted) return jobShutdown;
+    if (!options.canWrite) return;
+    try { if (!options.canWrite()) return jobReadOnly; }
+    catch { return jobReadOnly; }
+  };
+  const skipped = (name: string, detail: string): JobResult => ({ name, ok: false, detail, skipped: true, ms: 0 });
+  const initial = guard();
+  if (initial) return jobs.map(({ name }) => skipped(name, initial));
+
+  const release = acquireJobsLock(bundle);
   const onSignal = (): void => {
     stopping = true;
     log.warn("stopping after the current job (signal received)");
   };
-  process.on("SIGINT", onSignal);
-  process.on("SIGTERM", onSignal);
+  if (!options.signal) {
+    process.on("SIGINT", onSignal);
+    process.on("SIGTERM", onSignal);
+  }
 
   const results: JobResult[] = [];
   try {
     for (const job of jobs) {
-      if (stopping) {
-        results.push({ name: job.name, ok: false, detail: "skipped: shutting down", skipped: true, ms: 0 });
+      const before = guard();
+      if (before) {
+        results.push(skipped(job.name, before));
         continue;
       }
       const t0 = Date.now();
       try {
         const skip = typeof job.skip === "function" ? await job.skip() : job.skip;
+        const after = guard();
+        if (after) {
+          results.push(skipped(job.name, after));
+          continue;
+        }
         if (skip !== undefined) {
           results.push({ name: job.name, ok: true, detail: skip, skipped: true, ms: 0 });
           continue;
@@ -111,14 +135,16 @@ export async function runJobs(bundle: string, jobs: Job[]): Promise<JobResult[]>
         results.push({ name: job.name, ok: true, detail, skipped: false, ms: Date.now() - t0 });
       } catch (e) {
         const detail = (e as Error).message;
-        log.warn(`job ${job.name} failed`, { error: detail });
+        log.warn(`job ${job.name} failed`, options.signal ? undefined : { error: detail });
         results.push({ name: job.name, ok: false, detail, skipped: false, ms: Date.now() - t0 });
       }
     }
     return results;
   } finally {
-    process.off("SIGINT", onSignal);
-    process.off("SIGTERM", onSignal);
+    if (!options.signal) {
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+    }
     release();
   }
 }

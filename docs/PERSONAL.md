@@ -44,6 +44,14 @@ The app checks the database before saving the selection. A connection URL stays 
 
 Choose **Use SQLite** to switch back and remove the saved connection URL. Choose **Re-index** again to pick up any changes since you used SQLite. Old derived tables stay in your PostgreSQL database. Your database administrator can remove the brain’s cache schema.
 
+### Schedule maintenance
+
+Open **Settings → Maintenance → Schedule maintenance** in a writable brain. Choose every six hours, daily, or weekly, select the jobs, and save the schedule. The app shows the next due time and the latest run’s job outcomes. You can pause, resume, or remove the schedule for this brain. A job already running can finish when you pause or remove its schedule.
+
+Schedules run while the Mac app or local web server is open. When it reopens after a missed time, it runs at most one overdue pass for each brain. Settings and the latest run summary stay in local app data. The existing **Run jobs** button is available for a one-time pass.
+
+Re-index, review, and Doctor work offline. To schedule RSS, approve the current saved feeds. To backfill embeddings, first build a matching vector store, then approve the displayed provider, model, and endpoint. The scheduled pass processes up to 100 public notes and keeps existing private vectors local. If the approved feeds or embedding settings change, review the new settings and save the schedule again.
+
 In the CLI, set a local environment variable containing the URL, then use `okb cache-settings postgres --connection-env OKB_CACHE_URL`. The commands `okb cache-settings` and `okb cache-settings sqlite` show the selection and switch to SQLite, respectively.
 
 ### AI defaults

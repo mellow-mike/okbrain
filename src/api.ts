@@ -11,7 +11,7 @@
 // operations.ts imports this file for the `serve` op, so nothing here may
 // touch an operations.ts binding at module top level (ESM cycle).
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { BrowserPlanInputError, createBrowserPlan, type BrowserPlan } from "./core/ai/browser-plan.ts";
 import type { PlanOptions } from "./core/ai/chatgpt-plan.ts";
 import { providerKeyStatus, setProviderKey } from "./core/ai/local-keys.ts";
@@ -23,10 +23,11 @@ import { RepositoryContextError } from "./core/coding/repository-context.ts";
 import { StandaloneCodingControl, StandaloneControlError } from "./core/coding/standalone-control.ts";
 import { CodingTeamListener, type TeamStatus } from "./core/coding/team-listener.ts";
 import { BrainMountError } from "./core/brain-mounts.ts";
-import { ConfigError, listBrains, resolveBrain, UnknownBrainError } from "./core/config.ts";
+import { configForBrain, ConfigError, listBrains, loadConfig, resolveBrain, UnknownBrainError } from "./core/config.ts";
 import { localBundleWatchBackend, openLocalContext, type LocalContext } from "./core/context.ts";
 import { BundleWatcher } from "./core/engine/bundle-watch.ts";
 import { EngineError } from "./core/engine/sqlite.ts";
+import { MaintenanceScheduleError, MaintenanceScheduler, maintenanceJobNames, type MaintenanceJobName, type MaintenanceSchedulerOptions, type MaintenanceTarget } from "./core/jobs/schedule.ts";
 import { SyncError, syncGitHubCredential } from "./core/sync.ts";
 import { MAX_CONVERSATION_EXPORT_BYTES } from "./core/ingest/conversations.ts";
 import { createNotionSource, NotionSourceError, type NotionSource, type NotionSourceOptions } from "./core/ingest/notion-source.ts";
@@ -35,6 +36,7 @@ import { OKF_VERSION } from "./core/okf/indexmd.ts";
 import {
   checkOpCall,
   getOp,
+  maintenanceApprovals,
   OpError,
   operations,
   runBrainMountChange,
@@ -44,6 +46,7 @@ import {
   runOp,
   runPersonalSourceUpload,
   runRssSettings,
+  runScheduledMaintenance,
   type Operation,
 } from "./core/operations.ts";
 import {
@@ -53,7 +56,7 @@ import {
   hostAllowed,
   tokenMatches,
 } from "./core/serve-token.ts";
-import { VERSION } from "./core/version.ts";
+import { TOOL_ACTOR, VERSION } from "./core/version.ts";
 import { ManagedMcpHttp, ManagedMcpHttpError } from "./mcp/managed-http.ts";
 import { fontAssets, hostedFontCss } from "./core/viz/fonts.ts";
 import cytoscapeJs from "./core/viz/vendor/cytoscape.min.js" with { type: "text" };
@@ -132,6 +135,7 @@ export interface ApiOptions {
   coding?: ProjectControlOptions;
   standaloneCoding?: ConstructorParameters<typeof StandaloneCodingControl>[0];
   notion?: NotionSourceOptions;
+  maintenance?: Pick<MaintenanceSchedulerOptions, "now" | "path" | "intervalMs">;
 }
 
 export interface ApiServer {
@@ -234,6 +238,8 @@ interface ServeState {
   bundle: string;
   servedBrain?: string;
   watches?: Map<string | null, BundleWatcher>;
+  maintenance?: MaintenanceScheduler;
+  maintenanceAllowed?: (target: MaintenanceTarget) => boolean;
   port: number;
   token: string;
   readonly: boolean;
@@ -267,6 +273,79 @@ const open = (s: Scope): LocalContext => {
   local.ctx.brain = s.brain ?? s.servedBrain;
   return local;
 };
+
+function maintenanceTarget(scope: Scope): MaintenanceTarget {
+  if (!mountIsAvailable(scope.bundle)) throw new ConfigError("The selected brain folder is unavailable.");
+  return { path: realpathSync.native(scope.bundle), brain: scope.brain ?? scope.servedBrain ?? null };
+}
+
+function maintenancePathMatches(path: string, bound: string): boolean {
+  const canonical = realpathSync.native(path);
+  return process.platform === "win32" ? canonical.toLowerCase() === bound.toLowerCase() : canonical === bound;
+}
+
+async function maintenanceRequest(req: Request, url: URL, opts: ServeState, cors?: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+    return json(401, { error: "missing or invalid local app token" }, headers);
+  if (req.headers.has("origin") && !cors)
+    return json(403, { error: "Maintenance settings must come from the local app." }, headers);
+  if (req.method !== "GET" && req.method !== "POST") return json(405, { error: "Method not allowed." }, headers);
+  try {
+    let input: Record<string, unknown> | undefined;
+    if (req.method === "POST") {
+      if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+        return json(415, { error: "Send a JSON object." }, headers);
+      const raw = await readUpload(req, 4096, "Maintenance settings exceed 4 KiB.");
+      let value: unknown;
+      try { value = JSON.parse(raw.toString("utf8")); } catch { /* Handled below. */ }
+      if (!value || typeof value !== "object" || Array.isArray(value)) return json(400, { error: "Send a JSON object." }, headers);
+      input = value as Record<string, unknown>;
+    }
+    const scope = scopeOf(req, url, opts);
+    const target = maintenanceTarget(scope);
+    const allowed = opts.maintenanceAllowed!;
+    if (input && (scope.readonly || !allowed(target)))
+      return json(403, { error: "Open a writable brain to change its maintenance schedule." }, headers);
+    const local = open(scope);
+    try {
+      const { embedding, rss } = await maintenanceApprovals(local.ctx);
+      const scheduler = opts.maintenance!;
+      if (input) {
+        if (!allowed(target)) return json(403, { error: "The selected brain changed or is read-only." }, headers);
+        if (input.action === "pause") scheduler.pause(target);
+        else if (input.action === "remove") scheduler.remove(target);
+        else if (input.action === "save") {
+          const { cadence, jobs, approvals: rawApprovals } = input;
+          if (cadence !== "6h" && cadence !== "daily" && cadence !== "weekly")
+            return json(400, { error: "Choose how often the schedule should run." }, headers);
+          if (!Array.isArray(jobs) || !jobs.length || new Set(jobs).size !== jobs.length ||
+              jobs.some((job) => !maintenanceJobNames.includes(job)))
+            return json(400, { error: "Choose at least one available maintenance job." }, headers);
+          if (rawApprovals !== undefined && (!rawApprovals || typeof rawApprovals !== "object" || Array.isArray(rawApprovals)))
+            return json(400, { error: "Review the current maintenance job approvals." }, headers);
+          const supplied = (rawApprovals ?? {}) as Record<string, unknown>;
+          if ((jobs.includes("embed") && (!embedding || supplied.embed !== embedding.id)) ||
+              (jobs.includes("rss") && (!rss || supplied.rss !== rss.id)))
+            return json(409, { error: "Review and approve the current embedding or RSS settings before scheduling these jobs." }, headers);
+          const approvals = { ...(jobs.includes("embed") && embedding ? { embed: embedding.id } : {}),
+            ...(jobs.includes("rss") && rss ? { rss: rss.id } : {}) };
+          scheduler.save(target, { cadence, jobs: jobs as MaintenanceJobName[], approvals });
+        } else return json(400, { error: "Choose Save, Pause, or Remove schedule." }, headers);
+      }
+      const row = scheduler.get(target);
+      const schedule = row ? { cadence: row.cadence, jobs: row.jobs, enabled: row.enabled,
+        nextAt: row.nextAt, lastRun: row.lastRun, bindingAvailable: allowed(row.target) } : null;
+      return json(200, { result: { schedule,
+        embedding: embedding && { ...embedding, approved: row?.approvals?.embed === embedding.id },
+        rss: rss && { ...rss, approved: row?.approvals?.rss === rss.id },
+      } }, headers);
+    } finally { await local.close(); }
+  } catch (e) {
+    const status = e instanceof UploadTooLarge ? 413 : e instanceof MaintenanceScheduleError ? e.status : errStatus(e);
+    return json(status, status === 500 ? { error: "Could not open or update the local maintenance schedule." } : errBody(e), headers);
+  }
+}
 
 async function bundleWatchRequest(req: Request, url: URL, opts: ServeState, cors?: Hdrs): Promise<Response> {
   const headers = { ...cors, "cache-control": "no-store" };
@@ -891,6 +970,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
 
   if (url.pathname.startsWith("/api/coding/") && opts.coding) return codingRequest(req, url, opts, cors ?? {});
   if (url.pathname === "/api/brains/sync-github") return syncGitHubRequest(req, url, opts, cors ?? {});
+  if (url.pathname === "/api/maintenance" && opts.maintenance) return maintenanceRequest(req, url, opts, cors);
 
   const presented =
     req.headers.get("x-okb-token") ??
@@ -1015,6 +1095,31 @@ export function createApiServer(opts: ApiOptions): ApiServer {
   const team = new CodingTeamListener();
   const standalone = new StandaloneCodingControl(opts.standaloneCoding);
   const { bundle, readonly = false } = opts;
+  const maintenanceAllowed = (target: MaintenanceTarget): boolean => {
+    if (readonly || !mountIsAvailable(target.path)) return false;
+    try {
+      if (!maintenancePathMatches(target.path, target.path)) return false;
+      if (target.brain !== null) {
+        const mount = resolveBrain(target.brain);
+        return !mount.readonly && maintenancePathMatches(mount.path, target.path);
+      }
+      if (opts.servedBrain || !maintenancePathMatches(bundle, target.path)) return false;
+      return !listBrains().some((mount) => mount.readonly && mountIsAvailable(mount.path) && maintenancePathMatches(mount.path, target.path));
+    } catch { return false; }
+  };
+  const maintenance = new MaintenanceScheduler({
+    ...opts.maintenance,
+    allowed: maintenanceAllowed,
+    run: async (schedule, signal, isCurrent) => {
+      const { target, jobs, approvals } = schedule;
+      const canWrite = () => isCurrent() && maintenanceAllowed(target);
+      const local = openLocalContext(target.path, true, false, TOOL_ACTOR);
+      local.ctx.brain = target.brain ?? undefined;
+      local.ctx.config = () => configForBrain(loadConfig(), local.ctx.brain, target.path);
+      try { return await runScheduledMaintenance(local.ctx, { jobs, approvals, canWrite, signal }); }
+      finally { await local.close(); }
+    },
+  });
   const wanted = opts.port ?? DEFAULT_PORT;
   let controller: CodingProjectControl | undefined;
   const coding = () => controller ??= new CodingProjectControl({ ...opts.coding, retentionAllowed: () => {
@@ -1034,7 +1139,8 @@ export function createApiServer(opts: ApiOptions): ApiServer {
         if (path.startsWith("/api/coding/")) server.timeout(req, 65);
         if (path === "/api/op/sync" || path === "/api/op/sync_recovery") server.timeout(req, 260);
         if (path === "/api/brains" && req.method === "POST") server.timeout(req, 150);
-        return handleRequest(req, { bundle, servedBrain: opts.servedBrain, watches, port: server.port!, token, readonly, plan, coding, standalone, team, notion, mcp });
+        return handleRequest(req, { bundle, servedBrain: opts.servedBrain, watches, maintenance, maintenanceAllowed,
+          port: server.port!, token, readonly, plan, coding, standalone, team, notion, mcp });
       },
     });
   } catch (e) {
@@ -1044,6 +1150,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
       );
     throw e;
   }
+  if (!readonly) maintenance.start();
   if (!readonly && existsSync(codingProjectCatalogPath(opts.coding?.stateDir))) {
     try { coding(); } catch { /* Leave personal routes available. The Coding API reports catalog errors. */ }
   }
@@ -1056,7 +1163,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
       plan.close();
       notion.close();
       const stopped = await Promise.allSettled([
-        server.stop(true), team.stop(), mcp.stop(), controller?.close(), standalone.close(),
+        server.stop(true), team.stop(), mcp.stop(), controller?.close(), standalone.close(), maintenance.stop(),
         ...[...watches.values()].map((watcher) => watcher.stop()),
       ]);
       const failures = stopped.flatMap((result) => result.status === "rejected" ? [result.reason] : []);

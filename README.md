@@ -303,12 +303,11 @@ when using `okb sync`. Static HTML exports also
 omit these notes by default. The review queue ranks concepts past their
 `stale_after` first, nudges drafts, and never queues deprecated ones.
 
-Schedule `okb jobs` with cron, launchd, or Task Scheduler; there is no daemon,
-and its embed step skips itself until you have run `okb embed` once, so a
-nightly run can't start spending on a hosted provider behind your back.
-Deliberate AI enrichment is its own command — `okb enrich` turns an LLM loose
-on the web inside hard caps on depth, hosts, paths, and pages, every one of
-them enforced in the tool rather than the prompt.
+In the Mac or web app, use **Settings → Maintenance → Schedule maintenance**
+to run selected jobs while the app server is open. RSS and embedding schedules
+require separate approval of the current settings. `okb jobs` also runs a
+single pass for scripts using cron, launchd, or Task Scheduler. Use **Enrich**
+for a deliberate AI web pass with limits on depth, hosts, paths, and pages.
 
 ## Configuration
 
