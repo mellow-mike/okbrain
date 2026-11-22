@@ -88,6 +88,9 @@ for (const t of local ? [hostTarget()] : TARGETS) {
     rmSync(work, { recursive: true, force: true });
   }
   for (const f of ["LICENSE", "README.md"]) await copyFile(join(root, f), join(stage, f));
+  mkdirSync(join(stage, "docs"));
+  for (const f of ["PERSONAL.md", "CODING.md", "PRODUCT-PLAN.md"])
+    await copyFile(join(root, "docs", f), join(stage, "docs", f));
 
   const archive = t.os === "windows" ? `${label}.zip` : `${label}.tar.gz`;
   if (t.os === "windows")

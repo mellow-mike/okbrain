@@ -3,26 +3,43 @@
 Living, granular roadmap for okbrain. **It grows organically** — add subtasks as
 you discover them, log bugs in the Bug Log, drop unscheduled ideas in Backlog,
 and append a dated line to the Progress Log each session. Maintaining this file
-is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
+is described in [AGENTS.md](AGENTS.md). Design rationale lives in [CONTEXT.md](CONTEXT.md).
 
 ## Legend
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 0–6 complete.** The brain ingests (import/capture/clip/rss),
-> enriches itself behind guardrails (`okb enrich`), retrieves over keyword +
-> vector + graph + typed-edge relational arms, proposes links through
-> review, runs nightly maintenance (`okb jobs` under OS cron), ships agent
-> skills, packages (vec0 beside the binary, five-target release workflow,
-> one-command offline local package, Homebrew/Scoop templates), mounts
-> multiple brains with per-mount read-only policy (`--brain`, GUI
-> switcher), scores opinions (`okb take` / `resolve` / `calibrate`), and —
-> as of Stage 6 — writes **OKF v0.2** (provenance / trust / lifecycle
-> families, actors, `okb upgrade` for v0.1 bundles) behind a GUI that is a
-> full product surface (Home, Browse, a Concept reader, delete, jobs,
-> upgrade, sanitized rendering). Postgres and a desktop wrapper stay
-> deferred (see 5.4). Next: a tagged `v0.1.0` release, signing when
-> certificates exist, and Backlog items as they earn their way in.
+
+Stages 0–6 built the knowledge bundle, graph, retrieval, CLI, GUI, and MCP.
+The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions.
+
+### Stage 7 — Personal second brain
+
+- [x] Import ChatGPT and Claude conversation text as private drafts with
+  provenance, preview, and create-only deduplication.
+- [x] Add explicit local ChatGPT sign-in and cited questions through
+  eligible plans, with separately selected account, model list, and sign-out.
+- [x] Reduce graph reads during link suggestions and incremental provenance refresh.
+- [ ] Add a GUI for source and account management, including per-source controls.
+- [ ] Add incremental conversation reconciliation with review, and add
+  more supported provider integrations.
+- [ ] Add focused maps for questions and projects, with filtering and graph
+  explanations that remain usable on large bundles.
+
+### Stage 8 — Enterprise coding
+
+- [x] Pin Pi Durable and Pi AI 1.0 and exercise crash recovery on real Pi
+  SQLite persistence with a deterministic test provider.
+- [x] Ship local coding sessions with a workspace and attachment scope,
+  request IDs, and reviewable responses.
+- [ ] Add tenant/project authorization, isolated workers, per-project
+  credentials, and a run status and cancellation surface.
+- [ ] Verify failure and replay semantics in deployment, with audit events,
+  retention, and change review and approvals.
+- [ ] Add approved execution and repository integration after the control
+  plane and worker boundaries are verified.
+
+Stages 0–6 and the logs below are historical records.
 
 ---
 
@@ -710,6 +727,10 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Established the personal and enterprise workflows, added
+  local conversation import and ChatGPT plan usage, reduced graph reads,
+  and shipped the local Pi Durable pilot. Next milestones are account and
+  source controls in the GUI and an isolated, authenticated coding worker.
 - 2026-09-26 — **Design system implemented (6.4).** The GUI and the static
   viewer now wear the okbrain design system (R5): dark-first ink on a
   ground, colour only for state and concept types, Literata for the

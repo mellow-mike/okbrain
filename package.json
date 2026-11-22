@@ -1,7 +1,7 @@
 {
   "name": "okbrain",
   "version": "0.1.0",
-  "description": "Self-hosted, OKF-native personal knowledge manager (TypeScript on Bun).",
+  "description": "Local-first second brain and Pi Durable coding sessions (TypeScript on Bun).",
   "license": "MIT",
   "type": "module",
   "bin": {

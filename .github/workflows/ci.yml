@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
 
-# A feature isn't done until it's green on all three OSes (CLAUDE.md).
+# Keep the CLI and storage paths verified on all three supported OSes.
 jobs:
   test:
     name: ${{ matrix.os }}

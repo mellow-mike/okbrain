@@ -1,13 +1,23 @@
 # CONTEXT.md
 
-The living design reference for okbrain — the detail that doesn't fit in
-`CLAUDE.md`. This file describes the **current design**, not history. When a
-decision changes, update the relevant section and add a line to the Decisions
-Log (bottom). `ROADMAP.md` tracks what's built; this file explains how it's
-meant to work and why.
+This is the design reference for [AGENTS.md](AGENTS.md). See [the roadmap](ROADMAP.md)
+for delivery status and [the product plan](docs/PRODUCT-PLAN.md) for both workflows.
+The Decisions Log records the evolution of the design.
 
-Originating document: `okbrain-design.md` (the initial research/synthesis).
-This file supersedes it as the source of truth for design.
+## Product boundaries
+
+The personal brain stores canonical knowledge in open Markdown and YAML. OKF
+v0.2 remains the interchange baseline and its reference bundle verifies
+compatibility. Product-specific fields and concepts can evolve alongside it.
+The personal product prioritizes source capture, user-directed memory,
+configurable retrieval, and inspectable links.
+
+The coding workflow keeps operational state in Pi Durable storage in the
+user's application data. Each named session binds to a canonical workspace
+and a provider/model pair. Requests attach explicit text snapshots, carry a
+stable ID, and return an answer for human review. This pilot exposes a local
+CLI. Team identities, worker isolation, approvals, repository credentials,
+and governance belong to the enterprise control plane on the roadmap.
 
 ---
 
@@ -58,9 +68,11 @@ Five layers, each with one responsibility:
                       └──────────────┴──────────────────┘
  Ops contract:        core/operations.ts  (read/write/admin + trust)
                       ┌──────────┬──────────────┬──────────────┐
- Store (canonical):   OKF bundle (md+frontmatter, git)         │
+ Store (canonical):   OKF-compatible bundle (Markdown + YAML) │
  Engine (derived):    SQLite + sqlite-vec + FTS5 + graph  ◄────┘ rebuildable
  AI gateway:          embed | chat | rerank   (local | API)
+ ChatGPT plan:        per-user sign-in + Responses API (CLI only)
+ Coding:              Pi Durable 1.0 + private SQLite (CLI only)
  Skills + jobs:       fat markdown + thin resolver + cron worker
 ```
 
@@ -76,8 +88,7 @@ A bundle is a directory of UTF-8 markdown files. Reserved filenames at any
 level: `index.md` (directory listing / progressive disclosure) and `log.md`
 (update history). All other `.md` files are concepts. Relationships beyond
 the directory tree are plain markdown links; bundle-absolute links
-(`/dir/x.md`) are preferred for stability. OKF v0.2 (the current spec, at
-`GoogleCloudPlatform/open-knowledge-format`) adds optional frontmatter
+(`/dir/x.md`) are preferred for stability. The OKF v0.2 baseline adds optional frontmatter
 families that make an agent-maintained corpus self-describing: provenance
 (`sources` + `usage_window`), trust (`generated`, `verified`), lifecycle
 (`status`, `stale_after`), the actor convention, and the `Attested
@@ -241,8 +252,19 @@ rejects on any warning class — doctor is the only strict surface.
   surfaces: root `log.md` entries are skipped and parent `index.md` listings
   omit the directory (its own `index.md`, inside the ignored dir, still lists
   its concepts for local browsing). Scope is "under a `db_only/` directory"
-  (`inDbOnlyDir`), matching git's directory-pattern semantics. Per-page
-  `db_only` is Backlog.
+  (`inDbOnlyDir`), matching git's directory-pattern semantics. Static HTML
+  excludes those concepts by default. Local retrieval, the live GUI, and
+  MCP clients attached to that brain can read them.
+
+### Conversation exports
+
+`okb import-conversations` reads a local extracted ChatGPT or Claude JSON
+file and writes text transcripts as OKF drafts under `db_only/conversations/`.
+The provider and its source ID identify the note. The import keeps the
+selected ChatGPT branch, copies visible user and assistant text into fenced
+blocks, and records provenance. Preview lists planned IDs and skipped rows.
+Imports are create-only. After a batch, manifests refresh once and an
+existing FTS and graph index catches up without invoking a model.
 
 ---
 
@@ -253,7 +275,8 @@ rejects on any warning class — doctor is the only strict surface.
   `tags`, `resource`, body size (for node sizing in the viewer).
 - **Edges (primary)** = markdown links between concepts. Extraction: match
   `](….md)` links, resolve relative/absolute against the bundle root, drop
-  external (`://`) and unresolved targets, dedupe. Directed and (on disk)
+  external (`://`) and unresolved targets, dedupe. Fenced code stays out of
+  body link extraction and rewriting. Links are directed and (on disk)
   untyped, per OKF — relationship meaning lives in the prose.
 - **Provenance edges** = `sources[].resource` entries that name another
   concept (OKF v0.2 §5.1: "the derivation edge already exists in the bundle
@@ -312,6 +335,12 @@ unchanged concepts, and still index a concept whose frontmatter won't parse
 (empty metadata, raw text as body) — search never loses it; `okb doctor`
 flags it.
 
+Link suggestions fetch candidate titles and matching tags in one ordered
+engine query. The single-concept refresh checks only the candidate targets
+needed for provenance path fallback. A full build re-resolves provenance
+across the full bundle, including ambiguous relative paths in unchanged
+notes whose possible targets were added or removed.
+
 ### Viewer (live + static)
 Adapted from OKF's self-contained `viz.html` (Cytoscape.js graph + marked.js
 body rendering): type-colored nodes, directed edges, node hover tooltips
@@ -338,11 +367,13 @@ into `graph-other`, and every node keeps a visible Literata label so identity
 is never colour-alone. Stale nodes get a dashed `danger` ring, deprecated
 ones fade to `opacity-deprecated`, the selected one takes a 2px `accent`
 ring, and hovering a node dims everything outside its neighbourhood.
-- **Live (GUI):** same component fed by the engine over the local API; reflects
-  current DB, click-through to the editor.
+- **Live (GUI):** the local API builds graph data from the bundle directly,
+  with click-through to the editor.
 - **Static export:** `okb export-viz` writes the single HTML file to the fixed
   path `<bundle>/viz.html` — no backend, shareable, committable next to the
-  bundle. Built straight from a bundle walk (works without an index). Cytoscape
+  bundle. Built straight from a bundle walk (works without an index).
+  `--include-private` lets a trusted caller explicitly add `db_only/` notes.
+  Cytoscape
   and marked are vendored minified builds (`core/viz/vendor/`), inlined into
   the page together with okbrain's own `safe-markdown.js` + `render.js` +
   `tokens.css` + `okb.js` and embedded in the compiled binary via Bun text
@@ -538,6 +569,21 @@ concepts to search/graph/review.
 
 ## AI integration
 
+### ChatGPT plan usage
+
+`core/ai/chatgpt-plan.ts` implements OpenAI's local sign-in flow with a
+loopback callback, state, nonce, and PKCE. It verifies identity and granted
+scope before activation and keeps registrations per labeled account. A local
+SQLite transaction serializes refresh token rotation. Disconnect attempts
+revocation before clearing the grant. Commands that manage the account use
+per-user storage and are independent of the selected bundle.
+
+`okb ask-plan` uses local FTS and graph expansion, packs the retrieved context
+with the normal citation pipeline, and invokes the Responses API with the
+selected ChatGPT plan. Inference succeeds when the stream completes. Embedding,
+reranking, and API-key usage keep their existing routes. See the [personal
+guide](docs/PERSONAL.md) for account and privacy behavior.
+
 ### Gateway (`core/ai/gateway.ts` + `recipes.ts`)
 One interface, three capabilities: `chat(messages)`, `embed(texts)`,
 `rerank(query, docs)` — plain `fetch`, no provider SDKs. Three HTTP dialects
@@ -688,9 +734,9 @@ Every operation is declared once as data: name, typed param specs, handler,
 validates trust (fail-closed: untrusted ⇒ read-scope only), the read-only
 mount policy, and params before any handler runs; the `OpContext` also
 carries the caller's `actor()` so every write is attributed. Three adapters
-are generated: the CLI, the GUI's local HTTP API, and the MCP server. Add a
-capability once → it appears in all three. CLI/GUI can't drift: an API test
-derives the list of ops the GUI must wire from the registry itself.
+are generated: the CLI, the GUI's local HTTP API, and the MCP server. The
+adapter filters operations by scope and `localOnly`. The registry also marks
+account and coding commands that operate independently of a selected brain.
 
 ### CLI surface
 | Command | Scope | Purpose |
@@ -699,11 +745,15 @@ derives the list of ops the GUI must wire from the registry itself.
 | `okb new <type> <title> <description>` | write | Create a conformant concept at `<type>s/<slug>` |
 | `okb capture [text]` | write | Quick-capture text/stdin → `inbox/` concept |
 | `okb import <path>` | write | Map existing markdown (file/tree) → concepts; dedupe by id |
+| `okb import-conversations <path> --provider <provider>` | write (localOnly) | Import ChatGPT or Claude text as private drafts |
 | `okb write <id> [--status …] [--stale-after …] [--sources …]` | write | Create/update through the conformance writer |
 | `okb rm <id>` | write | Delete a concept (indexes, log, caches follow) |
 | `okb enrich [--web-seed …]` | write | Run the enrichment agent (guardrailed, sources-cited) |
 | `okb search <query>` | read | Hybrid + graph retrieval (`--json` for agents) |
 | `okb ask <question>` | read | Retrieval-augmented answer with citations |
+| `okb ask-plan <question>` | read (localOnly) | Cited answer using ChatGPT plan usage and local retrieval |
+| `okb chatgpt connect` / `status` / `use` / `models` / `disconnect` | read (localOnly) | Per-user ChatGPT account and consent management |
+| `okb code run` | read (localOnly) | Start or resume a Pi Durable coding request |
 | `okb read <id>` | read | Frontmatter, body, and derived signals (status/trust/stale) |
 | `okb list [--detail] [--type] [--tag] [--status]` | read | Concept ids, or a browse listing with signals |
 | `okb graph <id> [--depth N]` | read | Neighborhood with `→`/`←`/`↔` direction tags (incl. provenance edges) |
@@ -724,7 +774,7 @@ derives the list of ops the GUI must wire from the registry itself.
 | `okb take` / `resolve` / `calibrate` | write/read | Claims and calibration |
 | `okb brains` | read (localOnly) | List configured brain mounts |
 | `okb serve [--open]` / `okb mcp` / `okb bookmarklet` | admin (localOnly) | Local GUI+API, MCP server, clip bookmarklet |
-| `okb export-viz` | read | Self-contained OKF-style graph HTML |
+| `okb export-viz` | read | Self-contained graph HTML; private notes require explicit opt-in |
 | `okb version` / `--version` | — | okbrain's version |
 
 Global flags: `--json` everywhere, `--bundle <path>`, `--brain <name>`
@@ -885,7 +935,10 @@ its own `.okb/` index — nothing is shared between brains.
   GUI.
 - **MCP:** the MCP TypeScript SDK.
 - **AI:** HTTP clients per recipe (OpenAI-compatible for most local + several
-  API providers).
+  API providers), and an explicit ChatGPT plan integration using OpenAI OAuth
+  and streamed Responses.
+- **Coding:** Pi Durable, Pi AI, and Chord at 1.0.0 over a Bun SQLite adapter.
+  See the [coding guide](docs/CODING.md) for session semantics and operations.
 - **GUI build:** none — vanilla JS/CSS/HTML served as-is and embedded via Bun
   text imports; Bun's compiler is the only "bundler" (decided at 3.2).
 
@@ -901,9 +954,9 @@ platform vec0 into `bin/`; `scripts/package-release.ts` (driven by
 targets from one Linux runner and pairs each with its platform vec0 from
 the npm registry (tar.gz/zip + SHA256SUMS.txt), and `bun run package`
 (`--local`) builds the same archive for the host machine with the vec0
-already in `node_modules` — a fully offline packaging path. The archive is
-the complete offline product: CLI, local API, embedded GUI, MCP server, and
-the extension. CI and the release workflow pin the Bun version (a floating
+already in `node_modules`. The archive includes the binary with CLI, local
+API, embedded GUI, MCP and Pi Durable, the extension, and the user guides.
+CI and the release workflow pin the Bun version (a floating
 `latest` once broke Windows CI, B6). Homebrew/Scoop manifest templates live
 in `packaging/`; artifacts stay unsigned until org certificates exist (hook
 points documented in `packaging/README.md`).
@@ -1019,6 +1072,10 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-11-22 — **Two product workflows.** Preserve the open bundle and OKF
+  compatibility for personal knowledge. Add explicit ChatGPT plan usage,
+  local conversation imports, and more efficient mapping. Use Pi Durable
+  for supervised coding with a separate, local operational store.
 - 2026-09-26 — **The GUI and the viewer wear the okbrain design system
   (R5).** Dark-first ink on a ground replaces the blue accent; three faces
   say whose words are on screen (Literata for the bundle, Recursive for

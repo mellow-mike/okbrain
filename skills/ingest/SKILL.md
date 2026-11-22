@@ -1,8 +1,8 @@
 # ingest — bring outside material into the bundle in bulk
 
 Parameters:
-- `source` (required): a markdown file/directory, a feed URL, or a list of
-  page URLs.
+- `source` (required): a Markdown file/directory, a feed URL, page URLs, or
+  a local ChatGPT or Claude conversation export.
 - `dest` (optional): bundle directory for imports.
 - `limit` (optional): cap per feed pull.
 
@@ -13,6 +13,9 @@ Steps:
    - Feed URL → `okb rss <url> [--limit N]`; to make it recurring, add it to
      `rss.feeds` in config.json so `okb jobs` pulls it nightly.
    - Individual pages → `okb clip <url>` per page (see capture skill).
+   - Conversation export → `okb import-conversations <json> --provider chatgpt|claude --dry-run`,
+     then repeat without `--dry-run` to write private drafts. An existing
+     draft retains its edits on later imports.
 2. `okb index` — then read the stats line; a large `removed` you didn't
    expect means the source moved things, stop and check.
 3. `okb doctor` — imports carry foreign frontmatter; warnings are fine

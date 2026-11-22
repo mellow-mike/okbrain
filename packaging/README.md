@@ -22,9 +22,10 @@ Local single-platform build: `bun run build` → `bin/okb` + `bin/vec0.*`.
 
 Offline local package: `bun run package` (= `scripts/package-release.ts
 --local`) builds this machine's archive into `dist/` using the vec0 already
-in `node_modules` — no registry fetch, no network. The archive is the whole
-product: CLI, local API, embedded GUI, MCP server, extension, README and
-LICENSE.
+in `node_modules`. The archive includes the CLI, local API, embedded GUI,
+MCP server, SQLite extension, README, license, and the personal and coding
+guides. The Pi runtime is bundled. ChatGPT plan usage and hosted coding
+providers require network access when invoked.
 
 Both workflows pin the Bun version (`bun-version: 1.3.14`); bump it
 deliberately — a floating `latest` once broke Windows CI (B6).
