@@ -8,8 +8,9 @@
 // when their v0.2 counterpart is written. Each write also regenerates
 // index.md up the touched dir chain and appends a log.md entry (Stage 1.2).
 
-import { lstat, mkdir, writeFile } from "node:fs/promises";
-import { dirname, posix } from "node:path";
+import { randomUUID } from "node:crypto";
+import { link, lstat, mkdir, unlink, writeFile } from "node:fs/promises";
+import { dirname, join, posix } from "node:path";
 import { resolveActor } from "../config.ts";
 import { normalizeLinks } from "../graph/links.ts";
 import { readConceptPermissive } from "./bundle.ts";
@@ -246,15 +247,23 @@ export async function writeConcept(
 
   const privateConcept = inDbOnlyDir(input.id);
   await mkdir(dirname(path), { recursive: true, mode: privateConcept ? 0o700 : undefined });
-  try {
-    await writeFile(path, serialize({ frontmatter: fm, body }), {
-      encoding: "utf8",
-      flag: options.createOnly ? "wx" : "w",
-      mode: privateConcept ? 0o600 : undefined,
-    });
-  } catch (e) {
-    if (!options.createOnly || (e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    return { id: input.id, path, created: false, noop: true };
+  const serialized = serialize({ frontmatter: fm, body });
+  const mode = privateConcept ? 0o600 : undefined;
+  if (options.createOnly) {
+    // Publish complete bytes without ever replacing a concurrent writer's note.
+    const temporary = join(dirname(path), `.okb-write-${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporary, serialized, { encoding: "utf8", flag: "wx", mode });
+      await link(temporary, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST")
+        return { id: input.id, path, created: false, noop: true };
+      throw error;
+    } finally {
+      await unlink(temporary).catch(() => {});
+    }
+  } else {
+    await writeFile(path, serialized, { encoding: "utf8", mode });
   }
   const dir = posix.dirname(input.id);
   if (!options.deferIndex) await regenerateIndexes(root, dir === "." ? "" : dir);
