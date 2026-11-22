@@ -18,10 +18,10 @@
     "smoke:browser": "bun run scripts/smoke-browser.ts"
   },
   "engines": {
-    "bun": ">=1.3.14"
+    "bun": ">=1.4.3"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/bun": "1.4.3",
     "@types/turndown": "^5.0.6",
     "playwright": "1.65.1",
     "typescript": "^5.5.0"

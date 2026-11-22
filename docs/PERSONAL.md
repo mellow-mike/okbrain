@@ -99,6 +99,8 @@ Select **Restore default chat endpoint** or **Restore default embedding endpoint
 
 In **Settings → Enrichment**, enter comma-separated **Allowed hosts**, **Allowed path prefixes**, and **Denied path prefixes** to set the crawler’s scope. The crawler checks these settings before each request, including redirects. Denied path prefixes take precedence.
 
+Clip, RSS, and enrichment connect to a checked address at each redirect. HTTPS still verifies the original hostname. If you configure an environment proxy with `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`, use HTTPS source URLs for hostname-based sites routed through it. The app matches `NO_PROXY` against the original source address.
+
 In **Settings → OKF v0.2 migration**, enter **Actor to credit** to attribute legacy timestamps and reviews during migration. Preview the changes before choosing **Upgrade bundle**.
 
 ## Import conversations

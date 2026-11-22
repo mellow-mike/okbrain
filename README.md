@@ -112,11 +112,11 @@ it in. Run `okb embed` and `[vector]` joins the mix. Every command takes
 
 ## Install
 
-Requires [Bun](https://bun.sh) ≥ 1.1. Build the binary:
+The source build requires [Bun](https://bun.com) 1.4.3 or newer.
 
 ```bash
 git clone https://github.com/mellow-mike/okbrain && cd okbrain
-bun install
+bun install --frozen-lockfile
 bun run build
 ```
 

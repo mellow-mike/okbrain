@@ -565,13 +565,13 @@ fetch, extract the readable article, dedupe, write a conformant
 with or without an index; offline it fails fast (no queue in v1).
 
 ### Pipeline (`clip` op, scope `write`)
-1. **Fetch** through `core/ingest/fetch-guard.ts` — the one guarded fetcher,
-   extracted early on purpose: Stage 4.2's web pass reuses it (one guard, two
-   callers). Guards: http/https only; private/link-local/loopback IPs
-   rejected (every redirect hop re-resolved and re-checked); response size
-   cap; timeout. Residual DNS-rebinding TOCTOU risk is accepted for v1 (a
-   personal clipping tool fetches a URL the user chose); revisit for the
-   Stage-4 crawler.
+1. **Fetch** through `core/ingest/fetch-guard.ts`, shared by Clip, RSS, and
+   enrichment. For each redirect the guard applies URL policy, checks every
+   DNS answer, and gives Fetch a checked numeric destination. HTTP authority
+   and HTTPS server identity remain tied to the original URL. Proxy selection
+   uses the original origin. Configured HTTPS routes use numeric CONNECT and
+   keep TLS hostname checks. One deadline covers DNS, redirects, and the
+   response body, whose decoded bytes count toward the size cap.
 2. **Extract** readable article + metadata (title, byline, published,
    canonical URL, description) with `linkedom` + `@mozilla/readability`,
    HTML→markdown via `turndown`.

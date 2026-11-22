@@ -1,12 +1,9 @@
-// The one guarded fetcher (F-A.1). Extracted ahead of Stage 4.2 on purpose:
-// clip uses it today, the enrichment crawler reuses it later — one guard, two
-// callers. Guards: http/https only; private/link-local/loopback targets
-// rejected, re-checked on every redirect hop; response size cap; timeout.
-// Residual risk (documented): DNS rebinding between our lookup and fetch's
-// own resolution — accepted for v1, revisit with the Stage-4 crawler.
+// Shared transport for Clip, RSS, and enrichment. Validate each redirect and
+// connect only to a vetted numeric address, using the origin for HTTP and TLS.
 
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { guardedFetchProxy, GuardedFetchProxyError } from "./fetch-proxy.ts";
 
 export class FetchGuardError extends Error {}
 
@@ -27,6 +24,14 @@ export interface FetchedPage {
   contentType: string;
   body: string;
 }
+
+interface GuardedFetchDependencies {
+  resolve?: (hostname: string) => Promise<readonly { address: string }[]>;
+  fetch?: (input: URL, init: BunFetchRequestInit) => Promise<Response>;
+  env?: Record<string, string | undefined>;
+}
+
+const supportsPinnedFetch = Bun.semver.satisfies(Bun.version, ">=1.4.3");
 
 const v4Private = (ip: string): boolean => {
   const [a = 0, b = 0] = ip.split(".").map(Number);
@@ -94,83 +99,148 @@ const v6Private = (ip: string): boolean => {
 export const isPrivateIp = (ip: string): boolean =>
   isIP(ip) === 4 ? v4Private(ip) : v6Private(ip.replace(/^\[|\]$/g, ""));
 
-async function assertAllowed(url: URL, { allowPrivate, authorizeUrl }: GuardedFetchOptions): Promise<void> {
+function authorize(url: URL, { authorizeUrl }: GuardedFetchOptions): void {
   if (url.protocol !== "http:" && url.protocol !== "https:")
     throw new FetchGuardError(`only http/https URLs can be fetched: ${url.protocol}//`);
+  if (url.username || url.password) throw new FetchGuardError("Remove credentials from the source URL before fetching it.");
   authorizeUrl?.(new URL(url));
-  if (allowPrivate === true) return;
-  const host = url.hostname.replace(/^\[|\]$/g, "");
-  let addrs: { address: string }[];
-  try {
-    addrs = isIP(host) !== 0 ? [{ address: host }] : await lookup(host, { all: true });
-  } catch {
-    throw new FetchGuardError(`cannot resolve host: ${url.hostname}`);
-  }
-  for (const { address } of addrs)
-    if (isPrivateIp(address))
-      throw new FetchGuardError(
-        `refusing to fetch a private/loopback address: ${url.hostname} → ${address}`,
-      );
 }
 
-/** Fetch a page within the guardrails; returns decoded UTF-8 text. */
+function beforeTimeout<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+    operation.then((value) => {
+      signal.removeEventListener("abort", abort);
+      resolve(value);
+    }, (error) => {
+      signal.removeEventListener("abort", abort);
+      reject(error);
+    });
+  });
+}
+
+async function vettedAddresses(
+  host: string,
+  allowPrivate: boolean,
+  signal: AbortSignal,
+  resolve: NonNullable<GuardedFetchDependencies["resolve"]>,
+): Promise<string[]> {
+  let addresses: readonly { address: string }[];
+  try {
+    signal.throwIfAborted();
+    addresses = isIP(host) ? [{ address: host }] : await beforeTimeout(resolve(host), signal);
+  } catch {
+    signal.throwIfAborted();
+    throw new FetchGuardError(`cannot resolve host: ${host}`);
+  }
+  if (!addresses.length || addresses.some(({ address }) => !isIP(address) || address.includes("%")))
+    throw new FetchGuardError(`cannot resolve host to a valid address: ${host}`);
+  if (!allowPrivate && addresses.some(({ address }) => isPrivateIp(address)))
+    throw new FetchGuardError(`refusing to fetch a private/loopback address: ${host}`);
+  return [...new Set(addresses.map(({ address }) => address))];
+}
+
+async function fetchPinned(
+  url: URL,
+  host: string,
+  addresses: string[],
+  proxy: string | false,
+  signal: AbortSignal,
+  request: NonNullable<GuardedFetchDependencies["fetch"]>,
+): Promise<Response> {
+  const headers = { host: url.host, "user-agent": "okb-clip/0.1", accept: "text/html,*/*" };
+  // Avoid sharing a connection across origins even when their numeric addresses match.
+  const tls = { rejectUnauthorized: true, ...(url.protocol === "https:" && !isIP(host) ? { serverName: host } : {}) };
+  // NO_PROXY has already been matched against the origin, not the dial address.
+  const proxyOption = proxy === false ? false : { url: proxy, respectNoProxy: false };
+  const port = url.port ? `:${url.port}` : "";
+  for (const address of addresses) {
+    const numericHost = isIP(address) === 6 ? `[${address}]` : address;
+    const target = new URL(`${url.protocol}//${numericHost}${port}${url.pathname}${url.search}`);
+    signal.throwIfAborted();
+    try {
+      return await beforeTimeout(request(target, { headers, tls, proxy: proxyOption, redirect: "manual", keepalive: false, signal }), signal);
+    } catch {
+      signal.throwIfAborted();
+      // Fall back only to an address in the same checked answer set.
+    }
+  }
+  throw new FetchGuardError(`fetch failed for ${url.host}${proxy ? " through the configured proxy" : ""}. Check network access and TLS trust.`);
+}
+
+function cancel(body: ReadableStream | null) {
+  void body?.cancel().catch(() => {});
+}
+
+async function readBody(res: Response, maxBytes: number, signal: AbortSignal): Promise<string> {
+  const declared = Number(res.headers.get("content-length") ?? 0);
+  if (declared > maxBytes) {
+    cancel(res.body);
+    throw new FetchGuardError(`response too large (${declared} bytes > ${maxBytes} cap)`);
+  }
+  const reader = res.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      signal.throwIfAborted();
+      const { done, value } = await beforeTimeout(reader.read(), signal);
+      if (done) return new TextDecoder().decode(Buffer.concat(chunks));
+      total += value.length;
+      if (total > maxBytes) throw new FetchGuardError(`response too large (> ${maxBytes} byte cap)`);
+      chunks.push(value);
+    }
+  } catch (error) {
+    void reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/** Fetch a page within one DNS, redirect, and response deadline. */
 export async function guardedFetch(
   rawUrl: string,
   opts: GuardedFetchOptions = {},
+  deps: GuardedFetchDependencies = {},
 ): Promise<FetchedPage> {
+  if (!supportsPinnedFetch) throw new FetchGuardError("Guarded browsing requires Bun 1.4.3 or newer. Update Bun or open the current okbrain app.");
   const { maxBytes = 5_000_000, timeoutMs = 15_000, maxRedirects = 5 } = opts;
+  const { resolve = (host) => lookup(host, { all: true }), fetch: request = fetch, env = process.env } = deps;
   let url: URL;
+  try { url = new URL(rawUrl); }
+  catch { throw new FetchGuardError("not a valid URL"); }
+  const signal = AbortSignal.timeout(timeoutMs);
+
   try {
-    url = new URL(rawUrl);
-  } catch {
-    throw new FetchGuardError(`not a valid URL: ${rawUrl}`);
-  }
-
-  let res: Response | undefined;
-  for (let hop = 0; ; hop++) {
-    await assertAllowed(url, opts);
-    try {
-      res = await fetch(url, {
-        redirect: "manual",
-        signal: AbortSignal.timeout(timeoutMs),
-        headers: { "user-agent": "okb-clip/0.1", accept: "text/html,*/*" },
-      });
-    } catch (e) {
-      throw new FetchGuardError(
-        `fetch failed for ${url.href}: ${(e as Error).message} (offline? okb clip has no offline queue)`,
-      );
-    }
-    if (res.status >= 300 && res.status < 400) {
-      const loc = res.headers.get("location");
-      if (loc === null) throw new FetchGuardError(`redirect without Location from ${url.href}`);
-      if (hop >= maxRedirects)
-        throw new FetchGuardError(`too many redirects (> ${maxRedirects}) from ${rawUrl}`);
-      url = new URL(loc, url); // next hop re-runs both URL and network policy
-      continue;
-    }
-    break;
-  }
-  if (!res.ok)
-    throw new FetchGuardError(`HTTP ${res.status} from ${url.href}`);
-
-  const declared = Number(res.headers.get("content-length") ?? 0);
-  if (declared > maxBytes)
-    throw new FetchGuardError(`response too large (${declared} bytes > ${maxBytes} cap)`);
-
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  const reader = res.body?.getReader();
-  if (reader)
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.length;
-      if (total > maxBytes) {
-        await reader.cancel();
-        throw new FetchGuardError(`response too large (> ${maxBytes} byte cap)`);
+    for (let hop = 0; ; hop++) {
+      authorize(url, opts);
+      const host = url.hostname.replace(/^\[|\]$/g, "");
+      const proxy = guardedFetchProxy(url, env);
+      const addresses = await vettedAddresses(host, opts.allowPrivate === true, signal, resolve);
+      const res = await fetchPinned(url, host, addresses, proxy, signal, request);
+      if (res.status >= 300 && res.status < 400) {
+        cancel(res.body);
+        const location = res.headers.get("location");
+        if (location === null) throw new FetchGuardError(`redirect without Location from ${url.host}`);
+        if (hop >= maxRedirects) throw new FetchGuardError(`too many redirects (> ${maxRedirects})`);
+        try { url = new URL(location, url); }
+        catch { throw new FetchGuardError(`invalid redirect Location from ${url.host}`); }
+        continue;
       }
-      chunks.push(value);
+      if (!res.ok) {
+        cancel(res.body);
+        throw new FetchGuardError(`HTTP ${res.status} from ${url.host}`);
+      }
+      const body = await readBody(res, maxBytes, signal);
+      return { url: url.href, contentType: res.headers.get("content-type") ?? "", body };
     }
-  const body = new TextDecoder().decode(Buffer.concat(chunks));
-  return { url: url.href, contentType: res.headers.get("content-type") ?? "", body };
+  } catch (error) {
+    if (signal.aborted) throw new FetchGuardError(`fetch failed for ${url.host}: timed out after ${timeoutMs} ms`);
+    if (error instanceof GuardedFetchProxyError) throw new FetchGuardError(error.message);
+    throw error;
+  }
 }

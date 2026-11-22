@@ -472,6 +472,8 @@ Goal: the brain improves itself on a schedule.
       refusals report their real reason), step cap; guarded fetch underneath
       (SSRF guard stays live)
 - [x] Apply the enrichment host and path rules before following redirects.
+- [x] Connect Clip, RSS, and enrichment to vetted addresses through redirects,
+  preserving the source hostname for TLS and applying one fetch deadline.
 - [x] Crawler loop: JSON-action protocol over the plain-text chat gateway
       (list_concepts / read_concept / fetch_url / write_concept / done);
       enrich existing | mint `references/<slug>` (new ids confined there,
@@ -685,7 +687,8 @@ Goal: the brain improves itself on a schedule.
       binary; `okb --version`; MCP server version)
 - [x] `bun run package` — `scripts/package-release.ts --local`: host-only
       archive with the vec0 from `node_modules`, fully offline
-- [x] CI + release pin Bun 1.3.14 (B6 was a `latest` drift)
+- [x] CI, release, and the worker pin Bun 1.4.3 for guarded proxy handling (B6
+      was a `latest` drift).
 - [x] Docs: README (v0.2, GUI tour, offline package, upgrade), CONTEXT,
       CLAUDE.md invariant 1, REFERENCES (R1 updated, R3/R4 added), skills
 - [ ] Tag `v0.1.0` (runs the release workflow) — the maintainer's call
@@ -823,6 +826,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Bound guarded Clip, RSS, and enrichment requests to checked
+  addresses and verified TLS and proxy handling on Bun 1.4.3.
 - 2026-11-22 — Fixed the SQLite cache startup race between watch and foreground
   reads. Schema initialization and explicit rebuilds now commit atomically.
 - 2026-11-22 — Added the pinned Vite studies and validated checkout and source

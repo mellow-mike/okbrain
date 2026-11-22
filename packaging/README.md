@@ -33,8 +33,8 @@ MCP server, SQLite extension, README, license, and the personal and coding
 guides. The Pi runtime is bundled. ChatGPT plan usage and hosted coding
 providers require network access when invoked.
 
-Both workflows pin the Bun version (`bun-version: 1.3.14`); bump it
-deliberately — a floating `latest` once broke Windows CI (B6).
+Run local packaging commands with Bun 1.4.3 or newer. CI, release, and the
+coding worker build pin Bun 1.4.3. A floating `latest` previously broke Windows CI (B6).
 
 ## Signing and notarization
 
