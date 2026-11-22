@@ -835,15 +835,54 @@ try {
   await teamAccess.getByRole("button", { name: "Start team listener", exact: true }).click();
   const teamListener = await startedTeam;
   assert.ok(teamListener.ok());
-  const { url: teamPage } = (await teamListener.json()).result;
+  const { url: teamPage, port: boundTeamPort } = (await teamListener.json()).result;
   const teamLink = teamAccess.getByRole("link", { name: editorTeamOrigin, exact: true });
   await teamLink.waitFor();
   assert.equal(await teamLink.getAttribute("href"), editorTeamOrigin);
   const landing = await (await fetch(teamPage)).text();
   assert.match(landing, /okbrain: Connect to Team Workspace/);
   assert.equal(landing.includes(server.token), false);
+  async function teamStartupChange(label: string, action: string) {
+    const request = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding/team/preferences" &&
+      response.request().method() === "POST" && response.request().postDataJSON().action === action);
+    await teamAccess.getByRole("button", { name: label, exact: true }).click();
+    const response = await request;
+    const payload = await response.json();
+    assert.ok(response.ok(), payload.error);
+    return { input: response.request().postDataJSON(), preferences: payload.result };
+  }
+  const enabled = await teamStartupChange("Enable startup", "enable");
+  const assignedBinding = { port: boundTeamPort, publicOrigin: editorTeamOrigin };
+  assert.deepEqual(enabled.input, { action: "enable", ...assignedBinding });
+  assert.deepEqual(enabled.preferences.startup, assignedBinding);
+  await teamAccess.getByText(/Startup enabled on local port/).waitFor();
+  const disabled = await teamStartupChange("Disable startup", "disable");
+  assert.equal(disabled.preferences.startup, null);
+  assert.equal(await teamLink.isVisible(), true);
+  assert.equal((await fetch(teamPage)).ok, true);
+  await teamStartupChange("Enable startup", "enable");
   await teamAccess.getByRole("button", { name: "Stop listener", exact: true }).click();
   await teamLink.waitFor({ state: "hidden" });
+  const teamPort = teamAccess.getByLabel("Local port", { exact: true });
+  const atLaunch = teamAccess.getByRole("checkbox", { name: "Start on launch", exact: true });
+  await teamPort.fill("0");
+  await atLaunch.check();
+  assert.equal(await teamPort.evaluate((input) => input.checkValidity()), false);
+  await teamPort.fill(String(boundTeamPort));
+  const fixedStart = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding/team" &&
+    response.request().method() === "POST" && response.request().postDataJSON().action === "start");
+  await teamAccess.getByRole("button", { name: "Start team listener", exact: true }).click();
+  const fixedListener = await fixedStart;
+  assert.equal(fixedListener.ok(), true);
+  assert.deepEqual(fixedListener.request().postDataJSON(), { action: "start", startOnLaunch: true, ...assignedBinding });
+  await teamAccess.getByText(/Startup enabled on local port/).waitFor();
+  await teamAccess.getByRole("button", { name: "Stop listener", exact: true }).click();
+  await teamAccess.getByText("Team listener stopped and startup disabled.", { exact: true }).waitFor();
+  const persistedTeamPrefs = await fetch(new URL("api/coding/team/preferences", server.url), {
+    headers: { "x-okb-token": server.token },
+  });
+  assert.ok(persistedTeamPrefs.ok);
+  assert.equal((await persistedTeamPrefs.json()).result.startup, null);
   await page.getByRole("combobox", { name: "Provider", exact: true }).selectOption("google");
   assert.equal(await page.getByRole("combobox", { name: "Model", exact: true }).inputValue(), "gemini-3.5-flash-lite");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);

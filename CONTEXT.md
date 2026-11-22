@@ -49,6 +49,10 @@ HTTPS origin, and project identity together in SecretStorage and uses the
 member route for repository previews and run review. Each request requires
 approval of a new preview of the current source. Independent package review uses Pi
 Durable child conversations with explicit package previews and combined usage.
+An explicit owner preference can restore the team loopback listener's fixed
+port and HTTPS origin after a writable server restart from the same catalog.
+The saved port is reserved from the owner listener. Bind failures stay visible
+in Coding until the operator retries or clears the preference.
 Project reviewers can explicitly reopen a selected request's saved task and
 source from Pi admission records, including each package's excerpts.
 GitHub activity and compare handoff use a bound project remote.

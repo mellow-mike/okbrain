@@ -37,7 +37,11 @@ Save a project-specific provider API key and create a token for the member in **
 
 In **Coding → Team browser access**, start a separate listener. A member opens the team workspace URL and enters their project token. They can preview and approve sources, inspect project runs and their saved task and source, cancel or resume runs, and record reviews. Project configuration, credentials, token management, and transcript deletion stay with the local operator.
 
-The team listener binds to `127.0.0.1`. For remote access, an operator can configure a TLS reverse proxy that directs the declared HTTPS origin to the team listener and sets the upstream Host header to `127.0.0.1:<team port>`. The listener serves only the coding workspace and its project-token routes. Keep the separate local operator listener private. Team listener settings reset when the okbrain server stops.
+The team listener binds to `127.0.0.1`. For remote access, an operator can configure a TLS reverse proxy that directs the declared HTTPS origin to the team listener and sets the upstream Host header to `127.0.0.1:<team port>`. The listener serves the coding workspace and its project-token routes. Keep the separate local operator listener private.
+
+Choose a fixed port and select **Start on launch** to restore the team workspace when a writable okbrain server opens the same Coding state. While the listener is running, **Enable startup** saves its displayed port and HTTPS origin. **Disable startup** leaves the current listener running. **Stop listener** stops it and clears the startup preference. Closing okbrain saves the preference for the next launch.
+
+If the saved port is occupied, the team listener stays stopped and the owner app shows the bind error. Free the port and choose **Retry startup**, or disable startup and choose another binding. The saved team port is reserved from the owner app, so the reverse proxy can keep targeting it across restarts.
 
 ### Connect from VS Code or Cursor
 

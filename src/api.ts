@@ -18,7 +18,7 @@ import { providerKeyStatus, setProviderKey } from "./core/ai/local-keys.ts";
 import { AiError, providersFor } from "./core/ai/gateway.ts";
 import { CodingError, CodingSessionMissingError } from "./core/coding/durable.ts";
 import { CodingProjectProfileError } from "./core/coding/project-profile.ts";
-import { codingProjectCatalogPath, CodingProjectControl, ProjectControlError, type ProjectControlOptions } from "./core/coding/project-control.ts";
+import { codingProjectCatalogPath, CodingProjectControl, ProjectControlError, readCodingTeamStartup, readCodingTeamStartupPort, type ProjectControlOptions } from "./core/coding/project-control.ts";
 import { RepositoryContextError } from "./core/coding/repository-context.ts";
 import { StandaloneCodingControl, StandaloneControlError } from "./core/coding/standalone-control.ts";
 import { CodingTeamListener, type TeamStatus } from "./core/coding/team-listener.ts";
@@ -887,11 +887,14 @@ async function codingRequest(req: Request, url: URL, opts: ServeState, cors: Hdr
       const result = await opts.standalone!.dispatch(req.method, path.slice("/standalone".length), body, canWrite);
       return json(200, { result }, headers);
     }
-    if (path === "/team" && opts.team) {
+    if ((path === "/team" || path === "/team/preferences") && opts.team) {
       if (!owner) return json(403, { error: "Only the local operator can manage the team listener." }, headers);
-      if (req.method === "GET") return json(200, { result: opts.team.status }, headers);
-      if (readonly) return json(403, { error: "This server is attached to a read-only brain mount." }, headers);
-      const result = await opts.team.change(body, (request, state) => codingTeamRequest(request, state, opts));
+      const preferences = path === "/team/preferences";
+      if (req.method === "GET") return json(200, { result: preferences ? opts.team.preferences() : opts.team.status }, headers);
+      const policy = () => canWrite() && teamControlWritable(opts);
+      if (!policy()) return json(403, { error: "Open a writable brain to change the team workspace." }, headers);
+      const handler = (request: Request, state: TeamStatus) => codingTeamRequest(request, state, opts);
+      const result = preferences ? await opts.team.changePreferences(body, handler, policy) : await opts.team.change(body, handler, policy);
       return json(200, { result }, headers);
     }
     const result = await opts.coding!().dispatch(req.method, path, body, owner, bearer, readonly, canWrite);
@@ -913,6 +916,15 @@ const teamAssets = new Set([
   "/gui/fonts/RecursiveSans-VF.woff2", "/gui/fonts/RecursiveMono-VF.woff2",
   "/gui/fonts/Literata-VF.woff2", "/gui/fonts/Literata-Italic-VF.woff2",
 ]);
+
+function teamControlWritable(local: Pick<ServeState, "bundle" | "servedBrain" | "readonly">): boolean {
+  if (local.readonly) return false;
+  if (!local.servedBrain) return true;
+  try {
+    const mount = resolveBrain(local.servedBrain);
+    return mount.path === local.bundle && !mount.readonly;
+  } catch { return false; }
+}
 
 async function codingTeamRequest(req: Request, team: TeamStatus, local: ServeState): Promise<Response> {
   const url = new URL(req.url);
@@ -941,7 +953,7 @@ async function codingTeamRequest(req: Request, team: TeamStatus, local: ServeSta
   if (url.pathname.startsWith("/api/coding/")) {
     if (req.method === "OPTIONS") return new Response(null, { status: headers ? 204 : 403, headers });
     return codingRequest(req, url, {
-      bundle: local.bundle, port: team.port, token: "", readonly: local.readonly,
+      bundle: local.bundle, port: team.port, token: "", readonly: !teamControlWritable(local),
       coding: local.coding, projectTokensOnly: true,
     }, headers ?? {});
   }
@@ -1087,12 +1099,16 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
 }
 
 export function createApiServer(opts: ApiOptions): ApiServer {
+  const wanted = opts.port ?? DEFAULT_PORT;
+  const reservedTeamPort = readCodingTeamStartupPort(opts.coding?.stateDir);
+  if (reservedTeamPort !== null && wanted === reservedTeamPort) {
+    throw new Error(`Port ${wanted} is reserved for the team workspace. Choose another port for the local operator app.`);
+  }
   const token = opts.token ?? ensureServeToken();
   const plan = createBrowserPlan(opts.chatgpt);
   const notion = createNotionSource(opts.notion);
   const mcp = new ManagedMcpHttp();
   const watches = new Map<string | null, BundleWatcher>();
-  const team = new CodingTeamListener();
   const standalone = new StandaloneCodingControl(opts.standaloneCoding);
   const { bundle, readonly = false } = opts;
   const maintenanceAllowed = (target: MaintenanceTarget): boolean => {
@@ -1120,29 +1136,49 @@ export function createApiServer(opts: ApiOptions): ApiServer {
       finally { await local.close(); }
     },
   });
-  const wanted = opts.port ?? DEFAULT_PORT;
   let controller: CodingProjectControl | undefined;
   const coding = () => controller ??= new CodingProjectControl({ ...opts.coding, retentionAllowed: () => {
     if (readonly || opts.coding?.retentionAllowed?.() === false) return false;
     if (!opts.servedBrain) return true;
     try { return !resolveBrain(opts.servedBrain).readonly; } catch { return false; }
   } });
-  let server: Bun.Server<undefined>;
-  try {
-    server = Bun.serve({
+  const team = new CodingTeamListener({
+    get: () => controller ? controller.getTeamStartup() : readCodingTeamStartup(opts.coding?.stateDir),
+    save: (value) => coding().saveTeamStartup(value),
+    ensure: () => { coding(); },
+  });
+  let state: ServeState;
+  const listen = () => {
+    const listener = Bun.serve({
       hostname: "127.0.0.1",
       port: wanted,
       fetch(req) {
         const path = new URL(req.url).pathname;
-        if (path === "/api/plan/answer") server.timeout(req, 150);
-        if (path === "/api/ask/stream") server.timeout(req, 0);
-        if (path.startsWith("/api/coding/")) server.timeout(req, 65);
-        if (path === "/api/op/sync" || path === "/api/op/sync_recovery") server.timeout(req, 260);
-        if (path === "/api/brains" && req.method === "POST") server.timeout(req, 150);
-        return handleRequest(req, { bundle, servedBrain: opts.servedBrain, watches, maintenance, maintenanceAllowed,
-          port: server.port!, token, readonly, plan, coding, standalone, team, notion, mcp });
+        if (path === "/api/plan/answer") listener.timeout(req, 150);
+        if (path === "/api/ask/stream") listener.timeout(req, 0);
+        if (path.startsWith("/api/coding/")) listener.timeout(req, 65);
+        if (path === "/api/op/sync" || path === "/api/op/sync_recovery") listener.timeout(req, 260);
+        if (path === "/api/brains" && req.method === "POST") listener.timeout(req, 150);
+        return handleRequest(req, state);
       },
     });
+    return listener;
+  };
+  let server: Bun.Server<undefined>;
+  let teamPortAtBoot: number | null;
+  try {
+    const first = listen();
+    if (first.port === reservedTeamPort) {
+      // Holding the first port during the second ephemeral bind prevents it
+      // from being assigned again. Requests wait until state is initialized.
+      try { server = listen(); } finally { void first.stop(true); }
+    } else server = first;
+    // Another runtime may have saved a binding during the port selection.
+    teamPortAtBoot = readCodingTeamStartupPort(opts.coding?.stateDir);
+    if (server.port === reservedTeamPort || server.port === teamPortAtBoot) {
+      void server.stop(true);
+      throw new Error("Could not assign a local operator port separate from the Team workspace.");
+    }
   } catch (e) {
     if ((e as { code?: string }).code === "EADDRINUSE")
       throw new Error(
@@ -1150,11 +1186,16 @@ export function createApiServer(opts: ApiOptions): ApiServer {
       );
     throw e;
   }
+  const port = server.port!;
+  state = { bundle, servedBrain: opts.servedBrain, watches, maintenance, maintenanceAllowed,
+    port, token, readonly, plan, coding, standalone, team, notion, mcp };
   if (!readonly) maintenance.start();
   if (!readonly && existsSync(codingProjectCatalogPath(opts.coding?.stateDir))) {
     try { coding(); } catch { /* Leave personal routes available. The Coding API reports catalog errors. */ }
+    if (teamPortAtBoot !== null && teamControlWritable(state)) {
+      void team.restore((request, binding) => codingTeamRequest(request, binding, state), () => teamControlWritable(state)).catch(() => {});
+    }
   }
-  const port = server.port!;
   return {
     url: `http://127.0.0.1:${port}/`,
     port,
@@ -1162,8 +1203,10 @@ export function createApiServer(opts: ApiOptions): ApiServer {
     async stop() {
       plan.close();
       notion.close();
+      const teamStopped = team.stop();
+      const closeCoding = () => controller?.close();
       const stopped = await Promise.allSettled([
-        server.stop(true), team.stop(), mcp.stop(), controller?.close(), standalone.close(), maintenance.stop(),
+        server.stop(true), teamStopped, mcp.stop(), teamStopped.then(closeCoding, closeCoding), standalone.close(), maintenance.stop(),
         ...[...watches.values()].map((watcher) => watcher.stop()),
       ]);
       const failures = stopped.flatMap((result) => result.status === "rejected" ? [result.reason] : []);

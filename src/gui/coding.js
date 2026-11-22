@@ -1074,68 +1074,163 @@
   function teamSettings(parent, readonly, isDetached) {
     const panel = document.createElement('details');
     panel.className = 'coding-panel';
-    panel.innerHTML = '<summary>Team browser access</summary><form class="stack coding-form">' +
-      '<p class="muted">Start a separate local listener for team members with project tokens.</p>' +
+    panel.innerHTML = '<summary>Team browser access</summary><div class="stack coding-form">' +
+      '<p class="muted">The team listener accepts project tokens.</p><form class="stack">' +
       '<div class="coding-grid">' +
       field('Local port', '6524', 'number', 'name="port" min="0" max="65535" required') +
       field('HTTPS proxy origin (optional)', '', 'url', 'name="publicOrigin" placeholder="https://coding.example.com"') +
-      '</div><div class="row"><button type="submit">Start team listener</button>' +
+      '</div><label class="row"><input type="checkbox" name="startOnLaunch"><span>Start on launch</span></label>' +
+      '<p class="muted">Startup uses a fixed local port. Use port 0 to let the app choose a port for this run.</p>' +
+      '<div class="row"><button type="submit" disabled>Start team listener</button></div></form>' +
+      '<div data-team-live></div><div data-team-startup hidden><p data-team-startup-summary></p><p class="error" data-team-startup-error hidden></p></div>' +
+      '<div class="row" data-team-actions hidden><button type="button" data-enable hidden>Enable startup</button>' +
+      '<button type="button" data-disable hidden>Disable startup</button><button type="button" data-retry hidden>Retry startup</button>' +
       '<button type="button" data-stop hidden>Stop listener</button></div>' +
-      '<div class="coding-feedback" role="status"></div></form>' +
-      '<div class="stack coding-form"><h3>Connect VS Code or Cursor</h3>' +
+      '<div class="coding-feedback" role="status"></div>' +
+      '<div class="stack"><h3>Connect VS Code or Cursor</h3>' +
       '<p>Use <strong>Extensions → Install from VSIX</strong> to install <code>okbrain-coding.vsix</code>. ' +
       'From a trusted local editor window, choose <strong>okbrain: Connect to Team Workspace</strong> in the Command Palette.</p>' +
-      '<p class="muted" data-team-editor-help>Set an HTTPS proxy origin when starting the listener to connect an editor.</p></div>';
+      '<p class="muted" data-team-editor-help>Set an HTTPS proxy origin when starting the listener to connect an editor.</p></div></div>';
     parent.append(panel);
     const form = panel.querySelector('form');
-    const feedback = form.querySelector('[role="status"]');
+    const feedback = panel.querySelector('[role="status"]');
     const start = form.querySelector('button[type="submit"]');
-    const stop = form.querySelector('[data-stop]');
+    const stop = panel.querySelector('[data-stop]');
+    const enable = panel.querySelector('[data-enable]');
+    const disable = panel.querySelector('[data-disable]');
+    const retry = panel.querySelector('[data-retry]');
+    const live = panel.querySelector('[data-team-live]');
+    const startup = panel.querySelector('[data-team-startup]');
+    const startupSummary = panel.querySelector('[data-team-startup-summary]');
+    const startupError = panel.querySelector('[data-team-startup-error]');
+    const actions = panel.querySelector('[data-team-actions]');
     const editorHelp = panel.querySelector('[data-team-editor-help]');
+    const { port, publicOrigin, startOnLaunch } = form.elements;
+    const brain = document.querySelector('#brain')?.value;
+    const current = () => panel.isConnected && !isDetached() && document.querySelector('#brain')?.value === brain;
     let status = null;
+    let prefs = null;
+    let busy = false;
 
-    function update(value) {
-      status = value;
-      if (isDetached()) return;
-      report(feedback);
-      start.hidden = status !== null;
-      stop.hidden = status === null;
-      start.disabled = stop.disabled = readonly;
-      form.elements.port.disabled = form.elements.publicOrigin.disabled = status !== null;
+    function paint() {
+      if (!current()) return;
+      const saved = prefs?.startup;
+      const locked = readonly || busy || !prefs;
+      form.hidden = !!status || !!saved;
+      start.disabled = port.disabled = publicOrigin.disabled = startOnLaunch.disabled = locked;
+      stop.hidden = !status;
+      enable.hidden = !status || !!saved;
+      disable.hidden = !saved;
+      retry.hidden = !!status || !saved;
+      stop.disabled = enable.disabled = disable.disabled = retry.disabled = locked;
+      actions.hidden = readonly || (!status && !saved);
+      startup.hidden = !saved && !prefs?.startupError;
+      startupSummary.textContent = saved ? 'Startup enabled on local port ' + saved.port +
+        (saved.publicOrigin ? ' · HTTPS proxy ' + saved.publicOrigin : '') + '.' +
+        (status ? ' Stop listener also disables startup.' : '') : '';
+      startupError.textContent = prefs?.startupError || '';
+      startupError.hidden = !prefs?.startupError;
       editorHelp.textContent = status?.publicOrigin
         ? 'In the editor, enter the HTTPS team origin shown above and a project token from Project settings → Team access.'
+        : saved?.publicOrigin ? 'Start the team listener before connecting an editor.'
         : 'Set an HTTPS proxy origin when starting the listener to connect an editor.';
+      live.replaceChildren();
+      live.hidden = !status;
       if (!status) return;
-      form.elements.port.value = status.port;
-      form.elements.publicOrigin.value = status.publicOrigin || '';
-      feedback.append(status.publicOrigin ? 'HTTPS team origin ' : 'Local team browser ', Object.assign(document.createElement('a'), {
+      live.append(status.publicOrigin ? 'HTTPS team origin ' : 'Local team browser ', Object.assign(document.createElement('a'), {
         href: status.publicOrigin || status.url, textContent: status.publicOrigin || status.url,
         target: '_blank', rel: 'noopener noreferrer',
       }));
-      if (status.publicOrigin) feedback.append(' · Local upstream ' + status.url);
+      if (status.publicOrigin) live.append(' · Local upstream ' + status.url);
     }
 
-    panel.addEventListener('toggle', async () => {
-      if (!panel.open) return;
-      try { update(await coding('/team')); } catch (error) { report(feedback, error); }
-    });
-    start.disabled = readonly;
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      if (readonly || status) return;
-      start.disabled = true;
+    function setStatus(next) {
+      if (status && !next) startOnLaunch.checked = false;
+      status = next;
+      if (status) {
+        port.value = status.port;
+        publicOrigin.value = status.publicOrigin || '';
+      }
+      port.min = startOnLaunch.checked ? '1' : '0';
+    }
+    async function read() {
+      const [next, preferences] = await Promise.all([coding('/team'), coding('/team/preferences')]);
+      if (!current()) return;
+      setStatus(next);
+      prefs = preferences;
+    }
+    async function perform(action, message = '', refreshOnError = false) {
+      if (busy || !current()) return;
+      busy = true;
+      paint();
+      report(feedback);
+      let focusAfter;
       try {
-        update(await coding('/team', {
-          action: 'start', port: Number(form.elements.port.value), publicOrigin: form.elements.publicOrigin.value,
-        }));
-      } catch (error) { start.disabled = false; report(feedback, error); }
+        focusAfter = await action();
+        if (current()) feedback.textContent = typeof message === 'function' ? message() : message;
+      } catch (error) {
+        if (refreshOnError && current()) await read().catch(() => {});
+        if (current()) report(feedback, error);
+      } finally {
+        busy = false;
+        paint();
+        if (current()) focusAfter?.focus();
+      }
+    }
+    function changeListener(input, message) {
+      if (readonly || !prefs) return;
+      void perform(async () => {
+        const next = await coding('/team', input);
+        if (!current()) return;
+        setStatus(next);
+        prefs = await coding('/team/preferences');
+        return status ? stop : start;
+      }, message, true);
+    }
+    function changeStartup(input, message) {
+      if (readonly || !prefs) return;
+      void perform(async () => {
+        const next = await coding('/team/preferences', input);
+        if (!current()) return;
+        prefs = next;
+        if (input.action === 'retry') {
+          const resumed = await coding('/team');
+          if (!current()) return;
+          setStatus(resumed);
+          return status ? stop : retry;
+        }
+        return input.action === 'enable' ? disable : status ? enable : start;
+      }, message, true);
+    }
+
+    panel.addEventListener('toggle', () => {
+      if (panel.open) void perform(read);
     });
-    stop.addEventListener('click', async () => {
-      if (readonly || !status) return;
-      stop.disabled = true;
-      try { update(await coding('/team', { action: 'stop' })); }
-      catch (error) { stop.disabled = false; report(feedback, error); }
+    startOnLaunch.addEventListener('change', () => {
+      port.min = startOnLaunch.checked ? '1' : '0';
     });
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (start.disabled || status || prefs?.startup) return;
+      changeListener({
+        action: 'start', port: Number(port.value), publicOrigin: publicOrigin.value, startOnLaunch: startOnLaunch.checked,
+      }, startOnLaunch.checked ? 'Team listener started and startup saved.' : 'Team listener started.');
+    });
+    stop.addEventListener('click', () => {
+      if (status) changeListener({ action: 'stop' }, prefs?.startup
+        ? 'Team listener stopped and startup disabled.' : 'Team listener stopped.');
+    });
+    enable.addEventListener('click', () => {
+      if (status && !prefs?.startup)
+        changeStartup({ action: 'enable', port: status.port, publicOrigin: status.publicOrigin }, 'Startup saved.');
+    });
+    disable.addEventListener('click', () => {
+      if (prefs?.startup) changeStartup({ action: 'disable' }, 'Startup disabled.');
+    });
+    retry.addEventListener('click', () => {
+      if (!status && prefs?.startup) changeStartup({ action: 'retry' }, () => status ? 'Team listener started.' : '');
+    });
+    paint();
   }
 
   function patchReview(parent, project, readonly, detached) {

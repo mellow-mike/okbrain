@@ -1,7 +1,7 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, rmSync } from "node:fs";
 import { lstat, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { dataDir, resolveActor } from "../config.ts";
@@ -28,6 +28,7 @@ import { excludedPath, selectRepositoryContext } from "./repository-context.ts";
 import { validateCodingProjectProfile, type CodingProjectProfile } from "./project-profile.ts";
 import { launchProjectWorker, ProjectWorkerInterrupted } from "./project-worker.ts";
 import type { CodingTaskProgress } from "./task-progress.ts";
+import type { TeamStartup } from "./team-listener.ts";
 
 type Json = Record<string, unknown>;
 type Actor = { id: string; owner: boolean; project?: string };
@@ -65,6 +66,24 @@ type Running = {
 
 export class ProjectControlError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
+}
+
+export function teamListenConfiguration(port: unknown, publicOrigin: unknown, allowEphemeral = false): TeamStartup {
+  if (typeof port !== "number" || !Number.isInteger(port) || port < (allowEphemeral ? 0 : 1) || port > 65535) {
+    throw new ProjectControlError(allowEphemeral ? "Enter a local TCP port from 0 to 65535."
+      : "Choose a fixed local TCP port from 1 to 65535 for Team workspace startup.");
+  }
+  if (publicOrigin === null || publicOrigin === undefined || publicOrigin === "") return { port, publicOrigin: null };
+  if (typeof publicOrigin === "string" && publicOrigin.length <= 256) {
+    try {
+      const url = new URL(publicOrigin);
+      const withoutSlash = publicOrigin.endsWith("/") ? publicOrigin.slice(0, -1) : publicOrigin;
+      const suppliedOrigin = withoutSlash.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+      const explicitDefaultPort = !url.port && suppliedOrigin === `${url.origin}:443`;
+      if (url.protocol === "https:" && (suppliedOrigin === url.origin || explicitDefaultPort)) return { port, publicOrigin: url.origin };
+    } catch { /* Report invalid input without echoing it. */ }
+  }
+  throw new ProjectControlError("Enter an HTTPS origin without a path, credentials, query, or fragment.");
 }
 
 const sessionPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -156,6 +175,30 @@ export function codingProjectCatalogPath(stateDir = join(dataDir(), "coding-proj
   return join(stateDir, "projects.sqlite");
 }
 
+const readTeamStartupSql = "SELECT port, public_origin AS publicOrigin FROM team_startup WHERE singleton = 1";
+
+/** Read saved Team preferences without taking the catalog lease or migrating older catalogs. */
+export function readCodingTeamStartup(stateDir?: string): TeamStartup | null {
+  const catalog = codingProjectCatalogPath(stateDir);
+  if (!existsSync(catalog)) return null;
+  try {
+    ensureExtensionCapableSqlite();
+    const db = new Database(catalog, { readonly: true, strict: true });
+    try {
+      using statement = db.prepare<TeamStartup, []>(readTeamStartupSql);
+      const row = statement.get();
+      return row && teamListenConfiguration(row.port, row.publicOrigin);
+    } finally { db.close(true); }
+  } catch {
+    return null;
+  }
+}
+
+/** Reserve a saved Team port before opening the owner listener, including from a read-only server. */
+export function readCodingTeamStartupPort(stateDir?: string): number | null {
+  return readCodingTeamStartup(stateDir)?.port ?? null;
+}
+
 export class CodingProjectControl {
   readonly #directory: string;
   readonly #db: Database;
@@ -205,6 +248,11 @@ export class CodingProjectControl {
         CREATE TABLE IF NOT EXISTS projects(
           id TEXT PRIMARY KEY, title TEXT NOT NULL, workspace TEXT NOT NULL, scopes TEXT NOT NULL,
           provider TEXT NOT NULL, model TEXT NOT NULL, thinking TEXT, api_key TEXT, created TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS team_startup(
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+          port INTEGER NOT NULL CHECK(typeof(port) = 'integer' AND port BETWEEN 1 AND 65535),
+          public_origin TEXT
         );
         CREATE TABLE IF NOT EXISTS project_presets(
           project TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, id TEXT NOT NULL,
@@ -304,6 +352,23 @@ export class CodingProjectControl {
     } finally {
       this.#lease.close(true);
     }
+  }
+
+  getTeamStartup(): TeamStartup | null {
+    if (this.#closing) throw new ProjectControlError("The coding server is shutting down.", 409);
+    const row = this.#get<TeamStartup>(readTeamStartupSql);
+    return row && teamListenConfiguration(row.port, row.publicOrigin);
+  }
+
+  saveTeamStartup(value: TeamStartup | null): void {
+    if (this.#closing) throw new ProjectControlError("The coding server is shutting down.", 409);
+    if (value === null) {
+      this.#write("DELETE FROM team_startup WHERE singleton = 1");
+      return;
+    }
+    const binding = teamListenConfiguration(value.port, value.publicOrigin);
+    this.#write(`INSERT INTO team_startup (singleton, port, public_origin) VALUES (1, ?, ?)
+      ON CONFLICT(singleton) DO UPDATE SET port = excluded.port, public_origin = excluded.public_origin`, binding.port, binding.publicOrigin);
   }
 
   #get<T>(sql: string, ...bindings: SQLQueryBindings[]): T | null {

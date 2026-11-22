@@ -8,6 +8,8 @@ import { createApiServer, type ApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
 import { listCodingModels, maxLiveAnswerLength, runCodingSession, type CodingLiveAnswer, type CodingSessionStatusResult, type SavedCodingRequestInput } from "../src/core/coding/durable.ts";
 import type { CodingTaskProgress } from "../src/core/coding/task-progress.ts";
+import type { TeamPreferences, TeamStatus } from "../src/core/coding/team-listener.ts";
+import { loadConfig, saveConfig } from "../src/core/config.ts";
 import type { CodingProjectProfile } from "../src/core/coding/project-profile.ts";
 
 const ownerToken = "local-operator-test";
@@ -1338,6 +1340,68 @@ test("the dedicated team listener serves only coding assets and project token ro
     expect(await local.call("/team", { action: "stop" })).toBeNull();
   } finally {
     await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("team startup approval binds the live port and remains inspectable from a read-only app", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-team-preferences-");
+  const open = (readonly = false) => createApiServer({ bundle: workspace, port: 0, token: ownerToken, readonly, coding: { stateDir } });
+  let api = open();
+  try {
+    const local = apiClient(api.url);
+    const preferences = "/team/preferences";
+    expect(await local.call<TeamPreferences>(preferences)).toEqual({ startup: null, startupError: null });
+    expect((await local.request("/team", { action: "start", port: 0, startOnLaunch: true })).status).toBe(400);
+    expect(await local.call<TeamStatus | null>("/team")).toBeNull();
+    const status = await local.call<TeamStatus>("/team", { action: "start", port: 0, publicOrigin: "https://team.example" });
+    const binding = { port: status.port, publicOrigin: status.publicOrigin };
+    const enable = { action: "enable", ...binding };
+    expect((await local.request(preferences, { ...enable, publicOrigin: "https://different.example" })).status).toBe(409);
+    expect((await local.request(preferences, { ...enable, port: status.port === 65535 ? 65534 : status.port + 1 })).status).toBe(409);
+    expect(await local.call<TeamPreferences>(preferences, enable)).toEqual({ startup: binding, startupError: null });
+    expect(await local.call<TeamPreferences>(preferences, { action: "disable" })).toEqual({ startup: null, startupError: null });
+    expect(await local.call<TeamStatus>("/team")).toEqual(status);
+    await local.call(preferences, enable);
+
+    await api.stop();
+    api = open(true);
+    const viewOnly = apiClient(api.url);
+    expect(await viewOnly.call<TeamStatus | null>("/team")).toBeNull();
+    expect(await viewOnly.call<TeamPreferences>(preferences)).toEqual({ startup: binding, startupError: null });
+    expect((await viewOnly.request(preferences, { action: "retry" })).status).toBe(403);
+    expect((await viewOnly.request(preferences, { action: "disable" })).status).toBe(403);
+    expect((await viewOnly.request("/team", { action: "stop" })).status).toBe(403);
+  } finally {
+    await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a running team listener respects a newly read-only served brain", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-team-mount-policy-");
+  const saved = loadConfig();
+  const mount = (readonly: boolean) => saveConfig({ ...saved, brains: { ...saved.brains, teamPolicy: { path: workspace, readonly } } });
+  const models = createModels();
+  models.setProvider(fauxProvider({ provider: "openai", models: [{ id: "team-policy-fixture" }] }).provider);
+  let api: ApiServer | undefined;
+  try {
+    mount(false);
+    api = createApiServer({ bundle: workspace, servedBrain: "teamPolicy", port: 0, token: ownerToken, coding: { stateDir, models } });
+    const owner = apiClient(api.url);
+    const project = await owner.call<Project>("/projects", { workspace, title: "Team policy", provider: "openai", model: "team-policy-fixture" });
+    const path = "/projects/" + project.id;
+    const { token } = await owner.call<{ token: string }>(path + "/members", { name: "team-policy-reviewer" });
+    const status = await owner.call<TeamStatus>("/team", { action: "start", port: 0 });
+    const member = apiClient(status.url);
+    expect((await member.request(path + "/run", { session: "main" }, token)).status).toBe(400);
+    mount(true);
+    expect((await member.request(path + "/runs", undefined, token)).status).toBe(200);
+    expect((await member.request(path + "/run", { session: "main" }, token)).status).toBe(403);
+    expect((await owner.request("/team/preferences", { action: "enable", port: status.port, publicOrigin: null })).status).toBe(403);
+  } finally {
+    await api?.stop();
+    saveConfig(saved);
     await rm(root, { recursive: true, force: true });
   }
 });
