@@ -38,6 +38,13 @@
       }
     }
 
+    function credentialForm(kind, label, explanation, saveLabel, hasToken) {
+      return '<form class="stack coding-form" data-github-credential="' + kind + '"><p class="muted">' + explanation + '</p>' +
+        '<label class="field"><span>' + label + '</span><input type="password" name="token" required autocomplete="off" spellcheck="false" maxlength="280"></label>' +
+        '<div class="row"><button type="submit">' + saveLabel + '</button>' +
+        (hasToken ? '<button type="button" data-remove-token>Remove ' + label.toLowerCase() + '</button>' : '') + '</div></form>';
+    }
+
     function settings(state) {
       if (!state.canConfigure || readonly) return '';
       return '<details' + (state.connection ? '' : ' open') + ' data-github-settings><summary>Connection settings</summary>' +
@@ -49,24 +56,34 @@
         '<input type="password" name="token" autocomplete="off" spellcheck="false" maxlength="280"></label>' +
         '<div class="row"><button type="submit" disabled>Save connection</button>' +
         (state.connection ? '<button type="button" data-disconnect>Disconnect</button>' : '') + '</div></form>' +
-        (state.connection ? '<form class="stack coding-form" data-pr-token><p class="muted">To publish pull requests, use a separate fine-grained token limited to this repository with Pull requests write access.</p>' +
-        '<label class="field"><span>Pull request publishing token</span><input type="password" name="token" required autocomplete="off" spellcheck="false" maxlength="280"></label>' +
-        '<div class="row"><button type="submit">Save publishing token</button>' +
-        (state.connection.hasPublishToken ? '<button type="button" data-remove-pr-token>Remove publishing token</button>' : '') +
-        '</div></form>' : '') + '</details>';
+        (state.connection ?
+          credentialForm('branch', 'Branch publishing token', 'Use a separate fine-grained token limited to this repository with Contents write access.',
+            'Save branch publishing token', state.connection.hasContentsToken) +
+          credentialForm('pr', 'Pull request publishing token', 'Use a separate fine-grained token limited to this repository with Pull requests write access.',
+            'Save publishing token', state.connection.hasPublishToken) : '') + '</details>';
+    }
+
+    function branchOptions(connection) {
+      return '<details data-branch-options><summary>Create branch from applied patch</summary><div class="stack">' +
+        (connection.hasContentsToken ? '<p class="muted">Enter a new head branch above. Review the exact file contents before creating the branch.</p>' +
+        '<label class="field"><span>Commit message</span><input name="branchMessage" maxlength="512"></label>' +
+        '<div class="row"><button type="button" data-preview-branch>Preview branch</button>' :
+        '<p class="muted">Save a branch publishing token in Connection settings to create branches.</p><div class="row">') +
+        '<button type="button" data-recover-branch>Find or recover branch</button></div><div data-branch-result class="coding-preview stack" aria-live="polite"></div>' +
+        '</div></details>';
     }
 
     function handoff(state) {
       if (readonly) return '';
       return '<details data-github-handoff><summary>Prepare GitHub review</summary><form class="stack coding-form">' +
-        '<p class="muted">Choose an accepted coding request and branches that are already on GitHub. ' +
-        'Open the comparison to review the proposed branch changes.</p>' +
+        '<p class="muted">Choose an accepted coding request and the GitHub branches for its review.</p>' +
         '<label class="field"><span>Accepted request</span><select name="request" required></select></label>' +
         '<div class="row"><button type="button" data-load-runs>Refresh accepted requests</button></div>' +
         '<div class="coding-grid"><label class="field"><span>Base branch</span><input name="base" maxlength="255" required></label>' +
         '<label class="field"><span>Head branch</span><input name="head" maxlength="255" required></label></div>' +
         '<div class="row"><button type="submit">Prepare comparison</button></div><div data-comparison></div>' +
-        (state.canConfigure ? '<details data-pr-options><summary>Create a pull request</summary><div class="stack coding-form">' +
+        (state.canConfigure ? branchOptions(state.connection) +
+          '<details data-pr-options><summary>Create a pull request</summary><div class="stack coding-form">' +
         (state.connection.hasPublishToken ? '<label class="field"><span>Pull request title</span><input name="prTitle" maxlength="256"></label>' +
         '<label class="field"><span>Pull request Markdown</span><textarea name="prBody" rows="5" maxlength="16384"></textarea></label>' +
         '<label class="row"><input type="checkbox" name="prDraft" checked><span>Open as a draft</span></label>' +
@@ -123,23 +140,24 @@
         }));
       }
 
-      const prToken = area.querySelector('[data-pr-token]');
-      if (prToken) {
-        const token = prToken.elements.token;
-        const save = prToken.querySelector('button[type=submit]');
-        prToken.addEventListener('submit', (event) => {
+      for (const credential of area.querySelectorAll('[data-github-credential]')) {
+        const kind = credential.dataset.githubCredential;
+        const label = kind === 'branch' ? 'Branch publishing token' : 'Pull request publishing token';
+        const token = credential.elements.token;
+        const save = credential.querySelector('button[type=submit]');
+        credential.addEventListener('submit', (event) => {
           event.preventDefault();
           perform(save, async () => {
             try {
-              show(await coding(path + 'pr-credential', { token: token.value }));
-              notice('Pull request publishing token saved.');
+              show(await coding(path + kind + '-credential', { token: token.value }));
+              notice(label + ' saved.');
             } finally { token.value = ''; }
           });
         });
-        const remove = prToken.querySelector('[data-remove-pr-token]');
+        const remove = credential.querySelector('[data-remove-token]');
         remove?.addEventListener('click', () => perform(remove, async () => {
-          show(await coding(path + 'pr-credential', { token: '' }));
-          notice('Pull request publishing token removed.');
+          show(await coding(path + kind + '-credential', { token: '' }));
+          notice(label + ' removed.');
         }));
       }
 
@@ -165,8 +183,13 @@
       const previewPr = form.querySelector('[data-preview-pr]');
       const recoverPr = form.querySelector('[data-recover-pr]');
       const prReceipt = form.querySelector('[data-pr-receipt]');
+      const previewBranch = form.querySelector('[data-preview-branch]');
+      const recoverBranch = form.querySelector('[data-recover-branch]');
+      const branchResult = form.querySelector('[data-branch-result]');
+      const pullOptions = prepare.querySelector('[data-pr-options]');
       let accepted = [];
       let revision = 0;
+      let branchRevision = 0;
       async function loadRuns() {
         const selected = accepted[Number(request.value)] ?? target;
         const rows = await coding('/projects/' + encodeURIComponent(project.id) + '/runs');
@@ -177,23 +200,36 @@
         if (index >= 0) request.value = String(index);
         else clearPreview();
         submit.disabled = !accepted.length;
-        if (previewPr) previewPr.disabled = !accepted.length;
-        if (recoverPr) recoverPr.disabled = !accepted.length;
+        for (const button of [previewBranch, recoverBranch, previewPr, recoverPr]) {
+          if (button) button.disabled = !accepted.length;
+        }
       }
       submit.disabled = true;
-      if (previewPr) previewPr.disabled = true;
-      if (recoverPr) recoverPr.disabled = true;
+      for (const button of [previewBranch, recoverBranch, previewPr, recoverPr]) {
+        if (button) button.disabled = true;
+      }
       prepare.addEventListener('toggle', () => {
         if (prepare.open) perform(load, loadRuns);
       });
       load.addEventListener('click', () => perform(load, loadRuns));
-      function clearPreview() {
+      function clearPullPreview() {
         revision++;
         comparison.replaceChildren();
         prReceipt?.replaceChildren();
       }
+      function clearBranchPreview() {
+        branchRevision++;
+        branchResult?.replaceChildren();
+      }
+      function clearPreview() {
+        clearPullPreview();
+        clearBranchPreview();
+      }
       form.addEventListener('input', (event) => {
-        if (!prReceipt?.contains(event.target)) clearPreview();
+        if (branchResult?.contains(event.target) || prReceipt?.contains(event.target)) return;
+        if (event.target.name === 'branchMessage') clearBranchPreview();
+        else if (['prTitle', 'prBody', 'prDraft'].includes(event.target.name)) clearPullPreview();
+        else clearPreview();
       });
       form.addEventListener('submit', (event) => {
         event.preventDefault();
@@ -205,6 +241,79 @@
           });
           comparison.innerHTML = external(receipt.url, 'Open GitHub comparison');
           comparison.querySelector('a').focus();
+        });
+      });
+
+      function showBranchReceipt(result) {
+        if (!result?.receipt) {
+          branchResult.textContent = result
+            ? 'GitHub has not confirmed this branch yet. Check again or retry the approved preview.'
+            : 'This accepted request has no branch approval yet.';
+          return;
+        }
+        const { base, head, receipt } = result;
+        clearPreview();
+        form.elements.base.value = base;
+        form.elements.head.value = head;
+        branchResult.innerHTML = '<p data-branch-commit></p><div>' + external(receipt.url, 'Open branch on GitHub') + '</div>';
+        branchResult.querySelector('[data-branch-commit]').textContent = head + ' · ' + receipt.commitSha;
+        if (pullOptions) pullOptions.open = true;
+        branchResult.querySelector('a').focus();
+      }
+
+      recoverBranch?.addEventListener('click', () => {
+        const run = accepted[Number(request.value)];
+        if (!run) return;
+        const identity = { session: run.session, requestId: run.id };
+        const current = branchRevision;
+        perform(recoverBranch, async () => {
+          const saved = await coding(path + 'branch-inspect', identity);
+          const result = saved && !saved.receipt ? await coding(path + 'branch-recover', identity) : saved;
+          if (branchRevision === current) showBranchReceipt(result);
+        });
+      });
+
+      previewBranch?.addEventListener('click', () => {
+        const run = accepted[Number(request.value)];
+        if (!run || !form.reportValidity()) return;
+        const details = { session: run.session, requestId: run.id, base: form.elements.base.value, head: form.elements.head.value,
+          message: form.elements.branchMessage.value };
+        const current = branchRevision;
+        perform(previewBranch, async () => {
+          const preview = await coding(path + 'branch-preview', details);
+          if (branchRevision !== current) return;
+          branchResult.innerHTML = '<p>Accepted request <code data-branch-run></code></p><p data-branch-summary></p>' +
+            '<p>Pinned base <code data-branch-base-sha></code></p><pre aria-label="Commit message preview" data-commit-message></pre>' +
+            '<div class="stack" data-branch-files></div>' +
+            '<label class="row"><input type="checkbox" data-branch-confirm><span>Approve sending these exact file contents and commit message to this new branch</span></label>' +
+            '<div class="row"><button type="button" class="primary" data-branch-publish disabled>Publish branch</button></div>';
+          branchResult.querySelector('[data-branch-run]').textContent = run.session + ' / ' + run.id;
+          branchResult.querySelector('[data-branch-summary]').textContent = preview.repository + ' · ' + preview.head + ' from ' + preview.base;
+          branchResult.querySelector('[data-branch-base-sha]').textContent = preview.baseSha;
+          branchResult.querySelector('[data-commit-message]').textContent = preview.message;
+          const files = branchResult.querySelector('[data-branch-files]');
+          for (const { path, content } of preview.files) {
+            const file = document.createElement('details');
+            const summary = document.createElement('summary');
+            const text = document.createElement('pre');
+            summary.textContent = path;
+            text.textContent = content;
+            file.append(summary, text);
+            files.append(file);
+          }
+          const confirm = branchResult.querySelector('[data-branch-confirm]');
+          const publish = branchResult.querySelector('[data-branch-publish]');
+          confirm.addEventListener('change', () => { publish.disabled = !confirm.checked; });
+          confirm.focus();
+          publish.addEventListener('click', () => {
+            if (!confirm.checked || branchRevision !== current) return;
+            void perform(publish, async () => {
+              const result = await coding(path + 'branch-publish', { ...details, approval: preview.approval, approved: true });
+              if (branchRevision !== current) return;
+              showBranchReceipt(result);
+              if (result?.receipt) notice('GitHub branch recorded.');
+            }).finally(() => { publish.disabled = !confirm.checked; });
+          });
         });
       });
 
@@ -268,7 +377,6 @@
       });
       if (target) {
         prepare.open = true;
-        const pullOptions = prepare.querySelector('[data-pr-options]');
         if (pullOptions) pullOptions.open = true;
         (pullOptions || prepare).querySelector('summary').focus();
       }

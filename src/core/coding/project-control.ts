@@ -8,7 +8,7 @@ import { dataDir, resolveActor } from "../config.ts";
 import { ensureExtensionCapableSqlite } from "../engine/custom-sqlite.ts";
 import { log } from "../log.ts";
 import {
-  ApprovedPatchError, approvedPatchBytes, approvedPatchState, patchDigest, withPreparedPatch, type PatchFileReceipt,
+  ApprovedPatchError, approvedPatchBytes, approvedPatchFiles, approvedPatchState, patchDigest, withPreparedPatch, type PatchFileReceipt,
 } from "./approved-patch.ts";
 import {
   cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, getCodingSessionStatus, hasCodingCredential,
@@ -19,9 +19,10 @@ import { CodingEvaluationError, CodingEvaluations, parseEvaluation, presentEvide
 import { dockerWorkerConfig, type DockerWorkerConfig } from "./docker-worker.ts";
 import { PackageReviewError, previewPackageReviews, validatePackageReviews } from "./package-review.ts";
 import {
-  githubActivity, githubComparison, githubCreatePull, githubFindPull, githubPullBody, githubPullDraft,
+  githubActivity, githubBranch, githubComparison, githubCreatePull, githubFindPull, githubPullBody, githubPullDraft,
   GitHubError, githubRemotes, githubToken, githubUrl, type GitHubFetch, type GitHubPullReceipt,
 } from "./github.ts";
+import { githubBranchRef, githubCreatePatchCommit, githubCreatePatchRef, githubPreparePatchBranch } from "./github-branch.ts";
 import { excludedPath, selectRepositoryContext } from "./repository-context.ts";
 import { validateCodingProjectProfile } from "./project-profile.ts";
 import { launchProjectWorker, ProjectWorkerInterrupted } from "./project-worker.ts";
@@ -48,6 +49,11 @@ type GitHubPublication = {
   approval: string; repository: string; base: string; head: string; approved: string; created: string | null;
   pull_id: number | null; pull_number: number | null; draft: number | null; api_request_id: string | null;
 };
+type GitHubBranchPublication = {
+  approval: string; repository: string; base: string; head: string; base_sha: string; base_tree: string;
+  commit_sha: string | null; created: string | null;
+};
+type RunIdentity = Pick<RunRow, "session" | "id">;
 type Running = {
   cancel: AbortController;
   promise: Promise<void>;
@@ -66,6 +72,8 @@ const digest = (input: string) => createHash("sha256").update(input).digest("hex
 const retentionActor = "system:transcript-retention";
 const retentionBatchSize = 24;
 const retentionSweepInterval = 60 * 60 * 1000;
+const githubPullActions = ["github-pr-inspect", "github-pr-recover", "github-pr-preview", "github-pr-publish"];
+const githubBranchActions = ["github-branch-inspect", "github-branch-recover", "github-branch-preview", "github-branch-publish"];
 
 function field(body: Json, name: string, max = 256): string {
   const value = body[name];
@@ -222,10 +230,19 @@ export class CodingProjectControl {
         CREATE TABLE IF NOT EXISTS github_pr_credentials(
           project TEXT PRIMARY KEY REFERENCES github_projects(project) ON DELETE CASCADE, token TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS github_contents_credentials(
+          project TEXT PRIMARY KEY REFERENCES github_projects(project) ON DELETE CASCADE, token TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS github_publications(
           project TEXT NOT NULL REFERENCES projects(id), session TEXT NOT NULL, request_id TEXT NOT NULL,
           approval TEXT NOT NULL, repository TEXT NOT NULL, base TEXT NOT NULL, head TEXT NOT NULL,
           approved TEXT NOT NULL, created TEXT, pull_id INTEGER, pull_number INTEGER, draft INTEGER, api_request_id TEXT,
+          PRIMARY KEY(project, session, request_id)
+        );
+        CREATE TABLE IF NOT EXISTS github_branch_publications(
+          project TEXT NOT NULL REFERENCES projects(id), session TEXT NOT NULL, request_id TEXT NOT NULL,
+          approval TEXT NOT NULL, repository TEXT NOT NULL, base TEXT NOT NULL, head TEXT NOT NULL,
+          base_sha TEXT NOT NULL, base_tree TEXT NOT NULL, commit_sha TEXT, created TEXT,
           PRIMARY KEY(project, session, request_id)
         );
         CREATE TABLE IF NOT EXISTS applied_patches(
@@ -883,6 +900,10 @@ export class CodingProjectControl {
     return this.#get<{ token: string }>("SELECT token FROM github_pr_credentials WHERE project = ?", project)?.token ?? null;
   }
 
+  #githubContentsToken(project: string) {
+    return this.#get<{ token: string }>("SELECT token FROM github_contents_credentials WHERE project = ?", project)?.token ?? null;
+  }
+
   async #checkGitHubRemote(project: ProjectRow, bound: GitHubRow) {
     const remotes = await githubRemotes(await this.#workspace(project));
     if (!remotes.some((remote) => remote.remote === bound.remote && remote.repository === bound.repository))
@@ -961,13 +982,144 @@ export class CodingProjectControl {
     return this.#finishPublication(project.id, run, actor, pull, false);
   }
 
+  #branchPublication(project: string, run: RunIdentity) {
+    return this.#get<GitHubBranchPublication>(
+      "SELECT * FROM github_branch_publications WHERE project = ? AND session = ? AND request_id = ?", project, run.session, run.id,
+    );
+  }
+
+  #branchView(row: GitHubBranchPublication) {
+    const { approval, repository, base, head, base_sha: baseSha, commit_sha: commitSha, created } = row;
+    return {
+      approval, repository, base, head, baseSha,
+      receipt: created && commitSha ? { url: `${githubUrl(repository)}/tree/${encodeURIComponent(head)}`,
+        head, base, commitSha, recordedAt: created } : null,
+    };
+  }
+
+  #finishBranch(project: string, run: RunIdentity, actor: Actor, recovered: boolean) {
+    this.#db.transaction(() => {
+      const time = now();
+      this.#write("UPDATE github_branch_publications SET created = ? WHERE project = ? AND session = ? AND request_id = ?",
+        time, project, run.session, run.id);
+      this.#write("UPDATE runs SET updated = ? WHERE project = ? AND session = ? AND id = ?", time, project, run.session, run.id);
+      this.#audit(project, recovered ? "github_branch_recovered" : "github_branch_created", actor.id, run.session, run.id);
+    })();
+    return this.#branchView(this.#branchPublication(project, run)!);
+  }
+
+  async #verifyBranchConnection(project: ProjectRow, bound: GitHubRow, token: string) {
+    await this.#checkGitHubRemote(project, bound);
+    const current = this.#get<GitHubRow>("SELECT remote, repository, token FROM github_projects WHERE project = ?", project.id);
+    if (current?.remote !== bound.remote || current.repository !== bound.repository || this.#githubContentsToken(project.id) !== token)
+      throw new ProjectControlError("The GitHub connection or branch publishing token changed. Review the branch preview again.", 409);
+  }
+
+  async #githubPatchBranch(project: ProjectRow, bound: GitHubRow | null, action: string, body: Json, actor: Actor) {
+    this.#requireOwner(actor);
+    const request = this.#runParts(body);
+    const runId = { session: request.session, id: request.requestId };
+    const saved = this.#branchPublication(project.id, runId);
+    if (action === "github-branch-inspect") return saved ? this.#branchView(saved) : null;
+    if (!bound) throw new ProjectControlError("Connect a local GitHub remote for this project first.", 409);
+    if (saved && saved.repository !== bound.repository)
+      throw new ProjectControlError("Reconnect the approved repository to recover this branch.", 409);
+    const token = this.#githubContentsToken(project.id);
+    if (!token) throw new ProjectControlError("Set a separate GitHub branch publishing token with Contents write access first.", 409);
+    const deadline = AbortSignal.timeout(55_000);
+    await this.#verifyBranchConnection(project, bound, token);
+    const transport: GitHubFetch = (url, options) => this.#githubFetch(url, {
+      ...options, signal: options.signal ? AbortSignal.any([deadline, options.signal]) : deadline,
+    });
+    const repository = bound.repository;
+    const remoteHead = async (head: string, expected: string | null) => {
+      const actual = await githubBranchRef(repository, head, token, transport);
+      if (actual && actual !== expected)
+        throw new ProjectControlError("That head branch already exists or now points to a different commit. Choose a new branch.", 409);
+      return actual;
+    };
+    const createRef = async (head: string, commitSha: string) => {
+      await this.#verifyBranchConnection(project, bound, token);
+      await githubCreatePatchRef(repository, head, commitSha, token, transport);
+      return this.#finishBranch(project.id, runId, actor, false);
+    };
+    if (action === "github-branch-recover") {
+      if (!saved) throw new ProjectControlError("Confirm a branch preview before attempting recovery.", 409);
+      if (saved.created || !saved.commit_sha) return this.#branchView(saved);
+      return await remoteHead(saved.head, saved.commit_sha)
+        ? this.#finishBranch(project.id, runId, actor, true) : this.#branchView(saved);
+    }
+
+    const run = this.#readRun(project.id, runId.session, runId.id);
+    if (run.status !== "done" || run.review !== "accepted")
+      throw new ProjectControlError("Accept the coding request in Review before publishing its patch.", 409);
+    const patch = this.#get<PatchRow>("SELECT * FROM applied_patches WHERE project = ? AND session = ? AND request_id = ?",
+      project.id, run.session, run.id);
+    if (patch?.status !== "applied")
+      throw new ProjectControlError("Apply the approved patch to the worktree before preparing a GitHub branch.", 409);
+    const base = githubBranch(body.base);
+    const head = githubBranch(body.head);
+    if (base === head) throw new ProjectControlError("Choose a new branch with a different name from the base.");
+    const message = field(body, "message", 512);
+    if (/[\x00-\x1f\x7f]/u.test(message)) throw new ProjectControlError("Enter a single-line commit message.");
+    const approvalOf = (baseSha: string, baseTree: string) => digest(JSON.stringify([
+      1, project.id, repository, run.session, run.id, run.signature, run.reviewed, patch.preview_id, base, head, message, baseSha, baseTree,
+    ]));
+    const preview = action === "github-branch-preview";
+    if (!preview && (body.approved !== true || typeof body.approval !== "string" || !/^[a-f0-9]{64}$/u.test(body.approval)))
+      throw new ProjectControlError("Review the exact branch and confirm publication again.", 409);
+    if (saved?.commit_sha && saved.approval !== approvalOf(saved.base_sha, saved.base_tree))
+      throw new ProjectControlError("This run already has a different branch approval. Recover the saved branch or retry its original details.", 409);
+    if (!preview && saved?.commit_sha) {
+      if (body.approval !== saved.approval)
+        throw new ProjectControlError("Review the exact branch and confirm publication again.", 409);
+      if (saved.created) return this.#branchView(saved);
+      if (await remoteHead(saved.head, saved.commit_sha)) return this.#finishBranch(project.id, runId, actor, true);
+      // A prior attempt saved the exact commit before trying to expose the ref.
+      return createRef(saved.head, saved.commit_sha);
+    }
+
+    const files = await approvedPatchFiles(await this.#workspace(project), JSON.parse(project.scopes) as string[],
+      JSON.parse(patch.files) as PatchFileReceipt[]);
+    const { baseSha, baseTree } = await githubPreparePatchBranch(repository, base, files, token, transport);
+    const approval = approvalOf(baseSha, baseTree);
+    if (saved?.commit_sha && saved.approval !== approval)
+      throw new ProjectControlError("The base moved after the approved commit was saved. Recover the saved branch.", 409);
+    await remoteHead(head, saved?.commit_sha ?? null);
+    if (preview) return { approval, repository, base, head, baseSha, message, files: files.map(({ bytes, ...file }) => ({
+      ...file, content: new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes),
+    })) };
+    if (body.approval !== approval)
+      throw new ProjectControlError("The GitHub base, patch, or requested branch changed. Preview it again before publishing.", 409);
+
+    await this.#verifyBranchConnection(project, bound, token);
+    if (saved?.approval !== approval) this.#db.transaction(() => {
+      // Until a commit is saved, no create-ref request can have been sent.
+      this.#write(`INSERT INTO github_branch_publications(project, session, request_id, approval, repository, base, head, base_sha, base_tree)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project, session, request_id) DO UPDATE SET
+          approval = excluded.approval, base = excluded.base, head = excluded.head,
+          base_sha = excluded.base_sha, base_tree = excluded.base_tree`,
+      project.id, run.session, run.id, approval, repository, base, head, baseSha, baseTree);
+      this.#write("UPDATE runs SET updated = ? WHERE project = ? AND session = ? AND id = ?", now(), project.id, run.session, run.id);
+      this.#audit(project.id, "github_branch_approved", actor.id, run.session, run.id);
+    })();
+    const commitSha = await githubCreatePatchCommit(repository, { baseSha, baseTree, message, files }, token, transport);
+    this.#write("UPDATE github_branch_publications SET commit_sha = ? WHERE project = ? AND session = ? AND request_id = ?",
+      commitSha, project.id, run.session, run.id);
+    return createRef(head, commitSha);
+  }
+
   async #github(project: ProjectRow, action: string, method: string, body: Json, actor: Actor) {
     const bound = this.#get<GitHubRow>("SELECT remote, repository, token FROM github_projects WHERE project = ?", project.id);
     const status = (row: GitHubRow | null) => ({
       canConfigure: actor.owner,
       connection: row ? {
         remote: row.remote, repository: row.repository, url: githubUrl(row.repository), hasToken: row.token !== null,
-        ...(actor.owner ? { hasPublishToken: this.#githubPublishToken(project.id) !== null } : {}),
+        ...(actor.owner ? {
+          hasPublishToken: this.#githubPublishToken(project.id) !== null,
+          hasContentsToken: this.#githubContentsToken(project.id) !== null,
+        } : {}),
       } : null,
     });
     try {
@@ -985,12 +1137,16 @@ export class CodingProjectControl {
           throw new ProjectControlError("This Git remote changed. Detect the repository and confirm the connection again.", 409);
         this.#db.transaction(() => {
           const latest = this.#get<GitHubRow>("SELECT remote, repository, token FROM github_projects WHERE project = ?", project.id);
-          if (option.repository === latest?.repository && token && token === this.#githubPublishToken(project.id))
+          if (option.repository === latest?.repository && token
+              && [this.#githubPublishToken(project.id), this.#githubContentsToken(project.id)].includes(token))
             throw new ProjectControlError("Use different GitHub activity and publishing tokens.");
           this.#write(`INSERT INTO github_projects VALUES (?, ?, ?, ?)
             ON CONFLICT(project) DO UPDATE SET remote = excluded.remote, repository = excluded.repository, token = excluded.token`,
           project.id, option.remote, option.repository, token);
-          if (latest && latest.repository !== option.repository) this.#write("DELETE FROM github_pr_credentials WHERE project = ?", project.id);
+          if (latest && latest.repository !== option.repository) {
+            this.#write("DELETE FROM github_pr_credentials WHERE project = ?", project.id);
+            this.#write("DELETE FROM github_contents_credentials WHERE project = ?", project.id);
+          }
           this.#audit(project.id, "github_connected", actor.id);
         })();
         return status({ ...option, token });
@@ -1003,23 +1159,30 @@ export class CodingProjectControl {
         })();
         return status(null);
       }
-      if (method === "POST" && action === "github-pr-credential") {
+      if (method === "POST" && (action === "github-pr-credential" || action === "github-branch-credential")) {
         this.#requireOwner(actor);
         if (!bound) throw new ProjectControlError("Connect a local GitHub remote for this project first.", 409);
         const token = githubToken(body.token);
-        if (token && token === bound.token) throw new ProjectControlError("Use different GitHub activity and publishing tokens.");
+        const isBranch = action === "github-branch-credential";
+        const table = isBranch ? "github_contents_credentials" : "github_pr_credentials";
+        const auditKind = isBranch ? "github_contents_token" : "github_pr_token";
         await this.#checkGitHubRemote(project, bound);
         const current = this.#get<GitHubRow>("SELECT remote, repository, token FROM github_projects WHERE project = ?", project.id);
         if (current?.remote !== bound.remote || current.repository !== bound.repository || current.token !== bound.token)
           throw new ProjectControlError("The GitHub connection changed. Refresh it before saving the publishing token.", 409);
         this.#db.transaction(() => {
-          if (token) this.#write(`INSERT INTO github_pr_credentials VALUES (?, ?) ON CONFLICT(project) DO UPDATE SET token = excluded.token`, project.id, token);
-          else this.#write("DELETE FROM github_pr_credentials WHERE project = ?", project.id);
-          this.#audit(project.id, token ? "github_pr_token_saved" : "github_pr_token_removed", actor.id);
+          const other = isBranch ? this.#githubPublishToken(project.id) : this.#githubContentsToken(project.id);
+          if (token && (token === bound.token || token === other))
+            throw new ProjectControlError("Use separate GitHub tokens for activity, branch publication, and pull requests.");
+          if (token) this.#write(`INSERT INTO ${table} VALUES (?, ?) ON CONFLICT(project) DO UPDATE SET token = excluded.token`, project.id, token);
+          else this.#write(`DELETE FROM ${table} WHERE project = ?`, project.id);
+          this.#audit(project.id, token ? `${auditKind}_saved` : `${auditKind}_removed`, actor.id);
         })();
         return status(bound);
       }
-      if (method === "POST" && ["github-pr-inspect", "github-pr-recover", "github-pr-preview", "github-pr-publish"].includes(action)) {
+      if (method === "POST" && githubBranchActions.includes(action))
+        return await this.#githubPatchBranch(project, bound, action, body, actor);
+      if (method === "POST" && githubPullActions.includes(action)) {
         this.#requireOwner(actor);
         const request = this.#runParts(body);
         if (action === "github-pr-inspect") {
@@ -1047,6 +1210,7 @@ export class CodingProjectControl {
       }
     } catch (error) {
       if (error instanceof GitHubError) throw new ProjectControlError(error.message, error.status);
+      if (error instanceof ApprovedPatchError) throw new ProjectControlError(error.message, 409);
       throw error;
     }
     throw new ProjectControlError("GitHub endpoint not found.", 404);
@@ -1091,7 +1255,7 @@ export class CodingProjectControl {
     const project = this.#project(match[1]!, actor);
     const action = match[2];
     if (action === "retention" && (method === "GET" || method === "POST")) return this.#retention(project, method, body, actor);
-    if (action && method === "POST" && ["github-pr-inspect", "github-pr-recover", "github-pr-preview", "github-pr-publish"].includes(action))
+    if (action && method === "POST" && (githubPullActions.includes(action) || githubBranchActions.includes(action)))
       return this.#withSession(project, body, () => this.#github(project, action, method, body, actor));
     if (action?.startsWith("github-")) return this.#github(project, action, method, body, actor);
     if (method === "GET") {

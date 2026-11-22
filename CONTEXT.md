@@ -37,6 +37,10 @@ The project control plane scopes credentials, members, worker runs, and
 review decisions to registered projects. Independent package review uses Pi
 Durable child conversations with explicit package previews and combined usage.
 GitHub activity and compare handoff use a bound project remote.
+Branch publication binds exact applied patch bytes to a verified GitHub base
+commit. A separate Contents write credential creates a commit and a new ref.
+The catalog saves the commit SHA before exposing the ref so receipt recovery
+can verify the exact remote branch after a lost response.
 The local patch workflow requires an accepted request and a separately approved
 diff. A disposable Git index checks exact worktree data and the project audit
 records the approval and applied result without copying the patch into the audit.

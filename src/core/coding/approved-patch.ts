@@ -8,8 +8,8 @@ import { excludedPath } from "./repository-context.ts";
 export class ApprovedPatchError extends Error {}
 
 export const approvedPatchBytes = 48 * 1024;
-const maxFiles = 8;
-const maxFileBytes = 256 * 1024;
+export const approvedPatchFileLimit = 8;
+export const approvedPatchFileBytes = 256 * 1024;
 const maxOutputBytes = 64 * 1024;
 const pathPattern = /^[a-zA-Z0-9_.@/+\-]+$/u;
 const reservedComponent = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
@@ -22,6 +22,11 @@ export interface PatchFileReceipt {
   after: string;
 }
 
+export type ApprovedPatchFile = PatchFileReceipt & {
+  mode: "100644" | "100755";
+  bytes: Uint8Array;
+};
+
 interface PatchFileState {
   path: string;
   mode: string;
@@ -33,8 +38,8 @@ export function patchDigest(content: string | Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-function portablePath(path: string): boolean {
-  return path.length <= 512 && pathPattern.test(path) && !excludedPath(path) && path.split("/").every((part) =>
+export function isApprovedPatchPath(path: unknown): path is string {
+  return typeof path === "string" && path.length <= 512 && pathPattern.test(path) && !excludedPath(path) && path.split("/").every((part) =>
     part && part !== "." && part !== ".." && !part.endsWith(".") && !reservedComponent.test(part));
 }
 
@@ -51,8 +56,8 @@ export function patchPaths(diff: string): string[] {
   while (line < lines.length) {
     const header = /^diff --git a\/(\S+) b\/(\S+)$/u.exec(lines[line++]!);
     const path = header?.[1];
-    if (!path || path !== header?.[2] || !portablePath(path)) throw shapeError();
-    if (seen.has(path.toLowerCase()) || paths.length === maxFiles) throw new ApprovedPatchError("Include at most eight different files in a patch.");
+    if (!path || path !== header?.[2] || !isApprovedPatchPath(path)) throw shapeError();
+    if (seen.has(path.toLowerCase()) || paths.length === approvedPatchFileLimit) throw new ApprovedPatchError("Include at most eight different files in a patch.");
     seen.add(path.toLowerCase());
     paths.push(path);
     if (/^index [0-9a-f]{4,64}\.\.[0-9a-f]{4,64}(?: 100(?:644|755))?$/u.test(lines[line] ?? "")) line++;
@@ -90,7 +95,7 @@ async function readPatchFile(workspace: string, path: string, mode: string): Pro
     const file = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const info = await file.stat();
-      if (!info.isFile() || info.nlink !== 1 || info.size > maxFileBytes ||
+      if (!info.isFile() || info.nlink !== 1 || info.size > approvedPatchFileBytes ||
         (process.platform !== "win32" && (info.mode & 0o7777) !== Number.parseInt(mode.slice(-3), 8))) throw new Error();
       const bytes = Buffer.alloc(info.size + 1);
       let read = 0;
@@ -152,7 +157,7 @@ async function git(workspace: string, args: string[], env: ReturnType<typeof git
 async function snapshot(workspace: string, paths: string[], scopes: string[], env: ReturnType<typeof gitEnvironment>): Promise<PatchFileState[]> {
   const files: PatchFileState[] = [];
   for (const path of paths) {
-    if (!portablePath(path) || !scopes.some((scope) => scope === "." || path.startsWith(`${scope}/`))) {
+    if (!isApprovedPatchPath(path) || !scopes.some((scope) => scope === "." || path.startsWith(`${scope}/`))) {
       throw new ApprovedPatchError(`File ${path} is outside the permitted patch scope.`);
     }
   }
@@ -189,6 +194,34 @@ export async function approvedPatchState(workspace: string, scopes: string[], fi
     const current = await snapshot(workspace, files.map(({ path }) => path), scopes, env);
     const matches = (version: "before" | "after") => current.every((file, i) => file.mode === files[i]!.mode && file.sha256 === files[i]![version]);
     return matches("after") ? "after" : matches("before") ? "before" : "different";
+  });
+}
+
+/** Capture the exact, still-tracked bytes approved by an applied patch. */
+export async function approvedPatchFiles(workspace: string, scopes: string[], files: readonly PatchFileReceipt[]): Promise<ApprovedPatchFile[]> {
+  const invalid = () => new ApprovedPatchError("The applied patch receipt is invalid.");
+  if (!Array.isArray(files) || !files.length || files.length > approvedPatchFileLimit) throw invalid();
+  const hashes = /^[0-9a-f]{64}$/u;
+  const seen = new Set<string>();
+  const receipts: Omit<ApprovedPatchFile, "bytes">[] = [];
+  for (const file of files) {
+    if (!file || typeof file !== "object") throw invalid();
+    const { path, mode, before, after } = file as PatchFileReceipt;
+    if (!isApprovedPatchPath(path) || seen.has(path.toLowerCase())
+      || (mode !== "100644" && mode !== "100755")
+      || typeof before !== "string" || !hashes.test(before)
+      || typeof after !== "string" || !hashes.test(after) || before === after) throw invalid();
+    seen.add(path.toLowerCase());
+    receipts.push({ path, mode, before, after });
+  }
+  return scratch(async (_dir, env) => {
+    const captured = await snapshot(workspace, receipts.map(({ path }) => path), scopes, env);
+    return captured.map(({ mode, bytes, sha256 }, index) => {
+      const receipt = receipts[index]!;
+      if (mode !== receipt.mode || sha256 !== receipt.after)
+        throw new ApprovedPatchError("The worktree no longer matches the applied patch. Restore the approved files before publishing.");
+      return { ...receipt, bytes };
+    });
   });
 }
 

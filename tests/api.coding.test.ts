@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { createAssistantMessageEventStream, createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { createApiServer } from "../src/api.ts";
+import { createApiServer, type ApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
 import { listCodingModels, maxLiveAnswerLength, runCodingSession, type CodingLiveAnswer, type CodingSessionStatusResult } from "../src/core/coding/durable.ts";
 import type { CodingTaskProgress } from "../src/core/coding/task-progress.ts";
@@ -322,6 +323,157 @@ test("the production worker rejects a stale approval across a real child process
     expect(result.run).toMatchObject({ status: "failed", admitted: false, error: expect.stringContaining("selected files changed") });
   } finally {
     await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a GitHub branch uses only the exact applied patch and recovers a lost create-ref response", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-github-branch-");
+  const models = createModels();
+  const model = "branch-fixture";
+  const faux = fauxProvider({ provider: "openai", models: [{ id: model }] });
+  models.setProvider(faux.provider);
+  faux.setResponses([fauxAssistantMessage("Review the change to app.ts.")]);
+  const repo = "/repos/example-org/changes";
+  const path = join(workspace, "app.ts");
+  const before = "export const count = 1;\n";
+  const after = "export const count = 2;\n";
+  const oid = (byte: string) => byte.repeat(40);
+  const blob = (text: string) => createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest("hex");
+  const treeItem = (sha: string) => ({ path: "app.ts", mode: "100644", type: "blob", sha });
+  const parent = oid("1");
+  const baseTree = oid("2");
+  const nextTree = oid("3");
+  const commitSha = oid("4");
+  const refs = new Map([["main", parent]]);
+  const writes: { route: string; body: Record<string, unknown> }[] = [];
+  const token = "github_pat_" + "contents_fixture_".repeat(4);
+  const readToken = "github_pat_" + "activity_fixture_".repeat(4);
+  let loseResponse = true;
+  const githubFetch = async (url: URL, options: RequestInit) => {
+    expect(url.origin).toBe("https://api.github.com");
+    expect(options.redirect).toBe("error");
+    expect(new Headers(options.headers).get("authorization")).toBe("Bearer " + token);
+    const route = decodeURIComponent(url.pathname.slice(repo.length));
+    expect(url.pathname.startsWith(repo + "/git/")).toBe(true);
+    if (options.method === "GET") {
+      if (route.startsWith("/git/ref/heads/")) {
+        const name = route.slice("/git/ref/heads/".length);
+        return refs.has(name) ? Response.json({ ref: "refs/heads/" + name, object: { type: "commit", sha: refs.get(name) } })
+          : Response.json({}, { status: 404 });
+      }
+      if (route === `/git/commits/${refs.get("main")}`)
+        return Response.json({ sha: refs.get("main"), tree: { sha: baseTree } });
+      if (route === `/git/trees/${baseTree}`)
+        return Response.json({ sha: baseTree, truncated: false, tree: [treeItem(blob(before))] });
+      if (route === `/git/trees/${nextTree}`)
+        return Response.json({ sha: nextTree, truncated: false, tree: [treeItem(blob(after))] });
+      if (route === `/git/blobs/${blob(before)}`)
+        return Response.json({ sha: blob(before), encoding: "base64", content: Buffer.from(before).toString("base64"), size: Buffer.byteLength(before) });
+    }
+    expect(options.method).toBe("POST");
+    const body = JSON.parse(options.body as string) as Record<string, unknown>;
+    writes.push({ route, body });
+    if (route === "/git/blobs") return Response.json({ sha: blob(after) }, { status: 201 });
+    if (route === "/git/trees")
+      return Response.json({ sha: nextTree, truncated: false, tree: [treeItem(blob(after))] }, { status: 201 });
+    if (route === "/git/commits")
+      return Response.json({ sha: commitSha, message: body.message, tree: { sha: nextTree }, parents: [{ sha: parent }] }, { status: 201 });
+    if (route === "/git/refs") {
+      const name = (body.ref as string).slice("refs/heads/".length);
+      expect(refs.has(name)).toBe(false);
+      refs.set(name, body.sha as string);
+      if (loseResponse) {
+        loseResponse = false;
+        throw new Error("fixture lost the create-ref response");
+      }
+      return Response.json({ ref: body.ref, object: { type: "commit", sha: body.sha } }, { status: 201 });
+    }
+    throw new Error(`Unexpected fixture GitHub operation ${route}`);
+  };
+  const createServer = (readonly = false) =>
+    createApiServer({ bundle: workspace, port: 0, token: ownerToken, readonly, coding: { stateDir, models, githubFetch } });
+  let api: ApiServer | undefined;
+  try {
+    await writeFile(path, before);
+    for (const args of [["init", "-q"], ["add", "--", "app.ts"], ["remote", "add", "origin", "git@github.com:Example-Org/Changes.git"]]) {
+      const git = Bun.spawnSync(["git", ...args], { cwd: workspace });
+      expect(git.exitCode).toBe(0);
+    }
+    api = createServer();
+    const { call, request } = apiClient(api.url);
+    const project = await call<Project>("/projects", { title: "Branch fixture", workspace, provider: "openai", model });
+    const prefix = "/projects/" + project.id;
+    const member = await call<{ token: string }>(prefix + "/members", { name: "not-the-owner" });
+    await call(prefix + "/github-connect", { remote: "origin", repository: "example-org/changes", token: readToken });
+    expect((await request(prefix + "/github-branch-credential", { token }, member.token)).status).toBe(403);
+    expect((await request(prefix + "/github-branch-credential", { token: readToken })).status).toBe(400);
+    expect(await call(prefix + "/github-branch-credential", { token })).toMatchObject({ connection: { hasContentsToken: true } });
+    expect(JSON.stringify(await call(prefix + "/github-status"))).not.toContain(token);
+    expect((await request(prefix + "/github-pr-credential", { token })).status).toBe(400);
+
+    const selected = { source: "files", files: ["app.ts"] };
+    const source = await call<{ id: string }>(prefix + "/preview", selected);
+    const id = { session: "main", requestId: "branch-request" };
+    await call(prefix + "/run", { ...id, ...selected, approved: true, previewId: source.id, prompt: "Review app.ts." });
+    expect(await waitFor(() => call<Inspection>(prefix + "/inspect", id), ({ run }) => run.status === "done"))
+      .toMatchObject({ run: { status: "done" } });
+    const draft = { ...id, base: "main", head: "okbrain/reviewed-patch", message: "Update count from the reviewed patch" };
+    const branchPreview = prefix + "/github-branch-preview";
+    const branchPublish = prefix + "/github-branch-publish";
+    expect((await request(branchPreview, draft, member.token)).status).toBe(403);
+    expect((await request(branchPreview, draft)).status).toBe(409);
+    await call(prefix + "/review", { ...id, decision: "accepted" });
+    expect((await request(branchPreview, draft)).status).toBe(409);
+    const diff = `diff --git a/app.ts b/app.ts\n--- a/app.ts\n+++ b/app.ts\n@@ -1 +1 @@\n-${before}+${after}`;
+    const patch = await call<{ id: string }>(prefix + "/patch-preview", { ...id, diff });
+    await call(prefix + "/patch-apply", { ...id, diff, approved: true, previewId: patch.id });
+    expect(await Bun.file(path).text()).toBe(after);
+
+    refs.set(draft.head, oid("9"));
+    expect((await request(branchPreview, draft)).status).toBe(409);
+    refs.delete(draft.head);
+    const preview = await call<{ approval: string }>(branchPreview, draft);
+    expect(preview).toMatchObject({ baseSha: parent, message: draft.message,
+      files: [{ path: "app.ts", content: after }] });
+    const approved = { ...draft, approval: preview.approval, approved: true };
+    expect((await request(branchPublish, { ...approved, approved: false })).status).toBe(409);
+    await writeFile(path, "export const count = 99;\n");
+    expect((await request(branchPublish, approved)).status).toBe(409);
+    await writeFile(path, after);
+    refs.set("main", oid("8"));
+    expect((await request(branchPublish, approved)).status).toBe(409);
+    refs.set("main", parent);
+    expect(writes).toHaveLength(0);
+
+    const lost = await request(branchPublish, approved);
+    expect(lost.status).toBe(502);
+    expect(writes).toEqual([
+      { route: "/git/blobs", body: { encoding: "base64", content: Buffer.from(after).toString("base64") } },
+      { route: "/git/trees", body: { base_tree: baseTree, tree: [treeItem(blob(after))] } },
+      { route: "/git/commits", body: { message: draft.message, tree: nextTree, parents: [parent] } },
+      { route: "/git/refs", body: { ref: "refs/heads/" + draft.head, sha: commitSha } },
+    ]);
+    expect(await call(prefix + "/github-branch-inspect", id)).toMatchObject({ receipt: null, approval: preview.approval });
+    await api.stop();
+    api = createServer(true);
+    expect((await apiClient(api.url).request(branchPublish, approved)).status).toBe(403);
+    await api.stop();
+    api = createServer();
+    await writeFile(path, "Current worktree content must never be sent on recovery.\n");
+    const recovered = apiClient(api.url);
+    const receipt = await recovered.call<{ receipt: { commitSha: string; head: string; base: string; url: string } }>(
+      prefix + "/github-branch-recover", id,
+    );
+    expect(receipt).toMatchObject({ receipt: { commitSha, head: draft.head, base: draft.base,
+      url: "https://github.com/example-org/changes/tree/okbrain%2Freviewed-patch" } });
+    expect(await recovered.call<typeof receipt>(branchPublish, approved)).toEqual(receipt);
+    expect(writes).toHaveLength(4);
+    const audit = await recovered.call<{ kind: string }[]>(prefix + "/audit");
+    expect(audit.map(({ kind }) => kind)).toContain("github_branch_recovered");
+    expect(JSON.stringify(audit)).not.toContain(draft.message);
+  } finally {
+    await api?.stop();
     await rm(root, { recursive: true, force: true });
   }
 });

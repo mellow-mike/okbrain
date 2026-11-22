@@ -10,6 +10,7 @@ import { createApiServer } from "../src/api.ts";
 import { runCodingSession } from "../src/core/coding/durable.ts";
 import { loadConfig } from "../src/core/config.ts";
 import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/core/engine/cache-settings.ts";
+import { githubBranchBrowserFixture } from "./github-branch-browser-fixture.ts";
 
 const root = await mkdtemp(join(tmpdir(), "okbrain-browser-smoke-"));
 process.env.XDG_CONFIG_HOME = join(root, "config");
@@ -27,9 +28,12 @@ const projectModels = createModels();
 const projectFaux = fauxProvider({ provider: "openai", models: [{ id: "browser-project-fixture" }] });
 projectModels.setProvider(projectFaux.provider);
 projectModels.setProvider(googleProvider());
+const branchBefore = "export const sourceMarker = 'approved browser source';\n";
+const branchAfter = "export const sourceMarker = \"<script>branch preview stays text</script>\";\n";
+const githubFixture = githubBranchBrowserFixture("browser.ts", branchBefore, branchAfter);
 const server = createApiServer({
   bundle, port: 0,
-  coding: { stateDir: join(root, "coding-projects"), models: projectModels },
+  coding: { stateDir: join(root, "coding-projects"), models: projectModels, githubFetch: githubFixture.fetch },
   standaloneCoding: { stateDir: standaloneState, models: standaloneModels },
 });
 const finishAnswer = Promise.withResolvers<void>();
@@ -593,7 +597,7 @@ try {
   await page.getByText("Recovered with saved bytes.", { exact: true }).waitFor();
   assert.equal(standaloneFaux.state.callCount, 2);
 
-  const newFile = "export const sourceMarker = 'approved browser source';\n";
+  const newFile = branchBefore;
   await writeFile(file, newFile);
   for (const args of [["git", "init", "-q"], ["git", "add", "--", "browser.ts"]]) {
     const git = Bun.spawnSync(args, { cwd: workspace });
@@ -673,8 +677,80 @@ try {
   assert.equal(await cancelProject.evaluate((button) => button === document.activeElement), true);
   finishProject.resolve();
   await page.getByText("Project response ready for review.", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Accept result", exact: true }).waitFor();
+  const acceptResult = page.getByRole("button", { name: "Accept result", exact: true });
+  await acceptResult.waitFor();
   assert.equal(await page.getByRole("heading", { name: "Current Pi tasks", exact: true }).count(), 0);
+  const accepted = page.waitForResponse((res) => new URL(res.url()).pathname.endsWith(projectPath + "/review"));
+  await acceptResult.click();
+  assert.equal((await accepted).ok(), true);
+
+  const remote = Bun.spawnSync(["git", "remote", "add", "origin", `https://github.com/${githubFixture.repository}.git`], { cwd: workspace });
+  assert.equal(remote.exitCode, 0, remote.stderr.toString());
+  await page.getByText("Apply a reviewed patch", { exact: true }).click();
+  await page.getByLabel("Git unified diff", { exact: true }).fill(
+    "diff --git a/browser.ts b/browser.ts\n--- a/browser.ts\n+++ b/browser.ts\n@@ -1 +1 @@\n-" +
+    branchBefore + "+" + branchAfter,
+  );
+  await page.getByRole("button", { name: "Preview patch", exact: true }).click();
+  await page.getByRole("checkbox", { name: "Apply this exact diff to the listed files.", exact: true }).check();
+  await page.getByRole("button", { name: "Apply to worktree", exact: true }).click();
+  await page.getByText(/Applied to the local worktree/).waitFor();
+  assert.equal(await Bun.file(file).text(), branchAfter);
+  const github = page.locator("[data-coding-github]");
+  await github.getByRole("button", { name: "Detect GitHub remotes", exact: true }).click();
+  await github.getByRole("button", { name: "Save connection", exact: true }).click();
+  await github.getByText("GitHub connection saved.", { exact: true }).waitFor();
+  await github.getByText("Connection settings", { exact: true }).click();
+  await github.getByLabel("Branch publishing token", { exact: true }).fill(githubFixture.branchToken);
+  await github.getByRole("button", { name: "Save branch publishing token", exact: true }).click();
+  await github.getByText("Branch publishing token saved.", { exact: true }).waitFor();
+  await github.getByText("Connection settings", { exact: true }).click();
+  await github.getByLabel("Pull request publishing token", { exact: true }).fill(githubFixture.pullToken);
+  await github.getByRole("button", { name: "Save publishing token", exact: true }).click();
+  await github.getByText("Pull request publishing token saved.", { exact: true }).waitFor();
+  await github.getByText("Prepare GitHub review", { exact: true }).click();
+  await github.getByLabel("Base branch", { exact: true }).fill(githubFixture.base);
+  await github.getByLabel("Head branch", { exact: true }).fill(githubFixture.head);
+  await github.getByText("Create branch from applied patch", { exact: true }).click();
+  const commitMessage = github.getByLabel("Commit message", { exact: true });
+  await commitMessage.fill(githubFixture.message);
+  const previewBranch = github.getByRole("button", { name: "Preview branch", exact: true });
+  const publishBranch = github.getByRole("button", { name: "Publish branch", exact: true });
+  const branchConfirm = github.getByRole("checkbox", { name: /Approve sending these exact file contents/ });
+  await previewBranch.click();
+  await github.getByText(githubFixture.baseSha, { exact: false }).waitFor();
+  assert.equal(await publishBranch.isEnabled(), false);
+  await github.locator("[data-branch-files]").getByText("browser.ts", { exact: true }).click();
+  assert.equal(await github.locator("[data-branch-files] pre").textContent(), branchAfter);
+  assert.equal(await github.locator("[data-branch-files] script").count(), 0);
+  await branchConfirm.check();
+  assert.equal(await publishBranch.isEnabled(), true);
+  await commitMessage.fill("A different commit message");
+  assert.equal(await publishBranch.count(), 0);
+  assert.deepEqual(githubFixture.writes, []);
+  await commitMessage.fill(githubFixture.message);
+  await previewBranch.click();
+  await branchConfirm.check();
+  await publishBranch.click();
+  const branchLink = github.getByRole("link", { name: "Open branch on GitHub", exact: true });
+  await branchLink.waitFor();
+  await github.getByText(githubFixture.commitSha, { exact: false }).waitFor();
+  assert.equal(await github.getByLabel("Head branch", { exact: true }).inputValue(), githubFixture.head);
+  await github.getByLabel("Head branch", { exact: true }).fill("different-branch");
+  await github.getByRole("button", { name: "Find or recover branch", exact: true }).click();
+  await branchLink.waitFor();
+  assert.equal(await github.getByLabel("Head branch", { exact: true }).inputValue(), githubFixture.head);
+  await github.getByLabel("Pull request title", { exact: true }).fill("Browser review");
+  await github.getByLabel("Pull request Markdown", { exact: true }).fill("Approved branch for review.");
+  assert.equal(await branchLink.isVisible(), true);
+  await github.getByRole("button", { name: "Preview pull request", exact: true }).click();
+  await github.getByRole("checkbox", { name: "Approve this exact title, Markdown and branch comparison", exact: true }).check();
+  await github.getByRole("button", { name: "Publish to GitHub", exact: true }).click();
+  const pullLink = github.getByRole("link", { name: "Open pull request #22", exact: true });
+  await pullLink.waitFor();
+  assert.equal(await pullLink.getAttribute("href"), `https://github.com/${githubFixture.repository}/pull/22`);
+  assert.deepEqual(githubFixture.writes, ["/git/blobs", "/git/trees", "/git/commits", "/git/refs", "/pulls"]);
+  assert.equal(await Bun.file(file).text(), branchAfter);
 
   await page.evaluate(() => { location.hash = "#concept/%ZZ"; });
   await page.getByRole("textbox", { name: "Quick note" }).waitFor();

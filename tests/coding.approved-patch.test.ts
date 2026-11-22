@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createApiServer } from "../src/api.ts";
-import { approvedPatchState, patchPaths, withPreparedPatch } from "../src/core/coding/approved-patch.ts";
+import { approvedPatchFiles, approvedPatchState, patchDigest, patchPaths, withPreparedPatch } from "../src/core/coding/approved-patch.ts";
 import { ensureExtensionCapableSqlite } from "../src/core/engine/custom-sqlite.ts";
 
 const target = "src/example.ts";
@@ -52,6 +52,55 @@ test("previews an exact patch without touching files and applies only to the wor
   });
 });
 
+test("captures only the exact applied and unchanged patch bytes for publication", async () => {
+  await fixture(async (workspace, git) => {
+    const file = join(workspace, target);
+    const extra = join(workspace, "src/unrelated.ts");
+    await writeFile(extra, "Unrelated worktree changes stay separate.\n");
+    git("add", "--", "src/unrelated.ts");
+    const stage = git("ls-files", "--stage");
+    const receipts = await withPreparedPatch(workspace, ["src"], diff(), async ({ files, apply }) => {
+      await expect(approvedPatchFiles(workspace, ["src"], files)).rejects.toThrow("no longer matches");
+      await apply();
+      return files;
+    });
+    const captured = await approvedPatchFiles(workspace, ["src"], receipts);
+    expect(captured).toEqual([{
+      path: target, mode: "100644", before: patchDigest(original), after: patchDigest(proposed),
+      bytes: Buffer.from(proposed),
+    }]);
+    expect(git("ls-files", "--stage")).toBe(stage);
+    expect(await readFile(extra, "utf8")).toBe("Unrelated worktree changes stay separate.\n");
+    await writeFile(file, proposed + "// later edit\n");
+    expect(captured[0]!.bytes).toEqual(Buffer.from(proposed));
+    await expect(approvedPatchFiles(workspace, ["src"], receipts)).rejects.toThrow("no longer matches");
+  });
+});
+
+test("applied patch capture rejects invalid receipts, changed Git mode, and out-of-scope files", async () => {
+  await fixture(async (workspace, git) => {
+    const receipts = await withPreparedPatch(workspace, ["src"], diff(), async ({ files, apply }) => {
+      await apply();
+      return files;
+    });
+    const [file] = receipts;
+    for (const invalid of [
+      [],
+      [{ ...file!, path: "../outside.ts" }],
+      [{ ...file!, before: "bad hash" }],
+      [{ ...file!, after: file!.before }],
+      [{ ...file!, mode: "120000" }],
+      [...receipts, { ...file!, path: "SRC/example.ts" }],
+    ]) {
+      await expect(approvedPatchFiles(workspace, ["src"], invalid)).rejects.toThrow("receipt is invalid");
+    }
+    await expect(approvedPatchFiles(workspace, ["other"], receipts)).rejects.toThrow("outside the permitted patch scope");
+    git("update-index", "--chmod=+x", "--", target);
+    if (process.platform !== "win32") await chmod(join(workspace, target), 0o755);
+    await expect(approvedPatchFiles(workspace, ["src"], receipts)).rejects.toThrow("no longer matches");
+  });
+});
+
 test("rejects stale bytes, untracked and out-of-scope files, and invalid hunks", async () => {
   await fixture(async (workspace) => {
     const file = join(workspace, target);
@@ -82,11 +131,16 @@ test.skipIf(process.platform === "win32")("rejects files replaced by worktree sy
   await fixture(async (workspace) => {
     const originalPath = join(workspace, target);
     const linked = join(workspace, "target.ts");
-    await writeFile(linked, original, { mode: 0o644 });
+    const receipts = await withPreparedPatch(workspace, ["src"], diff(), async ({ files, apply }) => {
+      await apply();
+      return files;
+    });
+    await writeFile(linked, proposed, { mode: 0o644 });
     await rm(originalPath);
     await symlink(linked, originalPath);
     await expect(withPreparedPatch(workspace, ["src"], diff(), async () => {})).rejects.toThrow("ordinary tracked UTF-8 file");
-    expect(await readFile(linked, "utf8")).toBe(original);
+    await expect(approvedPatchFiles(workspace, ["src"], receipts)).rejects.toThrow("ordinary tracked UTF-8 file");
+    expect(await readFile(linked, "utf8")).toBe(proposed);
   });
 });
 

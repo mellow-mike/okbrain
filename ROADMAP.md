@@ -89,6 +89,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   comparison for accepted results.
 - [x] Preview and publish an owner-approved GitHub pull request from an accepted
   run using a separate publishing credential and a durable PR receipt.
+- [x] Publish an applied patch from the Mac or web app as a new GitHub branch
+  from a verified base, recover a lost response, and use the branch in the PR flow.
 - [x] Package VS Code and Cursor integration for approved active-file requests
   and reviewing runs.
 
@@ -781,6 +783,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Connected applied coding patches to GitHub branch and pull
+  request creation, with exact file previews and recovery after an interrupted write.
 - 2026-11-22 — Exposed Pi Durable task stages in app and editor run inspection.
   Tested private state backup, restore, and expired request replay protection
   through the offline Linux Docker worker and local project API.

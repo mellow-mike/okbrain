@@ -206,6 +206,16 @@ Choose **Refresh GitHub activity** to load recent open issues and pull requests.
 
 After accepting a coding request, open **Prepare GitHub review**, choose the accepted request, and enter the base and head branches already on GitHub. Use **Prepare comparison** to open GitHub's review screen. In VS Code and Cursor, choose **Prepare GitHub pull request in okbrain** from an accepted run to open the same form. [Compare branches in GitHub](https://docs.github.com/en/pull-requests/committing-changes-to-your-project/viewing-and-comparing-commits/comparing-commits)
 
+### Publish an applied patch as a new branch
+
+In the Mac or local web app, accept the result and apply its approved patch. In **GitHub → Connection settings**, save a separate fine-grained branch publishing token with **Contents** write access to this repository. Changes to GitHub Actions workflow files may also require **Workflows** write access. Open **Prepare GitHub review**, choose the same run, and enter an existing base branch, an unused head branch name, and a commit message.
+
+Choose **Preview branch**. okbrain checks that the original file bytes and modes match the selected GitHub base and that the worktree still contains the applied patch. The preview shows the base commit and the full file contents that will be sent. Review the contents, confirm, and choose **Publish branch**. Each publication creates one commit on the approved base and creates a new remote ref. Existing branches and the local index stay intact. [GitHub Git trees](https://docs.github.com/en/rest/git/trees) · [Create a Git reference](https://docs.github.com/en/rest/git/refs#create-a-reference)
+
+If the base or applied file contents change before the commit is written, preview again. If a connection drops while GitHub creates the branch, choose **Find or recover branch**. okbrain saves the intended commit before creating the ref and verifies that the remote branch points at that exact commit. The receipt fills in the branch for the pull request workflow.
+
+### Open a pull request
+
 To open a pull request from okbrain, the local owner saves a separate fine-grained **Pull request publishing token** under **Connection settings**. Restrict it to the connected repository and grant **Pull requests** write permission. In **Create a pull request**, enter the title and Markdown, choose whether to open a draft, and preview the exact text and branch comparison. After checking the preview, confirm and choose **Publish to GitHub**. okbrain submits the title, Markdown, branch names, and draft choice. The branches must already exist in that repository. The transcript, excerpts, and local worktree stay on the machine. [GitHub create pull request API](https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28#create-a-pull-request)
 
 The preview includes a Markdown comment that links GitHub's receipt to the local approval after a lost response or restart. Choose **Find or recover pull request** to look up that receipt. Repeating the same approval returns a recorded result when one is available. If GitHub already has another open pull request for those branches, review the existing comparison. okbrain records approval and publication or recovery in the project audit log.

@@ -84,7 +84,7 @@ export function githubUrl(repository: string) {
   return `${GITHUB_ORIGIN}/${repository}`;
 }
 
-function githubBranch(value: unknown): string {
+export function githubBranch(value: unknown): string {
   if (typeof value !== "string" || !/^[a-zA-Z0-9_][a-zA-Z0-9._/-]{0,254}$/.test(value) ||
       value.includes("..") || value.endsWith(".") ||
       value.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock"))) {
