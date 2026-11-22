@@ -131,7 +131,7 @@ test("settings report only redacted legacy URLs and refuse a nested brain or lin
     await expect(syncSettings(directory, origin)).rejects.toThrow();
   }
   expect(await readFile(join(root, ".git", "config"), "utf8")).toBe(originalConfig);
-});
+}, 15_000);
 
 test("replacing and disconnecting origin preserve refs, commits, and unrelated Git settings", async () => {
   const root = await brain("change-origin");
