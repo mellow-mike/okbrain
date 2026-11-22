@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApiServer } from "../src/api.ts";
-import type { CodingEvaluations, EvaluationSource } from "../src/core/coding/evaluation.ts";
+import { CodingEvaluations, parseEvaluation, pinnedEvaluationBinding, type EvaluationSource } from "../src/core/coding/evaluation.ts";
+import { pinnedEvaluationRubric } from "../src/core/coding/evaluation-rubric.ts";
+import { ensureExtensionCapableSqlite } from "../src/core/engine/custom-sqlite.ts";
 
 const ownerToken = "evaluation-test-owner";
 type Report = ReturnType<CodingEvaluations["report"]> & { provider: string; model: string };
@@ -178,6 +181,82 @@ test("opt-in Coding evaluations use saved evidence, separate actors, and durably
     await server.stop();
     await rm(root, { recursive: true, force: true, maxRetries: 3 });
   }
+});
+
+test("pinned evaluation drafts are scoped and reject other checkouts without admitting a run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "okb-pinned-study-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  for (const args of [["init", "--quiet"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+    "commit", "--quiet", "--allow-empty", "-m", "Test revision"]]) {
+    const git = Bun.spawnSync(["git", ...args], { cwd: workspace });
+    if (git.exitCode !== 0) throw new Error(git.stderr.toString());
+  }
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: "pinned-fixture" }] });
+  models.setProvider(faux.provider);
+  const api = createApiServer({ bundle: workspace, port: 0, token: ownerToken, coding: { stateDir: join(root, "state"), models } });
+  try {
+    const { call, request } = client(api.url);
+    const config = { workspace, title: "Pinned fixture", scopes: ["."], provider: "openai", model: "pinned-fixture" };
+    const project = await call<{ id: string }>("/projects", config);
+    const other = await call<{ id: string }>("/projects", { ...config, title: "Other fixture" });
+    const path = "/projects/" + project.id;
+    const member = await call<{ token: string }>(path + "/members", { name: "rubric-author" });
+    expect((await request(path + "/evaluation-rubric", undefined, null)).status).toBe(401);
+    expect((await request("/projects/" + other.id + "/evaluation-rubric", undefined, member.token)).status).toBe(403);
+    const response = await request(path + "/evaluation-rubric", undefined, member.token);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({ result: pinnedEvaluationRubric });
+    expect(pinnedEvaluationRubric.studies.map(({ id, tokenBudget, tasks }) => [id, tokenBudget, tasks.length]))
+      .toEqual([["package", 4096, 6], ["subsystem", 12288, 6]]);
+
+    const study = pinnedEvaluationRubric.studies[0]!;
+    const task = study.tasks[0]!;
+    const evaluation = { series: study.series, task: task.id, evidence: task.evidence };
+    const draft = { source: "files", files: task.files, evaluation, prompt: task.prompt, measurePreview: true };
+    const changed = await request(path + "/preview", { ...draft, prompt: "A different task" }, member.token);
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toMatchObject({ error: expect.stringContaining("exact task and citations") });
+    const changedScope = await request(path + "/preview", { ...draft, files: ["extra.ts"] }, member.token);
+    expect(changedScope.status).toBe(409);
+    expect(await changedScope.json()).toMatchObject({ error: expect.stringContaining("published source strategy") });
+    const wrong = await request(path + "/preview", draft, member.token);
+    expect(wrong.status).toBe(409);
+    expect(await wrong.json()).toMatchObject({ error: expect.stringContaining(pinnedEvaluationRubric.revision) });
+    const run = await request(path + "/run", { ...draft, session: "trial", requestId: "unapproved", approved: true, previewId: "not-a-preview" }, member.token);
+    expect(run.status).toBe(409);
+    expect(await call<unknown[]>(path + "/runs", undefined, member.token)).toHaveLength(0);
+    expect(faux.state.callCount).toBe(0);
+  } finally {
+    await api.stop();
+    await rm(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test("pinned evaluation timing requires the author's matching measured case preview", () => {
+  ensureExtensionCapableSqlite();
+  using db = new Database(":memory:");
+  db.exec(`CREATE TABLE runs(project TEXT, session TEXT, id TEXT, actor TEXT, status TEXT, PRIMARY KEY (project, session, id))`);
+  const ledger = new CodingEvaluations(db);
+  const attempt = { project: "project", session: "trial", requestId: "attempt" };
+  const actor = "human:author";
+  const preview = "fixture-hash";
+  db.run("INSERT INTO runs VALUES (?, ?, ?, ?, ?)", [attempt.project, attempt.session, attempt.requestId, actor, "running"]);
+  const [study] = pinnedEvaluationRubric.studies;
+  const [task] = study!.tasks;
+  const evaluation = parseEvaluation({ series: study!.series, task: task!.id, evidence: task!.evidence }, ["."]);
+  const binding = pinnedEvaluationBinding(evaluation, task!.prompt, { files: task!.files }, false)!;
+  const enroll = (principal = actor) => ledger.enroll(attempt, principal, evaluation, task!.prompt, "files", "injected", preview, binding);
+  ledger.preview(attempt.project, actor, preview, 30);
+  expect(() => enroll()).toThrow("Preview the pinned case again");
+  ledger.preview(attempt.project, actor, preview, 50, binding);
+  expect(() => enroll("human:reviewer")).toThrow("Preview the pinned case again");
+  enroll();
+  expect(ledger.get(attempt, actor)).toMatchObject({ previewMs: 50, series: study!.series });
+  // The same approved preview can't supply timing to a second trial.
+  expect(() => db.transaction(enroll)()).toThrow("Preview the pinned case again");
+  expect(ledger.get(attempt, actor)?.previewMs).toBe(50);
 });
 
 test("package evaluations inspect the original Pi Durable package inputs", async () => {

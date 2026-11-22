@@ -1,8 +1,9 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
+import { pinnedEvaluationTask } from "./evaluation-rubric.ts";
 import { profilePath } from "./project-profile.ts";
-import { excludedPath } from "./repository-context.ts";
+import { excludedPath, type RepositoryContextOptions } from "./repository-context.ts";
 
 const tokenFields = ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const;
 type Tokens = Pick<Usage, typeof tokenFields[number]>;
@@ -62,6 +63,35 @@ export function parseEvaluation(value: unknown, scopes: string[]): EvaluationCas
   if (new Set(targets.map(({ path, startLine, endLine }) => `${path}:${startLine}-${endLine}`)).size !== targets.length)
     throw new CodingEvaluationError("List each evidence target once.");
   return { series: identifier(series, "series"), task: identifier(task, "task"), evidence: targets };
+}
+
+function samePaths(actual: readonly string[] | undefined, expected: readonly string[]) {
+  return JSON.stringify([...(actual ?? [])].sort()) === JSON.stringify([...expected].sort());
+}
+
+/** Reserve the published series for the exact task, evidence, and retrieval recipe. */
+export function pinnedEvaluationBinding(evaluation: EvaluationCase | undefined, prompt: string | undefined,
+  selection: { files?: string[]; repository?: Omit<RepositoryContextOptions, "workspace"> }, approvedSourceLookup: boolean): string | undefined {
+  if (!evaluation?.series.startsWith("pinned-vite-")) return;
+  const pin = pinnedEvaluationTask(evaluation.series, evaluation.task);
+  if (!pin) throw new CodingEvaluationError("Load a published case from Pinned Vite benchmark, or choose another series ID.", 409);
+  const { study, task } = pin;
+  const expected = parseEvaluation({ series: study.series, task: task.id, evidence: task.evidence }, ["."]);
+  if (prompt !== task.prompt || JSON.stringify(evaluation.evidence) !== JSON.stringify(expected?.evidence)) {
+    throw new CodingEvaluationError("Reload the pinned case to restore its exact task and citations, or choose another series ID.", 409);
+  }
+  const repository = selection.repository;
+  const profile = repository?.profile;
+  const canonicalSource = selection.files
+    ? JSON.stringify(selection.files) === JSON.stringify(task.files)
+    : repository?.query === task.query && (profile
+      ? samePaths(profile.projects, task.projects) && samePaths(profile.sharedProjects, task.sharedProjects) &&
+        profile.tokenBudget === study.tokenBudget && !profile.guidance && !profile.exclude?.length
+      : samePaths(repository.projects, [...new Set([...task.projects, ...task.sharedProjects])]) && repository.tokenBudget === study.tokenBudget);
+  if (!canonicalSource || approvedSourceLookup) {
+    throw new CodingEvaluationError("Use a published source strategy for this pinned case, or choose another series ID.", 409);
+  }
+  return JSON.stringify([study.series, task.id]);
 }
 
 export function evaluationInput(content: string): EvaluationInput | undefined {
@@ -168,15 +198,15 @@ export class CodingEvaluations {
     `);
   }
 
-  preview(project: string, actor: string, id: string, milliseconds: number) {
-    const key = JSON.stringify([project, actor, id]);
+  preview(project: string, actor: string, id: string, milliseconds: number, binding?: string) {
+    const key = JSON.stringify([project, actor, id, binding]);
     this.#previews.delete(key);
     this.#previews.set(key, { milliseconds: Math.round(milliseconds), observedAt: Date.now() });
     if (this.#previews.size > 200) this.#previews.delete(this.#previews.keys().next().value!);
   }
 
   enroll(attempt: Attempt, actor: string, evaluation: EvaluationCase | undefined, prompt: string,
-    strategy: EvaluationStrategy, origin: Origin, previewId: string) {
+    strategy: EvaluationStrategy, origin: Origin, previewId: string, binding?: string) {
     const { project, session, requestId } = attempt;
     using remove = this.db.prepare("DELETE FROM coding_evaluations WHERE project = ? AND session = ? AND request_id = ?");
     remove.run(project, session, requestId);
@@ -189,9 +219,10 @@ export class CodingEvaluations {
     const existing = prior.get(project, series, task);
     if (existing && existing.definition !== definition)
       throw new CodingEvaluationError("This series and task ID already use a different prompt or evidence list. Use a new task ID.", 409);
-    const previewKey = JSON.stringify([project, actor, previewId]);
+    const previewKey = JSON.stringify([project, actor, previewId, binding]);
     const preview = this.#previews.get(previewKey);
     const previewMs = preview && Date.now() - preview.observedAt <= 15 * 60_000 ? preview.milliseconds : null;
+    if (binding && previewMs === null) throw new CodingEvaluationError("Preview the pinned case again before sending this trial.", 409);
     using insert = this.db.prepare(`
       INSERT INTO coding_evaluations(project, session, request_id, series, task, definition, evidence, strategy, origin, preview_id, preview_ms)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

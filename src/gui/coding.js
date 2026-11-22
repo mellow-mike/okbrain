@@ -555,13 +555,17 @@
     const compactionNotice = form.querySelector('[data-send-compaction-notice]');
     const packageFields = Array.from(form.querySelectorAll('[data-package]'));
     const feedback = form.querySelector('[data-composer-feedback]');
-    const evaluationOptions = form.querySelector('[data-evaluation-options]');
-    const evaluation = window.okbCodingEvaluation.composerOptions(evaluationOptions, readonly);
+    const evaluation = window.okbCodingEvaluation.composerOptions(form.querySelector('[data-evaluation-options]'), {
+      readonly, coding, prefix, detached, invalidate: clearPreview,
+      loadPinnedCase: (study, task, strategy) => panel.loadEvaluationCase(
+        { prompt: task.prompt, series: study.series, task: task.id, evidence: task.evidence }, { study, task, strategy }),
+    });
     let preview = null;
     let revision = 0;
     let busy = false;
     let evaluationPrompt;
     const pendingCompactions = new Set();
+    const draftPrompt = () => evaluationPrompt?.displayed === prompt.value ? evaluationPrompt.saved : prompt.value;
 
     function updateSend() {
       const pending = pendingCompactions.has(session.value.trim());
@@ -626,18 +630,17 @@
     });
 
     prompt.addEventListener('input', () => { evaluationPrompt = undefined; });
-    evaluationOptions.addEventListener('input', clearPreview);
-    evaluationOptions.addEventListener('change', clearPreview);
     for (const input of [source, projects, tokenBudget, profile, files, session, requestId, prompt, approvedSourceLookup,
       form.elements.query, ...form.querySelectorAll('[data-package] input')])
       input.addEventListener('input', clearPreview);
-    source.addEventListener('change', () => {
+    function updateSourceFields() {
       form.querySelector('[data-repository]').hidden = source.value !== 'repository';
       form.querySelector('[data-files]').hidden = source.value !== 'files';
       form.querySelector('[data-packages]').hidden = source.value !== 'packages';
       form.querySelector('[data-source-lookup]').hidden = source.value === 'packages';
       if (source.value === 'packages') approvedSourceLookup.checked = false;
-    });
+    }
+    source.addEventListener('change', updateSourceFields);
     approved.addEventListener('change', updateSend);
 
     previewButton.addEventListener('click', async () => {
@@ -652,7 +655,12 @@
         const lookup = approvedSourceLookup.checked;
         if (lookup && selection.source === 'files' && !selection.files.length)
           throw new Error('Choose at least one file to allow approved source lookup.');
-        const result = await coding(prefix + '/preview', { ...selection, ...(evaluation.enabled() ? { measurePreview: true } : {}) });
+        const evaluationCase = evaluation.value();
+        const pinned = evaluationCase?.series.startsWith('pinned-vite-');
+        const result = await coding(prefix + '/preview', {
+          ...selection, ...(evaluationCase ? { measurePreview: true } : {}),
+          ...(pinned ? { evaluation: evaluationCase, prompt: draftPrompt(), ...(lookup ? { approvedSourceLookup: true } : {}) } : {}),
+        });
         if (!isCurrent()) return;
         previewContents(previewEl, result);
         if (result.source === 'repository' && !result.excerpts.length) return;
@@ -684,7 +692,7 @@
       try {
         const run = await coding(prefix + '/run', {
           ...preview.selection, approved: true, previewId: preview.id,
-          prompt: evaluationPrompt?.displayed === prompt.value ? evaluationPrompt.saved : prompt.value,
+          prompt: draftPrompt(),
           session: session.value, requestId: requestId.value, evaluation: evaluation.value(),
           ...(preview.lookup ? { approvedSourceLookup: true } : {}),
         });
@@ -719,8 +727,21 @@
       clearPreview();
     };
     panel.canLoadEvaluationCase = () => !readonly && panel.isConnected && !detached();
-    panel.loadEvaluationCase = (saved) => {
+    panel.loadEvaluationCase = (saved, recipe) => {
       if (busy || !panel.canLoadEvaluationCase()) return false;
+      if (recipe) {
+        const { study, task, strategy } = recipe;
+        source.value = strategy === 'files' ? 'files' : 'repository';
+        files.value = strategy === 'files' ? task.files.join(', ') : '';
+        form.elements.query.value = strategy === 'files' ? '' : task.query;
+        const roots = strategy === 'lexical' ? [...new Set([...task.projects, ...task.sharedProjects])] : task.projects;
+        projects.value = roots.join(', ');
+        tokenBudget.value = study.tokenBudget;
+        profile.value = strategy === 'indexed' ? JSON.stringify({
+          version: 1, name: 'Vite benchmark', projects: task.projects, sharedProjects: task.sharedProjects, tokenBudget: study.tokenBudget,
+        }, null, 2) : '';
+        updateSourceFields();
+      }
       evaluation.load(saved);
       prompt.value = saved.prompt;
       // Textareas normalize line endings. Keep the saved prompt exact until the user edits it.
@@ -729,7 +750,8 @@
       requestId.value = crypto.randomUUID();
       approvedSourceLookup.checked = false;
       clearPreview();
-      report(feedback, undefined, 'Evaluation case loaded. Preview source again before sending.');
+      report(feedback, undefined, recipe ? 'Pinned evaluation case loaded. Preview source before sending.'
+        : 'Evaluation case loaded. Preview source again before sending.');
       prompt.focus();
       return true;
     };

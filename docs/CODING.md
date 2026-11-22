@@ -147,6 +147,14 @@ To repeat a case with another strategy, open a finished attempt and choose **Use
 
 An independent reviewer and approved live provider credentials are needed to collect live evidence. The automated browser check exercises submission and review with separate project tokens and an injected fixture provider.
 
+### Load a pinned Vite benchmark case
+
+Register the root of a clean Vite v7.0.0 checkout at `b85f32275b443bf6b647572a9209f1e078b5b4dd` as a Coding project. Give the project access to the directories the selected case uses. You can open an existing checkout from a Git client or editor. [Pinned Vite source](https://github.com/vitejs/vite/tree/b85f32275b443bf6b647572a9209f1e078b5b4dd)
+
+In **New request → Independent evaluation → Pinned Vite benchmark**, select a study, case, and strategy, then choose **Use pinned case**. Each study has six cases. **Package directories** uses a 4,096-token excerpt budget, and **Subsystem directories** uses 12,288. **Explicit files** starts with the known evidence paths. **Lexical** searches the permitted study directories, and **Indexed profile** uses the same budget with separate primary and shared directories.
+
+The app fills the task, citation targets, and source recipe in a fresh session. Choose **Preview source**, check the selection, and approve sending it. The server verifies the pinned commit and clean tracked checkout before previewing and sending, and records timing for the approved preview. The reserved study IDs keep these trials separate from custom runs. Use the normal independent review to record results.
+
 ### Review independent packages
 
 In the Coding workspace, choose **Independent package review** for a task spanning two or three separate directories. Enter a search query and optional excerpt budget for each directory. **Preview source** shows each package separately. Approve the shared task and selected text before sending.

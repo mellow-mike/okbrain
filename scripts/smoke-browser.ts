@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type Page, type Request as BrowserRequest } from "playwright";
 import { createApiServer } from "../src/api.ts";
 import { runCodingSession } from "../src/core/coding/durable.ts";
 import type { CodingRunReport } from "../src/core/coding/run-report.ts";
@@ -1624,6 +1624,130 @@ try {
     await Promise.all(teamPages.map((view) => view.close()));
     await codingFixture("/team", { action: "stop" });
   }
+
+  {
+    // Give the disposable repository a real HEAD so the refusal identifies the required revision.
+    const hooks = join(root, "browser-fixture-no-hooks");
+    await mkdir(hooks);
+    const commit = Bun.spawnSync(["git", "-c", `core.hooksPath=${hooks}`, "-c", "user.name=okbrain browser fixture",
+      "-c", "user.email=browser@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "Browser fixture"], { cwd: workspace });
+    assert.equal(commit.exitCode, 0, commit.stderr.toString());
+    const prefix = "/api/coding" + projectPath;
+    const projectPosts: string[] = [];
+    const recordProjectPost = (request: BrowserRequest) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === "POST" && path.startsWith(prefix + "/") && /\/(?:preview|run|resume)$/u.test(path))
+        projectPosts.push(path.slice(prefix.length));
+    };
+    page.on("request", recordProjectPost);
+    try {
+      const callsBeforePinned = projectFaux.state.callCount;
+      await projectMode.selectOption("files");
+      await manualFiles.fill("browser.ts");
+      await task.fill("Review the temporary browser draft.");
+      await projectLookup.check();
+      await previewProject.click();
+      await explicitApproval.check();
+      const sourcePreview = projectComposer.locator("[data-preview-content]");
+      assert.equal(await sourcePreview.locator("pre").textContent(), branchBefore);
+      assert.equal(await sendProject.isEnabled(), true);
+
+      const session = projectComposer.getByLabel("Session", { exact: true });
+      const requestID = projectComposer.getByLabel("Request ID", { exact: true });
+      const oldSession = await session.inputValue();
+      const oldRequest = await requestID.inputValue();
+      await projectComposer.getByText("Independent evaluation", { exact: true }).click();
+      const getRubric = page.waitForResponse((response) => new URL(response.url()).pathname === prefix + "/evaluation-rubric" &&
+        response.request().method() === "GET");
+      await projectComposer.getByText("Pinned Vite benchmark", { exact: true }).click();
+      const rubricResponse = await getRubric;
+      assert.ok(rubricResponse.ok(), await rubricResponse.text());
+      const { result: rubric } = await rubricResponse.json();
+      const revision = "b85f32275b443bf6b647572a9209f1e078b5b4dd";
+      assert.equal(rubric.version, 1);
+      assert.equal(rubric.tag, "v7.0.0");
+      assert.equal(rubric.revision, revision);
+      await projectComposer.getByText(new RegExp("v7\\.0\\.0.*" + revision)).waitFor();
+
+      const studyPicker = projectComposer.getByRole("combobox", { name: "Benchmark study", exact: true });
+      const casePicker = projectComposer.getByRole("combobox", { name: "Benchmark case", exact: true });
+      const strategyPicker = projectComposer.getByRole("combobox", { name: "Benchmark strategy", exact: true });
+      const choosePinned = projectComposer.getByRole("button", { name: "Use pinned case", exact: true });
+      await studyPicker.selectOption("subsystem");
+      const study = rubric.studies.find(({ id }: { id: string }) => id === "subsystem");
+      assert.ok(study);
+      assert.deepEqual(await casePicker.locator("option").evaluateAll((options) => options.map((option) =>
+        (option as HTMLOptionElement).value).filter(Boolean)), [
+        "preload-error", "scaffold-template", "plugin-legacy-target", "hmr-lifecycle", "split-css-manifest", "dependency-scan",
+      ]);
+      await casePicker.selectOption("hmr-lifecycle");
+      const pinned = study.tasks.find(({ id }: { id: string }) => id === "hmr-lifecycle");
+      assert.ok(pinned);
+      assert.equal(pinned.prompt, "Trace browser HMR before-update events through the shared listener registry. Cite supporting source by file path and line range.");
+      assert.deepEqual(pinned.files, ["packages/vite/src/client/client.ts", "packages/vite/src/shared/hmr.ts", "docs/guide/api-hmr.md"]);
+      await strategyPicker.selectOption("lexical");
+      assert.equal(await explicitApproval.isChecked(), true);
+      assert.equal(await projectLookup.isChecked(), true);
+      assert.equal(await sendProject.isEnabled(), true);
+
+      await choosePinned.click();
+      await projectComposer.getByText("Pinned evaluation case loaded. Preview source before sending.", { exact: true }).waitFor();
+      assert.equal(await projectMode.inputValue(), "repository");
+      assert.equal(await query.inputValue(), pinned.query);
+      assert.equal(await profileField.inputValue(), "");
+      assert.equal(await projectComposer.getByLabel("Directories", { exact: true }).inputValue(),
+        [...new Set([...pinned.projects, ...pinned.sharedProjects])].join(", "));
+      assert.equal(await projectComposer.getByLabel("Estimated excerpt tokens", { exact: true }).first().inputValue(), String(study.tokenBudget));
+      const lexicalSession = await session.inputValue();
+      const lexicalRequest = await requestID.inputValue();
+      assert.ok(lexicalSession && lexicalSession !== oldSession);
+      assert.ok(lexicalRequest && lexicalRequest !== oldRequest);
+      assert.equal(await projectLookup.isChecked(), false);
+      assert.equal(await explicitApproval.isChecked(), false);
+      assert.equal(await explicitApproval.isVisible(), false);
+      assert.equal(await sourcePreview.textContent(), "");
+      assert.equal(await sendProject.isEnabled(), false);
+
+      await strategyPicker.selectOption("files");
+      await choosePinned.click();
+      assert.equal(await projectMode.inputValue(), "files");
+      assert.equal(await manualFiles.inputValue(), pinned.files.join(", "));
+      assert.equal(await task.inputValue(), pinned.prompt);
+      assert.equal(await projectComposer.getByLabel("Series ID", { exact: true }).inputValue(), study.series);
+      assert.equal(await projectComposer.getByLabel("Task ID", { exact: true }).inputValue(), pinned.id);
+      assert.equal(await projectComposer.getByLabel("Expected citations", { exact: true }).inputValue(), pinned.evidence.join("\n"));
+      const fileSession = await session.inputValue();
+      const fileRequest = await requestID.inputValue();
+      assert.match(fileSession, /^[a-z0-9][a-z0-9_-]{0,63}$/u);
+      assert.match(fileRequest, /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u);
+      assert.ok(fileSession !== lexicalSession && fileSession !== oldSession);
+      assert.ok(fileRequest !== lexicalRequest && fileRequest !== oldRequest);
+      assert.deepEqual(projectPosts, ["/preview"]);
+
+      const blockedPreview = page.waitForResponse((response) => new URL(response.url()).pathname === prefix + "/preview" &&
+        response.request().method() === "POST");
+      await previewProject.click();
+      const denied = await blockedPreview;
+      assert.equal(denied.status(), 409);
+      assert.deepEqual(denied.request().postDataJSON(), {
+        source: "files", files: pinned.files, measurePreview: true, prompt: pinned.prompt,
+        evaluation: { series: study.series, task: pinned.id, evidence: pinned.evidence },
+      });
+      const payload = await denied.json();
+      assert.equal(payload.result, undefined);
+      assert.match(payload.error, /check out/iu);
+      assert.ok(payload.error.includes(revision));
+      await projectComposer.getByText(payload.error, { exact: true }).waitFor();
+      assert.equal(await sourcePreview.textContent(), "");
+      assert.equal(await explicitApproval.isVisible(), false);
+      assert.equal(await sendProject.isEnabled(), false);
+      assert.deepEqual(projectPosts, ["/preview", "/preview"]);
+      assert.equal(projectFaux.state.callCount, callsBeforePinned);
+    } finally {
+      page.off("request", recordProjectPost);
+    }
+  }
+
   assert.deepEqual(proposalRequests, []);
   assert.equal(await Bun.file(file).text(), branchBefore);
   const callsBeforeProjectCompaction = projectFaux.state.callCount;

@@ -20,7 +20,7 @@
     return details;
   }
 
-  function composerOptions(slot, readonly) {
+  function composerOptions(slot, { readonly, invalidate, coding, prefix, detached, loadPinnedCase }) {
     const details = element('details');
     details.innerHTML = '<summary>Independent evaluation</summary><div class="stack coding-form">' +
       '<label class="row"><input type="checkbox" data-enroll> Include this request in a measurement series</label>' +
@@ -40,14 +40,19 @@
     const citations = fields.querySelector('textarea');
     const update = () => { fields.hidden = fields.disabled = !enroll.checked; };
     enroll.disabled = readonly;
-    enroll.addEventListener('change', update);
+    enroll.addEventListener('change', () => {
+      update();
+      invalidate();
+    });
+    fields.addEventListener('input', invalidate);
+    fields.addEventListener('change', invalidate);
     update();
+    mountPinnedRubric(fields.parentElement, { readonly, coding, prefix, detached, loadPinnedCase });
     return {
-      enabled: () => enroll.checked,
       load(saved) {
         series.value = saved.series;
         task.value = saved.task;
-        citations.value = saved.evidence.map((item) => reference(item, '-')).join('\n');
+        citations.value = saved.evidence.map((item) => typeof item === 'string' ? item : reference(item, '-')).join('\n');
         enroll.checked = true;
         details.open = true;
         update();
@@ -58,6 +63,85 @@
         return { series: series.value.trim(), task: task.value.trim(), evidence };
       },
     };
+  }
+
+  function mountPinnedRubric(parent, { readonly, coding, prefix, detached, loadPinnedCase }) {
+    const disclosure = element('details');
+    disclosure.innerHTML = '<summary>Pinned Vite benchmark</summary><div class="stack coding-form">' +
+      '<p class="muted">Use a coding project rooted at a clean checkout of this exact Vite revision.</p>' +
+      '<div class="muted" data-benchmark-metadata hidden><p data-benchmark-revision></p><p data-benchmark-repository></p></div>' +
+      '<div class="coding-grid"><label class="field"><span id="benchmark-study-label">Benchmark study</span>' +
+      '<select aria-labelledby="benchmark-study-label" data-study disabled></select></label>' +
+      '<label class="field"><span id="benchmark-case-label">Benchmark case</span>' +
+      '<select aria-labelledby="benchmark-case-label" data-task disabled></select></label>' +
+      '<label class="field"><span id="benchmark-strategy-label">Benchmark strategy</span>' +
+      '<select aria-labelledby="benchmark-strategy-label" data-strategy disabled>' +
+      '<option value="files">Explicit files</option><option value="lexical">Lexical</option>' +
+      '<option value="indexed">Indexed profile</option></select></label></div>' +
+      '<p data-task-description hidden></p><div class="row"><button type="button" disabled>Use pinned case</button></div>' +
+      '<p class="coding-feedback" role="status"></p></div>';
+    parent.append(disclosure);
+    const studySelect = disclosure.querySelector('[data-study]');
+    const taskSelect = disclosure.querySelector('[data-task]');
+    const strategySelect = disclosure.querySelector('[data-strategy]');
+    const description = disclosure.querySelector('[data-task-description]');
+    const apply = disclosure.querySelector('button');
+    const feedback = disclosure.querySelector('[role="status"]');
+    let studies;
+    let loading = false;
+    const selectedStudy = () => studies?.find(({ id }) => id === studySelect.value);
+    const selectedTask = () => selectedStudy()?.tasks.find(({ id }) => id === taskSelect.value);
+
+    function showTask() {
+      const task = selectedTask();
+      description.textContent = task?.description ?? '';
+      description.hidden = !description.textContent;
+      apply.disabled = readonly || !task;
+    }
+    function showStudy() {
+      const previous = taskSelect.value;
+      const tasks = selectedStudy()?.tasks ?? [];
+      taskSelect.replaceChildren(...tasks.map(({ id }) => new Option(id, id)));
+      if (tasks.some(({ id }) => id === previous)) taskSelect.value = previous;
+      taskSelect.disabled = !tasks.length;
+      strategySelect.disabled = !tasks.length;
+      showTask();
+    }
+    disclosure.addEventListener('toggle', async () => {
+      if (!disclosure.open || studies || loading || detached()) return;
+      loading = true;
+      feedback.classList.remove('error');
+      feedback.textContent = 'Loading the pinned Vite benchmark…';
+      try {
+        const result = await coding(prefix + '/evaluation-rubric');
+        if (detached() || !disclosure.isConnected) return;
+        if (result?.version !== 1 || !Array.isArray(result.studies) || !result.studies.length)
+          throw new Error('The pinned Vite benchmark could not be loaded.');
+        studies = result.studies;
+        disclosure.querySelector('[data-benchmark-revision]').textContent = result.tag + ' · ' + result.revision;
+        disclosure.querySelector('[data-benchmark-repository]').textContent = result.repository;
+        disclosure.querySelector('[data-benchmark-metadata]').hidden = false;
+        studySelect.replaceChildren(...studies.map(({ label, id }) => new Option(label, id)));
+        studySelect.disabled = false;
+        showStudy();
+        feedback.textContent = '';
+      } catch (error) {
+        if (detached() || !disclosure.isConnected) return;
+        feedback.classList.add('error');
+        feedback.textContent = error.message;
+      } finally { loading = false; }
+    });
+    studySelect.addEventListener('change', showStudy);
+    taskSelect.addEventListener('change', showTask);
+    apply.addEventListener('click', () => {
+      if (apply.disabled || detached()) return;
+      const study = selectedStudy();
+      const task = selectedTask();
+      if (!task) return;
+      const loaded = loadPinnedCase(study, task, strategySelect.value);
+      feedback.classList.toggle('error', !loaded);
+      feedback.textContent = loaded ? '' : 'Wait for the current request to finish sending before loading this pinned case.';
+    });
   }
 
   function summaryGroup(group) {

@@ -69,6 +69,9 @@ Evaluation groups count approved source, independently verified citations,
 and recorded usage by strategy and provider origin. An operator can load the
 saved task and rubric for a fresh evaluation session in the app. Each trial
 requires a new source preview and approval.
+The benchmark CLI and app share the six pinned Vite tasks and evidence
+locations. Reserved app study IDs bind the task, citation targets, retrieval
+recipe, clean Git revision, and timed preview to each new trial.
 GitHub activity and compare handoff use a bound project remote.
 Branch publication binds exact applied patch bytes to a verified GitHub base
 commit. A separate Contents write credential creates a commit and a new ref.

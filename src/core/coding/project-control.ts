@@ -17,7 +17,8 @@ import {
   resetCodingContext, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions,
 } from "./durable.ts";
-import { CodingEvaluationError, CodingEvaluations, parseEvaluation, presentEvidence } from "./evaluation.ts";
+import { CodingEvaluationError, CodingEvaluations, parseEvaluation, pinnedEvaluationBinding, presentEvidence } from "./evaluation.ts";
+import { pinnedEvaluationRubric, PinnedEvaluationWorkspaceError, verifyPinnedEvaluationWorkspace } from "./evaluation-rubric.ts";
 import { codingRunReport } from "./run-report.ts";
 import { dockerWorkerConfig, type DockerWorkerConfig } from "./docker-worker.ts";
 import { PackageReviewError, previewPackageReviews, validatePackageReviews } from "./package-review.ts";
@@ -534,14 +535,20 @@ export class CodingProjectControl {
     const started = performance.now();
     const source = sourceOptions(project, body);
     const workspace = await this.#workspace(project);
+    const evaluation = parseEvaluation(body.evaluation, JSON.parse(project.scopes));
+    const binding = pinnedEvaluationBinding(evaluation, typeof body.prompt === "string" ? body.prompt : undefined, source, body.approvedSourceLookup === true);
+    if (binding) await verifyPinnedEvaluationWorkspace(workspace);
+    const measuredFrom = binding ? performance.now() : started;
     const result = source.packages
       ? { source: "packages", ...await previewPackageReviews(workspace, source.packages) }
       : source.repository
         ? { source: "repository", ...await selectRepositoryContext({ workspace, ...source.repository }) }
         : { source: "files", ...await previewCodingAttachments(workspace, source.files, JSON.parse(project.scopes)) };
-    if (body.measurePreview === true) {
+    const milliseconds = performance.now() - measuredFrom;
+    if (binding) await verifyPinnedEvaluationWorkspace(workspace);
+    if (binding || body.measurePreview === true) {
       const id = "manifest" in result ? result.manifest.id : result.id;
-      this.#evaluations.preview(project.id, actor.id, id, performance.now() - started);
+      this.#evaluations.preview(project.id, actor.id, id, milliseconds, binding);
     }
     return result;
   }
@@ -651,8 +658,9 @@ export class CodingProjectControl {
       throw new ProjectControlError("Choose explicit files or repository excerpts to allow approved source lookup.");
     const capabilities = approvedSourceLookup ? { approvedSourceLookup: true as const } : {};
     const evaluation = parseEvaluation(body.evaluation, JSON.parse(project.scopes));
+    const binding = pinnedEvaluationBinding(evaluation, prompt, selection, approvedSourceLookup);
     const signature = digest(JSON.stringify({ prompt, previewId, selection, ...(evaluation ? { evaluation } : {}), ...capabilities }));
-    await this.#workspace(project);
+    const workspace = await this.#workspace(project);
     const prior = this.#get<RunRow>("SELECT * FROM runs WHERE project = ? AND session = ? AND id = ?", project.id, run.session, run.requestId);
     if (prior && prior.status !== "failed") {
       if (prior.signature !== signature) throw new ProjectControlError("This request ID is bound to a different task or source selection.", 409);
@@ -666,6 +674,11 @@ export class CodingProjectControl {
       "SELECT id FROM runs WHERE project = ? AND session = ? AND status = 'interrupted' AND id <> ? LIMIT 1", project.id, run.session, run.requestId,
     );
     if (blocking) throw new ProjectControlError(`Resume or cancel interrupted request ${blocking.id} before starting another in this session.`, 409);
+    if (binding) {
+      if (this.#get("SELECT 1 FROM runs WHERE project = ? AND session = ? AND id <> ? LIMIT 1", project.id, run.session, run.requestId))
+        throw new ProjectControlError("Use a fresh session for each pinned evaluation trial.", 409);
+      await verifyPinnedEvaluationWorkspace(workspace);
+    }
     const identity = this.#session(project, run);
     const { stateDir, models, workspaceBinding } = this.#dependencies(project, actor);
     await requireNoPendingCodingContextCompaction(identity, { stateDir, models, workspaceBinding, allowEnvKey: false });
@@ -681,7 +694,7 @@ export class CodingProjectControl {
       if (evaluation || prior) {
         const strategy = selection.packages ? "packages" : selection.repository?.profile ? "indexed" : selection.repository ? "lexical" : "files";
         this.#evaluations.enroll({ project: project.id, ...run }, actor.id, evaluation, prompt,
-          strategy, this.#models ? "injected" : "provider", previewId);
+          strategy, this.#models ? "injected" : "provider", previewId, binding);
       }
       this.#audit(project.id, "submitted", actor.id, run.session, run.requestId);
     })();
@@ -1435,6 +1448,7 @@ export class CodingProjectControl {
     if (this.#closing) throw new ProjectControlError("The coding server is shutting down.", 409);
     const request = this.#dispatch(method, path, body, localOwner, token, readonly, canWrite).catch((error: unknown) => {
       if (error instanceof CodingEvaluationError) throw new ProjectControlError(error.message, error.status);
+      if (error instanceof PinnedEvaluationWorkspaceError) throw new ProjectControlError(error.message, 409);
       throw error;
     });
     this.#requests.add(request);
@@ -1465,6 +1479,7 @@ export class CodingProjectControl {
       return this.#withSession(project, body, () => this.#github(project, action, method, body, actor));
     if (action?.startsWith("github-")) return this.#github(project, action, method, body, actor);
     if (method === "GET") {
+      if (action === "evaluation-rubric") return pinnedEvaluationRubric;
       if (action === "evaluations") return { provider: project.provider, model: project.model, ...this.#evaluations.report(project.id, actor.id) };
       if (action === "runs") return this.#all<RunRow>("SELECT * FROM runs WHERE project = ? ORDER BY updated DESC LIMIT 200", project.id).map((row) => this.#runView(row));
       if (action === "audit") return this.#all<AuditRow>("SELECT kind, actor, session, request_id, at FROM audit WHERE project = ? ORDER BY seq DESC LIMIT 200", project.id);
