@@ -119,6 +119,11 @@ requires a new source preview and approval.
 The benchmark CLI and app share the six pinned Vite tasks and evidence
 locations. Reserved app study IDs bind the task, citation targets, retrieval
 recipe, clean Git revision, and timed preview to each new trial.
+The owner can prepare a matching shallow checkout from the project form. Its
+fixed tag must resolve to the pinned commit. The app checks the detached
+worktree before use and preserves tracked symlink entries as link text.
+The evaluation queue derives readiness from the authenticated member and the
+saved run and review states. Provider origin remains visible on each attempt.
 GitHub activity and compare handoff use a bound project remote.
 The local operator can prepare one shallow GitHub branch checkout in private
 Coding app data before registering a project. A transient Contents-read

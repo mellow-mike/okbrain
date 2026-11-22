@@ -1395,6 +1395,97 @@ try {
       await page.unroute(checkoutRoute);
     }
   }
+  {
+    const apiPath = "/api/coding/benchmark-checkout";
+    const checkoutRoute = "**" + apiPath;
+    const checkout = page.locator("[data-benchmark-checkout]");
+    const descriptor = { origin: "https://github.com/vitejs/vite.git", repository: "vitejs/vite", tag: "v7.0.0",
+      commit: "b85f32275b443bf6b647572a9209f1e078b5b4dd" };
+    const workspace = join(root, "pinned-benchmark-workspace");
+    const activate = checkout.getByRole("button", { name: "Prepare benchmark checkout", exact: true });
+    const consent = checkout.getByRole("checkbox", { name: "Use this exact benchmark revision", exact: true });
+    const workspaceField = page.getByLabel("Absolute workspace path", { exact: true });
+    const titleField = page.getByLabel("Project name", { exact: true });
+    const posts: string[] = [];
+    const submissions: unknown[] = [];
+    const callsBefore = projectFaux.state.callCount;
+    const descriptorReceived = Promise.withResolvers<void>();
+    const descriptorRelease = Promise.withResolvers<void>();
+    const reusedReceived = Promise.withResolvers<void>();
+    const reusedRelease = Promise.withResolvers<void>();
+    const recordBenchmarkPost = (request: BrowserRequest) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === "POST" && path.startsWith("/api/coding/")) posts.push(path);
+    };
+    page.on("request", recordBenchmarkPost);
+    await page.route(checkoutRoute, async (route) => {
+      const request = route.request();
+      assert.equal(request.headers()["x-okb-token"], server.token);
+      if (request.method() === "GET") {
+        descriptorReceived.resolve();
+        await descriptorRelease.promise;
+        const response = await route.fetch();
+        assert.ok(response.ok(), await response.text());
+        const body = await response.json();
+        assert.deepEqual(body.result, descriptor);
+        return route.fulfill({ response, json: body });
+      }
+      assert.equal(request.method(), "POST");
+      submissions.push(request.postDataJSON());
+      const attempt = submissions.length;
+      if (attempt === 2) { reusedReceived.resolve(); await reusedRelease.promise; }
+      return route.fulfill({ json: { result: { ...descriptor, workspace, reused: attempt === 2,
+        ...(attempt === 3 ? { commit: "a".repeat(40), workspace: join(root, "unapproved-revision") } : {}),
+      } } });
+    });
+    try {
+      await workspaceField.fill("");
+      await titleField.fill("");
+      await checkout.getByText("Prepare Vite benchmark checkout", { exact: true }).click();
+      await descriptorReceived.promise;
+      assert.equal(await consent.isEnabled(), false);
+      assert.equal(await activate.isEnabled(), false);
+      assert.deepEqual(posts, []);
+      descriptorRelease.resolve();
+      for (const detail of [descriptor.origin, descriptor.tag, descriptor.commit])
+        await checkout.locator("[data-benchmark-descriptor]").getByText(detail, { exact: true }).waitFor();
+      assert.equal(await activate.isEnabled(), false);
+      await consent.check();
+      await activate.click();
+      await checkout.getByText(/Vite benchmark checkout prepared\./).waitFor();
+      await checkout.locator("[data-benchmark-receipt]").getByText(workspace, { exact: true }).waitFor();
+      assert.equal(await workspaceField.inputValue(), workspace);
+      assert.equal(await titleField.inputValue(), "Vite benchmark");
+      assert.equal(await consent.isChecked(), false);
+      assert.equal(await activate.isEnabled(), false);
+
+      await consent.check();
+      await activate.click();
+      await reusedReceived.promise;
+      const manualWorkspace = join(root, "manual-benchmark-workspace");
+      await workspaceField.fill(manualWorkspace);
+      await titleField.fill("Custom study project");
+      reusedRelease.resolve();
+      await checkout.getByText(/Existing benchmark checkout reopened\. Your workspace field has changed/).waitFor();
+      assert.equal(await workspaceField.inputValue(), manualWorkspace);
+      assert.equal(await titleField.inputValue(), "Custom study project");
+
+      await consent.check();
+      await activate.click();
+      await checkout.getByText("The checkout receipt did not match the approved Vite benchmark revision.", { exact: true }).waitFor();
+      assert.equal(await workspaceField.inputValue(), manualWorkspace);
+      assert.equal(await checkout.locator("[data-benchmark-receipt]").isVisible(), false);
+      assert.deepEqual(submissions, Array.from({ length: 3 }, () => ({ approved: true, commit: descriptor.commit })));
+      assert.deepEqual(posts, [apiPath, apiPath, apiPath]);
+      assert.equal(projectFaux.state.callCount, callsBefore);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+    } finally {
+      descriptorRelease.resolve();
+      reusedRelease.resolve();
+      page.off("request", recordBenchmarkPost);
+      await page.unroute(checkoutRoute);
+    }
+  }
   const teamAccess = page.locator(".coding-projects details").filter({
     has: page.getByText("Team browser access", { exact: true }),
   });
@@ -2030,6 +2121,7 @@ try {
     assert.equal(await readonlyCoding.locator("#brain").inputValue(), readonlyBrain);
     const readonlyDeployment = await openDeployment(readonlyCoding);
     assert.equal(await readonlyCoding.getByText("Prepare GitHub checkout", { exact: true }).count(), 0);
+    assert.equal(await readonlyCoding.getByText("Prepare Vite benchmark checkout", { exact: true }).count(), 0);
     await readonlyDeployment.getByText(image, { exact: true }).waitFor();
     await readonlyDeployment.getByText("bridge", { exact: true }).waitFor();
     assert.equal(await readonlyDeployment.getByRole("button", { name: "Run offline worker check", exact: true }).count(), 0);
@@ -2284,6 +2376,7 @@ try {
     const reviewerPage = await openTeam(reviewer.token);
     await reviewerPage.getByRole("button", { name: /project-task-progress/ }).click();
     assert.equal(await reviewerPage.getByText("Prepare GitHub checkout", { exact: true }).count(), 0);
+    assert.equal(await reviewerPage.getByText("Prepare Vite benchmark checkout", { exact: true }).count(), 0);
     const copiedByMember = await copyRunReport(reviewerPage, "project-browser", "project-task-progress", [...projectPrivateText, reviewer.token, evaluationKey]);
     assert.deepEqual(copiedByMember.report, projectReport.report);
     const teamReview = reviewerPage.locator("[data-run-review]");
@@ -2374,7 +2467,19 @@ try {
 
     const authorResults = authorPage.locator(".coding-evaluations");
     await authorResults.getByText("Evaluation results", { exact: true }).click();
-    await authorResults.getByRole("button", { name: caseCaption }).click();
+    const authorFilter = authorResults.getByRole("combobox", { name: "Evaluation status", exact: true });
+    const authorCase = authorResults.getByRole("button", { name: caseCaption });
+    await authorResults.getByRole("heading", { name: "Evaluation review queue", exact: true }).waitFor();
+    await authorCase.getByText("Awaiting another member", { exact: true }).waitFor();
+    assert.equal(await authorFilter.inputValue(), "awaiting");
+    assert.deepEqual(await authorFilter.locator("option").allTextContents(), [
+      "Ready to review (0)", "Awaiting another member (1)", "Reviewed (0)", "All attempts (1)",
+    ]);
+    await authorFilter.selectOption("ready");
+    await authorResults.getByText("No evaluations are ready for you to review.", { exact: true }).waitFor();
+    assert.equal(await authorCase.count(), 0);
+    await authorFilter.selectOption("awaiting");
+    await authorCase.click();
     await authorResults.getByText("A different authenticated project member can record this evaluation.", { exact: true }).waitFor();
     assert.equal(await authorResults.getByRole("checkbox", { name: evidence, exact: true }).isDisabled(), true);
     assert.equal(await authorResults.getByRole("button", { name: "Save independent evaluation", exact: true }).count(), 0);
@@ -2388,8 +2493,26 @@ try {
     try {
       const results = reviewerPage.locator(".coding-evaluations");
       await results.getByText("Evaluation results", { exact: true }).click();
-      await results.getByRole("button", { name: caseCaption }).click();
+      const filter = results.getByRole("combobox", { name: "Evaluation status", exact: true });
+      const reviewerCase = results.getByRole("button", { name: caseCaption });
+      await reviewerCase.getByText("Ready to review", { exact: true }).waitFor();
+      assert.equal(await filter.inputValue(), "ready");
+      assert.deepEqual(await filter.locator("option").allTextContents(), [
+        "Ready to review (1)", "Awaiting another member (0)", "Reviewed (0)", "All attempts (1)",
+      ]);
+      await reviewerCase.getByText("Explicit files · Injected provider", { exact: true }).waitFor();
+      await filter.selectOption("awaiting");
+      await results.getByText("No evaluations are awaiting another member.", { exact: true }).waitFor();
+      assert.ok(!reviewerPosts.some((path) => path.endsWith("/evaluation-inspect")));
+      await filter.selectOption("all");
+      await reviewerCase.click();
       const details = results.locator("[data-detail]");
+      await details.getByText("Explicit files · Injected provider · Submitted by " + author.actor, { exact: true }).waitFor();
+      await filter.selectOption("reviewed");
+      await results.getByText("No evaluations have been reviewed.", { exact: true }).waitFor();
+      assert.equal(await details.getByRole("heading").count(), 0);
+      await filter.selectOption("ready");
+      await reviewerCase.click();
       await details.getByText("Task sent to the provider", { exact: true }).click();
       await details.getByText(caseTask, { exact: true }).waitFor();
       await details.getByText("Model response", { exact: true }).click();
@@ -2413,6 +2536,17 @@ try {
       assert.ok(reviewedCase.ok(), await reviewedCase.text());
       assert.deepEqual(reviewedCase.request().postDataJSON(), { session: evalSession, requestId: evalRequestId, decision: "accepted", verified: [0] });
       await details.getByText("Accepted by " + reviewer.actor, { exact: true }).waitFor();
+      assert.equal(await filter.inputValue(), "reviewed");
+      assert.deepEqual(await filter.locator("option").allTextContents(), [
+        "Ready to review (0)", "Awaiting another member (0)", "Reviewed (1)", "All attempts (1)",
+      ]);
+      assert.equal(await reviewerCase.getAttribute("aria-pressed"), "true");
+      await authorResults.getByRole("button", { name: "Refresh evaluations", exact: true }).click();
+      await authorResults.getByText("No evaluations are awaiting another member.", { exact: true }).waitFor();
+      await authorFilter.selectOption("reviewed");
+      await authorCase.getByText("Accepted", { exact: true }).waitFor();
+      await reviewerPage.bringToFront();
+      assert.equal(await reviewerPage.evaluate(() => document.documentElement.scrollWidth), 375);
       const metrics = results.locator("[data-groups] article");
       await metrics.getByText("Injected provider measurements", { exact: true }).waitFor();
       await metrics.getByText("1 attempt · 1 reviewed · 1 accepted", { exact: true }).waitFor();

@@ -4,8 +4,11 @@
 
   const strategyLabels = { files: 'Explicit files', lexical: 'Lexical', indexed: 'Indexed profile', packages: 'Package reviews' };
   const decisions = { accepted: 'Accepted', changes_requested: 'Changes requested' };
+  const queueLabels = { ready: 'Ready to review', awaiting: 'Awaiting another member', reviewed: 'Reviewed', all: 'All attempts' };
+  const origins = { provider: 'Configured provider', injected: 'Injected provider' };
   const number = (value) => value === null ? '—' : value.toLocaleString();
   const reference = ({ path, startLine, endLine }, dash = '–') => path + ':' + startLine + (startLine === endLine ? '' : dash + endLine);
+  const measurement = ({ strategy, origin }) => [strategyLabels[strategy], origins[origin]].filter(Boolean).join(' · ');
 
   function element(tag, text, className) {
     const result = document.createElement(tag);
@@ -165,19 +168,29 @@
   function mount(parent, { prefix, coding, readonly, detached, canLoadCase, loadCase }) {
     const panel = element('details', undefined, 'coding-panel coding-evaluations');
     panel.innerHTML = '<summary>Evaluation results</summary><div class="stack coding-form">' +
-      '<div class="row"><button type="button" class="small" data-refresh>Refresh evaluations</button>' +
-      '<button type="button" class="small" data-copy disabled>Copy metrics as JSON</button></div>' +
+      '<h4>Evaluation review queue</h4><div class="row">' +
+      '<button type="button" class="small" data-refresh>Refresh evaluations</button></div>' +
+      '<label class="field"><span id="evaluation-status-label">Evaluation status</span>' +
+      '<select aria-labelledby="evaluation-status-label" data-status-filter disabled></select></label>' +
+      '<p class="muted" data-truncated hidden>Queue and metrics cover the most recent 200 evaluation attempts.</p>' +
+      '<div class="stack coding-runs" data-attempts></div><div class="stack" data-detail></div>' +
+      '<p class="coding-feedback" role="status"></p>' +
+      '<div class="stack" data-metrics-controls hidden><h4>Measurement metrics</h4><div class="row">' +
+      '<button type="button" class="small" data-copy disabled>Copy metrics as JSON</button></div></div>' +
       '<label class="field" data-metrics-fallback hidden><span>Evaluation metrics JSON</span>' +
       '<textarea rows="8" readonly spellcheck="false"></textarea></label>' +
-      '<div class="stack" data-groups></div><div class="stack coding-runs" data-attempts></div>' +
-      '<div class="stack" data-detail></div><p class="coding-feedback" role="status"></p></div>';
+      '<p class="coding-feedback" role="status" data-metrics-feedback></p>' +
+      '<div class="stack" data-groups></div></div>';
     parent.append(panel);
     const groups = panel.querySelector('[data-groups]');
     const attempts = panel.querySelector('[data-attempts]');
     const detail = panel.querySelector('[data-detail]');
     const feedback = panel.querySelector('[role=status]');
+    const filter = panel.querySelector('[data-status-filter]');
+    const metricsControls = panel.querySelector('[data-metrics-controls]');
     const copy = panel.querySelector('[data-copy]');
     const fallback = panel.querySelector('[data-metrics-fallback]');
+    const metricsFeedback = panel.querySelector('[data-metrics-feedback]');
     const jsonField = fallback.querySelector('textarea');
     let report;
     let selected;
@@ -194,14 +207,62 @@
     const requestIdentity = (attempt) => ({ session: attempt.session, requestId: attempt.requestId });
     const attemptKey = (attempt) => JSON.stringify([attempt.session, attempt.requestId]);
     const settled = (attempt) => attempt.status === 'done' || attempt.status === 'unanswered';
+    const queueStatus = (attempt) => !settled(attempt) ? 'unfinished'
+      : attempt.decision ? 'reviewed' : !readonly && attempt.canReview ? 'ready' : 'awaiting';
+
+    function clearSelection() {
+      selected = undefined;
+      ++detailGeneration;
+      detail.replaceChildren();
+      attempts.querySelector('[aria-pressed="true"]')?.setAttribute('aria-pressed', 'false');
+    }
+
+    function renderQueue(reviewed) {
+      const rows = report.attempts;
+      const counts = { ready: 0, awaiting: 0, reviewed: 0, unfinished: 0, all: rows.length };
+      for (const row of rows) counts[queueStatus(row)]++;
+      let active = filter.value || ['ready', 'awaiting', 'reviewed'].find((key) => counts[key]) || 'all';
+      if (reviewed && selected === reviewed && active === 'ready' && !counts.ready &&
+          rows.some((row) => attemptKey(row) === reviewed && queueStatus(row) === 'reviewed')) active = 'reviewed';
+      filter.replaceChildren(...Object.entries(queueLabels).map(([key, label]) => new Option(label + ' (' + counts[key] + ')', key)));
+      filter.value = active;
+      filter.disabled = false;
+
+      const visible = active === 'all' ? rows : rows.filter((row) => queueStatus(row) === active);
+      if (selected && !visible.some((row) => attemptKey(row) === selected && settled(row))) clearSelection();
+      const empty = !rows.length ? 'Enroll a new request in Independent evaluation to start measuring.' : {
+        ready: 'No evaluations are ready for you to review.',
+        awaiting: 'No evaluations are awaiting another member.',
+        reviewed: 'No evaluations have been reviewed.',
+      }[active];
+      attempts.replaceChildren(...(visible.length ? visible.map((attempt) => {
+        const button = element('button', undefined, 'coding-run');
+        button.type = 'button';
+        button.disabled = !settled(attempt);
+        const labels = element('span');
+        labels.append(element('strong', attempt.series + ' / ' + attempt.task),
+          element('span', attempt.session + ' · ' + attempt.requestId, 'muted'), element('br'), element('span', measurement(attempt), 'muted'));
+        const status = decisions[attempt.decision] || queueLabels[queueStatus(attempt)] || attempt.status;
+        button.append(labels, element('span', status));
+        button.setAttribute('aria-pressed', String(selected === attemptKey(attempt)));
+        button.addEventListener('click', () => {
+          selected = attemptKey(attempt);
+          for (const other of attempts.querySelectorAll('button')) other.setAttribute('aria-pressed', String(other === button));
+          message('');
+          void openReview(attempt);
+        });
+        return button;
+      }) : [element('p', empty, 'muted')]));
+    }
 
     function clearMetricsFallback() {
       ++copyGeneration;
       fallback.hidden = true;
       jsonField.value = '';
+      metricsFeedback.textContent = '';
     }
 
-    async function loadReport() {
+    async function loadReport(reviewed) {
       const current = ++reportGeneration;
       loadingReport = true;
       const useCase = detail.querySelector('[data-use-evaluation-case]');
@@ -211,37 +272,12 @@
         if (detached() || current !== reportGeneration) return;
         clearMetricsFallback();
         report = result;
+        panel.querySelector('[data-truncated]').hidden = !report.truncated;
+        metricsControls.hidden = !report.groups.length;
         copy.disabled = !report.groups.length;
-        groups.replaceChildren();
-        attempts.replaceChildren();
-        if (selected && !report.attempts.some((attempt) => settled(attempt) && attemptKey(attempt) === selected)) {
-          selected = undefined;
-          ++detailGeneration;
-          detail.replaceChildren();
-        }
-        if (!report.attempts.length) {
-          groups.append(element('p', 'Enroll a new request in Independent evaluation to start measuring.', 'muted'));
-          return;
-        }
-        if (report.truncated) groups.append(element('p', 'Metrics cover the most recent 200 evaluation attempts.', 'muted'));
-        groups.append(element('p', report.provider + ' · ' + report.model, 'muted'), ...report.groups.map(summaryGroup));
-        for (const attempt of report.attempts) {
-          const button = element('button', undefined, 'coding-run');
-          button.type = 'button';
-          button.disabled = !settled(attempt);
-          const labels = element('span');
-          labels.append(element('strong', attempt.series + ' / ' + attempt.task),
-            element('span', attempt.session + ' · ' + attempt.requestId, 'muted'));
-          const status = decisions[attempt.decision] || (button.disabled ? attempt.status : 'Awaiting review');
-          button.append(labels, element('span', status));
-          button.setAttribute('aria-pressed', String(selected === attemptKey(attempt)));
-          button.addEventListener('click', async () => {
-            selected = attemptKey(attempt);
-            for (const other of attempts.querySelectorAll('button')) other.setAttribute('aria-pressed', String(other === button));
-            await openReview(attempt);
-          });
-          attempts.append(button);
-        }
+        groups.replaceChildren(...(report.groups.length
+          ? [element('p', report.provider + ' · ' + report.model, 'muted'), ...report.groups.map(summaryGroup)] : []));
+        renderQueue(reviewed);
       } catch (error) {
         if (!detached() && current === reportGeneration) message(error.message, true);
       } finally {
@@ -253,7 +289,7 @@
       }
     }
 
-    function reviewForm(result) {
+    function reviewForm(result, isCurrent) {
       const { attempt, evidencePresent } = result;
       const form = element('form', undefined, 'stack');
       const canReview = !readonly && attempt.canReview;
@@ -296,7 +332,8 @@
       update();
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
-        if (save.disabled) return;
+        if (save.disabled || !isCurrent()) return;
+        const restoreFocus = form.contains(document.activeElement);
         saving = true;
         update();
         try {
@@ -304,12 +341,15 @@
             ...requestIdentity(attempt), decision: decision.value,
             verified: checks.flatMap((check, index) => check.checked ? [index] : []),
           });
-          if (detached()) return;
+          if (detached() || !panel.open) return;
+          const reviewed = isCurrent() ? attemptKey(attempt) : undefined;
           message('Independent evaluation saved.');
-          await loadReport();
-          if (selected === attemptKey(attempt)) await openReview(attempt, false);
+          await loadReport(reviewed);
+          const focus = restoreFocus && (document.activeElement === document.body || form.contains(document.activeElement));
+          if (reviewed && isCurrent()) await openReview(attempt, focus);
+          else if (reviewed && !selected && focus) filter.focus();
         } catch (error) {
-          message(error.message, true);
+          if (isCurrent()) message(error.message, true);
         } finally { saving = false; update(); }
       });
       return form;
@@ -329,7 +369,7 @@
         source.append(element('summary', 'Approved source used for this request'));
         if (!result.sources.length) source.append(element('p', 'No source was attached.', 'muted'));
         for (const part of result.sources) source.append(disclosure(reference(part), part.content));
-        const controls = [heading];
+        const controls = [heading, element('p', measurement(result.attempt) + ' · Submitted by ' + result.attempt.submitter, 'muted')];
         if (!readonly && loadCase && canLoadCase?.() && typeof result.task === 'string' && result.task.trim() && result.attempt.evidence.length) {
           const actions = element('div', undefined, 'row');
           const button = element('button', 'Use evaluation case', 'small');
@@ -349,7 +389,7 @@
           controls.push(actions);
         }
         detail.replaceChildren(...controls, disclosure('Task sent to the provider', result.task),
-          disclosure('Model response', result.response || result.unansweredReason || 'No response was saved.'), source, reviewForm(result));
+          disclosure('Model response', result.response || result.unansweredReason || 'No response was saved.'), source, reviewForm(result, isCurrent));
         if (focus) {
           heading.tabIndex = -1;
           heading.focus();
@@ -361,7 +401,17 @@
 
     panel.addEventListener('toggle', () => {
       if (panel.open) void loadReport();
-      else clearMetricsFallback();
+      else {
+        ++reportGeneration;
+        loadingReport = false;
+        clearSelection();
+        clearMetricsFallback();
+        message('');
+      }
+    });
+    filter.addEventListener('change', () => {
+      message('');
+      renderQueue();
     });
     panel.querySelector('[data-refresh]').addEventListener('click', () => loadReport());
     copy.addEventListener('click', async () => {
@@ -374,14 +424,14 @@
         await navigator.clipboard.writeText(json);
         if (!isCurrent()) return;
         clearMetricsFallback();
-        message('Evaluation metrics copied.');
+        metricsFeedback.textContent = 'Evaluation metrics copied.';
       } catch {
         if (!isCurrent()) return;
         jsonField.value = json;
         fallback.hidden = false;
         jsonField.focus();
         jsonField.select();
-        message('Clipboard unavailable. Copy the selected evaluation metrics JSON.');
+        metricsFeedback.textContent = 'Clipboard unavailable. Copy the selected evaluation metrics JSON.';
       }
     });
   }

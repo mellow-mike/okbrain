@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node
 import { connect, createServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { pinnedEvaluationCheckout } from "../src/core/coding/evaluation-rubric.ts";
 
 const ownerToken = "local-fixture-owner";
 const branch = "research-notes";
@@ -361,8 +362,17 @@ test("the local operator prepares a GitHub Coding checkout with transient auth a
     git(source, "update-index", "--add", "--cacheinfo", `120000,${link},fixture-link`);
     git(source, "commit", "--quiet", "-m", "Publish a branch that needs an existing checkout");
     git(source, "push", "--quiet", remote, `refs/heads/${unsupportedBranch}:refs/heads/${unsupportedBranch}`);
+    git(source, "-c", "tag.gpgSign=false", "tag", "-a", pinnedEvaluationCheckout.tag, "-m", "Fixture tag for the wrong commit", commit);
+    git(source, "push", "--quiet", remote, `refs/tags/${pinnedEvaluationCheckout.tag}`);
     tls = Bun.serve({ hostname: "127.0.0.1", port: 0, tls: { cert: Bun.file(cert), key: Bun.file(key) }, async fetch(req) {
       const url = new URL(req.url);
+      if (/^\/vitejs\/vite\.git\/(?:info\/refs|git-upload-pack)$/u.test(url.pathname)) {
+        const auth = req.headers.get("authorization");
+        seen.push({ repository: "vitejs/vite", auth });
+        if (auth) return new Response("Unexpected auth", { status: 400 });
+        url.pathname = url.pathname.replace("/vitejs/vite.git/", "/fixture/coding-workspace.git/");
+        return smartGit(req, url, gitRoot);
+      }
       const route = /^\/fixture\/(coding-workspace|coding-redirect)\.git\/(info\/refs|git-upload-pack)$/u.exec(url.pathname);
       if (!route || (route[2] === "info/refs" ? req.method !== "GET" || url.search !== "?service=git-upload-pack" : req.method !== "POST"))
         return new Response("Not found", { status: 404 });
@@ -391,6 +401,17 @@ test("the local operator prepares a GitHub Coding checkout with transient auth a
     expect((await prepare({ ...draft, workspace: bundle })).status).toBe(400);
     expect((await prepare({ ...draft, url: "https://fixture.invalid/owner/repository.git" })).status).toBe(400);
     expect((await prepare({ ...draft, token: undefined })).status).toBe(400);
+    const benchmark = "coding/benchmark-checkout";
+    const approval = { approved: true, commit: pinnedEvaluationCheckout.commit };
+    const descriptor = await request(benchmark);
+    expect(descriptor.headers.get("cache-control")).toBe("no-store");
+    expect(await result(descriptor)).toEqual(pinnedEvaluationCheckout);
+    expect((await request(benchmark, undefined, { authorization: member.token })).status).toBe(403);
+    expect((await request(benchmark, approval, { authorization: member.token })).status).toBe(403);
+    expect((await request(benchmark, approval, { brain: "read-only-setup" })).status).toBe(403);
+    expect((await request(benchmark, { ...approval, approved: false })).status).toBe(400);
+    expect((await request(benchmark, { ...approval, token })).status).toBe(400);
+    expect((await request(benchmark, { ...approval, commit })).status).toBe(409);
     expect(seen).toEqual([]);
 
     const redirected = await prepare({ ...draft, url: github("coding-redirect") });
@@ -398,6 +419,14 @@ test("the local operator prepares a GitHub Coding checkout with transient auth a
     expect(await redirected.text()).not.toContain(token);
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.every((row) => row.repository === "coding-redirect" && row.auth === basic(token))).toBe(true);
+    expect(await readdir(checkouts)).toEqual([]);
+
+    const beforeTag = seen.length;
+    const moved = await request(benchmark, approval);
+    expect(moved.status).toBe(409);
+    expect(await moved.text()).toMatch(/tag.+(?:pin|commit)/iu);
+    expect(seen.slice(beforeTag)).not.toEqual([]);
+    expect(seen.slice(beforeTag).every((row) => row.repository === "vitejs/vite" && row.auth === null)).toBe(true);
     expect(await readdir(checkouts)).toEqual([]);
 
     const pending = prepare(draft);

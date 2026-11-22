@@ -18,7 +18,7 @@ import {
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions, type CodingSessionStatusResult,
 } from "./durable.ts";
 import { CodingEvaluationError, CodingEvaluations, parseEvaluation, pinnedEvaluationBinding, presentEvidence } from "./evaluation.ts";
-import { pinnedEvaluationRubric, PinnedEvaluationWorkspaceError, verifyPinnedEvaluationWorkspace } from "./evaluation-rubric.ts";
+import { pinnedEvaluationCheckout, pinnedEvaluationRubric, PinnedEvaluationWorkspaceError, verifyPinnedEvaluationWorkspace } from "./evaluation-rubric.ts";
 import { codingRunReport } from "./run-report.ts";
 import { dockerWorkerConfig, type DockerWorkerConfig } from "./docker-worker.ts";
 import { PackageReviewError, previewPackageReviews, validatePackageReviews } from "./package-review.ts";
@@ -535,22 +535,31 @@ export class CodingProjectControl {
     if (!actor.owner) throw new ProjectControlError("Only the local okbrain operator can change project settings.", 403);
   }
 
-  async #checkout(body: Json, actor: Actor, canWrite: () => boolean) {
+  async #checkout(body: Json, actor: Actor, canWrite: () => boolean, benchmark = false) {
     if (!actor.owner) throw new ProjectControlError("GitHub checkout setup is available to the local okbrain operator.", 403);
     const writable = () => !this.#closing && canWrite();
     if (!writable()) throw new ProjectControlError("Open a writable brain to prepare a GitHub checkout.", 403);
-    if (body.approved !== true || Object.keys(body).some((key) => !["url", "branch", "login", "token", "approved"].includes(key)))
-      throw new ProjectControlError("Confirm the GitHub repository and branch before preparing a checkout.");
+    const fields = benchmark ? ["approved", "commit"] : ["url", "branch", "login", "token", "approved"];
+    if (body.approved !== true || Object.keys(body).some((key) => !fields.includes(key)))
+      throw new ProjectControlError(benchmark ? "Confirm the pinned Vite revision before preparing a checkout."
+        : "Confirm the GitHub repository and branch before preparing a checkout.");
+    const pinned = pinnedEvaluationCheckout;
+    if (benchmark && body.commit !== pinned.commit)
+      throw new ProjectControlError("Review the pinned Vite commit before preparing the benchmark checkout.", 409);
     if (this.#checkoutInFlight) throw new ProjectControlError("A GitHub checkout is already being prepared. Try again when it finishes.", 409);
     const cancel = new AbortController();
     const deadline = AbortSignal.timeout(50_000);
     const signal = AbortSignal.any([cancel.signal, deadline]);
     const { url, branch, login, token } = body;
+    const input = benchmark ? { url: pinned.origin, tag: { name: pinned.tag, commit: pinned.commit } } : { url, branch, login, token };
     this.#checkoutInFlight = cancel;
     try {
-      return await createCodingGitHubCheckout({ url, branch, login, token }, {
+      const checkout = await createCodingGitHubCheckout(input, {
         directory: join(this.#directory, "checkouts"), canWrite: writable, signal,
       });
+      if (benchmark) await verifyPinnedEvaluationWorkspace(checkout.workspace, pinned.commit, signal);
+      if (!writable()) throw new ProjectControlError("The brain mount changed or is read-only.", 403);
+      return checkout;
     } catch (error) {
       if (!writable()) throw new ProjectControlError("The brain mount changed or is read-only.", 403);
       if (deadline.aborted) throw new ProjectControlError("Preparing the GitHub checkout took too long. Try again or select an existing local checkout.", 409);
@@ -1964,6 +1973,11 @@ export class CodingProjectControl {
       throw new ProjectControlError("This server is attached to a read-only brain mount.", 403);
     if (path === "/projects" && method === "POST") return this.#addProject(body, actor, canWrite);
     if (path === "/github-checkouts" && method === "POST") return this.#checkout(body, actor, canWrite);
+    if (path === "/benchmark-checkout") {
+      if (!actor.owner) throw new ProjectControlError("Benchmark checkout setup is available to the local okbrain operator.", 403);
+      if (method === "GET") return pinnedEvaluationCheckout;
+      if (method === "POST") return this.#checkout(body, actor, canWrite, true);
+    }
     const match = /^\/projects\/([a-f0-9-]{36})\/([a-z-]+)$/.exec(path);
     if (!match) throw new ProjectControlError("Coding endpoint not found.", 404);
     const project = this.#project(match[1]!, actor);

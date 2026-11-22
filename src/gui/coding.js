@@ -205,7 +205,43 @@
     return (match[1] + '/' + match[2]).toLowerCase();
   }
 
-  function mountGitHubCheckout(registration, detached) {
+  function renderCheckoutFields(panel, fields) {
+    panel.innerHTML = fields.map(([label, value]) => '<div><dt class="muted">' + label +
+      '</dt><dd><code>' + esc(value) + '</code></dd></div>').join('');
+    panel.hidden = false;
+  }
+
+  function validCheckoutWorkspace(result) {
+    return typeof result?.workspace === 'string' && /^(?:\/(?!\/)|[a-z]:[/\\])/iu.test(result.workspace) &&
+      !/[\x00-\x1f\x7f]/u.test(result.workspace) && typeof result.reused === 'boolean';
+  }
+
+  function checkoutRegistration(registration, detached) {
+    const brain = document.querySelector('#brain')?.value;
+    const current = () => registration.isConnected && !detached() && document.querySelector('#brain')?.value === brain;
+    const { workspace, title } = registration.elements;
+    let workspaceEdits = 0;
+    workspace.addEventListener('input', () => { workspaceEdits++; });
+    function preparePrefill() {
+      const editsAtApproval = workspaceEdits;
+      const workspaceAtApproval = workspace.value;
+      return (path, titleSuggestion) => {
+        if (!current() || workspaceEdits !== editsAtApproval || workspace.value !== workspaceAtApproval) return false;
+        workspace.value = path;
+        workspaceEdits++;
+        if (!title.value.trim()) title.value = titleSuggestion;
+        return true;
+      };
+    }
+    return { current, preparePrefill };
+  }
+
+  function checkoutFeedback(feedback, status, prefilled) {
+    report(feedback, undefined, status + (prefilled ? ' Choose your project scope and model, then add the project.' :
+      ' Your workspace field has changed. The prepared path is shown below.'));
+  }
+
+  function mountGitHubCheckout(registration, { current, preparePrefill }) {
     const panel = document.createElement('details');
     panel.dataset.githubCheckout = '';
     panel.innerHTML = '<summary>Prepare GitHub checkout</summary><form class="stack coding-form">' +
@@ -224,11 +260,7 @@
     const submit = form.querySelector('button');
     const feedback = form.querySelector('[role="status"]');
     const receipt = form.querySelector('dl');
-    const brain = document.querySelector('#brain')?.value;
-    const current = () => panel.isConnected && !detached() && document.querySelector('#brain')?.value === brain;
     let busy = false;
-    let workspaceEdits = 0;
-    registration.elements.workspace.addEventListener('input', () => { workspaceEdits++; });
 
     function update() {
       for (const field of [url, branch, login, token, approved]) field.disabled = busy;
@@ -257,8 +289,7 @@
         return;
       }
 
-      const editsAtApproval = workspaceEdits;
-      const workspaceAtApproval = registration.elements.workspace.value;
+      const prefill = preparePrefill();
       login.value = token.value = '';
       approved.checked = false;
       busy = true;
@@ -270,29 +301,96 @@
         const result = await coding('/github-checkouts', { url: endpoint, branch: selectedBranch, approved: true,
           ...(credential ? { login: username, token: credential } : {}) });
         if (!current()) return;
-        if (typeof result?.repository !== 'string' || result.repository.toLowerCase() !== repository || checkoutRepository(result.origin) !== repository ||
-            result.branch !== selectedBranch || typeof result.commit !== 'string' || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(result.commit) ||
-            typeof result.workspace !== 'string' || !/^(?:\/(?!\/)|[a-z]:[/\\])/iu.test(result.workspace) ||
-            /[\x00-\x1f\x7f]/u.test(result.workspace) || typeof result.reused !== 'boolean')
+        if (!validCheckoutWorkspace(result) || typeof result.repository !== 'string' || result.repository.toLowerCase() !== repository ||
+            checkoutRepository(result.origin) !== repository || result.branch !== selectedBranch || typeof result.commit !== 'string' ||
+            !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(result.commit))
           throw new Error('The checkout receipt did not match the approved repository and branch.');
-        const unchanged = workspaceEdits === editsAtApproval && registration.elements.workspace.value === workspaceAtApproval;
-        if (unchanged) {
-          registration.elements.workspace.value = result.workspace;
-          if (!registration.elements.title.value.trim()) registration.elements.title.value = result.repository.split('/')[1];
-        }
-        receipt.innerHTML = [['Repository', result.origin], ['Branch', result.branch], ['Imported commit', result.commit],
-          ['Local workspace', result.workspace]].map(([label, value]) => '<div><dt class="muted">' + label +
-          '</dt><dd><code>' + esc(value) + '</code></dd></div>').join('');
-        receipt.hidden = false;
+        const prefilled = prefill(result.workspace, result.repository.split('/')[1]);
+        renderCheckoutFields(receipt, [['Repository', result.origin], ['Branch', result.branch], ['Imported commit', result.commit],
+          ['Local workspace', result.workspace]]);
         const status = result.reused ? 'Existing checkout reopened.' : 'GitHub checkout prepared.';
-        report(feedback, undefined, status + (unchanged ? ' Choose your project scope and model, then add the project.' :
-          ' Your workspace field has changed. The prepared path is shown below.'));
+        checkoutFeedback(feedback, status, prefilled);
       } catch (error) {
         if (current()) report(feedback, error);
       } finally {
         busy = false;
         if (current()) update();
       }
+    });
+  }
+
+  function mountBenchmarkCheckout(registration, { current, preparePrefill }) {
+    const panel = document.createElement('details');
+    panel.dataset.benchmarkCheckout = '';
+    panel.innerHTML = '<summary>Prepare Vite benchmark checkout</summary><form class="stack coding-form">' +
+      '<p class="muted">Prepare the pinned benchmark revision in private app data. You can reopen a clean checkout for that revision.</p>' +
+      '<dl class="coding-grid coding-deployment-summary" data-benchmark-descriptor hidden></dl>' +
+      '<label class="row"><input type="checkbox" name="approved" disabled><span>Use this exact benchmark revision</span></label>' +
+      '<div class="row"><button type="submit" disabled>Prepare benchmark checkout</button></div>' +
+      '<div class="coding-feedback" role="status"></div><dl class="coding-grid coding-deployment-summary" data-benchmark-receipt hidden></dl></form>';
+    registration.before(panel);
+    const form = panel.querySelector('form');
+    const approved = form.elements.approved;
+    const submit = form.querySelector('button');
+    const feedback = form.querySelector('[role="status"]');
+    const details = form.querySelector('[data-benchmark-descriptor]');
+    const receipt = form.querySelector('[data-benchmark-receipt]');
+    const path = '/benchmark-checkout';
+    let descriptor;
+    let revision = 0;
+    let busy = false;
+
+    function update() {
+      approved.disabled = busy || !descriptor;
+      submit.disabled = approved.disabled || !approved.checked;
+    }
+
+    panel.addEventListener('toggle', async () => {
+      const attempt = ++revision;
+      approved.checked = false;
+      update();
+      if (!panel.open || busy || !current()) return;
+      const active = () => attempt === revision && panel.open && current();
+      descriptor = undefined;
+      details.hidden = true;
+      receipt.hidden = true;
+      update();
+      report(feedback, undefined, 'Reading the pinned benchmark revision…');
+      try {
+        const result = await coding(path);
+        if (!active()) return;
+        if (result?.origin !== 'https://github.com/vitejs/vite.git' || result.repository !== 'vitejs/vite' ||
+            typeof result.tag !== 'string' || !result.tag.trim() || typeof result.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(result.commit))
+          throw new Error('Could not verify the pinned Vite benchmark revision.');
+        descriptor = result;
+        renderCheckoutFields(details, [['Repository', result.origin], ['Tag', result.tag], ['Pinned commit', result.commit]]);
+        report(feedback);
+      } catch (error) { if (active()) report(feedback, error); }
+      finally { if (active()) update(); }
+    });
+
+    approved.addEventListener('change', update);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (busy || !descriptor || !approved.checked || !current() || !panel.open) return;
+      const { origin, repository, tag, commit } = descriptor;
+      const prefill = preparePrefill();
+      approved.checked = false;
+      busy = true;
+      update();
+      receipt.hidden = true;
+      report(feedback, undefined, 'Preparing the pinned Vite benchmark checkout…');
+      try {
+        const result = await coding(path, { approved: true, commit });
+        if (!current()) return;
+        if (!validCheckoutWorkspace(result) || result.origin !== origin || result.repository !== repository ||
+            result.tag !== tag || result.commit !== commit)
+          throw new Error('The checkout receipt did not match the approved Vite benchmark revision.');
+        const prefilled = prefill(result.workspace, 'Vite benchmark');
+        renderCheckoutFields(receipt, [['Local workspace', result.workspace]]);
+        checkoutFeedback(feedback, result.reused ? 'Existing benchmark checkout reopened.' : 'Vite benchmark checkout prepared.', prefilled);
+      } catch (error) { if (current()) report(feedback, error); }
+      finally { busy = false; if (current()) update(); }
     });
   }
 
@@ -315,7 +413,11 @@
       '<div class="row"><button class="primary" type="submit">Add project</button></div><div class="coding-feedback" role="status"></div></form>';
     parent.append(dialog);
     const form = dialog.querySelector('form');
-    if (!readonly) mountGitHubCheckout(form, detached);
+    if (!readonly) {
+      const checkout = checkoutRegistration(form, detached);
+      mountGitHubCheckout(form, checkout);
+      mountBenchmarkCheckout(form, checkout);
+    }
     const { provider, model, thinking } = form.elements;
     const submit = form.querySelector('button[type="submit"]');
     const feedback = form.querySelector('[role="status"]');

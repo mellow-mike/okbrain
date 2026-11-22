@@ -4,8 +4,11 @@ import { relative } from "node:path";
 import { promisify } from "node:util";
 
 export const pinnedViteRevision = "b85f32275b443bf6b647572a9209f1e078b5b4dd";
-const repository = "https://github.com/vitejs/vite.git";
+const repositorySlug = "vitejs/vite";
+const repository = `https://github.com/${repositorySlug}.git`;
 const tag = "v7.0.0";
+
+export const pinnedEvaluationCheckout = { origin: repository, repository: repositorySlug, tag, commit: pinnedViteRevision } as const;
 
 type Scope = { projects: string[]; sharedProjects: string[] };
 export interface ViteBenchmarkTask extends Scope {
@@ -154,7 +157,7 @@ const commitId = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const indexEntry = /^H (?:100644|100755|120000) [0-9a-f]{40}(?:[0-9a-f]{24})? 0\t/u;
 
 /** Verify a fixed Git checkout using local reads, including index flags that can hide tracked edits. */
-export async function verifyPinnedEvaluationWorkspace(workspace: string, revision = pinnedViteRevision): Promise<void> {
+export async function verifyPinnedEvaluationWorkspace(workspace: string, revision = pinnedViteRevision, signal?: AbortSignal): Promise<void> {
   if (!commitId.test(revision)) throw new PinnedEvaluationWorkspaceError("The evaluation needs a full Git commit ID.");
   try {
     const cwd = await realpath(workspace);
@@ -165,7 +168,7 @@ export async function verifyPinnedEvaluationWorkspace(workspace: string, revisio
       GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0",
     };
     const git = async (...args: string[]) => (await execGit("git", ["-c", "core.fsmonitor=false", "-c", "core.trustctime=true",
-      "-c", "core.checkStat=default", ...args], { cwd, env, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: 10_000 })).stdout;
+      "-c", "core.checkStat=default", ...args], { cwd, env, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: 10_000, signal })).stdout;
     const root = await realpath((await git("rev-parse", "--show-toplevel")).replace(/\r?\n$/u, ""));
     if (relative(cwd, root) !== "") throw new PinnedEvaluationWorkspaceError("Register the repository root to use the pinned evaluation study.");
     if ((await git("rev-parse", "--verify", "HEAD^{commit}")).trim() !== revision) {
