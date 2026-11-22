@@ -187,6 +187,16 @@ try {
   assert.equal(restored.pi.request.approvedSourceLookup, true);
   const evidence = await call<{ sources: { path: string; content: string }[] }>(path + "/evaluation-inspect", offline, member.token);
   assert.deepEqual(evidence.sources.map(({ path, content }) => ({ path, content })), [{ path: "app.ts", content: admittedSource }]);
+  const session = { session: offline.session };
+  const resetPreview = path + "/reset-context-preview";
+  const reset = path + "/reset-context";
+  assert.equal((await request(resetPreview, session, member.token)).status, 403);
+  const { version } = await call<{ version: string }>(resetPreview, session);
+  const confirmReset = { ...session, version };
+  assert.deepEqual(await call(reset, confirmReset), { reset: true, version });
+  assert.notEqual((await call<{ version: string }>(resetPreview, session)).version, version);
+  assert.deepEqual(await call(reset, confirmReset), { reset: true, version, replayed: true });
+  assert.deepEqual((await call<Inspection>(path + "/inspect", offline, member.token)).pi.request.receipt, saved.pi.request.receipt);
 
   await rename(detachedWorkspace, workspace);
   const unavailable = { session: "unavailable", requestId: "no-worker" };
@@ -217,7 +227,7 @@ try {
   const audit = await call<{ kind: string; session: string | null }[]>(path + "/audit");
   assert.ok(audit.some(({ kind, session }) => kind === "session_expired" && session === offline.session));
 
-  console.log("Docker Coding smoke passed. Verified offline worker isolation and admission, no fallback, scoped access, and quiesced backup restoration of Pi receipts and retention tombstones.");
+  console.log("Docker Coding smoke passed. Verified offline worker isolation and admission, no fallback, scoped access, quiesced backup restoration, owner context reset, archived Pi receipts, and retention tombstones.");
 } finally {
   await closeServer();
   await rm(root, { recursive: true, force: true });

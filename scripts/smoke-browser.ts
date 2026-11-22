@@ -869,6 +869,43 @@ try {
   await page.getByText("browser.ts", { exact: true }).click();
   await page.getByText(snapshot.trim(), { exact: true }).waitFor();
 
+  const contextReset = page.locator("[data-context-reset]");
+  const startFresh = contextReset.getByRole("button", { name: "Start fresh context", exact: true });
+  const approveFresh = contextReset.getByRole("checkbox", { name: "Clear active context and keep saved run history", exact: true });
+  const resetContext = contextReset.getByRole("button", { name: "Reset context", exact: true });
+  async function verifyContextReset(prefix: string, session: string) {
+    const check = page.waitForResponse((response) => new URL(response.url()).pathname === prefix + "/reset-context-preview");
+    await startFresh.click();
+    const preview = await check;
+    assert.ok(preview.ok(), await preview.text());
+    assert.deepEqual(preview.request().postDataJSON(), { session });
+    const { version } = (await preview.json()).result;
+    assert.ok(version);
+    await approveFresh.waitFor();
+    assert.equal(await approveFresh.isChecked(), false);
+    assert.equal(await resetContext.isEnabled(), false);
+    await approveFresh.check();
+    const commit = page.waitForResponse((response) => new URL(response.url()).pathname === prefix + "/reset-context");
+    await resetContext.click();
+    const result = await commit;
+    assert.ok(result.ok(), await result.text());
+    assert.deepEqual(result.request().postDataJSON(), { session, version });
+    assert.equal((await result.json()).result.reset, true);
+    await contextReset.getByText("Active context cleared. Saved history is still available.", { exact: true }).waitFor();
+    assert.equal(await approveFresh.isVisible(), false);
+  }
+  await startFresh.click();
+  await approveFresh.check();
+  const savedSessionChoice = page.getByRole("combobox", { name: "Saved session" });
+  await savedSessionChoice.selectOption("");
+  await approveFresh.waitFor({ state: "hidden" });
+  await savedSessionChoice.selectOption("existing-cli");
+  await page.getByText("Saved CLI answer.", { exact: true }).waitFor();
+  await page.getByText("Saved task and source", { exact: true }).click();
+  await verifyContextReset("/api/coding/standalone", "existing-cli");
+  await page.getByText("Saved CLI answer.", { exact: true }).waitFor();
+  await page.getByText("Saved CLI task.", { exact: true }).waitFor();
+
   const interrupted = Bun.spawn([process.execPath, "-e", `
     import { createModels, fauxProvider } from "@earendil-works/pi-ai";
     import { runCodingSession } from "./src/core/coding/durable.ts";
@@ -905,6 +942,7 @@ try {
   const resume = page.getByRole("button", { name: "Resume request", exact: true });
   await resume.waitFor();
   assert.equal(await resume.isEnabled(), false);
+  assert.equal(await startFresh.isVisible(), false);
   await page.getByRole("heading", { name: "Saved Pi task state", exact: true }).waitFor();
   await page.getByText("Model response · 1 pending", { exact: true }).waitFor();
   await page.getByText("Saved task and source", { exact: true }).click();
@@ -1147,6 +1185,12 @@ try {
   await reviewPatch.waitFor();
   assert.deepEqual(proposalRequests, []);
   assert.equal(await Bun.file(file).text(), branchBefore);
+  await startFresh.click();
+  await approveFresh.check();
+  await contextReset.getByRole("button", { name: "Cancel reset", exact: true }).click();
+  assert.equal(await approveFresh.isVisible(), false);
+  await verifyContextReset("/api/coding" + projectPath, "project-browser");
+  assert.equal(await projectResponse.textContent(), projectAnswer);
   await reviewPatch.click();
   const proposalChoice = page.getByRole("combobox", { name: "Proposed diff", exact: true });
   await proposalChoice.waitFor();

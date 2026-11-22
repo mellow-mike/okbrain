@@ -11,6 +11,7 @@ const teamSecret = 'okbrain.team.connection';
 const openingSources = new Map();
 let inspection = 0;
 let presetReview = 0;
+let workspaceRevision = 0;
 let teamRevision = 0;
 let teamChange = 0;
 let secretWrites = Promise.resolve();
@@ -359,10 +360,29 @@ async function reviewRepositoryRequest(connection, project, { name, prompt, sess
   }, canSubmit);
 }
 
+async function resetOwnerContext(connection, project, session, isCurrent) {
+  if (!isCurrent()) return;
+  const preview = await connection.api(pathFor(project, 'reset-context-preview'), { session });
+  if (!isCurrent()) return;
+  if (typeof preview?.version !== 'string' || !preview.version) throw new Error('Could not preview this session’s context.');
+  const confirmed = await vscode.window.showWarningMessage(
+    `Start fresh context for session ${session}? Saved runs stay available. The next request will start without earlier turns.`,
+    { modal: true }, 'Start Fresh Context');
+  if (confirmed !== 'Start Fresh Context' || !isCurrent()) return;
+  const result = await connection.api(pathFor(project, 'reset-context'), { session, version: preview.version });
+  if (!isCurrent()) return;
+  if (!result?.reset) throw new Error('The session did not confirm the context reset. Refresh Run history before trying again.');
+  await vscode.window.showInformationMessage(`Started fresh context for ${session}. Saved runs remain in Run history.`);
+}
+
 async function inspectRun(connection, project, selected) {
   const current = ++inspection;
   const team = connection.mode === 'team';
   const isCurrent = () => current === inspection && (!team || connection.current());
+  const resetWorkspace = workspaceRevision;
+  const folders = () => JSON.stringify(localWorkspaceFolders().map(({ uri }) => uri.fsPath));
+  const startingFolders = folders();
+  const canResetContext = () => !team && isCurrent() && trustedEditor() && resetWorkspace === workspaceRevision && startingFolders === folders();
   const identity = { session: selected.session, requestId: selected.id };
   const { run, pi, admissionMissing, liveAnswer, taskProgress } = await connection.api(pathFor(project, 'inspect'), identity);
   if (!isCurrent()) return;
@@ -393,6 +413,8 @@ async function inspectRun(connection, project, selected) {
   if (run.status === 'done') choices.push(
     { label: 'Accept result', action: 'review', decision: 'accepted' },
     { label: 'Request changes', action: 'review', decision: 'changes_requested' });
+  if (canResetContext() && run.admitted && run.status !== 'running' && run.status !== 'interrupted' && pi?.pendingRequestIds?.length === 0)
+    choices.push({ label: 'Start fresh context', action: 'reset-context' });
   if (!team && run.status === 'done' && run.review === 'accepted')
     choices.push({ label: 'Review proposed patch in okbrain', action: 'patch' });
   if (!team && run.review === 'accepted') choices.push({ label: 'Prepare GitHub pull request in okbrain', action: 'github' });
@@ -402,6 +424,7 @@ async function inspectRun(connection, project, selected) {
   if (action.action === 'patch' || action.action === 'github') return openWeb(connection, project, run, action.action);
   if (action.action === 'refresh') return inspectRun(connection, project, run);
   if (action.action === 'source-inspect') return showSavedRequestSource(connection, project, identity, isCurrent);
+  if (action.action === 'reset-context') return resetOwnerContext(connection, project, run.session, canResetContext);
   if (action.action === 'resume') {
     const proceed = await vscode.window.showWarningMessage('Resuming can make another provider call using the saved context.',
       { modal: true }, 'Resume');
@@ -429,6 +452,7 @@ function activate(context) {
     provideTextDocumentContent: (uri) => openingSources.get(uri.toString()) ?? '',
   }));
   context.subscriptions.push(context.secrets.onDidChange(({ key }) => { if (key === teamSecret) ++teamRevision; }));
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => { ++workspaceRevision; }));
   const register = (command, action) => context.subscriptions.push(vscode.commands.registerCommand(command, async () => {
     try {
       if (!trustedEditor()) throw new Error('Open a trusted local folder to use okbrain Coding.');

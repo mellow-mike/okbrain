@@ -36,6 +36,11 @@ Owners can explicitly delete a standalone transcript under its SQLite lease.
 A deletion marker prevents opening the transcript after an interrupted erase.
 The app can retry deletion while keeping the ownership file stable.
 Compaction reduces active context while preserving the original transcript.
+Local owners can explicitly start fresh context in an idle project or
+standalone session. An approved revision appends a passive Pi Durable reset
+entry under the session lease. Older requests remain in the transcript for
+inspection and review. Retrying the same approved revision reads its reset
+receipt and leaves any later context intact.
 The project control plane scopes credentials, members, worker runs, and
 review decisions to registered projects. Owners can save named task, query,
 and repository profile presets in the project catalog. Project members can

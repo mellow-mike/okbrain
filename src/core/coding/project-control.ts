@@ -12,7 +12,7 @@ import {
 } from "./approved-patch.ts";
 import {
   cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, getCodingSessionStatus, getSavedCodingRequestInput, hasCodingCredential,
-  listCodingModels, previewCodingAttachments, runCodingSession,
+  listCodingModels, previewCodingAttachments, previewCodingContextReset, resetCodingContext, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions,
 } from "./durable.ts";
 import { CodingEvaluationError, CodingEvaluations, parseEvaluation, presentEvidence } from "./evaluation.ts";
@@ -486,7 +486,7 @@ export class CodingProjectControl {
     return { session, requestId };
   }
 
-  #session(project: ProjectRow, run: { session: string; requestId: string }) {
+  #session<T extends { session: string }>(project: ProjectRow, run: T) {
     return {
       ...run, workspace: project.workspace, provider: project.provider, model: project.model,
       thinkingLevel: project.thinking ?? undefined,
@@ -667,6 +667,38 @@ export class CodingProjectControl {
     // Pi can save its admission before the catalog receives the worker event.
     if (!row.admitted && row.status !== "interrupted") return null;
     return getSavedCodingRequestInput(this.#session(project, run), this.#dependencies(project, actor));
+  }
+
+  async #resetContext(project: ProjectRow, body: Json, actor: Actor, preview: boolean, canWrite: () => boolean) {
+    const session = field(body, "session", 64);
+    const authorize = () => {
+      if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to change the session context.", 403);
+    };
+    authorize();
+    if (this.#active.has(`${project.id}/${session}`) || this.#get(
+      "SELECT 1 FROM runs WHERE project = ? AND session = ? AND status IN ('running', 'interrupted') LIMIT 1", project.id, session,
+    )) throw new ProjectControlError("Finish, resume, or cancel active work in this session before starting fresh context.", 409);
+    if (this.#get("SELECT 1 FROM session_deletions WHERE project = ? AND session = ?", project.id, session))
+      throw new ProjectControlError("This session is being deleted.", 409);
+    const identity = this.#session(project, { session });
+    const { stateDir, models, workspaceBinding } = this.#dependencies(project, actor);
+    const dependencies = { stateDir, models, workspaceBinding, allowEnvKey: false };
+    if (preview) return previewCodingContextReset(identity, dependencies);
+
+    const version = field(body, "version", 64);
+    if (!/^[a-f0-9]{64}$/u.test(version)) throw new ProjectControlError("Preview the active context before confirming a reset.");
+    const receiptId = `context-reset-${version}`;
+    const auditActor = (kind: string) => this.#get<{ actor: string }>(
+      "SELECT actor FROM audit WHERE project = ? AND session = ? AND request_id = ? AND kind = ? LIMIT 1",
+      project.id, session, receiptId, kind,
+    )?.actor;
+    const result = await resetCodingContext({ ...identity, version }, dependencies, () => {
+      authorize();
+      if (!auditActor("context_reset_approved")) this.#audit(project.id, "context_reset_approved", actor.id, session, receiptId);
+    });
+    const approvedBy = auditActor("context_reset_approved");
+    if (approvedBy && !auditActor("context_reset")) this.#audit(project.id, "context_reset", approvedBy, session, receiptId);
+    return result;
   }
 
   async #evaluate(project: ProjectRow, body: Json, actor: Actor, save: boolean) {
@@ -1318,9 +1350,10 @@ export class CodingProjectControl {
 
   dispatch(
     method: string, path: string, body: Json, localOwner: boolean, token: string | null, readonly: boolean,
+    canWrite: () => boolean = () => !readonly,
   ): Promise<unknown> {
     if (this.#closing) throw new ProjectControlError("The coding server is shutting down.", 409);
-    const request = this.#dispatch(method, path, body, localOwner, token, readonly).catch((error: unknown) => {
+    const request = this.#dispatch(method, path, body, localOwner, token, readonly, canWrite).catch((error: unknown) => {
       if (error instanceof CodingEvaluationError) throw new ProjectControlError(error.message, error.status);
       throw error;
     });
@@ -1330,6 +1363,7 @@ export class CodingProjectControl {
 
   async #dispatch(
     method: string, path: string, body: Json, localOwner: boolean, token: string | null, readonly: boolean,
+    canWrite: () => boolean,
   ): Promise<unknown> {
     const actor = this.#identity(localOwner, token);
     if (path === "/models" && method === "GET") return listCodingModels(this.#models);
@@ -1363,6 +1397,10 @@ export class CodingProjectControl {
       if (action === "run") return this.#withSession(project, body, () => this.#start(project, body, actor));
       if (action === "inspect") return this.#withSession(project, body, () => this.#inspect(project, body, actor));
       if (action === "source-inspect") return this.#withSession(project, body, () => this.#sourceInspect(project, body, actor));
+      if (action === "reset-context-preview" || action === "reset-context") {
+        this.#requireOwner(actor);
+        return this.#withSession(project, body, () => this.#resetContext(project, body, actor, action === "reset-context-preview", canWrite));
+      }
       if (action === "resume") return this.#withSession(project, body, () => this.#resume(project, body, actor));
       if (action === "cancel") return this.#withSession(project, body, () => this.#cancel(project, body, actor));
       if (action === "review") return this.#withSession(project, body, async () => this.#review(project, body, actor));

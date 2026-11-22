@@ -4,7 +4,7 @@ import {
   cancelCodingRequest, canonicalWorkspace, CodingError, CodingSessionBusyError, CodingSessionDeletingError, CodingSessionMissingError,
   deleteStandaloneCodingSession, inspectStandaloneCodingSession,
   listCodingModels, listStandaloneCodingRequests, listStandaloneCodingSessions, prepareCodingInput,
-  previewCodingAttachments, runCodingSession,
+  previewCodingAttachments, previewStandaloneCodingContextReset, resetStandaloneCodingContext, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions, type CodingSessionResult,
 } from "./durable.ts";
 import { validateCodingProjectProfile } from "./project-profile.ts";
@@ -108,7 +108,7 @@ export class StandaloneCodingControl {
       const selected = await selectRepositoryContext({ workspace, ...source.repository });
       return { source: "repository", id: selected.manifest.id, ...selected };
     }
-    if (!["/inspect", "/run", "/resume", "/cancel", "/delete-session"].includes(path))
+    if (!["/inspect", "/run", "/resume", "/cancel", "/delete-session", "/reset-context-preview", "/reset-context"].includes(path))
       throw new StandaloneControlError("Standalone coding route not found.", 404);
     const session = sessionOf(input);
     if (path === "/inspect") return this.#inspect(session, input.requestId === undefined ? undefined : requestOf(input));
@@ -125,6 +125,14 @@ export class StandaloneCodingControl {
   async #changeSession(session: string, path: string, input: Input, canWrite: () => boolean) {
     this.#checkWrite(canWrite);
     const current = this.#runs.get(session);
+    if (path === "/reset-context-preview" || path === "/reset-context") {
+      if (current?.view.status === "running")
+        throw new StandaloneControlError("Wait for this session to finish or cancel its run before starting fresh context.", 409);
+      if (path === "/reset-context-preview") return previewStandaloneCodingContextReset(session, this.dependencies);
+      const version = string(input, "version", 64);
+      if (!/^[a-f0-9]{64}$/u.test(version)) throw new StandaloneControlError("Preview the active context before confirming a reset.");
+      return resetStandaloneCodingContext(session, version, this.dependencies, () => this.#checkWrite(canWrite));
+    }
     if (path === "/delete-session") {
       if (input.confirm !== session) throw new StandaloneControlError("Type the session name to confirm transcript deletion.");
       if (current?.view.status === "running")

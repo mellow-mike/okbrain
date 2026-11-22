@@ -5,7 +5,7 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import {
-  AgentDoc, AssistantEntry, CompactionEntry, createRegistry, Harness, InboxDoc, LiveDoc, ROOT_CONVERSATION_ID, UsageDoc, UserEntry,
+  AgentDoc, AssistantEntry, CompactionEntry, createRegistry, Harness, InboxDoc, LiveDoc, ResetEntry, ROOT_CONVERSATION_ID, UsageDoc, UserEntry,
   type Conversation, type Cursor, type LiveState, type SettledSubmissionRecord, type SubmissionId, type SubmissionRecord, type UsageState,
 } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -47,6 +47,7 @@ const maxAttachmentBytes = 64 * 1024;
 const maxAttachments = 12;
 const sessionNamePattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const requestIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+const contextVersionPattern = /^[a-f0-9]{64}$/u;
 export const maxLiveAnswerLength = 8192;
 const instructions = [
   "Help with authorized software work using the task and the supplied source files.",
@@ -82,12 +83,17 @@ export type CodingSessionResult = { session: string; requestId: string; reposito
   | { status: "unanswered"; reason: string }
 );
 
-export type CodingSessionStatusOptions = Pick<CodingSessionOptions, "workspace" | "session" | "provider" | "model" | "thinkingLevel"> & {
+export type CodingSessionIdentity = Pick<CodingSessionOptions, "workspace" | "session" | "provider" | "model" | "thinkingLevel">;
+
+export type CodingSessionStatusOptions = CodingSessionIdentity & {
   requestId?: string;
   includeReceipt?: boolean;
   includeEvaluationInput?: boolean;
   includeSavedSource?: boolean;
 };
+
+export type CodingContextResetPreview = { version: string };
+export type CodingContextResetResult = CodingContextResetPreview & { reset: true; replayed?: true };
 
 export type SavedCodingSource = { source: "files"; files: { path: string; content: string }[] }
   | ({ source: "repository" } & RepositoryContextSelection);
@@ -439,6 +445,7 @@ async function withCodingSession<T>(
     budget: CodingBudget | undefined; history: ReturnType<typeof codingHistory>;
     sourceTool: ReturnType<typeof approvedSourceTool>;
   }) => Promise<T>,
+  leasedStorage?: SqliteStorage,
 ): Promise<T> {
   const provider = validateOptions(options);
   const bindLocalSource = create && "prompt" in options && options.prompt !== undefined;
@@ -455,7 +462,7 @@ async function withCodingSession<T>(
   const affinityDirectory = join(dependencies.stateBinding ?? codingStateRoot(dependencies), sessionDirectoryName(options.session));
   const affinity = createHash("sha256").update(JSON.stringify([workspace, affinityDirectory, provider, options.model])).digest("hex");
 
-  return withCodingStorage(options.session, dependencies, create, async (storage) => {
+  const openHarness = async (storage: SqliteStorage) => {
     let harness: Harness | undefined;
     try {
       const registry = createRegistry();
@@ -485,11 +492,116 @@ async function withCodingSession<T>(
     } finally {
       if (harness) await harness.close(context);
     }
-  }).catch((error: unknown) => {
+  };
+  const operation = leasedStorage === undefined
+    ? withCodingStorage(options.session, dependencies, create, openHarness)
+    : openHarness(leasedStorage);
+  return operation.catch((error: unknown) => {
     if (error instanceof CodingError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name)))
       throw error;
     throw new CodingError(`Could not open Pi Durable session ${options.session}.`, { cause: error });
   });
+}
+
+function withContextResetSession<T>(
+  options: CodingSessionIdentity | string,
+  dependencies: CodingDependencies,
+  use: (session: string, root: Conversation, storage: SqliteStorage) => Promise<T>,
+): Promise<T> {
+  const open = (identity: CodingSessionIdentity, bound: CodingDependencies, leasedStorage?: SqliteStorage) =>
+    withCodingSession(identity, bound, false, async ({ root, harness, storage }) => {
+      if (!root) throw sessionMissing(identity.session);
+      const { tasks, submissions } = await harness.inspect(context);
+      if (tasks.length || submissions.length) {
+        throw new CodingSessionBusyError("Finish or cancel pending coding work in this session before resetting its context.");
+      }
+      return use(identity.session, root, storage);
+    }, leasedStorage);
+  if (typeof options !== "string") return open(options, dependencies);
+  return withCodingStorage(options, dependencies, false, async (storage) => {
+    const identity = await standaloneIdentity(options, storage);
+    return open(identity, { ...dependencies, workspaceBinding: identity.workspace }, storage);
+  });
+}
+
+async function codingContextVersion(session: string, root: Conversation, dependencies: CodingDependencies): Promise<string> {
+  const transcript = join(codingStateRoot(dependencies), sessionDirectoryName(session), "transcript.sqlite");
+  const { dev, ino, birthtimeNs } = await lstat(transcript, { bigint: true });
+  const { items: [entry] } = await root.entries({}, 1, undefined, context);
+  // Immutable entries advance the revision. File identity distinguishes a recreated transcript whose entry IDs start over.
+  return createHash("sha256").update(JSON.stringify([dev.toString(), ino.toString(), birthtimeNs.toString(), session, entry ?? null]))
+    .digest("hex");
+}
+
+function previewContextReset(options: CodingSessionIdentity | string, dependencies: CodingDependencies): Promise<CodingContextResetPreview> {
+  return withContextResetSession(options, dependencies, async (session, root) => ({
+    version: await codingContextVersion(session, root, dependencies),
+  }));
+}
+
+class ContextResetAuthorizationError extends CodingError {}
+
+async function requireResetReceipt(storage: SqliteStorage, root: Conversation, record: SubmissionRecord) {
+  const marker = record.type === "write" && record.status === "done" && record.entry !== undefined
+    ? (await storage.entry(root.id, record.entry, context))?.entry : undefined;
+  if (!marker || !ResetEntry.is(marker) || marker.head !== marker.id) throw new CodingError("The saved context reset could not be verified.");
+}
+
+async function resetContext(
+  options: CodingSessionIdentity | string, version: string, dependencies: CodingDependencies, authorize?: () => void,
+): Promise<CodingContextResetResult> {
+  if (typeof version !== "string" || version.length !== 64 || !contextVersionPattern.test(version)) {
+    throw new CodingError("Preview the current coding session context before resetting it.");
+  }
+  try {
+    return await withContextResetSession(options, dependencies, async (session, root, storage) => {
+      // The prefix is outside the app's public request ID namespace. A retry can only read this version's receipt.
+      const requestId = `@okbrain.context-reset.${version}`;
+      const prior = await storage.submissionByRequest(root.id, requestId, context);
+      if (prior) {
+        await requireResetReceipt(storage, root, prior);
+        return { reset: true, version, replayed: true };
+      }
+      if (version !== await codingContextVersion(session, root, dependencies)) {
+        throw new CodingError("The coding session context changed. Preview it again before resetting it.");
+      }
+      try { authorize?.(); }
+      catch (cause) { throw new ContextResetAuthorizationError("The context reset is no longer authorized.", { cause }); }
+      // The lease and idle check prevent Pi from queuing this passive reset behind other work.
+      const submission = await root.submit({ type: "write", requestId, entry: { kind: ResetEntry.kind, head: "self" } }, context);
+      await requireResetReceipt(storage, root, await submission.status(context));
+      return { reset: true, version };
+    });
+  } catch (error) {
+    if (error instanceof ContextResetAuthorizationError) throw error.cause;
+    throw error;
+  }
+}
+
+/** Preview the current revision of an existing, idle project's Pi conversation. */
+export function previewCodingContextReset(
+  options: CodingSessionIdentity, dependencies: CodingDependencies = {},
+): Promise<CodingContextResetPreview> {
+  return previewContextReset(options, dependencies);
+}
+
+/** Start fresh model context while preserving all saved requests and their receipts. */
+export function resetCodingContext(
+  { version, ...options }: CodingSessionIdentity & { version: string }, dependencies: CodingDependencies = {}, authorize?: () => void,
+): Promise<CodingContextResetResult> {
+  return resetContext(options, version, dependencies, authorize);
+}
+
+/** Preview an existing standalone conversation with the identity recorded in that session. */
+export function previewStandaloneCodingContextReset(session: string, dependencies: CodingDependencies = {}): Promise<CodingContextResetPreview> {
+  return previewContextReset(session, dependencies);
+}
+
+/** Reset a standalone conversation using its saved identity and the same exclusive lease. */
+export function resetStandaloneCodingContext(
+  session: string, version: string, dependencies: CodingDependencies = {}, authorize?: () => void,
+): Promise<CodingContextResetResult> {
+  return resetContext(session, version, dependencies, authorize);
 }
 
 async function savedUserContent(storage: SqliteStorage, submission: SubmissionRecord, entryContext = context): Promise<string | undefined> {

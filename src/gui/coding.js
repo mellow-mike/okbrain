@@ -628,21 +628,132 @@
       else if (feedback.textContent.startsWith('Add a provider API key')) report(feedback);
     };
     panel.updateProject(project);
+    return (targetSession) => {
+      if (session.value !== targetSession) return;
+      approvedSourceLookup.checked = false;
+      clearPreview();
+    };
   }
 
-  function activity(parent, project, readonly, detached, reviewPatch) {
+  function mountContextReset(panel, { prefix, detached, clearConsent, refresh }) {
+    panel.innerHTML = '<div data-context-reset-entry><button type="button">Start fresh context</button></div>' +
+      '<div data-reset-confirmation hidden><div class="stack"><p data-reset-session></p>' +
+      '<label class="row"><input type="checkbox"><span>Clear active context and keep saved run history</span></label>' +
+      '<div class="row"><button type="button" data-reset-apply disabled>Reset context</button>' +
+      '<button type="button" data-reset-cancel>Cancel reset</button></div></div></div>' +
+      '<div class="coding-feedback" role="status"></div>';
+    const entry = panel.querySelector('[data-context-reset-entry]');
+    const start = entry.querySelector('button');
+    const confirmation = panel.querySelector('[data-reset-confirmation]');
+    const approval = confirmation.querySelector('input');
+    const apply = confirmation.querySelector('[data-reset-apply]');
+    const cancel = confirmation.querySelector('[data-reset-cancel]');
+    const scope = confirmation.querySelector('[data-reset-session]');
+    const feedback = panel.querySelector('[role="status"]');
+    let session = null;
+    let preview = null;
+    let revision = 0;
+    let busy = false;
+
+    function update() {
+      panel.hidden = !session;
+      entry.hidden = !!preview;
+      confirmation.hidden = !preview;
+      start.disabled = approval.disabled = cancel.disabled = busy;
+      apply.disabled = busy || !preview || !approval.checked;
+    }
+    function clear() {
+      revision++;
+      preview = null;
+      approval.checked = false;
+      busy = false;
+      update();
+    }
+    function current(expected, attempt) {
+      return !detached() && panel.isConnected && session === expected && revision === attempt;
+    }
+    start.addEventListener('click', async () => {
+      if (busy || !session || detached()) return;
+      const expected = session;
+      const attempt = ++revision;
+      busy = true;
+      update();
+      report(feedback);
+      feedback.textContent = 'Checking session context…';
+      try {
+        const { version } = await coding(prefix + '/reset-context-preview', { session: expected });
+        if (!current(expected, attempt)) return;
+        if (typeof version !== 'string' || !version) throw new Error('Could not preview this session’s active context.');
+        preview = { session: expected, version };
+        scope.textContent = 'Future requests in ' + expected + ' will start with fresh context. Saved requests, source snapshots, and responses stay in Run history.';
+        report(feedback);
+      } catch (error) {
+        if (current(expected, attempt)) report(feedback, error);
+      } finally {
+        if (current(expected, attempt)) {
+          busy = false;
+          update();
+          if (preview) approval.focus();
+        }
+      }
+    });
+    approval.addEventListener('change', update);
+    cancel.addEventListener('click', () => {
+      if (busy) return;
+      clear();
+      report(feedback);
+      start.focus();
+    });
+    apply.addEventListener('click', async () => {
+      if (apply.disabled || !preview || detached() || preview.session !== session) return;
+      const approved = preview;
+      const attempt = ++revision;
+      busy = true;
+      update();
+      report(feedback);
+      feedback.textContent = 'Resetting active context…';
+      try {
+        clearConsent(approved.session);
+        await coding(prefix + '/reset-context', approved);
+        if (!current(approved.session, attempt)) return;
+        clear();
+        feedback.textContent = 'Active context cleared. Saved history is still available.';
+        start.focus();
+        await refresh();
+      } catch (error) {
+        if (!current(approved.session, attempt)) return;
+        clear();
+        report(feedback, error);
+        start.focus();
+      }
+    });
+    update();
+    return (next) => {
+      if (session === next) return;
+      session = next;
+      clear();
+      report(feedback);
+    };
+  }
+
+  function activity(parent, project, readonly, detached, reviewPatch, clearResetConsent) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
     panel.className = 'coding-panel coding-activity stack';
     panel.innerHTML = '<div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh</button></div>' +
       '<div class="stack coding-runs" data-runs></div><div class="stack" data-inspect aria-live="polite"></div>' +
       '<section class="stack" data-saved-request-source hidden></section>' +
+      (clearResetConsent && !readonly ? '<section class="stack" data-context-reset hidden></section>' : '') +
       '<div class="coding-feedback" role="status"></div>';
     parent.append(panel);
     const list = panel.querySelector('[data-runs]');
     const inspected = panel.querySelector('[data-inspect]');
     const feedback = panel.querySelector('[role="status"]');
     const setSavedSourceRun = mountSavedSource(panel.querySelector('[data-saved-request-source]'), prefix, detached);
+    const resetPanel = panel.querySelector('[data-context-reset]');
+    const setResetSession = resetPanel ? mountContextReset(resetPanel, {
+      prefix, detached, clearConsent: clearResetConsent, refresh,
+    }) : null;
     let selected = null;
     let timer;
     let generation = 0;
@@ -656,11 +767,12 @@
       if (text.textContent !== (answer?.text ?? '')) text.textContent = answer?.text ?? '';
     }
 
-    async function readRun(run, current) {
+    async function readRun(run, current, idle) {
       const result = await coding(prefix + '/inspect', identity(run));
       if (detached() || current !== generation) return;
       const pi = result.pi;
       const row = result.run;
+      setResetSession?.(idle && pi && !pi.pendingRequestIds.length && row.status !== 'running' && row.status !== 'interrupted' ? row.session : null);
       const canViewSource = row.status !== 'running' &&
         (row.admitted || pi?.request || (row.status === 'interrupted' && !result.admissionMissing));
       setSavedSourceRun(canViewSource ? row : null);
@@ -768,10 +880,15 @@
             button.addEventListener('click', () => selectRun(rows[Number(button.dataset.run)]));
           });
         }
-        if (target) await readRun(target, current);
+        if (target) {
+          const idle = !rows.some((row) => row.session === target.session && (row.status === 'running' || row.status === 'interrupted'));
+          if (!idle) setResetSession?.(null);
+          await readRun(target, current, idle);
+        }
         else {
           selected = null;
           setSavedSourceRun(null);
+          setResetSession?.(null);
           inspected.replaceChildren();
         }
         if (focusResult && target && current === generation) {
@@ -788,6 +905,7 @@
     function selectRun(row) {
       if (selected?.id !== row.id || selected.session !== row.session) {
         setSavedSourceRun(null);
+        setResetSession?.(null);
         inspected.replaceChildren();
       }
       selected = row;
@@ -1228,7 +1346,7 @@
       projectsEl.remove();
       await window.okbCodingStandalone.mount(page, {
         coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, report, sessionUsage, usageText,
-        showTaskProgress, taskProgressPanel,
+        showTaskProgress, taskProgressPanel, mountContextReset,
       });
       return;
     }
@@ -1272,9 +1390,10 @@
     right.className = 'stack coding-right';
     grid.append(left, right);
     let openPatch;
-    const runs = activity(right, project, readonly, isDetached, teamMode ? undefined : (row) => openPatch(row));
+    const runs = activity(right, project, readonly, isDetached, teamMode ? undefined : (row) => openPatch(row),
+      teamMode ? undefined : (session) => clearComposerConsent(session));
     window.okbCodingEvaluation.mount(right, { prefix: projectUrl(project.id), coding, readonly, detached: isDetached });
-    composer(left, project, readonly, isDetached, runs.selectRun, !teamMode && !readonly);
+    const clearComposerConsent = composer(left, project, readonly, isDetached, runs.selectRun, !teamMode && !readonly);
     const composerPanel = left.querySelector('.coding-composer');
     if (!teamMode) settings(left, project, readonly, composerPanel.updateProject, runs.refresh);
     const github = document.createElement('div');

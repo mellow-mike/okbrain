@@ -4,7 +4,11 @@ import { createModels, fauxAssistantMessage, fauxProvider, getCurrentTools,
 import { chmod, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { CodingError, getCodingSessionStatus, previewCodingAttachments, runCodingSession, type CodingSessionOptions } from "../src/core/coding/durable.ts";
+import {
+  CodingError, CodingSessionBusyError, CodingSessionMissingError, deleteStandaloneCodingSession, getCodingSessionStatus,
+  inspectStandaloneCodingSession, previewCodingAttachments, previewCodingContextReset, previewStandaloneCodingContextReset,
+  resetCodingContext, resetStandaloneCodingContext, runCodingSession, type CodingSessionOptions,
+} from "../src/core/coding/durable.ts";
 
 let testDirectory: string;
 let workspace: string;
@@ -184,6 +188,84 @@ test("uses Pi threshold compaction locally and keeps old answers and committed u
   expect(faux.state.callCount).toBe(2);
 });
 
+test("fresh context preserves archived receipts and safely replays a confirmed reset after later work", async () => {
+  const { models, faux } = provider();
+  const dependencies = { stateDir, models };
+  const original = "original evidence before a deliberate context reset";
+  const revised = "different evidence selected after the context reset";
+  const source = join(workspace, "evidence.txt");
+  await writeFile(source, original);
+  const first = { ...options, prompt: "Check the first fixture", files: ["evidence.txt"] };
+  faux.setResponses([fauxAssistantMessage("Archived first answer.")]);
+  const receipt = await runCodingSession(first, dependencies);
+  expect(receipt).toMatchObject({ status: "done", text: "Archived first answer." });
+
+  const confirmed = await previewCodingContextReset(options, dependencies);
+  expect(confirmed.version).toMatch(/^[a-f0-9]{64}$/u);
+  expect(await previewCodingContextReset(options, dependencies)).toEqual(confirmed);
+  await expect(previewCodingContextReset({ ...options, model: "another-model" }, dependencies)).rejects.toThrow("different workspace or model");
+  const denied = new Error("The selected mount became read-only.");
+  const authorize = () => { throw denied; };
+  await expect(resetCodingContext({ ...options, ...confirmed }, dependencies, authorize)).rejects.toBe(denied);
+  expect(await previewCodingContextReset(options, dependencies)).toEqual(confirmed);
+  expect(await resetCodingContext({ ...options, ...confirmed }, dependencies)).toEqual({ reset: true, ...confirmed });
+  expect(faux.state.callCount).toBe(1);
+
+  const stale = await previewCodingContextReset(options, dependencies);
+  expect(stale.version).not.toBe(confirmed.version);
+  await writeFile(source, revised);
+  const archived = await getCodingSessionStatus({ ...options, includeReceipt: true, includeSavedSource: true }, dependencies);
+  expect(archived).toMatchObject({ request: { receipt, savedSource: { files: [{ path: "evidence.txt", content: original }] } } });
+  expect(faux.state.callCount).toBe(1);
+
+  const providerInputs: string[] = [];
+  faux.setResponses([
+    (input) => { providerInputs.push(JSON.stringify(input.messages)); return fauxAssistantMessage("Second answer after reset."); },
+    (input) => { providerInputs.push(JSON.stringify(input.messages)); return fauxAssistantMessage("Third answer after replay."); },
+  ]);
+  const second = { ...first, requestId: "second", prompt: "Check the new fixture" };
+  expect(await runCodingSession(second, dependencies)).toMatchObject({ status: "done", text: "Second answer after reset." });
+  expect(providerInputs[0]).toContain(revised);
+  expect(providerInputs[0]).not.toContain(original);
+  expect(providerInputs[0]).not.toContain(first.prompt);
+  expect(providerInputs[0]).not.toContain("Archived first answer.");
+
+  const current = await previewCodingContextReset(options, dependencies);
+  await expect(resetCodingContext({ ...options, ...stale }, dependencies)).rejects.toThrow("context changed");
+  expect(await resetCodingContext({ ...options, ...confirmed }, dependencies, authorize)).toEqual({ reset: true, ...confirmed, replayed: true });
+  expect(await previewCodingContextReset(options, dependencies)).toEqual(current);
+  expect(faux.state.callCount).toBe(2);
+  expect(await runCodingSession({ ...options, requestId: "third", prompt: "Continue with the new fixture" }, dependencies))
+    .toMatchObject({ status: "done" });
+  expect(providerInputs[1]).toContain("Second answer after reset.");
+  expect(providerInputs[1]).not.toContain("Archived first answer.");
+  expect(faux.state.callCount).toBe(3);
+});
+
+test("standalone reset uses the saved binding and rejects a preview from a deleted transcript", async () => {
+  const { models, faux } = provider();
+  const dependencies = { stateDir, models };
+  const request = { ...options, prompt: "Fixture task" };
+  faux.setResponses([fauxAssistantMessage("Fixture answer."), fauxAssistantMessage("Fixture answer.")]);
+  const receipt = await runCodingSession(request, dependencies);
+  const confirmed = await previewStandaloneCodingContextReset(options.session, dependencies);
+  const moved = join(testDirectory, "workspace-moved");
+  await rename(workspace, moved);
+  expect(await resetStandaloneCodingContext(options.session, confirmed.version, dependencies))
+    .toEqual({ reset: true, ...confirmed });
+  expect(await inspectStandaloneCodingSession(options.session, options.requestId, dependencies))
+    .toMatchObject({ request: { receipt } });
+  expect(faux.state.callCount).toBe(1);
+
+  expect(await deleteStandaloneCodingSession(options.session, dependencies)).toBe(true);
+  await expect(previewStandaloneCodingContextReset(options.session, dependencies)).rejects.toBeInstanceOf(CodingSessionMissingError);
+  await expect(resetStandaloneCodingContext(options.session, confirmed.version, dependencies)).rejects.toBeInstanceOf(CodingSessionMissingError);
+  await rename(moved, workspace);
+  expect(await runCodingSession(request, dependencies)).toMatchObject({ status: "done" });
+  await expect(resetStandaloneCodingContext(options.session, confirmed.version, dependencies)).rejects.toThrow("context changed");
+  expect(faux.state.callCount).toBe(2);
+});
+
 test("refuses a new request that cannot fit the model budget before admission", async () => {
   const { models, faux } = provider({ contextWindow: 3200, maxTokens: 400 });
   const dependencies = { stateDir, models };
@@ -222,6 +304,7 @@ test("resumes an interrupted Pi Durable request using the original attachment by
   const priorOptions = { ...options, requestId: "completed" };
   faux.setResponses([fauxAssistantMessage("A saved answer.")]);
   const prior = await runCodingSession({ ...priorOptions, prompt: "Review the plan" }, { stateDir, models });
+  const resetPreview = await previewCodingContextReset(options, { stateDir, models });
   const attachment = join(workspace, "original.txt");
   await writeFile(attachment, "original bytes");
   const script = `
@@ -251,6 +334,8 @@ test("resumes an interrupted Pi Durable request using the original attachment by
     reader.releaseLock();
     expect(new TextDecoder().decode(marker.value).trim()).toBe("generation-started");
     await expect(runCodingSession(options, { stateDir, models })).rejects.toThrow("already open");
+    await expect(previewCodingContextReset(options, { stateDir, models })).rejects.toBeInstanceOf(CodingSessionBusyError);
+    await expect(resetCodingContext({ ...options, ...resetPreview }, { stateDir, models })).rejects.toBeInstanceOf(CodingSessionBusyError);
   } finally {
     clearTimeout(startupTimeout);
     child.kill("SIGKILL");
@@ -263,6 +348,8 @@ test("resumes an interrupted Pi Durable request using the original attachment by
     pendingRequestIds: [options.requestId],
     request: { requestId: options.requestId, status: "placed" },
   });
+  await expect(previewCodingContextReset(options, { stateDir, models })).rejects.toThrow("Finish or cancel pending coding work");
+  await expect(resetCodingContext({ ...options, ...resetPreview }, { stateDir, models })).rejects.toThrow("Finish or cancel pending coding work");
   expect(faux.state.callCount).toBe(1);
   faux.setResponses([(input) => {
     expect(JSON.stringify(input.messages)).toContain("original bytes");

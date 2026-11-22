@@ -81,7 +81,7 @@ okb code run --workspace ./my-project --session auth-review --request-id auth-1 
 
 Choose up to eight workspace-relative directories. Use `.` to scope to the workspace root when appropriate. Discovery uses tracked paths from the Git index and reads their current working-tree contents, including local edits. It skips symlinks, binary files, common generated and credential paths, and `db_only/`. Review the selected lines before approving the selection, since ordinary source files can also contain secrets. A changed selection requires a fresh preview. Use one source mode per request. `--files` is available when you know the exact paths or need a file outside the tracked selection.
 
-The excerpt budget defaults to 4,096 estimated tokens and accepts 1–16,384. It estimates one token per two UTF-8 bytes of serialized excerpts, including paths and line labels. It is independent of the full request budget, which also includes the prompt, instructions, and active history. The preview checks up to 256 eligible files after ranking tracked paths, reads up to 64 KiB from each, and selects at most 12 excerpts. When a limit is reached or a result is missing, narrow the directories or use a more specific path or identifier. Open a new session when earlier turns should be outside the new task's context.
+The excerpt budget defaults to 4,096 estimated tokens and accepts 1–16,384. It estimates one token per two UTF-8 bytes of serialized excerpts, including paths and line labels. It is independent of the full request budget, which also includes the prompt, instructions, and active history. The preview checks up to 256 eligible files after ranking tracked paths, reads up to 64 KiB from each, and selects at most 12 excerpts. When a limit is reached or a result is missing, narrow the directories or use a more specific path or identifier. Use [Start fresh context](#start-fresh-context) when the next request should leave out earlier turns.
 
 ### Reuse a project profile
 
@@ -161,6 +161,12 @@ okb code run --workspace ./my-project --session app-review --request-id review-1
 An interrupted provider call can be attempted again, with normal provider billing. A completed request returns its saved answer without a provider call. If an interruption happened before admission, run the original command again. To ask a follow-up or retry an unanswered request, supply a new request ID and prompt. Follow-ups share the session transcript. Use a new session name to change the workspace, provider, or model.
 
 Use `--json` to capture a machine-readable result. A `done` result carries the assistant's `text`, `stopReason`, and `usage`. An `unanswered` result carries a `reason` and exits with status 1. Requests using a preview include the saved `repositoryContext` manifest. CLI validation and runtime errors are reported on stderr.
+
+### Start fresh context
+
+In **Run history** for a project, or in a saved **Standalone session**, select an idle session and choose **Start fresh context**. Review the session name and confirm **Reset context**. In VS Code or Cursor, open a finished run from **okbrain: Inspect and Review Coding Runs** and choose **Start fresh context**. These controls are available to the local owner in a writable workspace.
+
+Pi excludes earlier turns from subsequent model requests in this session. The workspace, provider, and model stay bound to the session, and saved tasks, sources, answers, reviews, and usage remain available in its run history. Resetting uses no provider call. Finish, resume, or cancel unsettled work first. If the context changes during confirmation, preview it again. [Pi Durable context reset](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md#reset-and-handoff)
 
 ## Inspect context and usage
 

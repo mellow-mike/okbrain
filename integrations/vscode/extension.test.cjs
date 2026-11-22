@@ -11,6 +11,7 @@ const { runInNewContext } = require('node:vm');
 function activateExtension(vscode, connection, options = {}) {
   const file = require.resolve('./extension.cjs');
   const module = { exports: {} };
+  vscode.workspace.onDidChangeWorkspaceFolders ??= () => {};
   runInNewContext(readFileSync(file, 'utf8'), {
     module,
     URL,
@@ -416,7 +417,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
         return { id: data.requestId, status: 'running' };
       }
       if (action === 'runs') return [done, interrupted, active];
-      if (action === 'inspect') return { run: selectedRun, pi: { request: { receipt: { text: 'Shared result.' } } } };
+      if (action === 'inspect') return { run: selectedRun, pi: { pendingRequestIds: [], request: { receipt: { text: 'Shared result.' } } } };
       if (action === 'source-inspect') return { prompt: 'Saved shared task.', groups: [{ files: [{ path: 'core/sample.ts', text: '<literal source>' }] }] };
       if (action === 'cancel' || action === 'resume') return selectedRun;
       assert.equal(action, 'review');
@@ -483,6 +484,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   assert.ok(availableActions.includes('Request changes'));
   assert.ok(!availableActions.includes('Review proposed patch in okbrain'));
   assert.ok(!availableActions.includes('Prepare GitHub pull request in okbrain'));
+  assert.ok(!availableActions.includes('Start fresh context'));
   assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
   assert.match(lastDocument.text, /Saved shared task/);
   assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect', 'source-inspect']);
@@ -505,4 +507,104 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   assert.deepEqual(calls.map(([action]) => action), ['runs', 'inspect']);
   assert.equal(entries.size, 0);
   assert.deepEqual(errors, []);
+});
+
+test('owner starts fresh context only after confirming the preview for the current idle session', async () => {
+  const project = { id: 'fixture', title: 'Project fixture' };
+  const first = { session: 'original', id: 'request-one', status: 'done', admitted: true };
+  const other = { session: 'other', id: 'request-two', status: 'done', admitted: true };
+  const calls = [];
+  const notices = [];
+  const errors = [];
+  const commands = new Map();
+  const title = 'Start fresh context';
+  const folder = { uri: { scheme: 'file', fsPath: '/fixture' } };
+  let selected = first;
+  let chooseReset = true;
+  let mode = 'decline';
+  let version = 0;
+  let availableActions;
+  let foldersChanged;
+  const invoke = () => commands.get('okbrain.runs')();
+  const vscode = {
+    commands: { registerCommand: (name, run) => commands.set(name, run) },
+    env: {},
+    workspace: {
+      isTrusted: true,
+      workspaceFolders: [folder],
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider() {},
+      onDidChangeWorkspaceFolders(listener) { foldersChanged = listener; },
+      async openTextDocument(value) { return value; },
+    },
+    window: {
+      async showTextDocument() {},
+      async showQuickPick(items, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return items.find((item) => item.label === selected.id);
+        availableActions = Array.from(items, (item) => item.label);
+        return chooseReset ? items.find((item) => item.label === title) : undefined;
+      },
+      async showWarningMessage(message, options, button) {
+        assert.match(message, /session original\?/);
+        assert.match(message, /Saved runs stay available/);
+        assert.equal(options.modal, true);
+        assert.equal(button, 'Start Fresh Context');
+        if (mode === 'decline') return undefined;
+        if (mode === 'other-inspection') {
+          chooseReset = false;
+          selected = other;
+          await invoke();
+        }
+        if (mode === 'workspace-changed') {
+          vscode.workspace.workspaceFolders = [{ uri: { scheme: 'file', fsPath: '/new-workspace' } }];
+          foldersChanged();
+          vscode.workspace.workspaceFolders = [folder];
+          foldersChanged();
+        }
+        return button;
+      },
+      async showInformationMessage(message) { notices.push(message); },
+      async showErrorMessage(message, ...actions) {
+        assert.equal(actions.length, 0);
+        errors.push(message);
+      },
+    },
+  };
+  activateExtension(vscode, { projects: [project], async api(path, data) {
+    assert.ok(path.startsWith('/projects/fixture/'));
+    const action = path.slice('/projects/fixture/'.length);
+    if (action === 'runs') return [first, other];
+    if (action === 'inspect') return { run: data.requestId === first.id ? first : other,
+      pi: { pendingRequestIds: mode === 'pending' ? ['still-running'] : [] } };
+    calls.push([action, JSON.parse(JSON.stringify(data))]);
+    if (action === 'reset-context-preview') return { version: `preview-${++version}` };
+    assert.equal(action, 'reset-context');
+    if (mode === 'network-failure') throw new Error('Connection lost');
+    return { reset: true, version: data.version };
+  } });
+
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }]]);
+  assert.deepEqual(notices, []);
+  mode = 'pending';
+  await invoke();
+  assert.ok(!availableActions.includes(title));
+  assert.deepEqual(calls, []);
+  mode = 'other-inspection';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }]]);
+  chooseReset = true;
+  selected = first;
+  mode = 'workspace-changed';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }]]);
+  mode = 'approve';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }],
+    ['reset-context', { session: first.session, version: 'preview-4' }]]);
+  assert.match(notices[0], /Saved runs remain/);
+  mode = 'network-failure';
+  await invoke();
+  assert.deepEqual(calls.map(([action]) => action), ['reset-context-preview', 'reset-context']);
+  assert.deepEqual(errors, ['Connection lost']);
 });

@@ -876,14 +876,14 @@ async function codingRequest(req: Request, url: URL, opts: ServeState, cors: Hdr
         return json(400, { error: "Send a JSON object." }, headers);
       }
     }
+    const canWrite = () => {
+      if (readonly) return false;
+      try {
+        const current = scopeOf(req, url, opts);
+        return current.bundle === selected?.bundle && !current.readonly;
+      } catch { return false; }
+    };
     if (standalone) {
-      const canWrite = () => {
-        if (readonly) return false;
-        try {
-          const current = scopeOf(req, url, opts);
-          return current.bundle === selected?.bundle && !current.readonly;
-        } catch { return false; }
-      };
       const result = await opts.standalone!.dispatch(req.method, path.slice("/standalone".length), body, canWrite);
       return json(200, { result }, headers);
     }
@@ -894,7 +894,7 @@ async function codingRequest(req: Request, url: URL, opts: ServeState, cors: Hdr
       const result = await opts.team.change(body, (request, state) => codingTeamRequest(request, state, opts));
       return json(200, { result }, headers);
     }
-    const result = await opts.coding!().dispatch(req.method, path, body, owner, bearer, readonly);
+    const result = await opts.coding!().dispatch(req.method, path, body, owner, bearer, readonly, canWrite);
     return json(200, { result }, headers);
   } catch (error) {
     if (error instanceof ProjectControlError) return json(error.status, errBody(error), headers);

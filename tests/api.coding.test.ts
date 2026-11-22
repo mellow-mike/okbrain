@@ -401,6 +401,126 @@ test("project run presets share request drafts and require fresh source approval
   }
 });
 
+test("a project owner can start fresh context while keeping saved runs and review decisions", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-project-context-reset-");
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: "context-reset-fixture" }] });
+  models.setProvider(faux.provider);
+  const open = (readonly = false) => createApiServer({ bundle: root, port: 0, token: ownerToken, readonly, coding: { stateDir, models } });
+  let api = open();
+  const hold = Promise.withResolvers<void>();
+  const session = "fresh-context";
+  const earlierTask = "Review the original attachment before the reset.";
+  const earlierAnswer = "Original project answer before reset.";
+  const newTask = "Review only the current task after reset.";
+  try {
+    const { call, request } = apiClient(api.url);
+    const project = await call<Project>("/projects", { workspace, title: "Context reset", scopes: ["src"], provider: "openai", model: "context-reset-fixture" });
+    const path = "/projects/" + project.id;
+    const refresh = path + "/reset-context-preview";
+    const reset = path + "/reset-context";
+    const member = await call<{ token: string }>(path + "/members", { name: "context-reviewer" });
+    expect((await request(refresh, { session }, member.token)).status).toBe(403);
+    expect((await request(reset, { session, version: "a".repeat(64) }, member.token)).status).toBe(403);
+    expect((await request(reset, { session, version: "unreviewed" })).status).toBe(400);
+
+    const source = { source: "files", files: ["src/example.ts"] };
+    const preview = await call<{ id: string }>(path + "/preview", source);
+    const first = { session, requestId: "original" };
+    faux.setResponses([async () => { await hold.promise; return fauxAssistantMessage(earlierAnswer); }]);
+    await call(path + "/run", { ...first, ...source, prompt: earlierTask, previewId: preview.id, approved: true });
+    expect((await request(refresh, { session })).status).toBe(409);
+    hold.resolve();
+    const wait = (client: ReturnType<typeof apiClient>, identity: { session: string; requestId: string }) =>
+      waitFor(() => client.call<Inspection>(path + "/inspect", identity), ({ run }) => run.status !== "running");
+    expect((await wait({ call, request }, first)).pi?.request?.receipt?.text).toBe(earlierAnswer);
+    await call(path + "/review", { ...first, decision: "accepted" }, member.token);
+    const originalVersion = (await call<{ version: string }>(refresh, { session })).version;
+
+    const second = { session, requestId: "newer-before-reset" };
+    const noFiles = { source: "files", files: [] };
+    const noFilesPreview = await call<{ id: string }>(path + "/preview", noFiles);
+    faux.setResponses([(input) => {
+      expect(JSON.stringify(input.messages)).toContain(earlierAnswer);
+      return fauxAssistantMessage("Newer answer before reset.");
+    }]);
+    await call(path + "/run", { ...second, ...noFiles, prompt: "A follow-up before reset.", previewId: noFilesPreview.id, approved: true });
+    expect((await wait({ call, request }, second)).run.status).toBe("done");
+    expect((await request(reset, { session, version: originalVersion })).status).toBe(409);
+    const currentVersion = (await call<{ version: string }>(refresh, { session })).version;
+    expect(currentVersion).not.toBe(originalVersion);
+
+    await api.stop();
+    api = open(true);
+    const readonly = apiClient(api.url);
+    expect((await readonly.request(refresh, { session })).status).toBe(403);
+    expect((await readonly.request(reset, { session, version: currentVersion })).status).toBe(403);
+    await api.stop();
+    api = open();
+    const fresh = apiClient(api.url);
+    expect(await fresh.call(reset, { session, version: currentVersion })).toMatchObject({ reset: true, version: currentVersion });
+    expect(faux.state.callCount).toBe(2);
+    expect(await fresh.call<Inspection>(path + "/inspect", first, member.token)).toMatchObject({
+      run: { status: "done", review: "accepted" }, pi: { request: { receipt: { text: earlierAnswer } } },
+    });
+    expect(await fresh.call<SavedCodingRequestInput>(path + "/source-inspect", first, member.token)).toMatchObject({
+      prompt: earlierTask, groups: [{ files: [{ path: "src/example.ts", text: "export const answer = 42;\n" }] }],
+    });
+
+    const third = { session, requestId: "first-after-reset" };
+    faux.setResponses([(input) => {
+      const sent = JSON.stringify(input.messages);
+      expect(sent).toContain(newTask);
+      for (const archived of [earlierTask, earlierAnswer, "Newer answer before reset.", "export const answer = 42"]) expect(sent).not.toContain(archived);
+      return fauxAssistantMessage("Fresh response.");
+    }]);
+    await fresh.call(path + "/run", { ...third, ...noFiles, prompt: newTask, previewId: noFilesPreview.id, approved: true });
+    expect((await wait(fresh, third)).pi?.request?.receipt?.text).toBe("Fresh response.");
+    const current = await fresh.call<{ version: string }>(refresh, { session });
+    expect(await fresh.call(reset, { session, version: currentVersion })).toMatchObject({ reset: true, version: currentVersion, replayed: true });
+    expect(await fresh.call<{ version: string }>(refresh, { session })).toEqual(current);
+    expect(faux.state.callCount).toBe(3);
+    const audit = await fresh.call<{ kind: string; session?: string }[]>(path + "/audit");
+    expect(audit.filter(({ kind }) => kind === "context_reset" || kind === "context_reset_approved").map(({ kind }) => kind))
+      .toEqual(["context_reset", "context_reset_approved"]);
+  } finally {
+    hold.resolve();
+    await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a local standalone context reset preserves the earlier CLI run and fixed identity", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-standalone-context-reset-");
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: "standalone-reset-fixture" }] });
+  models.setProvider(faux.provider);
+  const identity = { session: "standalone-reset", workspace, provider: "openai" as const, model: "standalone-reset-fixture" };
+  const first = { session: identity.session, requestId: "cli-original" };
+  const api = createApiServer({ bundle: root, port: 0, token: ownerToken, standaloneCoding: { stateDir, models } });
+  const readonly = createApiServer({ bundle: root, port: 0, token: ownerToken, readonly: true, standaloneCoding: { stateDir, models } });
+  try {
+    const path = "/standalone";
+    const { call, request } = apiClient(api.url);
+    faux.setResponses([fauxAssistantMessage("Original CLI receipt before reset.")]);
+    await runCodingSession({ ...identity, requestId: first.requestId, prompt: "Original CLI evidence review.", files: ["src/example.ts"] }, { stateDir, models });
+    const { version } = await call<{ version: string }>(path + "/reset-context-preview", { session: identity.session });
+    const approval = { session: identity.session, version };
+    expect((await apiClient(readonly.url).request(path + "/reset-context", approval)).status).toBe(403);
+    expect((await request(path + "/reset-context", { ...approval, version: "a".repeat(64) })).status).toBe(409);
+    expect(await call(path + "/reset-context", approval)).toMatchObject({ reset: true, version });
+    expect(faux.state.callCount).toBe(1);
+    expect(await call(path + "/inspect", first)).toMatchObject({
+      identity: { ...identity, workspace: expect.any(String) },
+      pi: { request: { receipt: { text: "Original CLI receipt before reset." },
+        savedPrompt: "Original CLI evidence review.", savedSource: { source: "files", files: [{ path: "src/example.ts", content: "export const answer = 42;\n" }] } } },
+    });
+  } finally {
+    await Promise.all([api.stop(), readonly.stop()]);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("source inspection reopens archived profile and package inputs from a read-only app", async () => {
   const { root, workspace, stateDir } = await fixture("okb-saved-coding-source-");
   const models = createModels();

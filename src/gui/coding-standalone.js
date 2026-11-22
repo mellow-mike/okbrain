@@ -11,7 +11,7 @@
   const statusLabel = (status) => statusLabels[status] || status || 'Saved';
 
   async function mount(parent, { coding, readonly, detached, defaultModels, entries, field, previewContents,
-    report, sessionUsage, usageText, showTaskProgress, taskProgressPanel }) {
+    report, sessionUsage, usageText, showTaskProgress, taskProgressPanel, mountContextReset }) {
     const header = parent.querySelector('header');
     header.innerHTML = '<div class="row coding-project-links"><a href="#coding">Project workspace</a></div>' +
       '<h2 class="display">Standalone sessions</h2><p class="muted">Open sessions from this app or the CLI.</p>';
@@ -48,6 +48,7 @@
       '<label class="field"><span>Saved session</span><select data-sessions><option value="">Loading sessions…</option></select></label>' +
       '<label class="field" data-request-picker hidden><span>Saved request</span><select data-requests></select></label>' +
       '<div data-inspect class="stack" aria-live="polite"></div>' +
+      (readonly ? '' : '<section class="stack" data-context-reset hidden></section>') +
       '<details data-delete-session hidden><summary>Delete standalone session</summary><form class="stack coding-form">' +
       '<p>Permanently delete the saved requests, source snapshots, and responses for <code data-delete-name></code> from this device.</p>' +
       '<p class="muted" data-delete-state></p><label class="field"><span>Type the session name to confirm</span>' +
@@ -87,12 +88,31 @@
     let refreshing = false;
     let runActionPending = false;
     let deleting = false;
+    let pendingWork = false;
     let sessionState = '';
     let preview = null;
     let revision = 0;
     let generation = 0;
     let timer;
     let inspected;
+    const resetPanel = grid.querySelector('[data-context-reset]');
+    const setResetSession = resetPanel ? mountContextReset(resetPanel, {
+      prefix, detached,
+      clearConsent() {
+        controls.approvedSourceLookup.checked = false;
+        invalidate();
+      },
+      async refresh() {
+        const selected = sessionName;
+        const request = requestId;
+        const sourceWasOpen = inspectEl.querySelector('[data-saved-task]')?.open;
+        await inspect();
+        if (!detached() && sessionName === selected && requestId === request && sourceWasOpen) {
+          const saved = inspectEl.querySelector('[data-saved-task]');
+          if (saved) saved.open = true;
+        }
+      },
+    }) : null;
 
     function selectedProvider() {
       return catalog.find((entry) => entry.provider === controls.provider.value);
@@ -123,6 +143,8 @@
       deleteInput.disabled = deletePanel.hidden || busy || running || refreshing || runActionPending || deleting ||
         !['ready', 'deleting', 'unavailable'].includes(sessionState);
       deleteButton.disabled = deleteInput.disabled || deleteInput.value !== sessionName;
+      setResetSession?.(sessionState === 'ready' && !busy && !running && !pendingWork && !refreshing &&
+        !runActionPending && !deleting ? sessionName : null);
     }
 
     function invalidate() {
@@ -268,7 +290,7 @@
         (pi ? '<p class="muted">Request usage · ' + esc(usageText(request?.usage)) + '</p><p class="muted">' +
           esc(pi.context.estimatedTokens.toLocaleString()) + ' active context tokens' +
           (pi.context.historyCompacted ? ' · Older turns compacted' : '') + '</p>' + sessionUsage(pi) : '') +
-        (savedPrompt || savedSource ? '<details><summary>Saved task and source</summary>' +
+        (savedPrompt || savedSource ? '<details data-saved-task><summary>Saved task and source</summary>' +
           (savedPrompt ? '<pre data-saved-prompt></pre>' : '') +
           (savedSource ? '<div class="coding-preview stack" data-saved-source></div>' : '') + '</details>' :
           references.length ? '<details><summary>Source references</summary><ul>' + references.map((entry) =>
@@ -364,6 +386,7 @@
         }
         fillBinding(result.identity || binding);
         running = result.active?.status === 'running' || result.state === 'busy';
+        pendingWork = !!result.pi?.pendingRequestIds.length;
         updateControls();
         const requests = [...(result.requests || [])];
         const knownActive = result.active?.requestId;
@@ -379,10 +402,11 @@
         if (running) timer = setTimeout(inspect, 1200);
       } catch (error) {
         if (detached() || current !== generation) return;
+        pendingWork = true;
         if (sessions.some((entry) => entry.session === sessionName && entry.state === 'unavailable')) {
           sessionState = 'unavailable';
-          updateControls();
         }
+        updateControls();
         report(historyFeedback, error);
       }
     }
@@ -392,6 +416,7 @@
       requestId = '';
       binding = null;
       running = false;
+      pendingWork = false;
       sessionState = '';
       deleteInput.value = '';
       deletePanel.open = false;
@@ -476,6 +501,7 @@
     sessionsSelect.addEventListener('change', () => { void selectSession(sessionsSelect.value); });
     requestsSelect.addEventListener('change', () => {
       requestId = requestsSelect.value;
+      setResetSession?.(null);
       inspected = undefined;
       inspectEl.replaceChildren();
       report(historyFeedback);

@@ -59,6 +59,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   recover from the stored snapshot.
 - [x] Expose local request status, active context estimates, Pi Durable history
   compaction, and recorded provider usage including cache counters.
+- [x] Start fresh Pi context in idle sessions from the Mac app, web app, and
+  editor. Preserve earlier requests, source snapshots, and review decisions.
 - [x] Support Gemini through Pi AI. Show Pi Durable session usage by model
   and separate the main conversation from package review children.
 - [x] Surface bounded Pi Durable answer text during runs in browser and editor
@@ -805,6 +807,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added owner-confirmed Pi context reset with durable replay and
+  access to saved requests in the Mac app, web app, and editor.
 - 2026-11-22 — Connected team members to HTTPS Coding workspaces from VS Code
   and Cursor, with project-bound credentials and reviewed repository previews.
 - 2026-11-22 — Added per-brain maintenance schedules to the Mac and web apps,
