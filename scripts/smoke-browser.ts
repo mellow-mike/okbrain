@@ -44,7 +44,9 @@ const finishAnswer = Promise.withResolvers<void>();
 const finishStandalone = Promise.withResolvers<void>();
 const finishProject = Promise.withResolvers<void>();
 let answerSource = "";
+let modelFixtureCalls = 0;
 const chatFixture = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+  modelFixtureCalls++;
   const input = await req.json() as { stream?: boolean; model?: string; input?: string[] };
   if (new URL(req.url).pathname === "/embeddings") {
     assert.equal(input.model, "fixture-embedding-model");
@@ -116,30 +118,99 @@ try {
   assert.equal(await page.evaluate(() => document.activeElement?.textContent), "Open saved note");
   await page.keyboard.press("Enter");
   await page.getByText("Offline orchid propagation", { exact: true }).first().waitFor();
-  await nav.getByRole("link", { name: "Home", exact: true }).click();
-  await enable.click();
-  await page.getByRole("link", { name: "Search notes", exact: true }).waitFor();
-  assert.equal(await page.evaluate(() => document.activeElement?.textContent), "Search notes");
+  const brainStatus = async (brain?: string) => {
+    const response = await fetch(new URL("api/status", server.url), { headers: {
+      "x-okb-token": server.token, ...(brain ? { "x-okb-brain": brain } : {}),
+    } });
+    if (!response.ok) assert.fail(await response.text());
+    return await response.json() as { hasIndex: boolean; readonly: boolean };
+  };
+  const searchOperations = new Set(["/api/op/index", "/api/op/search"]);
+  const firstPosts: string[] = [];
+  const captureSearch = (request: BrowserRequest) => {
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "POST" && searchOperations.has(path)) firstPosts.push(path);
+  };
+  page.on("request", captureSearch);
+  await page.keyboard.press("/");
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "qs-in");
+  await page.keyboard.type("orchid");
   await page.keyboard.press("Enter");
-
-  await page.getByRole("searchbox", { name: "Search notes", exact: true }).focus();
+  const buildSearch = page.getByRole("button", { name: "Build index and search", exact: true });
+  await buildSearch.waitFor();
+  const searchNotes = page.getByRole("searchbox", { name: "Search notes", exact: true });
+  assert.equal(await searchNotes.inputValue(), "orchid");
+  assert.equal((await brainStatus()).hasIndex, false);
+  assert.deepEqual(firstPosts, []);
   const semantic = page.getByRole("checkbox", { name: "Use configured semantic retrieval" });
   assert.equal(await semantic.isChecked(), false);
-  await page.getByRole("combobox", { name: "Retrieval profile" }).selectOption("lean");
+  const retrievalProfile = page.getByRole("combobox", { name: "Retrieval profile" });
+  await retrievalProfile.selectOption("lean");
   const maximumResults = page.getByRole("spinbutton", { name: "Maximum results", exact: true });
   assert.equal(await maximumResults.inputValue(), "20");
   await maximumResults.fill("35");
-  await page.getByRole("searchbox", { name: "Search notes", exact: true }).focus();
-  await page.keyboard.type("orchid");
+  const firstIndex = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/index");
   const orchidSearch = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/search");
+  await buildSearch.focus();
   await page.keyboard.press("Enter");
+  const indexed = await firstIndex;
+  assert.ok(indexed.ok(), await indexed.text());
   const orchidResults = await orchidSearch;
   assert.ok(orchidResults.ok(), await orchidResults.text());
   assert.deepEqual(orchidResults.request().postDataJSON(), { query: "orchid", limit: 35, profile: "lean", "keyword-only": true });
-  await page.getByRole("link", { name: "Offline orchid propagation", exact: true }).waitFor();
+  assert.deepEqual(firstPosts, ["/api/op/index", "/api/op/search"]);
+  page.off("request", captureSearch);
+  await page.getByRole("button", { name: "Search", exact: true }).waitFor();
+  assert.equal(await searchNotes.inputValue(), "orchid");
+  assert.equal(await maximumResults.inputValue(), "35");
+  assert.equal(await retrievalProfile.inputValue(), "lean");
+  assert.equal((await brainStatus()).hasIndex, true);
+  assert.equal(modelFixtureCalls, 0);
+  assert.deepEqual(outbound, []);
+  const firstSearchHit = page.getByRole("link", { name: "Offline orchid propagation", exact: true });
+  await firstSearchHit.waitFor();
+  assert.equal(await firstSearchHit.evaluate((link) => link === document.activeElement), true);
   await page.locator("#sout mark", { hasText: "orchid" }).waitFor();
   await page.locator("#sout").getByRole("link", { name: "Focused map" }).click();
   await page.getByText("1 note, 0 links.").waitFor();
+
+  const readonlyBrain = "readonly-search-fixture";
+  const readonlyFolder = join(root, readonlyBrain);
+  await mkdir(readonlyFolder);
+  await writeFile(join(readonlyFolder, "orchids.md"), "---\ntype: note\ntitle: Read-only orchard reference\n---\nOrchid names.\n");
+  const changeMount = (input: Record<string, unknown>) => fetch(new URL("api/brains/mounts", server.url), {
+    method: "POST", headers: { "x-okb-token": server.token, "content-type": "application/json" }, body: JSON.stringify(input),
+  });
+  const mounted = await changeMount({ action: "register", name: readonlyBrain, path: readonlyFolder, readonly: true });
+  assert.ok(mounted.ok, await mounted.text());
+  const readonlySearch = await browser.newPage({ viewport: { width: 375, height: 700 }, reducedMotion: "reduce" });
+  readonlySearch.setDefaultTimeout(8000);
+  const readonlyPosts: string[] = [];
+  try {
+    await readonlySearch.addInitScript((name) => localStorage.setItem("okb-gui-brain", name), readonlyBrain);
+    readonlySearch.on("pageerror", (error) => errors.push(error.message));
+    await readonlySearch.route("**/*", (route) => {
+      const url = new URL(route.request().url());
+      if (url.origin !== origin) { outbound.push(url.href); return route.abort(); }
+      if (searchOperations.has(url.pathname)) readonlyPosts.push(url.pathname);
+      return route.continue();
+    });
+    await readonlySearch.goto(server.url + "#search/orchid");
+    await readonlySearch.getByText(/This read-only brain has no local search index\./).waitFor();
+    assert.equal(await readonlySearch.locator("#brain").inputValue(), readonlyBrain);
+    assert.equal(await readonlySearch.getByRole("button", { name: "Build index and search", exact: true }).count(), 0);
+    await readonlySearch.getByRole("link", { name: "Browse its notes", exact: true }).click();
+    await readonlySearch.getByRole("link", { name: "Read-only orchard reference", exact: true }).waitFor();
+    assert.deepEqual(readonlyPosts, []);
+    const status = await brainStatus(readonlyBrain);
+    assert.equal(status.hasIndex, false);
+    assert.equal(status.readonly, true);
+    assert.equal(modelFixtureCalls, 0);
+  } finally {
+    await readonlySearch.close();
+    const unmounted = await changeMount({ action: "remove", previous: readonlyBrain });
+    assert.ok(unmounted.ok, await unmounted.text());
+  }
   await nav.getByRole("link", { name: "Ask", exact: true }).click();
   await page.getByRole("textbox", { name: "Question", exact: true }).fill("orchid");
   await page.getByRole("button", { name: "Ask", exact: true }).click();
@@ -171,13 +242,93 @@ try {
   await nav.getByRole("link", { name: "Add", exact: true }).click();
   await page.getByText("Highlights and tags", { exact: true }).click();
   await page.locator("#clipf").getByLabel("Quote", { exact: true }).waitFor();
-  const markdown = join(root, "garden-card.md");
+  const markdownFolder = join(root, "garden-library");
+  await mkdir(join(markdownFolder, "spring"), { recursive: true });
+  const markdown = join(markdownFolder, "spring", "garden-card.md");
   await writeFile(markdown, "# Garden card\n\nFor the spring beds.\n");
+  const directImporter = page.getByText("Import directly from a server path", { exact: true });
+  await directImporter.click();
   await page.locator("#imp-path").fill(markdown);
   await page.locator("#imp-type").fill("reference");
   await page.locator("#impf").getByRole("button", { name: "Import", exact: true }).click();
-  await page.locator("#imp-out").getByText(/1 imported, 0 skipped/).waitFor();
-  assert.match(await Bun.file(join(bundle, "garden-card.md")).text(), /^type: reference$/m);
+  const directResult = page.locator("#imp-out");
+  await directResult.getByText(/1 imported, 0 skipped/).waitFor();
+  const directCard = Bun.file(join(bundle, "garden-card.md"));
+  const directMarkdown = await directCard.text();
+  assert.match(directMarkdown, /^type: reference$/m);
+  const importedCard = directResult.getByRole("link", { name: "garden-card", exact: true });
+  assert.equal(await importedCard.getAttribute("href"), "#concept/garden-card");
+  assert.equal(await importedCard.evaluate((link) => link === document.activeElement), true);
+  await page.keyboard.press("Enter");
+  await page.locator(".concept-head").getByRole("heading", { name: "Garden card", exact: true }).waitFor();
+  await nav.getByRole("link", { name: "Add", exact: true }).click();
+  await directImporter.click();
+  await page.locator("#imp-path").fill(markdown);
+  await page.locator("#impf").getByRole("button", { name: "Import", exact: true }).click();
+  await directResult.getByText(/0 imported, 1 skipped/).waitFor();
+  await directResult.getByText(/garden-card\.md.*concept exists: garden-card/).waitFor();
+  assert.equal(await directCard.text(), directMarkdown);
+
+  const chooseMarkdown = page.getByRole("link", { name: "Choose Markdown files", exact: true });
+  await chooseMarkdown.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForURL((url) => url.hash === "#sources/markdown");
+  const sourceFiles = page.locator("#source-files-form");
+  const sourceResult = page.locator("#source-files-result");
+  assert.equal(await sourceFiles.getByRole("combobox", { name: /File format/ }).inputValue(), "markdown");
+  assert.equal(await sourceFiles.getByLabel("Source name", { exact: true }).inputValue(), "Markdown library");
+  const chooseFolder = sourceFiles.getByLabel("Or choose the extracted folder", { exact: true });
+  await chooseFolder.setInputFiles(markdownFolder);
+  const previewFiles = sourceFiles.getByRole("button", { name: "Preview files", exact: true });
+  const saveFiles = sourceResult.getByRole("button", { name: "Import selected drafts", exact: true });
+  const sourceUpload = (response: { url(): string }) => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/personal/sources/upload" && url.searchParams.get("kind") === "markdown";
+  };
+  const previewUpload = page.waitForResponse(sourceUpload);
+  await previewFiles.click();
+  const previewed = await previewUpload;
+  assert.ok(previewed.ok(), await previewed.text());
+  assert.equal((await previewed.request().allHeaders())["x-okb-preview"], undefined);
+  const { result: markdownPreview } = await previewed.json() as {
+    result: { preview: string; rows: { id: string; path: string; status: string }[] };
+  };
+  assert.equal(markdownPreview.rows.length, 1);
+  const [draft] = markdownPreview.rows;
+  assert.ok(draft);
+  assert.equal(draft.status, "new");
+  assert.equal(draft.path, "spring/garden-card.md");
+  assert.match(draft.id, /^db_only\/imports\/markdown-/);
+  const draftTarget = `#concept/${encodeURIComponent(draft.id)}`;
+  const privatePath = join(bundle, `${draft.id}.md`);
+  await sourceResult.getByText(/For the spring beds\./).waitFor();
+  assert.equal(await Bun.file(privatePath).exists(), false);
+
+  const confirmedUpload = page.waitForResponse(sourceUpload);
+  await saveFiles.click();
+  const confirmed = await confirmedUpload;
+  assert.ok(confirmed.ok(), await confirmed.text());
+  assert.equal((await confirmed.request().allHeaders())["x-okb-preview"], markdownPreview.preview);
+  await sourceFiles.getByText("1 private draft saved.", { exact: true }).waitFor();
+  const privateLink = sourceResult.getByRole("link", { name: "Garden card", exact: true });
+  assert.equal(await privateLink.getAttribute("href"), draftTarget);
+  await privateLink.click();
+  await page.locator(".concept-head").getByRole("heading", { name: "Garden card", exact: true }).waitFor();
+  const privateCard = Bun.file(privatePath);
+  const privateMarkdown = await privateCard.text();
+  assert.match(privateMarkdown, /For the spring beds\./);
+
+  await nav.getByRole("link", { name: "Add", exact: true }).click();
+  await chooseMarkdown.click();
+  await chooseFolder.setInputFiles(markdownFolder);
+  await previewFiles.click();
+  await sourceResult.getByText("Already imported and skipped (1)", { exact: true }).waitFor();
+  assert.equal(await privateLink.getAttribute("href"), draftTarget);
+  assert.equal(await saveFiles.count(), 0);
+  await privateLink.click();
+  await page.locator(".concept-head").getByRole("heading", { name: "Garden card", exact: true }).waitFor();
+  assert.equal(await privateCard.text(), privateMarkdown);
+  assert.equal(await directCard.text(), directMarkdown);
 
   await nav.getByRole("link", { name: "Accounts", exact: true }).click();
   await page.getByText("No connected account is selected.").waitFor();

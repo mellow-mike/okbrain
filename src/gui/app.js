@@ -99,6 +99,11 @@ async function appWork(p) {
   Okb.busy(true);
   try { return await p; } finally { Okb.busy(false); }
 }
+
+async function buildLocalIndex(brain) {
+  await appWork(api('index', {}));
+  if (BRAIN === brain) await refreshStatus();
+}
 /** File a card away once its act is recorded; an emptied list says so. */
 async function fileAway(card, kind, empty) {
   var list = card.parentNode;
@@ -382,6 +387,7 @@ async function mountBrainStarter(panel, seq) {
 }
 
 async function renderHome(_arg, seq) {
+  var brain = BRAIN;
   var name = STATUS ? (STATUS.brain || basename(STATUS.bundle)) : 'your brain';
   var readonly = STATUS && STATUS.readonly;
   view.innerHTML =
@@ -408,13 +414,16 @@ async function renderHome(_arg, seq) {
   }
   if (document.getElementById('h-build')) {
     document.getElementById('h-build').addEventListener('click', async function () {
+      if (stale(seq) || BRAIN !== brain) return;
       this.disabled = true;
       working('h-build-out', 'building the local index');
       try {
-        await appWork(api('index', {}));
-        await refreshStatus();
-        if (!stale(seq)) {
-          await route();
+        await buildLocalIndex(brain);
+        if (!stale(seq) && BRAIN === brain) {
+          var ready = route();
+          var nextSeq = gen;
+          await ready;
+          if (stale(nextSeq) || BRAIN !== brain) return;
           var summary = document.getElementById('h-index');
           if (summary) {
             summary.innerHTML = '<p role="status">Local index ready. <a href="#search">Search notes</a> · <a href="#review">Open review queue</a></p>';
@@ -422,7 +431,7 @@ async function renderHome(_arg, seq) {
           }
         }
       } catch (e) {
-        if (!stale(seq)) setHtml('h-build-out', errorBox(e));
+        if (!stale(seq) && BRAIN === brain) setHtml('h-build-out', errorBox(e));
         this.disabled = false;
       }
     });
@@ -1060,36 +1069,67 @@ async function renderGraph(focusId, seq) {
 
 // ---- search view --------------------------------------------------------
 
-function renderSearch(initialQ) {
+function renderSearch(initialQ, seq) {
+  var brain = BRAIN;
+  var bundle = STATUS?.bundle;
+  var hash = location.hash;
+  var readonly = STATUS?.readonly === true;
+  var needsIndex = STATUS?.hasIndex === false;
+  if (readonly && needsIndex) {
+    view.innerHTML = '<div class="stack"><h2>Search</h2><p class="notice">This read-only brain has no local search index. ' +
+      '<a href="#browse">Browse its notes</a>.</p></div>';
+    return;
+  }
   view.innerHTML =
     '<div class="stack"><h2>Search</h2>' +
     '<form id="sf" class="stack">' +
     '<label class="field"><span>Search notes</span><input id="sq" type="search" placeholder="Search by keyword…" required></label>' +
-    '<div class="row"><button class="primary">Search</button>' +
+    '<div class="row"><button class="primary">' + (needsIndex ? 'Build index and search' : 'Search') + '</button>' +
     '<label><input id="s-semantic" type="checkbox"> Use configured semantic retrieval</label>' +
     '<label class="field"><span>Retrieval profile</span>' +
     '<select id="s-profile"><option value="">Configured default</option><option>lean</option>' +
     '<option>balanced</option><option>max</option></select></label>' +
     '<label class="field"><span>Maximum results</span><input id="s-limit" type="number" value="20" min="1" required></label></div></form>' +
-    '<div id="sout" class="list" aria-live="polite"></div></div>';
+    '<p id="s-index-help" class="muted"' + (needsIndex ? '' : ' hidden') + '>Build a local index to search this brain’s notes.</p>' +
+    '<div id="sout" class="list" aria-live="polite" tabindex="-1"></div></div>';
+  var form = document.getElementById('sf');
+  var submit = form.querySelector('button');
+  var indexHelp = document.getElementById('s-index-help');
   var out = document.getElementById('sout');
   var qEl = document.getElementById('sq');
   var semantic = document.getElementById('s-semantic');
   var profile = document.getElementById('s-profile');
   var limit = document.getElementById('s-limit');
-  document.getElementById('sf').addEventListener('submit', async function (e) {
+  var busy = false;
+  function current() { return !stale(seq) && brain === BRAIN && hash === location.hash; }
+  function focusStayed() {
+    return document.activeElement === document.body || form.contains(document.activeElement);
+  }
+  form.addEventListener('submit', async function (e) {
     e.preventDefault();
     var q = qEl.value.trim();
-    if (!q) return;
-    if (STATUS && !STATUS.hasIndex) {
-      out.innerHTML = 'Build a local index from <a href="#home">Home</a> to search this brain.';
-      return;
-    }
-    Okb.working(out, 'searching');
+    if (!q || busy || !current()) return;
     var params = { query: q, 'keyword-only': !semantic.checked, limit: limit.valueAsNumber };
     if (profile.value) params.profile = profile.value;
+    var building = needsIndex;
+    var restoreFocus = building && form.contains(document.activeElement);
+    var controls = building ? Array.from(form.elements) : [submit];
+    busy = true;
+    controls.forEach(function (control) { control.disabled = true; });
     try {
+      if (building) {
+        Okb.working(out, 'building the local index');
+        await buildLocalIndex(brain);
+        if (!current()) return;
+        if (STATUS && bundle !== STATUS.bundle) throw new Error('The selected brain changed. Open Search again to search it.');
+        if (!STATUS?.hasIndex) throw new Error('The local index is unavailable. Check the search cache in Settings and try again.');
+        needsIndex = false;
+        submit.textContent = 'Search';
+        indexHelp.hidden = true;
+      }
+      Okb.working(out, 'searching');
       var hits = await api('search', params);
+      if (!current()) return;
       out.innerHTML = hits.length
         ? hits.map(function (h) {
             return '<div class="card"><div class="title">' + conceptLink(h.id, h.title) +
@@ -1100,14 +1140,24 @@ function renderSearch(initialQ) {
                 return part.match ? '<mark>' + esc(part.text) + '</mark>' : esc(part.text);
               }).join('') + '</div>' : h.snippet ? '<div class="muted">' + esc(h.snippet.slice(0, 240)) + '…</div>' : '') +
               '<div class="row"><a href="' + conceptHref(h.id) + '" class="link-button small">Open</a>' +
-              '<a href="' + editHref(h.id) + '" class="link-button small">Edit</a>' +
+              (readonly ? '' : '<a href="' + editHref(h.id) + '" class="link-button small">Edit</a>') +
               '<a href="' + mapHref(h.id) + '">Focused map</a></div></div>';
           }).join('')
         : '<div class="empty">No hits.</div>';
       Okb.enter(out);
-    } catch (err) { out.innerHTML = errorBox(err); }
+      if (restoreFocus && focusStayed()) (out.querySelector('.title a') || out).focus();
+    } catch (err) {
+      if (current()) out.innerHTML = errorBox(err);
+    } finally {
+      busy = false;
+      controls.forEach(function (control) { control.disabled = false; });
+      if (current() && restoreFocus && focusStayed()) submit.focus();
+    }
   });
-  if (initialQ) { qEl.value = initialQ; qEl.form.requestSubmit(); }
+  if (initialQ) {
+    qEl.value = initialQ;
+    if (!needsIndex) form.requestSubmit();
+  }
 }
 
 // ---- ask view -----------------------------------------------------------
@@ -1415,10 +1465,12 @@ function mountRssSettings(panel) {
   });
 }
 
-function renderAdd() {
+function renderAdd(_arg, seq) {
+  var brain = BRAIN;
   view.innerHTML =
     '<div class="stack"><h2>Add to your brain</h2>' +
-    '<p>To bring over chats from ChatGPT or Claude, <a href="#sources">import conversations</a>.</p>' +
+    '<div><p>To bring over chats from ChatGPT or Claude, <a href="#sources">import conversations</a>.</p>' +
+    (STATUS?.readonly ? '' : '<p><a href="#sources/markdown">Choose Markdown files</a> to preview and save them as private drafts.</p>') + '</div>' +
     '<h3>Quick capture</h3>' +
     '<form id="capf" class="stack">' +
     '<label class="field"><span>Note</span><textarea id="cap-text" rows="4" required></textarea></label>' +
@@ -1447,13 +1499,15 @@ function renderAdd() {
     '<textarea name="feeds" rows="4" spellcheck="false" disabled></textarea></label>' +
     '<p class="muted">The saved list is shared across brain folders on this device. Pull saves entries in the selected brain.</p>' +
     '<div class="row"><button disabled>Save feed URLs</button><span role="status">Loading feed URLs…</span></div></form></details>') +
-    '<h3>Import Markdown from disk</h3>' +
+    '<h3>Import Markdown</h3>' +
+    (STATUS?.readonly ? '<p class="notice">Choose a writable brain to import Markdown.</p>' :
+    '<details class="card source-panel"><summary>Import directly from a server path</summary>' +
     '<form id="impf" class="stack">' +
     '<label class="field"><span>File or folder path on the okbrain server</span><input id="imp-path" required></label>' +
     '<div class="grid"><label class="field"><span>Destination folder</span><input id="imp-dest" placeholder="Brain root by default"></label>' +
     '<label class="field"><span>Type for files without one</span><input id="imp-type" placeholder="Note by default"></label></div><div class="row">' +
     '<label class="row" style="gap:5px"><input type="checkbox" id="imp-over"> overwrite</label>' +
-    '<button>Import</button></div></form><div id="imp-out"></div></div>';
+    '<button>Import</button></div></form><div id="imp-out" aria-live="polite"></div></details>') + '</div>';
 
   var out = setHtml;
   function done(el, id, label) {
@@ -1518,8 +1572,11 @@ function renderAdd() {
     } catch (err) { out('rss-out', errorBox(err)); }
   });
 
-  document.getElementById('impf').addEventListener('submit', async function (e) {
+  document.getElementById('impf')?.addEventListener('submit', async function (e) {
     e.preventDefault();
+    if (stale(seq) || BRAIN !== brain) return;
+    var submit = this.querySelector('button');
+    if (submit.disabled) return;
     var path = document.getElementById('imp-path').value.trim();
     if (!path) return;
     var params = { path: path };
@@ -1528,14 +1585,26 @@ function renderAdd() {
     if (dest) params.dest = dest;
     if (type) params.type = type;
     if (document.getElementById('imp-over').checked) params.overwrite = true;
-    working('imp-out', 'importing');
+    var result = document.getElementById('imp-out');
+    var form = this;
+    var restoreFocus = form.contains(document.activeElement);
+    function current() { return !stale(seq) && BRAIN === brain; }
+    submit.disabled = true;
+    Okb.working(result, 'importing');
     try {
       var r = await appWork(api('import', params));
-      out('imp-out', '<div class="notice">' + esc(
-        r.imported.map(function (id) { return 'imported ' + id; })
-          .concat(r.skipped.map(function (s) { return 'skipped ' + s.path + ' — ' + s.reason; }))
-          .concat([r.imported.length + ' imported, ' + r.skipped.length + ' skipped']).join('\n')) + '</div>');
-    } catch (err) { out('imp-out', errorBox(err)); }
+      if (!current()) return;
+      var items = r.imported.map(function (id) { return '<li>Imported ' + conceptLink(id) + '</li>'; })
+        .concat(r.skipped.map(function (item) {
+          return '<li>Skipped ' + esc(item.path) + ' — ' + esc(item.reason) + '</li>';
+        }));
+      result.innerHTML = '<div class="notice"><p>' + r.imported.length + ' imported, ' + r.skipped.length + ' skipped</p>' +
+        (items.length ? '<ul class="source-rows">' + items.join('') + '</ul>' : '') + '</div>';
+      if (restoreFocus && (document.activeElement === document.body || form.contains(document.activeElement)))
+        result.querySelector('a')?.focus();
+    } catch (err) {
+      if (current()) result.innerHTML = errorBox(err);
+    } finally { submit.disabled = false; }
   });
 }
 
@@ -1576,19 +1645,20 @@ async function uploadSourceFiles(files, folder, kind, name, confirmation) {
 var SOURCE_LABELS = { bookmarks: 'Browser bookmarks', markdown: 'Markdown library', notion: 'Notion workspace', email: 'Email archive', calendar: 'Calendar export' };
 var SOURCE_EXTENSIONS = { email: '.eml', calendar: '.ics' };
 
-function sourceFilesPanel(name, readonly) {
+function sourceFilesPanel(name, readonly, format) {
   return '<section class="card source-panel" aria-labelledby="source-files"><h3 id="source-files">Import files</h3>' +
     '<p>Preview bookmarks, Markdown, a Notion export, email, or calendar events. ' +
     'The selected items become private drafts in <strong>' + esc(name) + '</strong>.</p>' +
     (readonly ? '<p class="notice">Choose a writable brain to import files.</p>' :
     '<form id="source-files-form" class="source-panel"><div class="grid">' +
     '<label class="field"><span>File format</span><select id="source-kind">' +
-    '<option value="bookmarks">Browser bookmarks (HTML)</option><option value="markdown">Markdown</option><option value="notion">Notion export</option>' +
+    '<option value="bookmarks">Browser bookmarks (HTML)</option><option value="markdown"' + (format === 'markdown' ? ' selected' : '') +
+    '>Markdown</option><option value="notion">Notion export</option>' +
     '<option value="email">Email (.eml)</option><option value="calendar">Calendar (.ics)</option></select></label>' +
-    '<label class="field"><span>Source name</span><input id="source-name" maxlength="80" value="Browser bookmarks" required></label></div>' +
+    '<label class="field"><span>Source name</span><input id="source-name" maxlength="80" value="' + esc(SOURCE_LABELS[format]) + '" required></label></div>' +
     '<p class="muted" id="source-name-guide">Use the same source name next time to see what changed.</p>' +
     '<p class="muted" id="source-offline-guide" hidden></p>' +
-    '<label class="field"><span>Export files</span><input id="source-pick-files" type="file" accept=".html,.htm,text/html"></label>' +
+    '<label class="field"><span>Export files</span><input id="source-pick-files" type="file"></label>' +
     '<label class="field" id="source-folder-picker" hidden><span>Or choose the extracted folder</span>' +
     '<input id="source-pick-folder" type="file" webkitdirectory multiple></label>' +
     '<div class="row"><button class="primary" id="source-files-preview">Preview files</button></div>' +
@@ -1711,7 +1781,7 @@ function setupSourceFiles(seq, brain, onImport) {
           return '<li>' + conceptLink(row.id, row.title) + '</li>';
         }).join('') + '</ul>';
         if (saved.length && STATUS && !STATUS.hasIndex) result.insertAdjacentHTML('beforeend',
-          '<p><a href="#home">Enable search on Home</a> to find text in these drafts.</p>');
+          '<p><a href="#search">Open Search</a> to index and search this brain’s notes.</p>');
         onImport();
       } else {
         preview = response.preview;
@@ -1735,6 +1805,7 @@ function setupSourceFiles(seq, brain, onImport) {
   });
   name.addEventListener('input', clear);
   form.addEventListener('submit', function (event) { event.preventDefault(); run(null); });
+  updateFormat();
   return function (item) {
     if (busy) return;
     kind.value = item.kind;
@@ -1778,12 +1849,13 @@ async function showSourceHistory(seq, brain, repeat) {
   }
 }
 
-function renderSources(_arg, seq) {
+function renderSources(arg, seq) {
   var brain = BRAIN;
   var name = STATUS ? (STATUS.brain || basename(STATUS.bundle)) : 'the selected brain';
   var readonly = STATUS && STATUS.readonly;
-  view.innerHTML =
-    '<div class="stack source-page"><h2>Sources</h2>' +
+  var markdown = arg === 'markdown';
+  var filesPanel = sourceFilesPanel(name, readonly, markdown ? 'markdown' : 'bookmarks');
+  var conversationsPanel =
     '<section class="card source-panel" aria-labelledby="source-chats"><h3 id="source-chats">Conversation exports</h3>' +
     '<p>Save ChatGPT or Claude conversations to <strong>' + esc(name) + '</strong> as private drafts. ' +
     'Extract your export and select one conversations JSON file up to 128 MiB. The app reads it locally.</p>' +
@@ -1796,8 +1868,9 @@ function renderSources(_arg, seq) {
     '<div class="row"><button id="source-preview" class="primary">Preview import</button>' +
     '<button id="source-confirm" class="primary" type="button" hidden>Import drafts</button></div>' +
     '<div id="source-status" role="status"></div><div id="source-result" class="source-panel"></div></form>') +
-    '<a href="#browse/conversation">Browse conversation drafts</a></section>' +
-    sourceFilesPanel(name, readonly) +
+    '<a href="#browse/conversation">Browse conversation drafts</a></section>';
+  view.innerHTML = '<div class="stack source-page"><h2>Sources</h2>' +
+    (markdown ? filesPanel + conversationsPanel : conversationsPanel + filesPanel) +
     '<section class="card source-panel" id="source-notion"></section>' +
     '<section class="card source-panel" aria-labelledby="source-history-title"><h3 id="source-history-title">Import history</h3>' +
     '<div class="source-panel" id="source-history" aria-live="polite">Loading import history…</div></section>' +
@@ -1926,7 +1999,7 @@ function renderSources(_arg, seq) {
         form.reset();
         refreshHistory();
         if (count > 0 && STATUS && !STATUS.hasIndex)
-          result.insertAdjacentHTML('beforeend', '<p><a href="#home">Enable search on Home</a> to find text in these drafts.</p>');
+          result.insertAdjacentHTML('beforeend', '<p><a href="#search">Open Search</a> to index and search this brain’s notes.</p>');
       } else if (count > 0) {
         receipt = r.preview;
         confirmButton.hidden = false;

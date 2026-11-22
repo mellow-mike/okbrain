@@ -45,6 +45,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   status, pause and resume, and approval for network jobs.
 - [x] Inspect and copy a note’s saved Markdown and YAML from the Mac and web
   apps, clear its resource URI, and set the search result limit and profile.
+- [x] Build a first search index and run the original query from Search. Open
+  the reviewed Markdown picker from Add and link directly imported notes.
 
 ### Stage 8 — Enterprise coding
 
@@ -835,6 +837,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added first search from Search and a Markdown picker from Add,
+  including a reviewed folder import and links to saved notes.
 - 2026-11-22 — Added saved-answer comparison and review in the apps and editor.
   Tested alternative patch approval, GitHub head checks, and pull request recovery.
 - 2026-11-22 — Added Pi alternative reviews with per-send context approval,

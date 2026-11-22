@@ -995,11 +995,14 @@ Views:
   and counts, search and hover-neighbourhood dimming, stale/deprecated
   styling, detail panel with badges, provenance links to included notes, and Open/Edit.
 - **Search** — offline or hybrid `search` with a configurable result maximum,
-  retrieval profile, per-hit recall-source chips, and snippets.
+  retrieval profile, per-hit recall-source chips, and snippets. A writable
+  brain can build its first local index and run the submitted query in place.
   **Ask** — SSE streaming: context chips before the answer;
   verified citations link to the reader.
 - **Add** — quick `capture`, `clip` (with auto-tag opt-in), `rss` (one URL
-  or every configured feed), bulk `import`, and the bookmarklet.
+  or every configured feed), and the bookmarklet. Markdown file selection
+  opens the reviewed Sources import. A direct server-path `import` links to
+  the saved notes.
 - **Sources** — preview browser-selected ChatGPT and Claude exports, import
   private drafts, and find web capture and AI-account setup.
 - **Review** / **Inbox** — card stacks with reasons / unread items;

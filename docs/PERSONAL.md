@@ -6,7 +6,9 @@ An okbrain bundle is a directory of Markdown notes with Open Knowledge Format me
 
 Open **okbrain.app** and choose **File → Open Brain Folder** if you have an existing bundle. **File → Open in Browser** opens the same brain in your browser. To start the local web server without the macOS app, run `okb serve --open` from the bundle directory. [Installation and packaging](../packaging/README.md)
 
-On **Home**, enter a **Quick note**, select **Capture**, and open the saved note. Select **Enable search and review** to build the local index. **Search** uses local keywords by default and highlights matches in result excerpts. Open **Review** to see suggested notes and the reasons they surfaced. Overdue claims link directly to the outcome controls. These actions work offline. **Browse** can open notes before the index is built.
+On **Home**, enter a **Quick note**, select **Capture**, and open the saved note. To find it again, enter your query in **Search**. On a writable brain without an index, select **Build index and search**. The app builds the index and runs the query with your selected options. **Search** uses local keywords by default and highlights matches in result excerpts. You can also build the index from **Home → Enable search and review**. **Browse** opens notes before an index exists, including in a read-only brain.
+
+Open **Review** to see suggested notes and the reasons they surfaced. Overdue claims link directly to the outcome controls.
 
 In **Search**, set **Maximum results** and choose your retrieval profile before submitting. Leave semantic retrieval off to search without provider calls.
 
@@ -18,7 +20,7 @@ The terminal equivalent is `okb inbox file <inbox-id> <destination-id>`. Run it 
 
 In **Review**, you can change the queue size and the number of days to snooze notes. To ask your configured model to relate queue items to recent notes, opt in, select a retrieval profile, and choose **Update queue**. This sends note titles and descriptions to the configured model. The lean profile skips that model call.
 
-Open **Add** to give a capture its own title and tags, include a quote and comment with a web clip, or import a Markdown file or folder from the local server's disk with a default note type.
+Open **Add** to give a capture its own title and tags or include a quote and comment with a web clip. Select **Choose Markdown files** to open **Sources** with Markdown selected. Pick files or a folder, preview the entries, then save the selected notes as private drafts. To import from a path on the computer running okbrain, expand **Import directly from a server path**. You can set the destination and default note type and open imported notes from the results.
 
 Open **Focused map** with a question, project, or note. Filter by source, date, or private drafts. Each row explains the link direction and can move the map to the linked note.
 
