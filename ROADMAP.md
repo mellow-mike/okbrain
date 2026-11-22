@@ -840,6 +840,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added owner deployment checks in the Mac and web apps and
+  verified the offline Docker probe. Live provider and host drills remain open.
 - 2026-11-22 — Added first search from Search and a Markdown picker from Add,
   including a reviewed folder import and links to saved notes.
 - 2026-11-22 — Added saved-answer comparison and review in the apps and editor.
