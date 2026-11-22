@@ -4,6 +4,7 @@
 
   const esc = window.okbRender.esc;
   const codingPath = '/api/coding';
+  const defaultModels = { openai: 'gpt-5-mini', anthropic: 'claude-sonnet-4-6', google: 'gemini-3.5-flash-lite' };
   let teamToken = null;
 
   async function coding(path, data) {
@@ -54,6 +55,41 @@
     ].join(' · ');
   }
 
+  function sessionCounters(usage) {
+    const counters = [usage.totalTokens.toLocaleString() + ' total tokens', usageText(usage)];
+    if (usage.reasoning !== undefined) counters.push(usage.reasoning.toLocaleString() + ' reasoning within output');
+    if (usage.cacheWrite1h !== undefined) counters.push(usage.cacheWrite1h.toLocaleString() + ' one-hour cache write');
+    if (usage.cost?.total > 0) counters.push('$' + usage.cost.total.toLocaleString(undefined, { maximumFractionDigits: 8 }) + ' estimated USD');
+    return counters.join(' · ');
+  }
+
+  function childCounters(total, main) {
+    if (!main) return total;
+    const subtract = (field) => Math.max(0, total[field] - (main[field] ?? 0));
+    const child = Object.fromEntries(['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens'].map((field) => [field, subtract(field)]));
+    for (const field of ['reasoning', 'cacheWrite1h']) if (total[field] !== undefined) child[field] = subtract(field);
+    child.cost = { total: Math.max(0, (total.cost?.total ?? 0) - (main.cost?.total ?? 0)) };
+    return child;
+  }
+
+  function sessionUsage(pi) {
+    const scopes = [['models', 'Models'], ['tools', 'Tools']].map(([key, label]) => {
+      const rows = Object.entries(pi.usage?.[key] ?? {}).sort(([a], [b]) => a.localeCompare(b));
+      if (!rows.length) return '';
+      return '<h5>' + label + '</h5><ul class="plain">' + rows.map(([name, total]) => {
+        const main = pi.rootUsage?.[key]?.[name];
+        const child = pi.rootUsage && childCounters(total, main);
+        const fromChildren = child && (child.totalTokens > 0 || child.cost?.total > 1e-9);
+        return '<li><strong>' + esc(name) + '</strong><p>' + esc(sessionCounters(total)) + '</p>' +
+          (fromChildren && main ? '<p class="muted">Main conversation · ' + esc(sessionCounters(main)) + '</p>' : '') +
+          (fromChildren ? '<p class="muted">Child conversations · ' + esc(sessionCounters(child)) + '</p>' : '') + '</li>';
+      }).join('') + '</ul>';
+    }).join('');
+    return '<details><summary>Session usage</summary>' + (scopes
+      ? '<p class="muted">Recorded across this session, including failed or cancelled attempts when usage was saved.</p>' + scopes
+      : '<p class="muted">No provider or tool usage recorded for this session.</p>') + '</details>';
+  }
+
   function register(parent, models, suggestedWorkspace, readonly) {
     const dialog = document.createElement('details');
     dialog.className = 'coding-panel';
@@ -88,14 +124,14 @@
     function syncModels() {
       const catalog = models.find((entry) => entry.provider === provider.value);
       model.replaceChildren(...(catalog?.models || []).map((item) => new Option(item.name, item.id)));
-      const defaultModel = provider.value === 'openai' ? 'gpt-5-mini' : 'claude-sonnet-4-6';
+      const defaultModel = defaultModels[provider.value];
       if ([...model.options].some((item) => item.value === defaultModel)) model.value = defaultModel;
       syncThinking();
       submit.disabled = readonly || !model.options.length;
     }
 
     provider.replaceChildren(...models.filter((entry) => entry.models.length).map((entry) =>
-      new Option(entry.provider === 'openai' ? 'OpenAI' : 'Anthropic', entry.provider)));
+      new Option(entry.label, entry.provider)));
     provider.addEventListener('change', syncModels);
     model.addEventListener('change', syncThinking);
     syncModels();
@@ -291,7 +327,7 @@
         if (result.source === 'repository' && !result.excerpts.length) return;
         if (result.source === 'packages' && result.packages.some((part) => !part.excerpts.length)) return;
         preview = { selection, lookup, id: result.manifest?.id || result.id };
-        const provider = project.provider === 'openai' ? 'OpenAI' : 'Anthropic';
+        const provider = project.providerLabel;
         approveText.textContent = result.source === 'packages'
           ? 'Approve sending the shared task and each package’s selected text to ' + provider + '.'
           : 'Approve sending the task, selected text, and active session history to ' + provider + '.';
@@ -387,13 +423,14 @@
         (row.reviewer ? '<p class="muted">Reviewed by ' + esc(row.reviewer) + ' · ' + esc(time(row.reviewed)) + '</p>' : '') +
         (error ? '<div class="notice">' + esc(error) + '</div>' : '') +
         (result.admissionMissing ? '<p class="muted">Pi did not save this request. Resume will make this ID available for resubmission.</p>' : '') +
-        (pi ? '<p class="muted">' + esc(usageText(pi.request?.usage)) + '</p><p class="muted">' +
+        (pi ? '<p class="muted">Request usage · ' + esc(usageText(pi.request?.usage)) + '</p><p class="muted">' +
           esc(pi.context.estimatedTokens.toLocaleString()) + ' active context tokens' +
           (pi.context.historyCompacted ? ' · Older turns compacted' : '') + '</p>' : '') +
         (pi?.request?.approvedSourceLookup ? '<p class="muted">Approved source lookup enabled for this request.</p>' : '') +
         (receipt?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
         (row.status === 'running' ? '<div data-live-answer hidden><p class="muted"></p><pre></pre></div>' : '') +
         (receipt?.text ? '<pre data-answer></pre><div class="row"><button type="button" data-copy>Copy response</button></div>' : '') +
+        (pi ? sessionUsage(pi) : '') +
         (snippet.length ? '<details><summary>Source references</summary><ul>' + snippet.map((file) =>
           '<li><code>' + esc(file.path + ':' + file.startLine + '–' + file.endLine) + '</code></li>').join('') + '</ul></details>' : '') +
         '<div class="row" data-actions></div></div>';

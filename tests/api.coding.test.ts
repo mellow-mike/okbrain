@@ -110,8 +110,13 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     const result = await waitFor(inspect, (value) => value.run.status === "done");
     expect(result).toMatchObject({
       run: { id: "review-1", status: "done", admitted: true },
-      pi: { request: { receipt: { text: "Keep this change for review." } } },
+      pi: {
+        request: { receipt: { text: "Keep this change for review." } },
+        usage: { models: { "openai/preview-test": { totalTokens: expect.any(Number) } } },
+        rootUsage: { models: { "openai/preview-test": { totalTokens: expect.any(Number) } } },
+      },
     });
+    expect((await request("/projects/" + other.id + "/inspect", identity, member.token)).status).toBe(403);
     expect(calls[0]).toContain("answer = 43");
     expect(await call<Run>(path + "/run", approved, member.token)).toMatchObject({ status: "done" });
     expect((await request(path + "/run", { ...approved, prompt: "Different task" }, member.token)).status).toBe(409);

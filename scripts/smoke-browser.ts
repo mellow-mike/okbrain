@@ -295,10 +295,13 @@ try {
     if (new URL(response.url()).pathname !== "/api/brains/watch" || response.request().method() !== "GET") return false;
     return (await response.json()).result?.stats?.indexed === 1;
   });
-  await writeFile(join(bundle, "external.md"), "---\ntype: note\ntitle: Watched field note\n---\nHellebore propagation\n");
+  await writeFile(join(bundle, "external.md"), "---\ntype: note\ntitle: Watched field note\n---\nHellebore propagation\n\nSee [Graph waypoint](/graph-waypoint.md).\n");
   await refreshed;
   await watcher.getByRole("button", { name: "Stop watching" }).click();
   await watcher.getByText("Watching is off.", { exact: true }).waitFor();
+  await writeFile(join(bundle, "graph-waypoint.md"), "---\ntype: note\ntitle: Graph waypoint\n---\nSee [Graph destination](/graph-destination.md).\n");
+  await writeFile(join(bundle, "graph-destination.md"), "---\ntype: note\ntitle: Graph destination\n---\nThe end of the path.\n");
+  assert.equal((await fetch(new URL("api/op/index", server.url), { method: "POST", headers: { "x-okb-token": server.token } })).status, 200);
   await nav.getByRole("link", { name: "Search", exact: true }).click();
   await page.getByRole("searchbox", { name: "Search notes", exact: true }).fill("hellebore");
   await page.getByRole("searchbox", { name: "Search notes", exact: true }).press("Enter");
@@ -310,8 +313,55 @@ try {
   await page.locator("#gdetail").getByRole("link", { name: "Open", exact: true }).click();
   await page.locator(".concept-head").getByRole("heading", { name: "Watched field note" }).waitFor();
   await page.waitForFunction(() => !("cy" in window) || !window.cy);
+  const neighbors = page.locator("#c-links");
+  await neighbors.getByRole("link", { name: "Graph waypoint", exact: true }).waitFor();
+  assert.equal(await neighbors.getByRole("link", { name: "Graph destination", exact: true }).count(), 0);
+  await neighbors.getByLabel("Neighborhood depth", { exact: true }).fill("2");
+  await neighbors.getByRole("button", { name: "Show links", exact: true }).click();
+  await neighbors.getByRole("heading", { name: "2 hops away", exact: true }).waitFor();
+  await neighbors.getByRole("link", { name: "Graph destination", exact: true }).waitFor();
+
+  await nav.getByRole("link", { name: "Stats", exact: true }).click();
+  await page.getByLabel("From concept ID", { exact: true }).fill("external");
+  await page.getByLabel("To concept ID", { exact: true }).fill("graph-destination");
+  const hops = page.getByLabel("Max path hops", { exact: true });
+  const findPath = page.getByRole("button", { name: "Find path", exact: true });
+  await hops.fill("1");
+  await findPath.click();
+  await page.getByText("No path found.", { exact: true }).waitFor();
+  await hops.fill("2");
+  await findPath.click();
+  await page.locator("#p-out").getByRole("link", { name: "Graph destination", exact: true }).waitFor();
 
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
+  const enrichment = page.locator("#enrf");
+  await page.route("**/api/op/enrich", async (route) => {
+    assert.deepEqual(route.request().postDataJSON(), {
+      task: "Review the selected pages", "web-seed": "https://example.invalid/guide", "allow-path": "/guide,/reference", "deny-path": "/admin",
+    });
+    await route.fulfill({ json: { result: { fetched: [], written: [], summary: "Scope saved", steps: 1 } } });
+  });
+  await enrichment.getByLabel("Task", { exact: true }).fill("Review the selected pages");
+  await enrichment.getByLabel("Seed URLs", { exact: true }).fill("https://example.invalid/guide");
+  await enrichment.getByLabel("Allowed path prefixes", { exact: true }).fill("/guide,/reference");
+  await enrichment.getByLabel("Denied path prefixes", { exact: true }).fill("/admin");
+  await enrichment.getByRole("button", { name: "Run enrich", exact: true }).click();
+  await page.locator("#enr-out").getByText(/Scope saved/).waitFor();
+
+  const legacyFile = join(bundle, "legacy-field-note.md");
+  await writeFile(legacyFile, "---\ntype: note\ntitle: Legacy field note\ndescription: An earlier capture\ntimestamp: 2026-01-01T00:00:00Z\n---\nRecord the date.\n");
+  const migration = page.locator("#mx-upgrade-form");
+  await migration.getByLabel("Actor to credit (optional)").fill("human:field-editor");
+  const previewUpgrade = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/upgrade");
+  await migration.getByRole("button", { name: "Preview upgrade", exact: true }).click();
+  assert.deepEqual((await previewUpgrade).request().postDataJSON(), { "dry-run": true, by: "human:field-editor" });
+  await page.locator("#mx-out").getByText(/would upgrade legacy-field-note/).waitFor();
+  assert.match(await Bun.file(legacyFile).text(), /^timestamp:/m);
+  page.once("dialog", (dialog) => dialog.accept());
+  await migration.getByRole("button", { name: "Upgrade bundle", exact: true }).click();
+  await page.locator("#mx-out").getByText(/upgraded legacy-field-note/).waitFor();
+  assert.match(await Bun.file(legacyFile).text(), /^  by: human:field-editor$/m);
+
   const embed = page.locator("#embedf");
   await embed.getByLabel("Provider override").fill("local");
   await embed.getByLabel("Model override").fill("fixture-embedding-model");
@@ -359,6 +409,41 @@ try {
   await rss.getByRole("button", { name: "Pull", exact: true }).click();
   await page.getByText("Sample feed: 0 added, 0 known", { exact: true }).waitFor();
   assert.deepEqual(feedRequests, [{ limit: 2 }]);
+
+  await nav.getByRole("link", { name: "Sources", exact: true }).click();
+  const conversations = page.locator("#source-form");
+  const conversationRows = Array.from({ length: 52 }, (_, i) => ({
+    uuid: `browser-conversation-${i + 1}`,
+    name: `Browser conversation ${String(i + 1).padStart(2, "0")}`,
+    chat_messages: [{ sender: "human", text: "Private synthetic conversation excerpt." }],
+  }));
+  await conversations.getByLabel("Export provider").selectOption("claude");
+  await conversations.getByLabel("Conversations file").setInputFiles({
+    name: "conversations.json", mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify([...conversationRows, ...conversationRows])),
+  });
+  await conversations.getByRole("button", { name: "Preview import", exact: true }).click();
+  await conversations.getByText("52 drafts ready to import. 52 skipped.", { exact: true }).waitFor();
+  const conversationReport = conversations.locator("#source-result");
+  await conversationReport.getByText("Showing draft rows 1–50 of 52.", { exact: true }).waitFor();
+  assert.equal(await conversationReport.locator(":scope > ol > li").count(), 50);
+  await conversationReport.getByRole("button", { name: "Next draft rows" }).click();
+  await conversationReport.getByText("Browser conversation 52", { exact: false }).waitFor();
+  assert.equal(await conversationReport.locator(":scope > ol > li").count(), 2);
+  await conversationReport.getByRole("button", { name: "Previous draft rows" }).click();
+  await conversationReport.getByText("Browser conversation 01", { exact: false }).waitFor();
+  const skippedConversations = conversationReport.locator("details");
+  await skippedConversations.getByText("Skipped conversations", { exact: true }).click();
+  await skippedConversations.getByRole("button", { name: "Next skipped rows" }).click();
+  await skippedConversations.getByText("Showing skipped rows 51–52 of 52.", { exact: true }).waitFor();
+  assert.equal(await skippedConversations.locator("li[value='104']").count(), 1);
+  assert.equal(await conversationReport.getByText("Private synthetic conversation excerpt.", { exact: true }).count(), 0);
+  await conversations.getByRole("button", { name: "Import drafts", exact: true }).click();
+  await conversations.getByText("52 drafts imported. 52 skipped.", { exact: true }).waitFor();
+  await conversationReport.getByRole("button", { name: "Next draft rows" }).click();
+  const laterDraft = conversationReport.getByRole("link", { name: "Browser conversation 52", exact: true });
+  await laterDraft.waitFor();
+  assert.match(decodeURIComponent(await laterDraft.getAttribute("href") || ""), /^#concept\/db_only\/conversations\/claude\//);
 
   const localSourceFiles = [
     { format: "email", name: "field.eml", title: "Trip email", mime: "message/rfc822",
@@ -414,6 +499,8 @@ try {
 
   await nav.getByRole("link", { name: "Coding", exact: true }).click();
   await page.getByText("Add a project", { exact: true }).waitFor();
+  await page.getByRole("combobox", { name: "Provider", exact: true }).selectOption("google");
+  assert.equal(await page.getByRole("combobox", { name: "Model", exact: true }).inputValue(), "gemini-3.5-flash-lite");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
   await page.evaluate(() => { location.hash = "#concept/%ZZ"; });
   await page.getByRole("textbox", { name: "Quick note" }).waitFor();

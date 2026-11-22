@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
@@ -30,14 +30,12 @@ try {
 
   // Apple’s system SQLite cannot load sqlite-vec. Package the upstream amalgamation.
   const sqlite = "sqlite-amalgamation-3540100";
-  const response = await fetch(`https://www.sqlite.org/2026/${sqlite}.zip`, { signal: AbortSignal.timeout(30_000) });
-  if (!response.ok) throw new Error(`SQLite download returned HTTP ${response.status}`);
-  const archive = Buffer.from(await response.arrayBuffer());
+  const zip = join(staging, `${sqlite}.zip`);
+  await $`curl --fail --silent --show-error --connect-timeout 15 --max-time 45 --retry 2 --retry-connrefused --output ${zip} ${`https://www.sqlite.org/2026/${sqlite}.zip`}`;
+  const archive = Buffer.from(await Bun.file(zip).arrayBuffer());
   const hash = createHash("sha3-256").update(archive).digest("hex");
   if (hash !== "92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30")
     throw new Error("The SQLite download failed its published checksum.");
-  const zip = join(staging, `${sqlite}.zip`);
-  await writeFile(zip, archive);
   await $`unzip -q ${zip} -d ${staging}`;
   await $`xcrun clang -target ${target} -dynamiclib -O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_COLUMN_METADATA -o ${join(executables, "libsqlite3.dylib")} ${join(staging, sqlite, "sqlite3.c")}`;
   for (const file of ["okb", "vec0.dylib", "libsqlite3.dylib"])

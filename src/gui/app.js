@@ -725,24 +725,50 @@ async function renderConcept(id, seq, was) {
   });
 
   var linksEl = document.getElementById('c-links');
-  Okb.working(linksEl, 'loading links');
   if (STATUS && !STATUS.hasIndex) {
     linksEl.innerHTML = '<span class="muted">Links to / cited by need a search index — build one on <a href="#home">Home</a>.</span>';
     return;
   }
-  try {
-    var ns = await api('graph_neighbors', { id: id, depth: 1 });
-    var out = ns.filter(function (n) { return n.dir === 'out' || n.dir === 'both'; });
-    var back = ns.filter(function (n) { return n.dir === 'in' || n.dir === 'both'; });
-    var list = function (arr) {
-      return '<ul class="plain">' + arr.map(function (n) { return '<li>' + conceptLink(n.id, n.title) + '</li>'; }).join('') + '</ul>';
-    };
-    linksEl.innerHTML =
-      '<h3>Links to (' + out.length + ')</h3>' + (out.length ? list(out) : '<span class="muted">none</span>') +
-      '<h3>Cited by (' + back.length + ')</h3>' + (back.length ? list(back) : '<span class="muted">none</span>');
-  } catch (e) {
-    linksEl.innerHTML = '<span class="muted">' + esc(e.message) + '</span>';
+  linksEl.innerHTML = '<form class="stack"><label class="field"><span>Neighborhood depth</span>' +
+    '<input name="depth" type="number" min="0" placeholder="1"></label>' +
+    '<div class="row"><button class="small">Show links</button></div></form><div aria-live="polite" id="c-link-results"></div>';
+  var linksForm = linksEl.querySelector('form');
+  var linksButton = linksForm.querySelector('button');
+  var linksResult = linksEl.querySelector('#c-link-results');
+  function linkList(notes) {
+    return notes.length ? '<ul class="plain">' + notes.map(function (note) {
+      return '<li>' + conceptLink(note.id, note.title) + '</li>';
+    }).join('') + '</ul>' : '<span class="muted">none</span>';
   }
+  async function loadLinks() {
+    if (linksButton.disabled) return;
+    var depth = linksForm.elements.depth.valueAsNumber;
+    var params = { id: id };
+    if (Number.isFinite(depth)) params.depth = depth;
+    linksButton.disabled = true;
+    Okb.working(linksResult, 'loading links');
+    try {
+      var neighbors = await api('graph_neighbors', params);
+      if (stale(seq)) return;
+      var out = neighbors.filter(function (note) { return note.dir === 'out' || note.dir === 'both'; });
+      var back = neighbors.filter(function (note) { return note.dir === 'in' || note.dir === 'both'; });
+      var farther = new Map();
+      neighbors.forEach(function (note) {
+        if (note.depth <= 1) return;
+        if (!farther.has(note.depth)) farther.set(note.depth, []);
+        farther.get(note.depth).push(note);
+      });
+      linksResult.innerHTML = '<h3>Links to (' + out.length + ')</h3>' + linkList(out) +
+        '<h3>Cited by (' + back.length + ')</h3>' + linkList(back) +
+        Array.from(farther, function (group) {
+          return '<h3>' + esc(group[0]) + ' hops away</h3>' + linkList(group[1]);
+        }).join('');
+    } catch (error) {
+      if (!stale(seq)) linksResult.innerHTML = errorBox(error);
+    } finally { linksButton.disabled = false; }
+  }
+  linksForm.addEventListener('submit', function (event) { event.preventDefault(); void loadLinks(); });
+  await loadLinks();
 }
 
 // ---- edit ---------------------------------------------------------------
@@ -1754,11 +1780,43 @@ function renderSources(_arg, seq) {
     result.innerHTML = '';
   }
 
-  function resultList(items, format) {
-    // Long archives can contain thousands of rows. Keep the page responsive.
-    var shown = items.slice(0, 50);
-    return '<ol class="source-rows">' + shown.map(format).join('') + '</ol>' +
-      (shown.length < items.length ? '<p class="muted">Showing the first ' + shown.length + ' of ' + items.length + '.</p>' : '');
+  function resultList(parent, items, label, format) {
+    var pageSize = 50;
+    var offset = 0;
+    var list = document.createElement('ol');
+    list.className = 'source-rows';
+    var controls = document.createElement('div');
+    controls.className = 'row';
+    controls.hidden = items.length <= pageSize;
+    var previous = document.createElement('button');
+    var next = document.createElement('button');
+    previous.type = next.type = 'button';
+    previous.textContent = 'Previous ' + label + ' rows';
+    next.textContent = 'Next ' + label + ' rows';
+    var count = document.createElement('span');
+    count.className = 'muted';
+    count.setAttribute('aria-live', 'polite');
+    controls.append(previous, next, count);
+    parent.append(controls, list);
+
+    function show() {
+      var end = Math.min(offset + pageSize, items.length);
+      list.innerHTML = items.slice(offset, end).map(format).join('');
+      previous.disabled = offset === 0;
+      next.disabled = end >= items.length;
+      count.textContent = 'Showing ' + label + ' rows ' + (offset + 1) + '–' + end + ' of ' + items.length + '.';
+    }
+    previous.addEventListener('click', function () {
+      offset -= pageSize;
+      show();
+      if (previous.disabled) next.focus();
+    });
+    next.addEventListener('click', function () {
+      offset += pageSize;
+      show();
+      if (next.disabled) previous.focus();
+    });
+    show();
   }
 
   async function run(commit) {
@@ -1780,17 +1838,24 @@ function renderSources(_arg, seq) {
       status.textContent = count + (count === 1 ? ' draft ' : ' drafts ') +
         (commit ? 'imported' : 'ready to import') + (r.skipped.length ? '. ' + r.skipped.length + ' skipped.' : '.');
       if (count > 0) {
-        result.innerHTML = resultList(r.drafts, function (draft) {
+        resultList(result, r.drafts, 'draft', function (draft) {
           return '<li value="' + esc(draft.row) + '">' + (commit ? conceptLink(draft.id, draft.title) : esc(draft.title)) +
             '<span class="muted">' + (draft.createdAt ? ' · ' + dateOf(draft.createdAt) : '') + ' · ' +
-            esc(draft.messages) + (draft.messages === 1 ? ' message' : ' messages') + '</span></li>';
+            esc(draft.messages) + (draft.messages === 1 ? ' message' : ' messages') + '</span>' +
+            '<br><code>' + esc(draft.id) + '</code></li>';
         });
       }
       if (r.skipped.length > 0) {
-        result.insertAdjacentHTML('beforeend', '<details' + (count === 0 ? ' open' : '') + '><summary>Skipped conversations</summary>' +
-          resultList(r.skipped, function (row) {
-            return '<li value="' + esc(row.row) + '">' + esc(row.reason) + '</li>';
-          }) + '</details>');
+        var skipped = document.createElement('details');
+        skipped.open = count === 0;
+        var summary = document.createElement('summary');
+        summary.textContent = 'Skipped conversations';
+        skipped.append(summary);
+        result.append(skipped);
+        resultList(skipped, r.skipped, 'skipped', function (row) {
+          return '<li value="' + esc(row.row) + '">' + esc(row.reason) +
+            (row.id ? '<br><code>' + esc(row.id) + '</code>' : '') + '</li>';
+        });
       }
       if (commit) {
         form.reset();
@@ -1916,20 +1981,26 @@ async function renderClaims(focusId, seq) {
 
 // ---- stats view (stats / orphans / path) --------------------------------
 
-async function renderStats() {
+async function renderStats(_arg, seq) {
   view.innerHTML =
     '<div class="stack wide"><h2>Stats</h2><div id="st-out"></div>' +
     '<h3>Path between two concepts</h3>' +
-    '<form id="pf" class="row">' +
-    '<input id="p-from" placeholder="from id"><span class="muted">→</span>' +
-    '<input id="p-to" placeholder="to id"><button class="primary">Find path</button></form>' +
+    '<form id="pf" class="stack"><div class="grid three">' +
+    '<label class="field"><span>From concept ID</span><input id="p-from" required></label>' +
+    '<label class="field"><span>To concept ID</span><input id="p-to" required></label>' +
+    '<label class="field"><span>Max path hops</span><input id="p-depth" type="number" min="0" placeholder="10"></label>' +
+    '</div><div class="row"><button class="primary">Find path</button></div></form>' +
     '<div id="p-out"></div>' +
     '<h3>Orphans (no links in or out)</h3><div id="or-out"></div></div>';
   working('st-out', 'counting');
   working('or-out', 'loading');
+  var pathForm = document.getElementById('pf');
+  var pathSubmit = pathForm.querySelector('button');
+  pathForm.addEventListener('submit', findPath);
 
   try {
     var s = await api('stats', {});
+    if (stale(seq)) return;
     setTypes(s.byType.map(function (t) { return t.type; }));
     var h = '<div class="tiles">' +
       tile('Concepts', s.concepts) + tile('Links', s.edges + (s.typedEdges ? ' · ' + s.typedEdges + ' typed' : '')) +
@@ -1946,32 +2017,40 @@ async function renderStats() {
       s.topTags.map(function (t) { return '<span class="chip">' + esc(t.tag) + ' ' + t.count + '</span>'; }).join(' ') + '</div>';
     if (s.newest) h += '<p class="muted">freshest ' + dateOf(s.newest) + ' · oldest ' + dateOf(s.oldest) + '</p>';
     setHtml('st-out', h);
-  } catch (e) { setHtml('st-out', errorBox(e)); }
+  } catch (e) { if (!stale(seq)) setHtml('st-out', errorBox(e)); }
 
-  document.getElementById('pf').addEventListener('submit', async function (e) {
+  if (stale(seq)) return;
+  async function findPath(e) {
     e.preventDefault();
     var from = document.getElementById('p-from').value.trim();
     var to = document.getElementById('p-to').value.trim();
     var el = document.getElementById('p-out');
-    if (!from || !to) return;
+    if (!from || !to || pathSubmit.disabled) return;
+    var depth = document.getElementById('p-depth').valueAsNumber;
+    var params = { from: from, to: to };
+    if (Number.isFinite(depth)) params['max-depth'] = depth;
+    pathSubmit.disabled = true;
     Okb.working(el, 'searching');
     try {
-      var hops = await api('graph_path', { from: from, to: to });
+      var hops = await api('graph_path', params);
+      if (stale(seq)) return;
       if (!hops) { el.innerHTML = '<div class="empty">No path found.</div>'; return; }
       el.innerHTML = '<div class="notice">' + hops.map(function (hp, i) {
         return (i === 0 ? '' : ' ' + DIR_MARK[hp.dir] + ' ') + conceptLink(hp.id, hp.title);
       }).join('') + '</div>';
-    } catch (err) { el.innerHTML = errorBox(err); }
-  });
+    } catch (err) { if (!stale(seq)) el.innerHTML = errorBox(err); }
+    finally { pathSubmit.disabled = false; }
+  }
 
   try {
     var os = await api('orphans', {});
+    if (stale(seq)) return;
     setHtml('or-out', os.length
       ? '<ul class="plain">' + os.map(function (o) {
           return '<li>' + conceptLink(o.id, o.title) + ' <a href="' + graphHref(o.id) + '" class="muted">graph</a></li>';
         }).join('') + '</ul>'
       : '<div class="empty">No orphans.</div>');
-  } catch (e) { setHtml('or-out', errorBox(e)); }
+  } catch (e) { if (!stale(seq)) setHtml('or-out', errorBox(e)); }
 }
 
 // ---- settings view ------------------------------------------------------
@@ -2294,6 +2373,7 @@ async function renderSettings(_arg, seq) {
     field('web-max-pages', 'Max pages', '', '5') +
     field('web-max-depth', 'Max depth', '', '1') +
     field('allow-host', 'Allowed hosts', '', 'default: the seeds’ hosts') +
+    field('allow-path', 'Allowed path prefixes', '', 'e.g. /guide,/reference') +
     field('deny-path', 'Denied path prefixes', '', 'e.g. /admin,/login') +
     '<label class="field"><span>Web</span><select id="ed-no-web"><option value="">on</option><option value="1">off (--no-web)</option></select></label>' +
     '</div><div class="row"><button>Run enrich</button></div></form>' +
@@ -2336,8 +2416,10 @@ async function renderSettings(_arg, seq) {
     ['index', 'embed', 'rss', 'review', 'doctor'].map(function (j) {
       return '<label class="row" style="gap:4px"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
     }).join('') + '<button id="mx-jobs">Run jobs</button></div>' +
-    '<div class="row"><span class="muted">OKF v0.2 migration:</span><button id="mx-upgrade-dry">Preview upgrade</button>' +
-    '<button id="mx-upgrade">Upgrade bundle</button></div><div id="mx-out"></div>' +
+    (st.readonly ? '' : '<form id="mx-upgrade-form" class="stack"><h4>OKF v0.2 migration</h4>' +
+      field('upgrade-by', 'Actor to credit (optional)', '', 'Current actor') +
+      '<div class="row"><button id="mx-upgrade-dry" type="submit">Preview upgrade</button>' +
+      '<button id="mx-upgrade" type="submit">Upgrade bundle</button></div></form>') + '<div id="mx-out"></div>' +
     '<section id="mcp-settings" class="stack"></section>' +
     '<details><summary>MCP stdio client configuration</summary>' +
     '<p class="muted">A stdio client launches okbrain using an executable path on this computer.</p><pre>' + esc(mcpJson) + '</pre></details>' +
@@ -2435,7 +2517,7 @@ async function renderSettings(_arg, seq) {
   document.getElementById('enrf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var params = {};
-    ['web-seed', 'task', 'concept', 'allow-host', 'deny-path'].forEach(function (n) {
+    ['web-seed', 'task', 'concept', 'allow-host', 'allow-path', 'deny-path'].forEach(function (n) {
       var v = document.getElementById('ed-' + n).value.trim();
       if (v) params[n] = v;
     });
@@ -2530,10 +2612,15 @@ async function renderSettings(_arg, seq) {
       .concat([u.upgraded.length + ' ' + verb + ', ' + u.unchanged + ' already v' + u.okfVersion +
         (u.declared ? '; root index.md declares okf_version ' + u.okfVersion : '')]).join('\n')) + '</div>';
   };
-  document.getElementById('mx-upgrade-dry').addEventListener('click', function () { maint('upgrade', 'previewing', { 'dry-run': true }, upgradeRender); });
-  document.getElementById('mx-upgrade').addEventListener('click', function () {
-    if (!confirm('Rewrite v0.1 conventions (timestamp, # Citations, last_reviewed) as OKF v0.2 frontmatter across the bundle?')) return;
-    maint('upgrade', 'upgrading', {}, upgradeRender);
+  var upgradeForm = document.getElementById('mx-upgrade-form');
+  if (upgradeForm) upgradeForm.addEventListener('submit', function (event) {
+    event.preventDefault();
+    var preview = event.submitter?.id !== 'mx-upgrade';
+    if (!preview && !confirm('Rewrite v0.1 conventions (timestamp, # Citations, last_reviewed) as OKF v0.2 frontmatter across the bundle?')) return;
+    var by = document.getElementById('ed-upgrade-by').value.trim();
+    var params = preview ? { 'dry-run': true } : {};
+    if (by) params.by = by;
+    void maint('upgrade', preview ? 'previewing' : 'upgrading', params, upgradeRender);
   });
 }
 

@@ -18,6 +18,8 @@ Open **Add** to give a capture its own title and tags, include a quote and comme
 
 Open **Focused map** with a question, project, or note. Filter by source, date, or private drafts. Each row explains the link direction and can move the map to the linked note.
 
+In a note's links panel, set **Neighborhood depth** and choose **Show links** to see which notes are within that many hops. In **Stats → Path between two concepts**, set **Max path hops** to bound the shortest-path search.
+
 Use **Sources** to import conversations, bookmarks, Markdown, Notion exports, email, and calendar events. It also links to web capture, RSS, and AI settings. The import forms show which brain receives drafts. If you have multiple brains mounted, select a writable brain before importing.
 
 In **Add → Manage saved feeds**, enter one URL per line and select **Save feed URLs**. The list is shared across brain folders on this device. In **Pull RSS feeds**, enter one URL or leave it blank to pull every saved feed into the selected brain. Set **Max new items per feed** to limit how many entries each feed can add. The terminal equivalent for viewing the saved list is `okb rss settings`.
@@ -87,13 +89,15 @@ Select **Restore default chat endpoint** or **Restore default embedding endpoint
 
 **Ask** displays text as the provider returns it and verifies citations when the answer completes. **Stop** cancels the in-flight answer. Providers that return a complete response display it in one piece. Use `okb ask --stream 'your question'` for incremental terminal output. `--json` returns a single completed result.
 
+In **Settings → Enrichment**, enter comma-separated **Allowed path prefixes** to restrict fetching to those paths. Denied path prefixes still apply. In **Settings → OKF v0.2 migration**, enter **Actor to credit** to attribute legacy timestamps and reviews during migration. Preview the changes before choosing **Upgrade bundle**.
+
 ## Import conversations
 
 Request a data export from ChatGPT or Claude and extract the archive locally. Find the conversations JSON file inside it. If the export splits conversations across JSON files, run the importer once for each file. [Export ChatGPT data](https://help.openai.com/en/articles/7260999-exporting-your-chatgpt-history-and-data), [Export Claude data](https://support.claude.com/en/articles/9450526-export-your-claude-data)
 
-In the web app, open **Sources → Conversation exports**, choose the provider, pick the JSON file, and select **Preview import**. Review the draft titles, message counts, and skipped rows, then select **Import drafts**. The local okbrain server reads the selected file and writes the notes into the active brain. **Browse conversation drafts** opens the imported notes. For large archives, the page shows the first 50 rows of each list and the total counts.
+In the web app, open **Sources → Conversation exports**, choose the provider, pick the JSON file, and select **Preview import**. Review the draft titles, message counts, and skipped rows, then select **Import drafts**. Use **Next draft rows** and **Next skipped rows** to review every row in reports with more than 50 entries. The local okbrain server reads the selected file and writes private notes into the active brain. **Browse conversation drafts** opens the imported notes.
 
-Use the terminal for the full row report or when the web app is closed.
+The CLI also supports reviewing and importing an export.
 
 ```bash
 okb import-conversations ~/Downloads/chatgpt/conversations.json --provider chatgpt --dry-run

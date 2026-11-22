@@ -5,7 +5,7 @@ Use the **Coding** workspace in the Mac app or local web app to review source fi
 ## Work in the app
 
 1. Open **Coding** and choose **Add a project**. Enter the repository's absolute path on this computer, set the permitted directories, and choose a Pi provider, model, and optional reasoning level.
-2. Save a provider key for that project or use an existing environment key for local runs. The app shows which credential source the project uses.
+2. Save a provider key for that project or use an existing environment key for local runs. Projects can use OpenAI, Anthropic, or Google Gemini. The app shows which credential source the project uses.
 3. Describe the task and select tracked excerpts or explicit files. Choose **Preview source**, inspect the actual text, and approve sending it with the task and active conversation history. Sending with a changed file selection requires a fresh preview.
 4. Select the request in **Run history**. Ordinary requests can show a short preview of the answer as it arrives. When the run finishes, inspect the full result and its recorded provider usage before choosing **Accept result** or **Request changes**. An interrupted run can resume with its stored input, or be cancelled. A follow-up uses the same session and a new request ID.
 
@@ -23,7 +23,7 @@ The team listener binds to `127.0.0.1`. For remote access, an operator can confi
 
 ## Start a request in the CLI
 
-Set `OPENAI_API_KEY` in your environment and choose an exact model ID from Pi 1.0's OpenAI catalog. For Anthropic, set `ANTHROPIC_API_KEY` and use `--provider anthropic --model claude-sonnet-4-6`. Coding sessions use provider API keys and their billing accounts.
+Set `OPENAI_API_KEY` in your environment and choose an exact model ID from Pi 1.0's OpenAI catalog. For Anthropic, set `ANTHROPIC_API_KEY` and use `--provider anthropic --model claude-sonnet-4-6`. For Gemini, set `GEMINI_API_KEY` and use `--provider google --model gemini-3.5-flash-lite`. Coding sessions use provider API keys and their billing accounts. [Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key), [Gemini 3.5 Flash-Lite](https://aistudio.google.com/docs/models/gemini-3.5-flash-lite)
 
 ```sh
 okb code run --workspace ./my-project --session app-review --request-id review-1 \
@@ -141,7 +141,9 @@ okb code status --workspace ./my-project --session auth-review --request-id auth
   --provider openai --model gpt-5-mini --json
 ```
 
-`code status` reads the session without calling a provider. It shows pending request IDs, estimated active context, model-window and output limits, and usage recorded by Pi Durable. With a request ID it also reports that request's state, saved source manifest, and any recorded response usage. Input, output, cache-read, and cache-write counters come from Pi's persisted records. Pi receives an opaque session ID so providers can reuse a stable prefix across follow-ups. Provider support, cache lifetime, and history compaction affect the observed counts. An interrupted provider attempt may incur usage that the local process never recorded.
+`code status` reads the session without calling a provider. It shows pending request IDs, estimated active context, model-window and output limits, and usage recorded by Pi Durable. With a request ID it also reports that request's state, saved source manifest, and any recorded response usage. In **Run history**, open **Session usage** under any saved request to see model totals and the portions from the main and child conversations. The panel shows provider-reported token categories, reasoning within output, an estimated USD cost when available, and any tracked tool usage. It includes failed and cancelled attempts when Pi saved their usage. An interrupted provider attempt may incur usage that the local process never recorded.
+
+Pi receives an opaque session ID so providers can reuse a stable prefix across follow-ups. Provider support, cache lifetime, and history compaction affect the observed counts.
 
 The local input cap is 32,768 estimated tokens, reduced for smaller model windows after reserving room for output and estimation error. Output is capped at up to 8,192 tokens depending on the model. As a session grows, Pi Durable compacts older turns into a bounded local recap with task and answer excerpts and source references. The recap costs no separate provider call, and the original entries stay in SQLite. Reattach source when an old line or decision is important to a follow-up.
 

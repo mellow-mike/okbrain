@@ -47,6 +47,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   recover from the stored snapshot.
 - [x] Expose local request status, active context estimates, Pi Durable history
   compaction, and recorded provider usage including cache counters.
+- [x] Support Gemini through Pi AI. Show Pi Durable session usage by model
+  and separate the main conversation from package review children.
 - [x] Surface bounded Pi Durable answer text during runs in browser and editor
   inspection, with review controls available after completion.
 - [x] Offer an approved-source line lookup for explicit files and scoped
@@ -771,6 +773,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added Gemini and session usage to Coding. Exposed full
+  conversation import reports, bounded graph traversal, enrichment path
+  allowlists, and a migration actor override in the apps.
 - 2026-11-22 — Added per-brain local PostgreSQL and pgvector caches with
   web and macOS settings, safe backend switching, and real rebuild parity.
 - 2026-11-22 — Added approved GitHub PR creation and offline email and calendar

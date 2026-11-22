@@ -182,7 +182,7 @@ const codingWorkspace = { name: "workspace", type: "string", required: true, des
 const codingSessionParams: ParamSpec[] = [
   codingWorkspace,
   { name: "session", type: "string", required: true, description: "persistent session name" },
-  { name: "provider", type: "string", required: true, description: "Pi provider: openai or anthropic" },
+  { name: "provider", type: "string", required: true, description: "Pi provider: openai, anthropic, or google" },
   { name: "model", type: "string", required: true, description: "model ID in Pi's provider catalog" },
 ];
 const repositorySelectionParams: ParamSpec[] = [

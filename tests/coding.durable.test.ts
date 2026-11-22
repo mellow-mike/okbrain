@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider, getCurrentTools,
   type FauxModelDefinition, type TranscriptContext } from "@earendil-works/pi-ai";
 import { chmod, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
@@ -33,6 +33,41 @@ function provider(limits: Omit<FauxModelDefinition, "id"> = {}) {
   models.setProvider(faux.provider);
   return { models, faux };
 }
+
+test("Pi submits a Gemini request with the selected project key and reopens its durable receipt", async () => {
+  const input = { ...options, provider: "google", model: "gemini-3.5-flash-lite", prompt: "Review the selected fixture." };
+  const sent: { url: string; key: string | null; body: string }[] = [];
+  const fixtureFetch = async (args: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const req = args instanceof Request ? new Request(args, init) : new Request(String(args), init);
+    sent.push({ url: req.url, key: req.headers.get("x-goog-api-key"), body: await req.text() });
+    const reply = {
+      candidates: [{ content: { role: "model", parts: [{ text: "Gemini fixture result." }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 4, totalTokenCount: 16 },
+    };
+    return new Response(`data: ${JSON.stringify(reply)}\n\n`, {
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+  const transport = spyOn(globalThis, "fetch").mockImplementation(Object.assign(fixtureFetch, {
+    preconnect() { throw new Error("Gemini test must stay offline."); },
+  }));
+  try {
+    await expect(runCodingSession(input, { stateDir, allowEnvKey: false })).rejects.toThrow("Set a project API key");
+    const result = await runCodingSession(input, { stateDir, apiKey: "fixture-gemini-key", allowEnvKey: false });
+    expect(result).toMatchObject({ status: "done", text: "Gemini fixture result.", usage: { totalTokens: 16 } });
+    expect(sent).toHaveLength(1);
+    expect(new URL(sent[0]!.url).hostname).toBe("generativelanguage.googleapis.com");
+    expect(sent[0]!.url).toContain("/models/gemini-3.5-flash-lite:streamGenerateContent");
+    expect(sent[0]!.key).toBe("fixture-gemini-key");
+    expect(sent[0]!.body).toContain(input.prompt);
+    expect(sent[0]!.body).not.toContain("fixture-gemini-key");
+    expect(await runCodingSession(input, { stateDir, allowEnvKey: false })).toEqual(result);
+    expect(await getCodingSessionStatus(input, { stateDir, allowEnvKey: false })).toMatchObject({
+      provider: "google", model: input.model, usage: { models: { ["google/" + input.model]: { totalTokens: 16 } } },
+    });
+    expect(sent).toHaveLength(1);
+  } finally { transport.mockRestore(); }
+});
 
 test("persists a coding conversation and its answer across separate harness openings", async () => {
   const { models, faux } = provider();
@@ -87,6 +122,27 @@ test("persists a coding conversation and its answer across separate harness open
     .rejects.toThrow("different workspace or model");
   await expect(runCodingSession({ ...options, model: "another-model" }, { stateDir, models }))
     .rejects.toThrow("different workspace or model");
+});
+
+test("persisted session usage includes a failed provider attempt alongside completed request usage", async () => {
+  const { models, faux } = provider();
+  const dependencies = { stateDir, models };
+  faux.setResponses([fauxAssistantMessage("A completed answer.")]);
+  const completed = await runCodingSession({ ...options, prompt: "Complete the first request." }, dependencies);
+  if (completed.status !== "done") throw new Error(completed.reason);
+
+  faux.setResponses([fauxAssistantMessage("Partial output from the failed attempt.", {
+    stopReason: "error", errorMessage: "Invalid credentials",
+  })]);
+  const failed = await runCodingSession({ ...options, requestId: "failed-1", prompt: "Inspect a later request." }, dependencies);
+  expect(failed.status).toBe("unanswered");
+  const calls = faux.state.callCount;
+  const saved = await getCodingSessionStatus({ ...options, includeReceipt: true }, dependencies);
+  expect(saved.request?.usage).toEqual(completed.usage);
+  expect(saved.rootUsage).toEqual(saved.usage);
+  expect(saved.usage.models["openai/test-model"]?.totalTokens ?? 0).toBeGreaterThan(completed.usage.totalTokens);
+  expect((await getCodingSessionStatus({ ...options, requestId: "failed-1" }, dependencies)).usage).toEqual(saved.usage);
+  expect(faux.state.callCount).toBe(calls);
 });
 
 test("uses Pi threshold compaction locally and keeps old answers and committed usage accessible", async () => {

@@ -85,6 +85,10 @@ test("only sends each reviewed package its own source and recovers durable work 
     const settled = await getCodingSessionStatus({ ...options, includeReceipt: true }, dependencies);
     expect(settled.pendingRequestIds).toEqual([]);
     expect(settled.request?.receipt).toEqual(receipt);
+    if (parent.status !== "done") throw new Error(parent.reason);
+    const modelKey = `${options.provider}/${options.model}`;
+    expect(settled.rootUsage.models[modelKey]?.totalTokens).toBe(parent.usage.totalTokens);
+    expect(settled.usage.models[modelKey]?.totalTokens).toBe(parent.usage.totalTokens + receipt.usage.totalTokens);
     expect(faux.state.callCount).toBe(3);
   } finally {
     await rm(root, { force: true, recursive: true });

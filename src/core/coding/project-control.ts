@@ -11,7 +11,7 @@ import {
   ApprovedPatchError, approvedPatchBytes, approvedPatchState, patchDigest, withPreparedPatch, type PatchFileReceipt,
 } from "./approved-patch.ts";
 import {
-  cancelCodingRequest, canonicalWorkspace, codingCredential, CodingError, getCodingSessionStatus, hasCodingCredential,
+  cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, getCodingSessionStatus, hasCodingCredential,
   listCodingModels, previewCodingAttachments, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions,
 } from "./durable.ts";
@@ -317,6 +317,7 @@ export class CodingProjectControl {
     const { api_key, scopes, workspace, ...settings } = row;
     return {
       ...settings,
+      providerLabel: codingProviderLabel(row.provider),
       ...(actor.owner ? { workspace } : {}),
       scopes: JSON.parse(scopes) as string[],
       workerIsolation: this.#dockerWorker ? "docker" : "process",

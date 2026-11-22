@@ -20,8 +20,11 @@ tracked files under caller-chosen Git project directories. Selection reports
 file and line ranges, an estimated excerpt budget, scan limits, and a digest
 of the selected bytes. Admission checks the digest and saves the exact
 selection. Recovery reads the saved input. When the operator opts in, Pi can
-look up bounded line ranges in the current request's saved selection. The app and CLI report Pi Durable
-status, active context estimates, and recorded provider and cache usage.
+look up bounded line ranges in the current request's saved selection. OpenAI,
+Anthropic, and Google Gemini use Pi's model catalogs and explicit credentials.
+The app and CLI report Pi Durable status, active context estimates, and
+recorded usage. Run history shows usage for the selected request and the full
+session, including main and child conversation totals.
 Compaction reduces active context while preserving the original transcript.
 The project control plane scopes credentials, members, worker runs, and
 review decisions to registered projects. Independent package review uses Pi

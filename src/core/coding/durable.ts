@@ -2,9 +2,10 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import { createModels, getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import {
-  AssistantEntry, CompactionEntry, createRegistry, Harness, LiveDoc, ROOT_CONVERSATION_ID, UserEntry,
+  AssistantEntry, CompactionEntry, createRegistry, Harness, LiveDoc, ROOT_CONVERSATION_ID, UsageDoc, UserEntry,
   type Conversation, type Cursor, type LiveState, type SettledSubmissionRecord, type SubmissionId, type SubmissionRecord, type UsageState,
 } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -29,8 +30,14 @@ import { RepositoryContextError, type RepositoryContextManifest, type Repository
 import { openDurableDatabase } from "./sqlite.ts";
 
 const context = BACKGROUND_CONTEXT;
-const providerKeys = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY" } as const;
-export type CodingProvider = keyof typeof providerKeys;
+const providers = {
+  openai: { label: "OpenAI", key: "OPENAI_API_KEY", create: openaiProvider },
+  anthropic: { label: "Anthropic", key: "ANTHROPIC_API_KEY", create: anthropicProvider },
+  google: { label: "Google Gemini", key: "GEMINI_API_KEY", create: googleProvider },
+} as const;
+export type CodingProvider = keyof typeof providers;
+const isCodingProvider = (provider: string): provider is CodingProvider => Object.hasOwn(providers, provider);
+export const codingProviderLabel = (provider: CodingProvider): string => providers[provider].label;
 const maxPromptBytes = 16 * 1024;
 const maxFileBytes = 32 * 1024;
 const maxAttachmentBytes = 64 * 1024;
@@ -78,7 +85,10 @@ export interface CodingSessionStatusResult {
   provider: string;
   model: string;
   pendingRequestIds: string[];
+  /** Aggregated over every conversation in this session, including package reviews. */
   usage: UsageState;
+  /** Accounting for the main conversation, before adding child conversations. */
+  rootUsage: UsageState;
   context: Partial<CodingBudget> & { estimatedTokens: number; historyCompacted: boolean };
   request?: {
     requestId: string;
@@ -128,8 +138,8 @@ function validateOptions(options: CodingSessionStatusOptions): CodingProvider {
   }
   if (!options.workspace.trim()) throw new CodingError("A coding workspace directory is required.");
   if (!options.model.trim()) throw new CodingError("A Pi model ID is required.");
-  if (options.provider !== "openai" && options.provider !== "anthropic") {
-    throw new CodingError("Choose openai or anthropic as the Pi Durable provider.");
+  if (!isCodingProvider(options.provider)) {
+    throw new CodingError("Choose openai, anthropic, or google as the Pi Durable provider.");
   }
   return options.provider;
 }
@@ -289,23 +299,25 @@ export async function previewCodingAttachments(workspace: string, paths: string[
 }
 
 export function codingCredential(provider: CodingProvider, dependencies: CodingDependencies): string | undefined {
-  return (dependencies.apiKey ?? (dependencies.allowEnvKey !== false ? process.env[providerKeys[provider]] : undefined))?.trim() || undefined;
+  return (dependencies.apiKey ?? (dependencies.allowEnvKey !== false ? process.env[providers[provider].key] : undefined))?.trim() || undefined;
 }
 
 function apiKeyModels(provider: CodingProvider, key?: string): Models {
+  const settings = providers[provider];
   const models = createModels({
     authContext: {
-      env: async (name) => name === providerKeys[provider] ? key : undefined,
+      env: async (name) => name === settings.key ? key : undefined,
       fileExists: async () => false,
     },
   });
-  models.setProvider(provider === "openai" ? openaiProvider() : anthropicProvider());
+  models.setProvider(settings.create());
   return models;
 }
 
 export function listCodingModels(injected?: Models) {
-  return (Object.keys(providerKeys) as CodingProvider[]).map((provider) => ({
+  return (Object.keys(providers) as CodingProvider[]).map((provider) => ({
     provider,
+    label: codingProviderLabel(provider),
     models: (injected ?? apiKeyModels(provider)).getModels(provider).map((model) => ({
       id: model.id, name: model.name, thinkingLevels: getSupportedThinkingLevels(model),
     })),
@@ -503,7 +515,7 @@ export async function runCodingSession(
     if (!hasCodingCredential(provider, dependencies)) {
       throw new CodingError(dependencies.allowEnvKey === false
         ? `Set a project API key to use ${provider} with Pi Durable.`
-        : `Set ${providerKeys[provider]} to use ${provider} with Pi Durable.`);
+        : `Set ${providers[provider].key} to use ${provider} with Pi Durable.`);
     }
 
     let content: string | undefined;
@@ -639,6 +651,7 @@ export async function getCodingSessionStatus(
         submission.conversationId === ROOT_CONVERSATION_ID && submission.type === "input" && submission.requestId ? [submission.requestId] : []),
         ...packageReviewIds(inspection)],
       usage: await harness.usage(context),
+      rootUsage: await harness.snapshot(UsageDoc, root.id, context) ?? { models: {}, tools: {} },
       context: {
         ...budget,
         estimatedTokens: estimateCodingContext(view.messages),
