@@ -7,11 +7,20 @@ type Execute = <T>(operation: () => T | Promise<T>) => Promise<T>;
 function executor(database: Database, execute: Execute): SqliteExecutor {
   return {
     exec: (sql) => execute(() => { database.exec(sql); }),
-    run: (sql, ...params) => execute(() => { database.query(sql).run(...params); }),
-    get: <T extends object>(sql: string, ...params: SqliteValue[]) =>
-      execute(() => database.query<T, SqliteValue[]>(sql).get(...params) ?? undefined),
-    all: <T extends object>(sql: string, ...params: SqliteValue[]) =>
-      execute(() => database.query<T, SqliteValue[]>(sql).all(...params)),
+    // Finalize statements explicitly. Bun 1.3.14 can leave statements beyond
+    // its query cache open, preventing SQLite file cleanup on Windows.
+    run: (sql, ...params) => execute(() => {
+      using statement = database.prepare<object, SqliteValue[]>(sql);
+      statement.run(...params);
+    }),
+    get: <T extends object>(sql: string, ...params: SqliteValue[]) => execute(() => {
+      using statement = database.prepare<T, SqliteValue[]>(sql);
+      return statement.get(...params) ?? undefined;
+    }),
+    all: <T extends object>(sql: string, ...params: SqliteValue[]) => execute(() => {
+      using statement = database.prepare<T, SqliteValue[]>(sql);
+      return statement.all(...params);
+    }),
   };
 }
 
@@ -56,6 +65,6 @@ export function openDurableDatabase(path: string): SqliteDatabase {
         active = false;
       }
     }),
-    close: () => enqueue(() => database.close()),
+    close: () => enqueue(() => database.close(true)),
   };
 }

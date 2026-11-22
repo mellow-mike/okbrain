@@ -24,10 +24,7 @@ beforeEach(async () => {
   };
 });
 
-afterEach(async () => {
-  // Windows can briefly keep the crashed child's SQLite files locked.
-  await rm(testDirectory, { force: true, recursive: true, maxRetries: 8, retryDelay: 100 });
-});
+afterEach(async () => { await rm(testDirectory, { force: true, recursive: true }); });
 
 function provider() {
   const models = createModels();
