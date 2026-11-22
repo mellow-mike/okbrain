@@ -61,6 +61,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   compaction, and recorded provider usage including cache counters.
 - [x] Show the session input limit, output allowance, and model window alongside
   the active context estimate in the apps and editor inspection.
+- [x] Compact older Pi context on demand from the Mac app, web app, and editor.
+  Recover an approved local recap after interruption and keep original runs.
 - [x] Start fresh Pi context in idle sessions from the Mac app, web app, and
   editor. Preserve earlier requests, source snapshots, and review decisions.
 - [x] Carry an optional owner-authored handoff into fresh Pi context from the
@@ -817,6 +819,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 Newest first. One line per session: what changed + what's next.
 - 2026-11-22 — Applied personal enrichment’s host and path scope to every
   redirect destination.
+- 2026-11-22 — Added owner-approved local Pi compaction and recovery to the Mac
+  and web apps and the VS Code and Cursor extension.
 - 2026-11-22 — Made Pi context limits visible in the Mac app, web app, and editor.
 - 2026-11-22 — Added optional reviewed handoffs to Pi context resets in the
   Mac and web apps and the VS Code and Cursor extension.

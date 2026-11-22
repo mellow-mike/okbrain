@@ -937,11 +937,42 @@ try {
   await page.getByText("browser.ts", { exact: true }).click();
   await page.getByText(snapshot.trim(), { exact: true }).waitFor();
 
-  const contextReset = page.locator("[data-context-reset]");
+  const contextReset = page.locator("[data-context-controls]");
   const startFresh = contextReset.getByRole("button", { name: "Start fresh context", exact: true });
   const approveFresh = contextReset.getByRole("checkbox", { name: "Clear active context and keep saved run history", exact: true });
   const resetContext = contextReset.getByRole("button", { name: "Reset context", exact: true });
   const handoffInput = contextReset.getByRole("textbox", { name: "Handoff note (optional)", exact: true });
+  const startCompaction = contextReset.getByRole("button", { name: "Compact context locally", exact: true });
+  const approveCompaction = contextReset.getByRole("checkbox", { name: "Compact older context and keep saved run history", exact: true });
+  async function verifyContextCompaction(prefix: string, session: string, { recovering = false, compacted = false } = {}) {
+    const check = page.waitForResponse((response) => new URL(response.url()).pathname === prefix + "/compact-context-preview");
+    await startCompaction.click();
+    const preview = await check;
+    assert.ok(preview.ok(), await preview.text());
+    assert.deepEqual(preview.request().postDataJSON(), { session });
+    const { version, recovering: pending } = (await preview.json()).result;
+    assert.match(version, /^[a-f0-9]{64}$/u);
+    assert.equal(pending === true, recovering);
+    await contextReset.getByText((recovering ? "Finish the interrupted compaction in " : "Compact older context in ") + session +
+      ". The recap is generated entirely on this device. Recent turns stay in context and the original runs remain in Run history. Short sessions may have too little history to compact.",
+      { exact: true }).waitFor();
+    const apply = contextReset.getByRole("button", { name: recovering ? "Finish compaction" : "Compact context", exact: true });
+    assert.equal(await approveCompaction.isChecked(), false);
+    assert.equal(await apply.isEnabled(), false);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+    await approveCompaction.check();
+    const confirm = page.waitForResponse((response) => new URL(response.url()).pathname === prefix + "/compact-context");
+    await apply.click();
+    const response = await confirm;
+    assert.ok(response.ok(), await response.text());
+    assert.deepEqual(response.request().postDataJSON(), { session, version });
+    const result = (await response.json()).result;
+    assert.equal(result.version, version);
+    assert.equal(result.compacted, compacted);
+    assert.ok(result.replayed === undefined || result.replayed === true);
+    await contextReset.getByText(compacted ? "Older context compacted locally. Saved history is still available."
+      : "This session has too little older context to compact.", { exact: true }).waitFor();
+  }
   async function verifyContextReset(prefix: string, session: string, expectedHandoff?: string) {
     const input = { session, ...(expectedHandoff === undefined ? {} : { handoff: expectedHandoff }) };
     const check = page.waitForResponse((response) => new URL(response.url()).pathname === prefix + "/reset-context-preview");
@@ -984,6 +1015,42 @@ try {
   await verifyContextReset("/api/coding/standalone", "existing-cli");
   await page.getByText("Saved CLI answer.", { exact: true }).waitFor();
   await page.getByText("Saved CLI task.", { exact: true }).waitFor();
+  const callsBeforeStandaloneCompaction = standaloneFaux.state.callCount;
+  await startCompaction.click();
+  await approveCompaction.check();
+  await contextReset.getByRole("button", { name: "Cancel compaction", exact: true }).click();
+  await approveCompaction.waitFor({ state: "hidden" });
+  assert.equal(await startCompaction.evaluate((button) => button === document.activeElement), true);
+  await verifyContextCompaction("/api/coding/standalone", "existing-cli");
+  await page.getByText("Saved CLI answer.", { exact: true }).waitFor();
+  await page.getByText("Saved CLI task.", { exact: true }).waitFor();
+  assert.equal(standaloneFaux.state.callCount, callsBeforeStandaloneCompaction);
+
+  await page.route("**/api/coding/standalone/inspect", async (route) => {
+    const response = await route.fetch();
+    const payload = await response.json();
+    payload.result.pi.context.compactionPending = true;
+    await route.fulfill({ response, json: payload });
+  }, { times: 1 });
+  await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
+  const sendBlocked = page.getByText("Finish local compaction in Run history before sending in this session.", { exact: true });
+  await sendBlocked.waitFor();
+  await startFresh.waitFor({ state: "hidden" });
+  await page.getByLabel("Task", { exact: true }).fill("Keep this draft pending until compaction finishes.");
+  await page.getByRole("button", { name: "Preview source", exact: true }).click();
+  const pendingApproval = page.getByRole("checkbox", { name: /Approve sending the task, selected source/ });
+  await pendingApproval.check();
+  assert.equal(await page.getByRole("button", { name: "Send request", exact: true }).isEnabled(), false);
+  await page.route("**/api/coding/standalone/compact-context-preview", async (route) => {
+    const response = await route.fetch();
+    const payload = await response.json();
+    payload.result.recovering = true;
+    await route.fulfill({ response, json: payload });
+  }, { times: 1 });
+  await verifyContextCompaction("/api/coding/standalone", "existing-cli", { recovering: true });
+  await sendBlocked.waitFor({ state: "hidden" });
+  await pendingApproval.waitFor({ state: "hidden" });
+  await startFresh.waitFor();
 
   const interrupted = Bun.spawn([process.execPath, "-e", `
     import { createModels, fauxProvider } from "@earendil-works/pi-ai";
@@ -1269,6 +1336,9 @@ try {
   await reviewPatch.waitFor();
   assert.deepEqual(proposalRequests, []);
   assert.equal(await Bun.file(file).text(), branchBefore);
+  const callsBeforeProjectCompaction = projectFaux.state.callCount;
+  await verifyContextCompaction("/api/coding" + projectPath, "project-browser");
+  assert.equal(projectFaux.state.callCount, callsBeforeProjectCompaction);
   await startFresh.click();
   await approveFresh.check();
   await contextReset.getByRole("button", { name: "Cancel reset", exact: true }).click();

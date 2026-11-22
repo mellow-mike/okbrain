@@ -36,6 +36,10 @@ Owners can explicitly delete a standalone transcript under its SQLite lease.
 A deletion marker prevents opening the transcript after an interrupted erase.
 The app can retry deletion while keeping the ownership file stable.
 Compaction reduces active context while preserving the original transcript.
+Local owners can also approve manual compaction on idle sessions. Approval is
+bound to the active context revision. Pi persists the local recap task and its
+result or no-op, so the owner can recover an interruption or reread a settled
+result without a provider call. New requests wait for pending maintenance.
 Local owners can explicitly start fresh context in an idle project or
 standalone session. An approved revision appends a passive Pi Durable reset
 entry under the session lease. The approval can include a short owner-authored

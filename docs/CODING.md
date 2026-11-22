@@ -174,6 +174,14 @@ In VS Code or Cursor, open a finished run from **okbrain: Inspect and Review Cod
 
 Pi excludes earlier turns from subsequent model requests in this session. An approved handoff becomes the first message in the fresh context and accompanies the next request sent to the bound provider and model. The workspace binding and saved tasks, sources, answers, reviews, and usage remain available. Resetting uses no provider call. Finish, resume, or cancel unsettled work first. If the note or active context changes during confirmation, preview it again. [Pi Durable context reset](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md#reset-and-handoff)
 
+### Compact context locally
+
+To keep recent turns in a long session, select a saved request from an idle session in **Run history** or **Standalone sessions**, then choose **Compact context locally**. Verify the session name, check **Compact older context and keep saved run history**, and choose **Compact context**. In VS Code or Cursor, choose **Compact context locally** from the saved run’s actions and confirm **Compact Context**.
+
+Pi uses a short recap of older active turns and keeps recent turns verbatim. The recap is generated on this device without a provider call. Saved requests, sources, answers, reviews, and usage remain available. If there is too little context, the action reports that and leaves the history as it was. The recap can omit details from older turns, so reattach important source before relying on it again.
+
+If local compaction was interrupted, reopen the saved run and choose **Compact context locally** again. Review the same session and choose **Finish compaction** in the app or **Resume Compaction** in the editor before sending another request. These controls require the local owner on a writable mount. [Pi Durable compaction](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md#compaction)
+
 ## Inspect context and usage
 
 ```sh

@@ -494,7 +494,8 @@
       '<div data-evaluation-options></div>' +
       '<label class="row" data-approve hidden><input type="checkbox" name="approved"><span data-approve-text></span></label>' +
       '<div class="row"><button type="submit" class="primary" disabled>Send request</button><span class="muted">' + esc(project.model) +
-      '</span></div><div data-composer-feedback class="coding-feedback" role="status"></div></form>';
+      '</span></div><p class="muted" data-send-compaction-notice hidden>Finish local compaction in Run history before sending in this session.</p>' +
+      '<div data-composer-feedback class="coding-feedback" role="status"></div></form>';
     parent.append(panel);
 
     const form = panel.querySelector('form');
@@ -504,12 +505,20 @@
     const previewEl = form.querySelector('[data-preview-content]');
     const approve = form.querySelector('[data-approve]');
     const approveText = form.querySelector('[data-approve-text]');
+    const compactionNotice = form.querySelector('[data-send-compaction-notice]');
     const packageFields = Array.from(form.querySelectorAll('[data-package]'));
     const feedback = form.querySelector('[data-composer-feedback]');
     const evaluation = window.okbCodingEvaluation.composerOptions(form.querySelector('[data-evaluation-options]'), readonly);
     let preview = null;
     let revision = 0;
     let busy = false;
+    const pendingCompactions = new Set();
+
+    function updateSend() {
+      const pending = pendingCompactions.has(session.value.trim());
+      compactionNotice.hidden = !pending;
+      send.disabled = readonly || busy || project.credential === 'missing' || !preview || !approved.checked || pending;
+    }
 
     function clearPreview() {
       revision++;
@@ -517,7 +526,7 @@
       previewEl.replaceChildren();
       approved.checked = false;
       approve.hidden = true;
-      send.disabled = true;
+      updateSend();
     }
 
     function sourceInput() {
@@ -574,9 +583,7 @@
       form.querySelector('[data-source-lookup]').hidden = source.value === 'packages';
       if (source.value === 'packages') approvedSourceLookup.checked = false;
     });
-    approved.addEventListener('change', () => {
-      send.disabled = readonly || busy || project.credential === 'missing' || !preview || !approved.checked;
-    });
+    approved.addEventListener('change', updateSend);
 
     previewButton.addEventListener('click', async () => {
       clearPreview();
@@ -612,7 +619,7 @@
 
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
-      if (readonly || busy || !preview || !approved.checked) return;
+      if (send.disabled) return;
       busy = true;
       send.disabled = true;
       report(feedback);
@@ -634,15 +641,23 @@
         report(feedback, error);
       } finally {
         busy = false;
-        send.disabled = readonly || !preview || !approved.checked;
+        updateSend();
       }
     });
 
     panel.updateProject = (current) => {
       project = current;
-      send.disabled = readonly || busy || project.credential === 'missing' || !preview || !approved.checked;
+      updateSend();
       if (project.credential === 'missing') feedback.textContent = 'Add a provider API key in Project settings to send a request.';
       else if (feedback.textContent.startsWith('Add a provider API key')) report(feedback);
+    };
+    panel.setCompactionPending = (name, pending) => {
+      if (pendingCompactions.has(name) === pending) return;
+      if (pending) pendingCompactions.add(name);
+      else pendingCompactions.delete(name);
+      if (name !== session.value.trim()) return;
+      approvedSourceLookup.checked = false;
+      clearPreview();
     };
     panel.updateProject(project);
     return (targetSession) => {
@@ -652,22 +667,27 @@
     };
   }
 
-  function mountContextReset(panel, { prefix, detached, provider, clearConsent, refresh }) {
+  function mountContextControls(panel, { prefix, detached, provider, clearConsent, markCompactionPending, refresh }) {
     panel.innerHTML = '<details data-reset-note><summary>Add a handoff note</summary><div class="stack coding-form">' +
       '<label class="field"><span>Handoff note (optional)</span><textarea rows="4" maxlength="4096" aria-describedby="context-reset-note-limit"></textarea></label>' +
       '<p class="muted" id="context-reset-note-limit"></p></div></details>' +
-      '<div data-context-reset-entry><button type="button">Start fresh context</button></div>' +
+      '<p class="muted" data-context-pending hidden>Local compaction was interrupted. Finish it before starting fresh context or sending a new request.</p>' +
+      '<div class="row" data-context-actions><button type="button" data-start-reset>Start fresh context</button>' +
+      '<button type="button" data-start-compact>Compact context locally</button></div>' +
       '<div data-reset-confirmation hidden><div class="stack"><p data-reset-session></p>' +
       '<div data-reset-handoff-review hidden><h5>Handoff note to send</h5><p data-reset-destination></p>' +
       '<pre class="source-markdown" data-reset-handoff></pre></div>' +
-      '<label class="row"><input type="checkbox"><span>Clear active context and keep saved run history</span></label>' +
+      '<label class="row"><input type="checkbox"><span data-context-approval></span></label>' +
       '<div class="row"><button type="button" data-reset-apply disabled>Reset context</button>' +
       '<button type="button" data-reset-cancel>Cancel reset</button></div></div></div>' +
       '<div class="coding-feedback" role="status"></div>';
-    const entry = panel.querySelector('[data-context-reset-entry]');
-    const start = entry.querySelector('button');
+    const entry = panel.querySelector('[data-context-actions]');
+    const start = entry.querySelector('[data-start-reset]');
+    const compact = entry.querySelector('[data-start-compact]');
+    const pendingNotice = panel.querySelector('[data-context-pending]');
     const confirmation = panel.querySelector('[data-reset-confirmation]');
     const approval = confirmation.querySelector('input');
+    const approvalLabel = confirmation.querySelector('[data-context-approval]');
     const apply = confirmation.querySelector('[data-reset-apply]');
     const cancel = confirmation.querySelector('[data-reset-cancel]');
     const scope = confirmation.querySelector('[data-reset-session]');
@@ -684,6 +704,8 @@
     let preview = null;
     let revision = 0;
     let phase = '';
+    let action = '';
+    let compactionPending = false;
 
     function update() {
       const bytes = encoder.encode(note.value).byteLength;
@@ -693,7 +715,11 @@
       panel.hidden = !session;
       entry.hidden = !!preview;
       confirmation.hidden = !preview;
+      pendingNotice.hidden = !compactionPending || !!preview;
+      noteDetails.hidden = compactionPending || action === 'compact-context';
+      start.hidden = compactionPending;
       start.disabled = busy || bytes > noteLimit;
+      compact.disabled = busy;
       approval.disabled = cancel.disabled = busy;
       note.disabled = phase === 'applying';
       apply.disabled = busy || !preview || !approval.checked;
@@ -703,6 +729,7 @@
       preview = null;
       approval.checked = false;
       phase = '';
+      action = '';
       handoffText.textContent = '';
       update();
     }
@@ -714,27 +741,40 @@
     function current(expected, attempt) {
       return !detached() && panel.isConnected && session === expected && revision === attempt;
     }
-    start.addEventListener('click', async () => {
-      if (start.disabled || !session || detached()) return;
+    async function review(method, button) {
+      if (button.disabled || button.hidden || !session || detached()) return;
       const expected = session;
-      const draft = note.value;
+      const reset = method === 'reset-context';
+      const draft = reset ? note.value : '';
       const attempt = ++revision;
       phase = 'previewing';
+      action = method;
       update();
       report(feedback);
       feedback.textContent = 'Checking session context…';
       try {
-        const { version, handoff } = await coding(prefix + '/reset-context-preview', {
+        const { version, handoff, recovering } = await coding(prefix + '/' + method + '-preview', {
           session: expected, ...(draft ? { handoff: draft } : {}),
         });
-        if (!current(expected, attempt) || note.value !== draft) return;
+        if (!current(expected, attempt) || (reset && note.value !== draft)) return;
         if (typeof version !== 'string' || !version) throw new Error('Could not preview this session’s active context.');
-        if (handoff !== (draft.trim() ? draft : undefined)) throw new Error('The preview did not match your handoff note. Preview this session again before resetting.');
-        preview = { draft, request: { session: expected, version, ...(handoff === undefined ? {} : { handoff }) } };
-        scope.textContent = 'Future requests in ' + expected + ' will start with fresh context. Saved requests, source snapshots, and responses stay in Run history.';
-        handoffReview.hidden = handoff === undefined;
-        if (handoff !== undefined) {
-          handoffText.textContent = handoff;
+        if (reset && handoff !== (draft.trim() ? draft : undefined)) throw new Error('The preview did not match your handoff note. Preview this session again before resetting.');
+        const approvedNote = reset ? handoff : undefined;
+        preview = { draft, request: { session: expected, version, ...(approvedNote === undefined ? {} : { handoff: approvedNote }) } };
+        if (!reset && recovering === true) {
+          compactionPending = true;
+          markCompactionPending(expected, true);
+        }
+        scope.textContent = reset
+          ? 'Future requests in ' + expected + ' will start with fresh context. Saved requests, source snapshots, and responses stay in Run history.'
+          : (recovering === true ? 'Finish the interrupted compaction in ' : 'Compact older context in ') + expected +
+            '. The recap is generated entirely on this device. Recent turns stay in context and the original runs remain in Run history. Short sessions may have too little history to compact.';
+        approvalLabel.textContent = reset ? 'Clear active context and keep saved run history' : 'Compact older context and keep saved run history';
+        apply.textContent = reset ? 'Reset context' : recovering === true ? 'Finish compaction' : 'Compact context';
+        cancel.textContent = reset ? 'Cancel reset' : 'Cancel compaction';
+        handoffReview.hidden = approvedNote === undefined;
+        if (approvedNote !== undefined) {
+          handoffText.textContent = approvedNote;
           destination.textContent = 'The note will accompany the next request in this session to ' + (provider() || 'the session’s provider') + '.';
         }
         report(feedback);
@@ -743,72 +783,94 @@
       } finally {
         if (current(expected, attempt)) {
           phase = '';
+          if (!preview) action = '';
           update();
           if (preview) approval.focus();
         }
       }
-    });
+    }
+    start.addEventListener('click', () => review('reset-context', start));
+    compact.addEventListener('click', () => review('compact-context', compact));
     note.addEventListener('input', () => {
-      if (phase === 'applying') return;
+      if (phase === 'applying' || action === 'compact-context') return;
       clear();
       report(feedback);
     });
     approval.addEventListener('change', update);
     cancel.addEventListener('click', () => {
       if (phase) return;
-      discard();
+      const reset = action === 'reset-context';
+      if (reset) discard();
+      else clear();
       report(feedback);
-      start.focus();
+      (reset ? start : compact).focus();
     });
     apply.addEventListener('click', async () => {
-      if (apply.disabled || !preview || detached() || preview.request.session !== session || preview.draft !== note.value) return;
+      const reset = action === 'reset-context';
+      if (apply.disabled || !preview || detached() || preview.request.session !== session || (reset && preview.draft !== note.value)) return;
       const approved = preview.request;
       const attempt = ++revision;
+      const button = reset ? start : compact;
       phase = 'applying';
       update();
       report(feedback);
-      feedback.textContent = 'Resetting active context…';
+      feedback.textContent = reset ? 'Resetting active context…' : 'Compacting context locally…';
       try {
         clearConsent(approved.session);
-        await coding(prefix + '/reset-context', approved);
+        const result = await coding(prefix + '/' + action, approved);
         if (!current(approved.session, attempt)) return;
-        discard();
-        feedback.textContent = 'Active context cleared. Saved history is still available.';
-        start.focus();
+        if (!reset && (result?.version !== approved.version || typeof result.compacted !== 'boolean'))
+          throw new Error('Could not confirm the local compaction result. Refresh Run history before trying again.');
+        if (!reset) {
+          compactionPending = false;
+          markCompactionPending(approved.session, false);
+        }
         await refresh();
+        if (!current(approved.session, attempt)) return;
+        if (reset) discard();
+        else clear();
+        feedback.textContent = reset ? 'Active context cleared. Saved history is still available.' : result.compacted
+          ? 'Older context compacted locally. Saved history is still available.'
+          : 'This session has too little older context to compact.';
+        button.focus();
       } catch (error) {
         if (!current(approved.session, attempt)) return;
         clear();
         report(feedback, error);
-        start.focus();
+        button.focus();
+        if (!reset) await refresh();
       }
     });
     update();
-    return (next) => {
-      if (session === next) return;
+    return (next, pending = false) => {
+      if (session === next && compactionPending === pending) return;
+      const changedSession = session !== next;
       session = next;
-      discard();
-      report(feedback);
+      compactionPending = pending;
+      if (changedSession) {
+        discard();
+        report(feedback);
+      } else clear();
     };
   }
 
-  function activity(parent, project, readonly, detached, reviewPatch, clearResetConsent) {
+  function activity(parent, project, readonly, detached, reviewPatch, contextActions) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
     panel.className = 'coding-panel coding-activity stack';
     panel.innerHTML = '<div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh</button></div>' +
       '<div class="stack coding-runs" data-runs></div><div class="stack" data-inspect aria-live="polite"></div>' +
       '<section class="stack" data-saved-request-source hidden></section>' +
-      (clearResetConsent && !readonly ? '<section class="stack" data-context-reset hidden></section>' : '') +
+      (contextActions && !readonly ? '<section class="stack" data-context-controls hidden></section>' : '') +
       '<div class="coding-feedback" role="status"></div>';
     parent.append(panel);
     const list = panel.querySelector('[data-runs]');
     const inspected = panel.querySelector('[data-inspect]');
     const feedback = panel.querySelector('[role="status"]');
     const setSavedSourceRun = mountSavedSource(panel.querySelector('[data-saved-request-source]'), prefix, detached);
-    const resetPanel = panel.querySelector('[data-context-reset]');
-    const setResetSession = resetPanel ? mountContextReset(resetPanel, {
-      prefix, detached, provider: () => project.providerLabel, clearConsent: clearResetConsent, refresh,
+    const contextPanel = panel.querySelector('[data-context-controls]');
+    const setContextSession = contextPanel ? mountContextControls(contextPanel, {
+      prefix, detached, provider: () => project.providerLabel, ...contextActions, refresh,
     }) : null;
     let selected = null;
     let timer;
@@ -828,7 +890,9 @@
       if (detached() || current !== generation) return;
       const pi = result.pi;
       const row = result.run;
-      setResetSession?.(idle && pi && !pi.pendingRequestIds.length && row.status !== 'running' && row.status !== 'interrupted' ? row.session : null);
+      const compactionPending = pi?.context?.compactionPending === true;
+      if (pi) contextActions?.markCompactionPending(row.session, compactionPending);
+      setContextSession?.(idle && pi && !pi.pendingRequestIds.length ? row.session : null, compactionPending);
       const canViewSource = row.status !== 'running' &&
         (row.admitted || pi?.request || (row.status === 'interrupted' && !result.admissionMissing));
       setSavedSourceRun(canViewSource ? row : null);
@@ -936,13 +1000,13 @@
         }
         if (target) {
           const idle = !rows.some((row) => row.session === target.session && (row.status === 'running' || row.status === 'interrupted'));
-          if (!idle) setResetSession?.(null);
+          if (!idle) setContextSession?.(null);
           await readRun(target, current, idle);
         }
         else {
           selected = null;
           setSavedSourceRun(null);
-          setResetSession?.(null);
+          setContextSession?.(null);
           inspected.replaceChildren();
         }
         if (focusResult && target && current === generation) {
@@ -959,7 +1023,7 @@
     function selectRun(row) {
       if (selected?.id !== row.id || selected.session !== row.session) {
         setSavedSourceRun(null);
-        setResetSession?.(null);
+        setContextSession?.(null);
         inspected.replaceChildren();
       }
       selected = row;
@@ -1495,7 +1559,7 @@
       projectsEl.remove();
       await window.okbCodingStandalone.mount(page, {
         coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, report, sessionUsage, usageText, contextSummary,
-        showTaskProgress, taskProgressPanel, mountContextReset,
+        showTaskProgress, taskProgressPanel, mountContextControls,
       });
       return;
     }
@@ -1539,11 +1603,14 @@
     right.className = 'stack coding-right';
     grid.append(left, right);
     let openPatch;
-    const runs = activity(right, project, readonly, isDetached, teamMode ? undefined : (row) => openPatch(row),
-      teamMode ? undefined : (session) => clearComposerConsent(session));
+    let composerPanel;
+    const runs = activity(right, project, readonly, isDetached, teamMode ? undefined : (row) => openPatch(row), teamMode || readonly ? undefined : {
+      clearConsent: (session) => clearComposerConsent(session),
+      markCompactionPending: (session, pending) => composerPanel.setCompactionPending(session, pending),
+    });
     window.okbCodingEvaluation.mount(right, { prefix: projectUrl(project.id), coding, readonly, detached: isDetached });
     const clearComposerConsent = composer(left, project, readonly, isDetached, runs.selectRun, !teamMode && !readonly);
-    const composerPanel = left.querySelector('.coding-composer');
+    composerPanel = left.querySelector('.coding-composer');
     if (!teamMode) settings(left, project, readonly, composerPanel.updateProject, runs.refresh);
     const github = document.createElement('div');
     github.dataset.codingGithub = '';

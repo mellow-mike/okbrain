@@ -188,6 +188,13 @@ try {
   const evidence = await call<{ sources: { path: string; content: string }[] }>(path + "/evaluation-inspect", offline, member.token);
   assert.deepEqual(evidence.sources.map(({ path, content }) => ({ path, content })), [{ path: "app.ts", content: admittedSource }]);
   const session = { session: offline.session };
+  const compactPreview = path + "/compact-context-preview";
+  const compact = path + "/compact-context";
+  assert.equal((await request(compactPreview, session, member.token)).status, 403);
+  const compaction = await call<{ version: string }>(compactPreview, session);
+  const approvedCompaction = { ...session, ...compaction };
+  assert.deepEqual(await call(compact, approvedCompaction), { compacted: false, version: compaction.version });
+  assert.deepEqual(await call(compact, approvedCompaction), { compacted: false, version: compaction.version, replayed: true });
   const resetPreview = path + "/reset-context-preview";
   const reset = path + "/reset-context";
   const handoff = "Check the new baseline on the next run.";
@@ -232,7 +239,7 @@ try {
   const audit = await call<{ kind: string; session: string | null }[]>(path + "/audit");
   assert.ok(audit.some(({ kind, session }) => kind === "session_expired" && session === offline.session));
 
-  console.log("Docker Coding smoke passed. Verified offline worker isolation and admission, no fallback, scoped access, quiesced backup restoration, owner context handoff, archived Pi receipts, and retention tombstones.");
+  console.log("Docker Coding smoke passed. Verified offline worker isolation and admission, no fallback, scoped access, quiesced backup restoration, owner context maintenance, archived Pi receipts, and retention tombstones.");
 } finally {
   await closeServer();
   await rm(root, { recursive: true, force: true });

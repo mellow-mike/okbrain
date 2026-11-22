@@ -11,7 +11,7 @@
   const statusLabel = (status) => statusLabels[status] || status || 'Saved';
 
   async function mount(parent, { coding, readonly, detached, defaultModels, entries, field, previewContents,
-    report, sessionUsage, usageText, contextSummary, showTaskProgress, taskProgressPanel, mountContextReset }) {
+    report, sessionUsage, usageText, contextSummary, showTaskProgress, taskProgressPanel, mountContextControls }) {
     const header = parent.querySelector('header');
     header.innerHTML = '<div class="row coding-project-links"><a href="#coding">Project workspace</a></div>' +
       '<h2 class="display">Standalone sessions</h2><p class="muted">Open sessions from this app or the CLI.</p>';
@@ -43,12 +43,13 @@
       '<div class="coding-preview stack" data-preview-content aria-live="polite"></div>' +
       '<label class="row" data-approve hidden><input type="checkbox" name="approved"><span></span></label>' +
       '<div class="row"><button type="submit" class="primary" disabled>Send request</button></div>' +
+      '<p class="muted" data-send-compaction-notice hidden>Finish local compaction in Run history before sending in this session.</p>' +
       '<div class="coding-feedback" role="status"></div></form></section>' +
       '<section class="coding-panel stack"><div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh sessions</button></div>' +
       '<label class="field"><span>Saved session</span><select data-sessions><option value="">Loading sessions…</option></select></label>' +
       '<label class="field" data-request-picker hidden><span>Saved request</span><select data-requests></select></label>' +
       '<div data-inspect class="stack" aria-live="polite"></div>' +
-      (readonly ? '' : '<section class="stack" data-context-reset hidden></section>') +
+      (readonly ? '' : '<section class="stack" data-context-controls hidden></section>') +
       '<details data-delete-session hidden><summary>Delete standalone session</summary><form class="stack coding-form">' +
       '<p>Permanently delete the saved requests, source snapshots, and responses for <code data-delete-name></code> from this device.</p>' +
       '<p class="muted" data-delete-state></p><label class="field"><span>Type the session name to confirm</span>' +
@@ -65,6 +66,7 @@
     const previewContent = form.querySelector('[data-preview-content]');
     const approve = form.querySelector('[data-approve]');
     const send = form.querySelector('button[type="submit"]');
+    const compactionNotice = form.querySelector('[data-send-compaction-notice]');
     const sessionsSelect = grid.querySelector('[data-sessions]');
     const requestPicker = grid.querySelector('[data-request-picker]');
     const requestsSelect = grid.querySelector('[data-requests]');
@@ -89,15 +91,17 @@
     let runActionPending = false;
     let deleting = false;
     let pendingWork = false;
+    let compactionPending = false;
     let sessionState = '';
     let preview = null;
     let revision = 0;
     let generation = 0;
     let timer;
     let inspected;
-    const resetPanel = grid.querySelector('[data-context-reset]');
-    const setResetSession = resetPanel ? mountContextReset(resetPanel, {
+    const contextPanel = grid.querySelector('[data-context-controls]');
+    const setContextSession = contextPanel ? mountContextControls(contextPanel, {
       prefix, detached, provider: () => providerName(binding?.provider),
+      markCompactionPending,
       clearConsent() {
         controls.approvedSourceLookup.checked = false;
         invalidate();
@@ -126,7 +130,8 @@
       const waiting = !!sessionName && !binding;
       const key = selectedProvider()?.credential;
       previewButton.disabled = busy || running || waiting || previewing || deleting || sessionState === 'deleting';
-      send.disabled = readonly || previewButton.disabled || !preview || !form.checkValidity() ||
+      compactionNotice.hidden = !compactionPending;
+      send.disabled = readonly || previewButton.disabled || compactionPending || !preview || !form.checkValidity() ||
         !controls.approved.checked || (key !== 'saved' && key !== 'environment');
       controls.workspace.readOnly = !!binding;
       controls.session.readOnly = !!sessionName;
@@ -143,8 +148,8 @@
       deleteInput.disabled = deletePanel.hidden || busy || running || refreshing || runActionPending || deleting ||
         !['ready', 'deleting', 'unavailable'].includes(sessionState);
       deleteButton.disabled = deleteInput.disabled || deleteInput.value !== sessionName;
-      setResetSession?.(sessionState === 'ready' && !busy && !running && !pendingWork && !refreshing &&
-        !runActionPending && !deleting ? sessionName : null);
+      setContextSession?.(sessionState === 'ready' && !busy && !running && !pendingWork && !refreshing &&
+        !runActionPending && !deleting ? sessionName : null, compactionPending);
     }
 
     function invalidate() {
@@ -154,6 +159,13 @@
       approve.hidden = true;
       previewContent.replaceChildren();
       updateControls();
+    }
+
+    function markCompactionPending(name, pending) {
+      if (name !== sessionName || pending === compactionPending) return;
+      compactionPending = pending;
+      controls.approvedSourceLookup.checked = false;
+      invalidate();
     }
 
     function syncThinking(previous = '') {
@@ -386,6 +398,7 @@
         fillBinding(result.identity || binding);
         running = result.active?.status === 'running' || result.state === 'busy';
         pendingWork = !!result.pi?.pendingRequestIds.length;
+        if (result.pi && !readonly) markCompactionPending(sessionName, result.pi.context?.compactionPending === true);
         updateControls();
         const requests = [...(result.requests || [])];
         const knownActive = result.active?.requestId;
@@ -416,6 +429,7 @@
       binding = null;
       running = false;
       pendingWork = false;
+      compactionPending = false;
       sessionState = '';
       deleteInput.value = '';
       deletePanel.open = false;
@@ -500,7 +514,7 @@
     sessionsSelect.addEventListener('change', () => { void selectSession(sessionsSelect.value); });
     requestsSelect.addEventListener('change', () => {
       requestId = requestsSelect.value;
-      setResetSession?.(null);
+      setContextSession?.(null);
       inspected = undefined;
       inspectEl.replaceChildren();
       report(historyFeedback);

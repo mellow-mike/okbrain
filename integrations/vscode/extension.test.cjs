@@ -507,6 +507,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   assert.ok(!availableActions.includes('Review proposed patch in okbrain'));
   assert.ok(!availableActions.includes('Prepare GitHub pull request in okbrain'));
   assert.ok(!availableActions.includes('Start fresh context'));
+  assert.ok(!availableActions.includes('Compact context locally'));
   assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
   assert.match(lastDocument.text, /Saved shared task/);
   assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect', 'source-inspect']);
@@ -696,4 +697,120 @@ test('owner starts fresh context with the exact optional handoff only after conf
   await invoke();
   assert.deepEqual(calls.map(([action]) => action), ['reset-context-preview', 'reset-context']);
   assert.deepEqual(errors, ['Connection lost']);
+});
+
+test('editor compacts only an approved idle owner session and recovers pending compaction', async () => {
+  const project = { id: 'fixture', title: 'Project fixture' };
+  const run = { session: 'main', id: 'saved-request', status: 'done', admitted: true };
+  const editor = { document: { uri: { scheme: 'untitled' } } };
+  const commands = new Map();
+  const calls = [];
+  const notices = [];
+  const errors = [];
+  const confirmations = [];
+  const compact = 'Compact context locally';
+  const version = 'approved-compaction-version';
+  const preview = ['compact-context-preview', { session: run.session }];
+  const apply = ['compact-context', { session: run.session, version }];
+  let mode = 'decline';
+  let actions;
+  let editorChanged;
+  let documentText;
+  const switchEditor = () => {
+    vscode.window.activeTextEditor = undefined;
+    editorChanged(undefined);
+    vscode.window.activeTextEditor = editor;
+    editorChanged(editor);
+  };
+  const vscode = {
+    commands: { registerCommand: (name, invoke) => commands.set(name, invoke) }, env: {},
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider() {},
+      async openTextDocument(document) { return document; },
+    },
+    window: {
+      activeTextEditor: editor,
+      onDidChangeActiveTextEditor(listener) { editorChanged = listener; },
+      async showTextDocument(document) { documentText = document.content; },
+      async showQuickPick(items, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return items[0];
+        actions = Array.from(items, (item) => item.label);
+        return items.find((item) => item.label === compact);
+      },
+      async showWarningMessage(message, options, button) {
+        assert.equal(options.modal, true);
+        assert.match(message, /for session main\?/);
+        assert.match(message, /recap runs entirely on this device/);
+        assert.match(message, /originals stay in Run history/);
+        assert.match(message, /skips sessions with too little older history/);
+        confirmations.push(button);
+        if (mode === 'away-during-confirmation') switchEditor();
+        return mode === 'decline' ? undefined : button;
+      },
+      async showInformationMessage(message) { notices.push(message); },
+      async showErrorMessage(message) { errors.push(message); },
+    },
+  };
+  activateExtension(vscode, { projects: [project], async api(path, data) {
+    assert.ok(path.startsWith('/projects/fixture/'));
+    const action = path.slice('/projects/fixture/'.length);
+    if (action === 'runs') return [run];
+    if (action === 'inspect') return { run, pi: { pendingRequestIds: mode === 'busy' ? ['active-request'] : [],
+      context: { compactionPending: mode === 'recovery' } } };
+    calls.push([action, JSON.parse(JSON.stringify(data))]);
+    if (action === 'compact-context-preview') {
+      if (mode === 'away-during-preview') switchEditor();
+      if (mode === 'readonly') throw new Error('Open a writable brain to compact the session context.');
+      return { version, ...(mode === 'recovery' ? { recovering: true } : {}) };
+    }
+    assert.equal(action, 'compact-context');
+    return { version, compacted: mode !== 'no-op', ...(mode === 'recovery' ? { replayed: true } : {}) };
+  } });
+  const inspect = commands.get('okbrain.runs');
+
+  await inspect();
+  assert.ok(actions.includes('Start fresh context'));
+  assert.deepEqual(calls.splice(0), [preview]);
+  assert.deepEqual(confirmations.splice(0), ['Compact Context']);
+  for (const status of ['running', 'interrupted']) {
+    run.status = status;
+    await inspect();
+    assert.ok(!actions.includes(compact));
+  }
+  run.status = 'done';
+  mode = 'busy';
+  await inspect();
+  assert.ok(!actions.includes(compact));
+  assert.deepEqual(calls, []);
+  mode = 'readonly';
+  await inspect();
+  assert.deepEqual(calls.splice(0), [preview]);
+  assert.match(errors.pop(), /writable brain/);
+  mode = 'away-during-preview';
+  await inspect();
+  assert.deepEqual(calls.splice(0), [preview]);
+  assert.deepEqual(confirmations, []);
+  mode = 'away-during-confirmation';
+  await inspect();
+  assert.deepEqual(calls.splice(0), [preview]);
+  assert.deepEqual(confirmations.splice(0), ['Compact Context']);
+  assert.deepEqual(notices, []);
+
+  for (const [scenario, button, notice] of [
+    ['success', 'Compact Context', /Compacted context locally for main/],
+    ['no-op', 'Compact Context', /main has too little older history/],
+    ['recovery', 'Resume Compaction', /Recovered local compaction for main/],
+  ]) {
+    mode = scenario;
+    await inspect();
+    assert.deepEqual(calls.splice(0), [preview, apply]);
+    assert.deepEqual(confirmations.splice(0), [button]);
+    assert.match(notices.pop(), notice);
+  }
+  assert.match(documentText, /Local compaction is awaiting recovery/);
+  assert.ok(actions.includes(compact));
+  assert.ok(!actions.includes('Start fresh context'));
+  assert.deepEqual(errors, []);
 });

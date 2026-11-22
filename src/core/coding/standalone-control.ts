@@ -2,9 +2,10 @@ import { isAbsolute } from "node:path";
 import { gatewayEnvironment, providerKeyStatus } from "../ai/local-keys.ts";
 import {
   cancelCodingRequest, canonicalWorkspace, CodingError, CodingSessionBusyError, CodingSessionDeletingError, CodingSessionMissingError,
-  deleteStandaloneCodingSession, inspectStandaloneCodingSession,
+  compactStandaloneCodingContext, deleteStandaloneCodingSession, inspectStandaloneCodingSession,
   listCodingModels, listStandaloneCodingRequests, listStandaloneCodingSessions, parseCodingHandoff, prepareCodingInput,
-  previewCodingAttachments, previewStandaloneCodingContextReset, resetStandaloneCodingContext, runCodingSession,
+  previewCodingAttachments, previewStandaloneCodingContextCompaction, previewStandaloneCodingContextReset,
+  requireNoPendingCodingContextCompaction, resetStandaloneCodingContext, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions, type CodingSessionResult,
 } from "./durable.ts";
 import { validateCodingProjectProfile } from "./project-profile.ts";
@@ -108,7 +109,8 @@ export class StandaloneCodingControl {
       const selected = await selectRepositoryContext({ workspace, ...source.repository });
       return { source: "repository", id: selected.manifest.id, ...selected };
     }
-    if (!["/inspect", "/run", "/resume", "/cancel", "/delete-session", "/reset-context-preview", "/reset-context"].includes(path))
+    if (!["/inspect", "/run", "/resume", "/cancel", "/delete-session", "/reset-context-preview", "/reset-context",
+      "/compact-context-preview", "/compact-context"].includes(path))
       throw new StandaloneControlError("Standalone coding route not found.", 404);
     const session = sessionOf(input);
     if (path === "/inspect") return this.#inspect(session, input.requestId === undefined ? undefined : requestOf(input));
@@ -125,14 +127,17 @@ export class StandaloneCodingControl {
   async #changeSession(session: string, path: string, input: Input, canWrite: () => boolean) {
     this.#checkWrite(canWrite);
     const current = this.#runs.get(session);
-    if (path === "/reset-context-preview" || path === "/reset-context") {
+    if (path === "/reset-context-preview" || path === "/reset-context" || path === "/compact-context-preview" || path === "/compact-context") {
       if (current?.view.status === "running")
-        throw new StandaloneControlError("Wait for this session to finish or cancel its run before starting fresh context.", 409);
-      const handoff = parseCodingHandoff(input.handoff);
-      if (path === "/reset-context-preview") return previewStandaloneCodingContextReset(session, this.dependencies, handoff);
+        throw new StandaloneControlError("Wait for this session to finish or cancel its run before changing its context.", 409);
+      if (path === "/compact-context-preview") return previewStandaloneCodingContextCompaction(session, this.dependencies);
+      if (path === "/reset-context-preview")
+        return previewStandaloneCodingContextReset(session, this.dependencies, parseCodingHandoff(input.handoff));
       const version = string(input, "version", 64);
-      if (!/^[a-f0-9]{64}$/u.test(version)) throw new StandaloneControlError("Preview the active context before confirming a reset.");
-      return resetStandaloneCodingContext(session, version, this.dependencies, () => this.#checkWrite(canWrite), handoff);
+      if (!/^[a-f0-9]{64}$/u.test(version)) throw new StandaloneControlError("Preview the active context before confirming the change.");
+      const authorize = () => this.#checkWrite(canWrite);
+      return path === "/compact-context" ? compactStandaloneCodingContext(session, version, this.dependencies, authorize)
+        : resetStandaloneCodingContext(session, version, this.dependencies, authorize, parseCodingHandoff(input.handoff));
     }
     if (path === "/delete-session") {
       if (input.confirm !== session) throw new StandaloneControlError("Type the session name to confirm transcript deletion.");
@@ -175,6 +180,7 @@ export class StandaloneCodingControl {
         ...(source.source === "files" ? { files: source.files, filePreviewId: previewId } : { repository: { ...source.repository, id: previewId } }),
       };
       const preparedInput = await prepareCodingInput(options, workspace);
+      await requireNoPendingCodingContextCompaction(options, { ...this.dependencies, allowEnvKey: false, workspaceBinding: workspace });
       this.#checkWrite(canWrite);
       return this.#launch(identity, (signal, updates) => runCodingSession(options, {
         ...this.#runner(choice.provider, workspace), preparedInput, requireNewRequest: true, signal, ...updates,
@@ -191,6 +197,8 @@ export class StandaloneCodingControl {
       const receipt = await cancelCodingRequest(options, { ...this.dependencies, workspaceBinding: options.workspace });
       return { ...identity, admitted: true, status: receipt.status, receipt, cancelled: receipt.status === "unanswered" };
     }
+    await requireNoPendingCodingContextCompaction(options, { ...this.dependencies, allowEnvKey: false, workspaceBinding: options.workspace });
+    this.#checkWrite(canWrite);
     return this.#launch(identity, (signal, updates) => runCodingSession(options, {
       ...this.#runner(saved.identity.provider, options.workspace), signal, ...updates,
     }));

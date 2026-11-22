@@ -1,15 +1,22 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, getCurrentTools,
   type FauxModelDefinition, type TranscriptContext } from "@earendil-works/pi-ai";
+import { CompactionTask, createRegistry, Harness, ROOT_CONVERSATION_ID, type Conversation } from "@earendil-works/pi-durable";
+import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createApiServer } from "../src/api.ts";
 import {
-  CodingError, CodingHandoffError, CodingSessionBusyError, CodingSessionMissingError, deleteStandaloneCodingSession, getCodingSessionStatus,
-  inspectStandaloneCodingSession, maxCodingHandoffBytes, parseCodingHandoff, previewCodingAttachments, previewCodingContextReset, previewStandaloneCodingContextReset,
-  resetCodingContext, resetStandaloneCodingContext, runCodingSession, type CodingSessionOptions,
+  CodingError, CodingHandoffError, CodingSessionBusyError, CodingSessionMissingError, compactCodingContext, compactStandaloneCodingContext,
+  deleteStandaloneCodingSession, getCodingSessionStatus, inspectStandaloneCodingSession, maxCodingHandoffBytes, parseCodingHandoff,
+  previewCodingAttachments, previewCodingContextCompaction, previewCodingContextReset, previewStandaloneCodingContextCompaction,
+  previewStandaloneCodingContextReset, requireNoPendingCodingContextCompaction, resetCodingContext, resetStandaloneCodingContext,
+  runCodingSession, type CodingSessionOptions,
 } from "../src/core/coding/durable.ts";
+import { openDurableDatabase } from "../src/core/coding/sqlite.ts";
 
 let testDirectory: string;
 let workspace: string;
@@ -188,6 +195,163 @@ test("uses Pi threshold compaction locally and keeps old answers and committed u
   });
   expect(faux.state.callCount).toBe(2);
 });
+
+test("recovers an interrupted local compaction under the same approval and preserves terminal receipts", async () => {
+  const limits = { contextWindow: 4000, maxTokens: 400 };
+  const { models, faux } = provider(limits);
+  const dependencies = { stateDir, models };
+  const oldSource = "old-source-sentinel ".repeat(48);
+  const recentSource = "recent-source-sentinel ".repeat(230);
+  await expect(requireNoPendingCodingContextCompaction(options, { stateDir })).resolves.toBeUndefined();
+  await expect(stat(stateDir)).rejects.toThrow();
+  await writeFile(join(workspace, "old.ts"), oldSource);
+  await writeFile(join(workspace, "recent.ts"), recentSource);
+  faux.setResponses([fauxAssistantMessage("Old saved answer."), fauxAssistantMessage("Recent saved answer.")]);
+  const old = await runCodingSession({ ...options, prompt: "Old fixture task", files: ["old.ts"] }, dependencies);
+
+  const reset = await previewCodingContextReset(options, dependencies);
+  const short = await previewCodingContextCompaction(options, dependencies);
+  expect(short.version).not.toBe(reset.version);
+  await expect(compactCodingContext({ ...options, ...reset }, dependencies)).rejects.toThrow("context changed");
+  await expect(resetCodingContext({ ...options, ...short }, dependencies)).rejects.toThrow("context changed");
+  expect(await compactCodingContext({ ...options, ...short }, dependencies)).toEqual({ ...short, compacted: false });
+  expect(await previewCodingContextCompaction(options, dependencies)).toEqual(short);
+  expect(faux.state.callCount).toBe(1);
+
+  const latest = await runCodingSession({ ...options, requestId: "recent", prompt: "Recent fixture task", files: ["recent.ts"] }, dependencies);
+  expect(latest).toMatchObject({ status: "done" });
+  const approved = await previewStandaloneCodingContextCompaction(options.session, dependencies);
+  const script = `
+    import { createModels, fauxProvider } from "@earendil-works/pi-ai";
+    import { CompactionTask } from "@earendil-works/pi-durable";
+    import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+    import { compactCodingContext } from "./src/core/coding/durable.ts";
+    const { options, limits, stateDir, version } = JSON.parse(process.argv.at(-1));
+    const models = createModels();
+    models.setProvider(fauxProvider({ provider: options.provider, models: [{ id: options.model, ...limits }] }).provider);
+    const scanEntries = SqliteStorage.prototype.scanEntries;
+    SqliteStorage.prototype.scanEntries = async function (query, limit, cursor, context) {
+      const { items } = await this.scanTasks({ conversationId: query.conversationId, kind: CompactionTask.definition.name }, 16, undefined, context);
+      if (items.some((task) => task.state.status !== "terminal" && task.input.instructions === "okbrain/manual-compaction/v1:" + version)) {
+        console.log("compaction-select-paused");
+        return new Promise(() => {});
+      }
+      return scanEntries.call(this, query, limit, cursor, context);
+    };
+    const keepAlive = setInterval(() => {}, 1000);
+    try { await compactCodingContext({ ...options, version }, { stateDir, models }); }
+    finally { clearInterval(keepAlive); }
+  `;
+  const child = Bun.spawn([process.execPath, "-e", script, "--", JSON.stringify({ options, limits, stateDir, version: approved.version })], {
+    cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "inherit",
+  });
+  const startupTimeout = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  try {
+    const reader = child.stdout.getReader();
+    try {
+      let stdout = "";
+      while (!stdout.includes("compaction-select-paused")) {
+        const part = await reader.read();
+        if (part.done) throw new Error("The fixture exited before reaching the persisted compaction.");
+        stdout += new TextDecoder().decode(part.value);
+      }
+      await expect(previewCodingContextCompaction(options, dependencies)).rejects.toBeInstanceOf(CodingSessionBusyError);
+      await expect(requireNoPendingCodingContextCompaction(options, { stateDir })).rejects.toBeInstanceOf(CodingSessionBusyError);
+    } finally { reader.releaseLock(); }
+  } finally {
+    clearTimeout(startupTimeout);
+    child.kill("SIGKILL");
+    await child.exited;
+  }
+
+  const workspaceBinding = await realpath(workspace);
+  const bound = { ...options, workspace: workspaceBinding };
+  await expect(requireNoPendingCodingContextCompaction(bound, { stateDir, workspaceBinding })).rejects.toThrow("Recover the pending context compaction");
+  const token = "offline-local-owner";
+  const api = createApiServer({
+    bundle: workspace, port: 0, token, standaloneCoding: dependencies, coding: { stateDir: join(testDirectory, "projects") },
+    maintenance: { path: join(testDirectory, "maintenance.sqlite") },
+  });
+  try {
+    const request = (path: string, data: object) => fetch(new URL(`/api/coding/standalone/${path}`, api.url), {
+      method: "POST", headers: { "x-okb-token": token, "content-type": "application/json" }, body: JSON.stringify(data),
+    });
+    const source = { source: "files", files: ["recent.ts"] };
+    const previewed = await request("preview", { ...source, workspace });
+    expect(previewed.status).toBe(200);
+    const { result: { id } } = await previewed.json() as { result: { id: string } };
+    const requestId = "blocked-http-request";
+    const refused = await request("run", { ...source, ...options, requestId, prompt: "Try a new request", previewId: id, approved: true });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: expect.stringContaining("Recover the pending context compaction") });
+    const inspected = await request("inspect", { session: options.session, requestId });
+    expect(inspected.status).toBe(200);
+    const { result } = await inspected.json() as { result: { active?: unknown; requests: { requestId: string }[] } };
+    expect(result.active).toBeUndefined();
+    expect(result.requests.some((entry) => entry.requestId === requestId)).toBe(false);
+  } finally { await api.stop(); }
+
+  const paused = await getCodingSessionStatus({ ...options, includeReceipt: true }, dependencies);
+  expect(paused).toMatchObject({ pendingRequestIds: [], context: { compactionPending: true, historyCompacted: false }, request: { receipt: old } });
+  expect(JSON.stringify(paused)).not.toContain(approved.version);
+  expect(await previewCodingContextCompaction(options, dependencies)).toEqual({ ...approved, recovering: true });
+  await expect(runCodingSession({ ...options, requestId: "new-work", prompt: "Try sending during compaction" }, dependencies))
+    .rejects.toThrow("Recover the pending context compaction");
+  await expect(previewCodingContextReset(options, dependencies)).rejects.toThrow("Recover the pending context compaction");
+  const denied = new Error("The workspace became read-only.");
+  const authorize = () => { throw denied; };
+  await expect(compactCodingContext({ ...options, ...approved }, dependencies, authorize)).rejects.toBe(denied);
+  expect(await previewCodingContextCompaction(options, dependencies)).toEqual({ ...approved, recovering: true });
+
+  const transcript = join(stateDir, `session-${options.session}`, "transcript.sqlite");
+  const withPausedHarness = async <T,>(use: (harness: Harness, root: Conversation) => Promise<T>): Promise<T> => {
+    const storage = await SqliteStorage.open(openDurableDatabase(transcript, false));
+    const harness = await Harness.open(storage, { models, registry: createRegistry() }, BACKGROUND_CONTEXT);
+    try { return await use(harness, (await harness.conversation(ROOT_CONVERSATION_ID, BACKGROUND_CONTEXT))!); }
+    finally { await harness.close(BACKGROUND_CONTEXT); }
+  };
+  const sibling = await withPausedHarness(async (harness, root) => {
+    const { tasks } = await harness.inspect(BACKGROUND_CONTEXT);
+    expect(tasks).toHaveLength(1);
+    return root.commit((tx) => tx.createTask(CompactionTask, {
+      reason: "manual", instructions: `okbrain/manual-compaction/v1:${approved.version}`,
+    }, { ownership: { kind: "task", taskId: tasks[0]!.record.id } }), BACKGROUND_CONTEXT);
+  });
+  await expect(previewCodingContextCompaction(options, dependencies)).rejects.toThrow("other pending coding work");
+  await expect(compactCodingContext({ ...options, ...approved }, dependencies)).rejects.toThrow("other pending coding work");
+  // Settle the injected fixture task without running the scheduler.
+  const storage = await SqliteStorage.open(openDurableDatabase(transcript, false));
+  try {
+    const { memos: _memos, ...task } = (await storage.task(sibling, BACKGROUND_CONTEXT))!;
+    await storage.commit([{ type: "task", value: { ...task, state: { status: "terminal", outcome: { status: "aborted" } } } }], BACKGROUND_CONTEXT);
+  } finally { await storage.close(BACKGROUND_CONTEXT); }
+
+  expect(await compactStandaloneCodingContext(options.session, approved.version, dependencies))
+    .toEqual({ ...approved, compacted: true, replayed: true });
+  await expect(requireNoPendingCodingContextCompaction(bound, { stateDir, workspaceBinding })).resolves.toBeUndefined();
+  expect(faux.state.callCount).toBe(2);
+  const saved = await getCodingSessionStatus({ ...options, includeReceipt: true, includeSavedSource: true }, dependencies);
+  expect(saved.context.compactionPending).toBeUndefined();
+  expect(saved).toMatchObject({ context: { historyCompacted: true }, request: { receipt: old,
+    savedSource: { files: [{ path: "old.ts", content: oldSource }] } } });
+  expect(await compactCodingContext({ ...options, ...short }, dependencies, authorize)).toEqual({ ...short, compacted: false, replayed: true });
+
+  const providerInputs: string[] = [];
+  faux.setResponses([(input) => { providerInputs.push(JSON.stringify(input.messages)); return fauxAssistantMessage("Follow-up answer."); }]);
+  expect(await runCodingSession({ ...options, requestId: "follow-up", prompt: "Continue using recent approved evidence" }, dependencies))
+    .toMatchObject({ status: "done" });
+  expect(providerInputs[0]).toContain("Old fixture task");
+  expect(providerInputs[0]).not.toContain(oldSource.trim());
+  expect(providerInputs[0]).toContain(recentSource);
+  const current = await previewCodingContextCompaction(options, dependencies);
+  expect(await compactCodingContext({ ...options, ...approved }, dependencies, authorize)).toEqual({ ...approved, compacted: true, replayed: true });
+  expect(await previewCodingContextCompaction(options, dependencies)).toEqual(current);
+  await withPausedHarness((_harness, root) => root.configure({ extensions: [] }, BACKGROUND_CONTEXT));
+  await expect(previewCodingContextCompaction(options, dependencies)).rejects.toThrow("does not use the local history summary");
+  await expect(compactCodingContext({ ...options, ...current }, dependencies)).rejects.toThrow("does not use the local history summary");
+  expect(await compactCodingContext({ ...options, ...approved }, dependencies)).toEqual({ ...approved, compacted: true, replayed: true });
+  expect(faux.state.callCount).toBe(3);
+}, 15_000);
 
 test("fresh context preserves archived receipts and safely replays a confirmed reset after later work", async () => {
   const { models, faux } = provider();

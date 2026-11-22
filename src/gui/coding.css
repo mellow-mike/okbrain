@@ -24,6 +24,8 @@
 .coding-panel > summary { cursor: pointer; font-weight: 650; }
 .coding-panel h3 { margin: 0; }
 .coding-panel [hidden] { display: none !important; }
+/* Keep context actions from rewrapping between pointer down and up. */
+.coding-panel [data-context-controls] button:hover:not(:disabled) { font-weight: 560; }
 .coding-form { padding-top: var(--space-4); }
 .coding-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr)); }
 .coding-panel input, .coding-panel select { min-width: 0; }

@@ -390,6 +390,34 @@ async function resetOwnerContext(connection, project, session, isCurrent) {
   await vscode.window.showInformationMessage(`Started fresh context for ${session}. Saved runs remain in Run history.`);
 }
 
+async function compactOwnerContext(connection, project, session, isCurrent) {
+  if (!isCurrent()) return;
+  const preview = await connection.api(pathFor(project, 'compact-context-preview'), { session });
+  if (!isCurrent()) return;
+  const version = preview?.version;
+  if (typeof version !== 'string' || !version) throw new Error('Could not preview local compaction for this session.');
+
+  const recovering = preview.recovering === true;
+  const button = recovering ? 'Resume Compaction' : 'Compact Context';
+  const confirmed = await vscode.window.showWarningMessage(
+    `${recovering ? 'Resume local compaction' : 'Compact context locally'} for session ${session}? ` +
+      'A recap condenses older turns in the active context. The recap runs entirely on this device, and the originals stay in Run history. ' +
+      'Compaction skips sessions with too little older history.',
+    { modal: true }, button);
+  if (confirmed !== button || !isCurrent()) return;
+  const result = await connection.api(pathFor(project, 'compact-context'), { session, version });
+  if (!isCurrent()) return;
+  if (result?.version !== version || typeof result.compacted !== 'boolean') {
+    throw new Error('Could not verify the compaction result. Refresh Run history before trying again.');
+  }
+  if (!result.compacted) {
+    await vscode.window.showInformationMessage(`Session ${session} has too little older history for compaction.`);
+    return;
+  }
+  await vscode.window.showInformationMessage(
+    `${recovering ? 'Recovered local compaction' : 'Compacted context locally'} for ${session}. Saved runs remain in Run history.`);
+}
+
 function contextBudgetLines(context) {
   const lines = [
     ['Estimated active context', context?.estimatedTokens, 0],
@@ -399,6 +427,7 @@ function contextBudgetLines(context) {
   ].flatMap(([label, value, minimum]) => Number.isSafeInteger(value) && value >= minimum
     ? [`${label}: ${value.toLocaleString()} tokens`] : []);
   if (context?.historyCompacted === true) lines.push('Earlier turns are compacted. Saved requests remain in Run history.');
+  if (context?.compactionPending === true) lines.push('Local compaction is awaiting recovery.');
   return lines.length ? ['Session context budget', ...lines] : [];
 }
 
@@ -406,7 +435,7 @@ async function inspectRun(connection, project, selected) {
   const current = ++inspection;
   const team = connection.mode === 'team';
   const isCurrent = () => current === inspection && (!team || connection.current());
-  const resetWorkspace = workspaceRevision;
+  const inspectedWorkspace = workspaceRevision;
   const folders = () => JSON.stringify(localWorkspaceFolders().map(({ uri }) => uri.fsPath));
   const startingFolders = folders();
   const identity = { session: selected.session, requestId: selected.id };
@@ -433,10 +462,12 @@ async function inspectRun(connection, project, selected) {
   else await showText(contents);
 
   if (!isCurrent()) return;
-  const resetEditor = editorRevision;
+  const inspectedEditor = editorRevision;
   const startingEditor = vscode.window.activeTextEditor;
-  const canResetContext = () => !team && isCurrent() && trustedEditor() && resetWorkspace === workspaceRevision &&
-    startingFolders === folders() && resetEditor === editorRevision && startingEditor === vscode.window.activeTextEditor;
+  const idle = run.admitted && run.status !== 'running' && run.status !== 'interrupted' && pi?.pendingRequestIds?.length === 0;
+  const canChangeContext = () => !team && idle && isCurrent() && trustedEditor() && inspectedWorkspace === workspaceRevision &&
+    startingFolders === folders() && inspectedEditor === editorRevision && startingEditor === vscode.window.activeTextEditor;
+  const compactionPending = pi?.context?.compactionPending === true;
   const choices = [{ label: 'Refresh', action: 'refresh' }, { label: 'Open in okbrain', action: 'open' }];
   if (run.status !== 'running' && (run.admitted || pi?.request || (run.status === 'interrupted' && !admissionMissing)))
     choices.push({ label: 'View saved request source', action: 'source-inspect' });
@@ -445,8 +476,10 @@ async function inspectRun(connection, project, selected) {
   if (run.status === 'done') choices.push(
     { label: 'Accept result', action: 'review', decision: 'accepted' },
     { label: 'Request changes', action: 'review', decision: 'changes_requested' });
-  if (canResetContext() && run.admitted && run.status !== 'running' && run.status !== 'interrupted' && pi?.pendingRequestIds?.length === 0)
-    choices.push({ label: 'Start fresh context', action: 'reset-context' });
+  if (canChangeContext()) {
+    if (!compactionPending) choices.push({ label: 'Start fresh context', action: 'reset-context' });
+    choices.push({ label: 'Compact context locally', action: 'compact-context' });
+  }
   if (!team && run.status === 'done' && run.review === 'accepted')
     choices.push({ label: 'Review proposed patch in okbrain', action: 'patch' });
   if (!team && run.review === 'accepted') choices.push({ label: 'Prepare GitHub pull request in okbrain', action: 'github' });
@@ -456,7 +489,8 @@ async function inspectRun(connection, project, selected) {
   if (action.action === 'patch' || action.action === 'github') return openWeb(connection, project, run, action.action);
   if (action.action === 'refresh') return inspectRun(connection, project, run);
   if (action.action === 'source-inspect') return showSavedRequestSource(connection, project, identity, isCurrent);
-  if (action.action === 'reset-context') return resetOwnerContext(connection, project, run.session, canResetContext);
+  if (action.action === 'reset-context') return resetOwnerContext(connection, project, run.session, () => !compactionPending && canChangeContext());
+  if (action.action === 'compact-context') return compactOwnerContext(connection, project, run.session, canChangeContext);
   if (action.action === 'resume') {
     const proceed = await vscode.window.showWarningMessage('Resuming can make another provider call using the saved context.',
       { modal: true }, 'Resume');

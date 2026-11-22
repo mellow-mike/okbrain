@@ -11,8 +11,10 @@ import {
   ApprovedPatchError, approvedPatchBytes, approvedPatchFiles, approvedPatchState, patchDigest, withPreparedPatch, type PatchFileReceipt,
 } from "./approved-patch.ts";
 import {
-  cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, getCodingSessionStatus, getSavedCodingRequestInput, hasCodingCredential,
-  listCodingModels, parseCodingHandoff, previewCodingAttachments, previewCodingContextReset, resetCodingContext, runCodingSession,
+  cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, compactCodingContext,
+  getCodingSessionStatus, getSavedCodingRequestInput, hasCodingCredential, listCodingModels, parseCodingHandoff,
+  previewCodingAttachments, previewCodingContextCompaction, previewCodingContextReset, requireNoPendingCodingContextCompaction,
+  resetCodingContext, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions,
 } from "./durable.ts";
 import { CodingEvaluationError, CodingEvaluations, parseEvaluation, presentEvidence } from "./evaluation.ts";
@@ -663,6 +665,9 @@ export class CodingProjectControl {
       "SELECT id FROM runs WHERE project = ? AND session = ? AND status = 'interrupted' AND id <> ? LIMIT 1", project.id, run.session, run.requestId,
     );
     if (blocking) throw new ProjectControlError(`Resume or cancel interrupted request ${blocking.id} before starting another in this session.`, 409);
+    const identity = this.#session(project, run);
+    const { stateDir, models, workspaceBinding } = this.#dependencies(project, actor);
+    await requireNoPendingCodingContextCompaction(identity, { stateDir, models, workspaceBinding, allowEnvKey: false });
     this.#db.transaction(() => {
       if (prior) {
         this.#write("UPDATE runs SET status = 'running', signature = ?, actor = ?, updated = ?, error = NULL WHERE project = ? AND session = ? AND id = ?",
@@ -680,7 +685,7 @@ export class CodingProjectControl {
       this.#audit(project.id, "submitted", actor.id, run.session, run.requestId);
     })();
     this.#schedule(project, {
-      ...this.#session(project, run), prompt, ...capabilities,
+      ...identity, prompt, ...capabilities,
       ...(selection.packages ? { packageReviews: { packages: selection.packages, id: previewId } } : selection.repository
         ? { repository: { ...selection.repository, id: previewId } }
         : { files: selection.files, filePreviewId: previewId, allowedAttachmentScopes: JSON.parse(project.scopes) as string[] }),
@@ -734,7 +739,7 @@ export class CodingProjectControl {
     return getSavedCodingRequestInput(this.#session(project, run), this.#dependencies(project, actor));
   }
 
-  async #resetContext(project: ProjectRow, body: Json, actor: Actor, preview: boolean, canWrite: () => boolean) {
+  async #changeContext(project: ProjectRow, body: Json, actor: Actor, compact: boolean, preview: boolean, canWrite: () => boolean) {
     const session = field(body, "session", 64);
     const authorize = () => {
       if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to change the session context.", 403);
@@ -742,27 +747,32 @@ export class CodingProjectControl {
     authorize();
     if (this.#active.has(`${project.id}/${session}`) || this.#get(
       "SELECT 1 FROM runs WHERE project = ? AND session = ? AND status IN ('running', 'interrupted') LIMIT 1", project.id, session,
-    )) throw new ProjectControlError("Finish, resume, or cancel active work in this session before starting fresh context.", 409);
+    )) throw new ProjectControlError("Finish, resume, or cancel active work in this session before changing its context.", 409);
     if (this.#get("SELECT 1 FROM session_deletions WHERE project = ? AND session = ?", project.id, session))
       throw new ProjectControlError("This session is being deleted.", 409);
-    const identity = { ...this.#session(project, { session }), handoff: parseCodingHandoff(body.handoff) };
+    const identity = this.#session(project, { session });
     const { stateDir, models, workspaceBinding } = this.#dependencies(project, actor);
     const dependencies = { stateDir, models, workspaceBinding, allowEnvKey: false };
-    if (preview) return previewCodingContextReset(identity, dependencies);
+    const handoff = compact ? undefined : parseCodingHandoff(body.handoff);
+    if (preview) return compact ? previewCodingContextCompaction(identity, dependencies) : previewCodingContextReset({ ...identity, handoff }, dependencies);
 
     const version = field(body, "version", 64);
-    if (!/^[a-f0-9]{64}$/u.test(version)) throw new ProjectControlError("Preview the active context before confirming a reset.");
-    const receiptId = `context-reset-${version}`;
+    if (!/^[a-f0-9]{64}$/u.test(version)) throw new ProjectControlError("Preview the active context before confirming the change.");
+    const receiptId = `context-${compact ? "compaction" : "reset"}-${version}`;
+    const approvedKind = compact ? "context_compaction_approved" : "context_reset_approved";
     const auditActor = (kind: string) => this.#get<{ actor: string }>(
       "SELECT actor FROM audit WHERE project = ? AND session = ? AND request_id = ? AND kind = ? LIMIT 1",
       project.id, session, receiptId, kind,
     )?.actor;
-    const result = await resetCodingContext({ ...identity, version }, dependencies, () => {
+    const approve = () => {
       authorize();
-      if (!auditActor("context_reset_approved")) this.#audit(project.id, "context_reset_approved", actor.id, session, receiptId);
-    });
-    const approvedBy = auditActor("context_reset_approved");
-    if (approvedBy && !auditActor("context_reset")) this.#audit(project.id, "context_reset", approvedBy, session, receiptId);
+      if (!auditActor(approvedKind)) this.#audit(project.id, approvedKind, actor.id, session, receiptId);
+    };
+    const result = compact ? await compactCodingContext({ ...identity, version }, dependencies, approve)
+      : await resetCodingContext({ ...identity, version, handoff }, dependencies, approve);
+    const resultKind = "compacted" in result ? result.compacted ? "context_compaction" : "context_compaction_skipped" : "context_reset";
+    const approvedBy = auditActor(approvedKind);
+    if (approvedBy && !auditActor(resultKind)) this.#audit(project.id, resultKind, approvedBy, session, receiptId);
     return result;
   }
 
@@ -804,6 +814,8 @@ export class CodingProjectControl {
       this.#setRun(project.id, run, actor, "failed", "The server stopped before this request was admitted. Preview and submit it again with the same request ID.");
       return this.#runView(this.#readRun(project.id, run.session, run.requestId));
     }
+    if (inspected.pi?.context.compactionPending)
+      throw new ProjectControlError("Recover the pending context compaction before resuming work in this session.", 409);
     if (!hasCodingCredential(project.provider, this.#dependencies(project, actor)))
       throw new ProjectControlError("Add a provider API key for this project before resuming requests.", 409);
     this.#canSchedule(project, run);
@@ -1462,9 +1474,10 @@ export class CodingProjectControl {
       if (action === "run") return this.#withSession(project, body, () => this.#start(project, body, actor));
       if (action === "inspect") return this.#withSession(project, body, () => this.#inspect(project, body, actor));
       if (action === "source-inspect") return this.#withSession(project, body, () => this.#sourceInspect(project, body, actor));
-      if (action === "reset-context-preview" || action === "reset-context") {
+      if (action === "reset-context-preview" || action === "reset-context" || action === "compact-context-preview" || action === "compact-context") {
         this.#requireOwner(actor);
-        return this.#withSession(project, body, () => this.#resetContext(project, body, actor, action === "reset-context-preview", canWrite));
+        return this.#withSession(project, body, () => this.#changeContext(project, body, actor,
+          action.startsWith("compact-"), action.endsWith("-preview"), canWrite));
       }
       if (action === "resume") return this.#withSession(project, body, () => this.#resume(project, body, actor));
       if (action === "cancel") return this.#withSession(project, body, () => this.#cancel(project, body, actor));

@@ -1197,6 +1197,7 @@ export const operations: readonly Operation[] = [
           : `Estimated active context: ${context.estimatedTokens}/${context.limitTokens} tokens (${context.maxOutputTokens} reserved for output; model window ${context.modelWindowTokens}).`,
       ];
       if (context.historyCompacted) lines.push("Older turns are compacted in the active context. The original transcript is retained.");
+      if (context.compactionPending) lines.push("Local compaction is awaiting recovery. Open this session in the app and choose Compact context locally.");
       const renderUsage = (label: string, tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }) =>
         `${label}: ${tokens.totalTokens} total tokens (${tokens.input} input, ${tokens.output} output, ${tokens.cacheRead} cache read, ${tokens.cacheWrite} cache write).`;
       const sessionUsage = usage.models[`${result.provider}/${result.model}`];

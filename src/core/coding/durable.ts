@@ -5,8 +5,9 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import {
-  AgentDoc, AssistantEntry, CompactionEntry, createRegistry, Harness, InboxDoc, LiveDoc, ResetEntry, ROOT_CONVERSATION_ID, UsageDoc, UserEntry,
-  type Conversation, type Cursor, type LiveState, type SettledSubmissionRecord, type SubmissionId, type SubmissionRecord, type UsageState,
+  AgentDoc, AssistantEntry, CompactionEntry, CompactionTask, createRegistry, Harness, InboxDoc, LiveDoc, ResetEntry, ROOT_CONVERSATION_ID, UsageDoc, UserEntry,
+  type Conversation, type Cursor, type HarnessInspection, type LiveState, type SettledSubmissionRecord, type SubmissionId, type SubmissionRecord,
+  type TaskOutcome, type UsageState,
 } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Database } from "bun:sqlite";
@@ -48,6 +49,9 @@ const maxAttachments = 12;
 const sessionNamePattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const requestIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const contextVersionPattern = /^[a-f0-9]{64}$/u;
+const manualCompactionScope = "okbrain/manual-compaction/v1";
+const manualCompactionPrefix = `${manualCompactionScope}:`;
+const pendingCompactionMessage = "Recover the pending context compaction before continuing in this session.";
 export const maxCodingHandoffBytes = 2048;
 export const maxLiveAnswerLength = 8192;
 const instructions = [
@@ -96,6 +100,8 @@ export type CodingSessionStatusOptions = CodingSessionIdentity & {
 
 export type CodingContextResetPreview = { version: string; handoff?: string };
 export type CodingContextResetResult = { reset: true; version: string; replayed?: true };
+export type CodingContextCompactionPreview = { version: string; recovering?: true };
+export type CodingContextCompactionResult = { version: string; compacted: boolean; replayed?: true };
 
 export type SavedCodingSource = { source: "files"; files: { path: string; content: string }[] }
   | ({ source: "repository" } & RepositoryContextSelection);
@@ -109,7 +115,7 @@ export interface CodingSessionStatusResult {
   usage: UsageState;
   /** Accounting for the main conversation, before adding child conversations. */
   rootUsage: UsageState;
-  context: Partial<CodingBudget> & { estimatedTokens: number; historyCompacted: boolean };
+  context: Partial<CodingBudget> & { estimatedTokens: number; historyCompacted: boolean; compactionPending?: true };
   request?: {
     requestId: string;
     status: SubmissionRecord["status"];
@@ -505,24 +511,40 @@ async function withCodingSession<T>(
   });
 }
 
-function withContextResetSession<T>(
+type SavedContextSession = {
+  session: string; root: Conversation; harness: Harness; storage: SqliteStorage;
+  budget: CodingBudget | undefined; history: ReturnType<typeof codingHistory>;
+};
+
+function withSavedContextSession<T>(
   options: CodingSessionIdentity | string,
   dependencies: CodingDependencies,
-  use: (session: string, root: Conversation, storage: SqliteStorage) => Promise<T>,
+  use: (session: SavedContextSession) => Promise<T>,
 ): Promise<T> {
   const open = (identity: CodingSessionIdentity, bound: CodingDependencies, leasedStorage?: SqliteStorage) =>
-    withCodingSession(identity, bound, false, async ({ root, harness, storage }) => {
+    withCodingSession(identity, bound, false, async ({ root, harness, storage, budget, history }) => {
       if (!root) throw sessionMissing(identity.session);
-      const { tasks, submissions } = await harness.inspect(context);
-      if (tasks.length || submissions.length) {
-        throw new CodingSessionBusyError("Finish or cancel pending coding work in this session before resetting its context.");
-      }
-      return use(identity.session, root, storage);
+      return use({ session: identity.session, root, harness, storage, budget, history });
     }, leasedStorage);
   if (typeof options !== "string") return open(options, dependencies);
   return withCodingStorage(options, dependencies, false, async (storage) => {
     const identity = await standaloneIdentity(options, storage);
     return open(identity, { ...dependencies, workspaceBinding: identity.workspace }, storage);
+  });
+}
+
+function withContextResetSession<T>(
+  options: CodingSessionIdentity | string,
+  dependencies: CodingDependencies,
+  use: (session: string, root: Conversation, storage: SqliteStorage) => Promise<T>,
+): Promise<T> {
+  return withSavedContextSession(options, dependencies, async ({ session, root, harness, storage }) => {
+    const inspection = await harness.inspect(context);
+    requireNoPendingCompaction(inspection);
+    if (inspection.tasks.length || inspection.submissions.length) {
+      throw new CodingSessionBusyError("Finish or cancel pending coding work in this session before resetting its context.");
+    }
+    return use(session, root, storage);
   });
 }
 
@@ -558,7 +580,12 @@ async function previewContextReset(
   }));
 }
 
-class ContextResetAuthorizationError extends CodingError {}
+class ContextChangeAuthorizationError extends CodingError {}
+
+function authorizeContextChange(authorize?: () => void) {
+  try { authorize?.(); }
+  catch (cause) { throw new ContextChangeAuthorizationError("The context change is no longer authorized.", { cause }); }
+}
 
 async function requireResetReceipt(storage: SqliteStorage, root: Conversation, record: SubmissionRecord, handoffMessage: string | undefined) {
   const marker = record.type === "write" && record.status === "done" && record.entry !== undefined
@@ -591,8 +618,7 @@ async function resetContext(
       if (version !== await codingContextVersion(session, root, dependencies, handoff)) {
         throw new CodingError("The coding session context changed or the handoff note differs. Preview it again before resetting it.");
       }
-      try { authorize?.(); }
-      catch (cause) { throw new ContextResetAuthorizationError("The context reset is no longer authorized.", { cause }); }
+      authorizeContextChange(authorize);
       // The lease and idle check prevent Pi from queuing this passive reset behind other work.
       const model = handoffMessage === undefined ? {} : { model: [{ role: "user" as const, content: handoffMessage, timestamp: Date.now() }] };
       const submission = await root.submit({ type: "write", requestId, entry: { kind: ResetEntry.kind, head: "self", ...model } }, context);
@@ -600,7 +626,7 @@ async function resetContext(
       return { reset: true, version };
     });
   } catch (error) {
-    if (error instanceof ContextResetAuthorizationError) throw error.cause;
+    if (error instanceof ContextChangeAuthorizationError) throw error.cause;
     throw error;
   }
 }
@@ -632,6 +658,194 @@ export function resetStandaloneCodingContext(
   session: string, version: string, dependencies: CodingDependencies = {}, authorize?: () => void, handoff?: string,
 ): Promise<CodingContextResetResult> {
   return resetContext(session, version, dependencies, authorize, handoff);
+}
+
+type SavedCompactionTask = HarnessInspection["tasks"][number]["record"];
+
+function manualCompactionVersion(task: SavedCompactionTask): string | undefined {
+  if (task.kind !== CompactionTask.definition.name || task.conversationId !== ROOT_CONVERSATION_ID || task.owner !== undefined ||
+      task.background || !task.input || typeof task.input !== "object" || Array.isArray(task.input)) return;
+  const { reason, instructions } = task.input;
+  if (reason !== "manual" || typeof instructions !== "string" || !instructions.startsWith(manualCompactionPrefix)) return;
+  const version = instructions.slice(manualCompactionPrefix.length);
+  if (version.length === 64 && contextVersionPattern.test(version)) return version;
+}
+
+function pendingCompaction(inspection: HarnessInspection): SavedCompactionTask | undefined {
+  return inspection.tasks.find(({ record }) => manualCompactionVersion(record) !== undefined)?.record;
+}
+
+function requireNoPendingCompaction(inspection: HarnessInspection) {
+  if (pendingCompaction(inspection)) {
+    throw new CodingSessionBusyError(pendingCompactionMessage);
+  }
+}
+
+/** Check unfinished manual compactions under the session lease before allocating a new run. */
+export async function requireNoPendingCodingContextCompaction(options: CodingSessionIdentity, dependencies: CodingDependencies = {}): Promise<void> {
+  validateOptions(options);
+  if (dependencies.workspaceBinding !== undefined && options.workspace !== dependencies.workspaceBinding) {
+    throw new CodingError("The authorized workspace path changed since this project was registered.");
+  }
+  try {
+    await withCodingStorage(options.session, dependencies, false, async (storage) => {
+      if (!await storage.conversation(ROOT_CONVERSATION_ID, context)) return;
+      const saved = await standaloneIdentity(options.session, storage);
+      const workspace = dependencies.workspaceBinding ?? await canonicalWorkspace(options.workspace);
+      if (saved.workspace !== workspace || saved.provider !== options.provider || saved.model !== options.model) {
+        throw new CodingError(`Coding session ${options.session} belongs to a different workspace or model.`);
+      }
+      if (options.thinkingLevel !== undefined && options.thinkingLevel !== (saved.thinkingLevel ?? "off")) {
+        throw new CodingError(`Coding session ${options.session} uses a different reasoning level.`);
+      }
+      for (const status of ["pending", "running", "waiting", "completing"] as const) {
+        let cursor: Cursor | undefined;
+        do {
+          const page = await storage.scanTasks({ conversationId: ROOT_CONVERSATION_ID, kind: CompactionTask.definition.name,
+            background: false, status }, 64, cursor, context);
+          if (page.items.some((task) => manualCompactionVersion(task) !== undefined)) {
+            throw new CodingSessionBusyError(pendingCompactionMessage);
+          }
+          cursor = page.next;
+        } while (cursor);
+      }
+    });
+  } catch (error) {
+    if (!(error instanceof CodingSessionMissingError)) throw error;
+  }
+}
+
+async function compactionVersion(session: SavedContextSession, dependencies: CodingDependencies): Promise<string> {
+  const current = await codingContextVersion(session.session, session.root, dependencies, undefined);
+  return createHash("sha256").update(JSON.stringify([manualCompactionScope, current])).digest("hex");
+}
+
+async function savedCompaction({ root, storage }: SavedContextSession, version: string): Promise<SavedCompactionTask | undefined> {
+  let cursor: Cursor | undefined;
+  let match: SavedCompactionTask | undefined;
+  do {
+    const page = await storage.scanTasks({ conversationId: root.id, kind: CompactionTask.definition.name, background: false }, 64, cursor, context);
+    for (const task of page.items) {
+      if (manualCompactionVersion(task) !== version) continue;
+      if (match) throw new CodingError("The saved context compaction receipt is ambiguous.");
+      match = task;
+    }
+    cursor = page.next;
+  } while (cursor);
+  return match;
+}
+
+async function requireLocalCompaction({ root, budget, history }: SavedContextSession) {
+  if (!budget) throw new CodingError("The saved model is unavailable for local context compaction.");
+  if (!(await root.agent(context)).extensions.some(({ name }) => name === history.name)) {
+    throw new CodingError("The saved session does not use the local history summary. Use Start fresh context or open a new session.");
+  }
+}
+
+function requireCompactionIdle(inspection: HarnessInspection, recovery?: SavedCompactionTask) {
+  // Pi's scheduling controls resume all tasks and submissions in the harness.
+  if (inspection.submissions.length || inspection.tasks.length !== (recovery ? 1 : 0) ||
+      (recovery && inspection.tasks[0]?.record.id !== recovery.id)) {
+    throw new CodingSessionBusyError("Finish or cancel other pending coding work before compacting this session.");
+  }
+  if (recovery && recovery.state.status !== "completing") {
+    const checkpoint = recovery.state.checkpoint;
+    if (recovery.state.status === "waiting" || !checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint) || checkpoint.phase !== "select") {
+      throw new CodingError("The pending compaction cannot be resumed locally. Open a new session to continue coding.");
+    }
+  }
+}
+
+async function compactedReceipt({ root, storage }: SavedContextSession, outcome: TaskOutcome<unknown>): Promise<boolean> {
+  if (outcome.status !== "completed") throw new CodingError("Pi Durable could not finish local context compaction.");
+  const { result } = outcome;
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    if (Object.keys(result).length === 0) return false;
+    if ("submissionId" in result && typeof result.submissionId === "number" && Number.isSafeInteger(result.submissionId)) {
+      const saved = await storage.submission(result.submissionId as SubmissionId, context);
+      if (saved?.conversationId === root.id && saved.type === "write") {
+        if (saved.status === "unanswered" && saved.reason === "stale") {
+          throw new CodingError("The coding session context changed before compaction was saved. Preview it again.");
+        }
+        const marker = saved.status === "done" && saved.entry !== undefined
+          ? (await storage.entry(root.id, saved.entry, context))?.entry : undefined;
+        if (marker && CompactionEntry.is(marker) && marker.data?.reason === "manual") return true;
+      }
+    }
+  }
+  throw new CodingError("The saved context compaction receipt could not be verified.");
+}
+
+function previewCompaction(
+  options: CodingSessionIdentity | string, dependencies: CodingDependencies,
+): Promise<CodingContextCompactionPreview> {
+  return withSavedContextSession(options, dependencies, async (session) => {
+    const inspection = await session.harness.inspect(context);
+    const recovery = pendingCompaction(inspection);
+    requireCompactionIdle(inspection, recovery);
+    await requireLocalCompaction(session);
+    const version = await compactionVersion(session, dependencies);
+    if (recovery && manualCompactionVersion(recovery) !== version) {
+      throw new CodingError("The coding session context changed before the pending compaction finished.");
+    }
+    return recovery ? { version, recovering: true } : { version };
+  });
+}
+
+async function compactContext(
+  options: CodingSessionIdentity | string, version: string, dependencies: CodingDependencies, authorize?: () => void,
+): Promise<CodingContextCompactionResult> {
+  if (typeof version !== "string" || version.length !== 64 || !contextVersionPattern.test(version)) {
+    throw new CodingError("Preview the current coding session context before compacting it.");
+  }
+  try {
+    return await withSavedContextSession(options, dependencies, async (session) => {
+      const { harness, root } = session;
+      const saved = await savedCompaction(session, version);
+      if (saved?.state.status === "terminal") {
+        return { version, compacted: await compactedReceipt(session, saved.state.outcome), replayed: true };
+      }
+      requireCompactionIdle(await harness.inspect(context), saved);
+      await requireLocalCompaction(session);
+      if (version !== await compactionVersion(session, dependencies)) {
+        throw new CodingError("The coding session context changed. Preview it again before compacting it.");
+      }
+      authorizeContextChange(authorize);
+      // Pi persists the instructions with the task. Our local history hook does not use them in the summary.
+      const id = saved?.id ?? await root.compact(`${manualCompactionPrefix}${version}`, context);
+      const { state } = await harness.waitForTask(id, context);
+      return { version, compacted: await compactedReceipt(session, state.outcome), ...(saved ? { replayed: true as const } : {}) };
+    });
+  } catch (error) {
+    if (error instanceof ContextChangeAuthorizationError) throw error.cause;
+    throw error;
+  }
+}
+
+/** Preview a compactable project session or the approved compaction it can recover. */
+export function previewCodingContextCompaction(
+  options: CodingSessionIdentity, dependencies: CodingDependencies = {},
+): Promise<CodingContextCompactionPreview> {
+  return previewCompaction(options, dependencies);
+}
+
+/** Compact an existing project conversation locally, or recover its approved operation. */
+export function compactCodingContext(
+  { version, ...options }: CodingSessionIdentity & { version: string }, dependencies: CodingDependencies = {}, authorize?: () => void,
+): Promise<CodingContextCompactionResult> {
+  return compactContext(options, version, dependencies, authorize);
+}
+
+export function previewStandaloneCodingContextCompaction(
+  session: string, dependencies: CodingDependencies = {},
+): Promise<CodingContextCompactionPreview> {
+  return previewCompaction(session, dependencies);
+}
+
+export function compactStandaloneCodingContext(
+  session: string, version: string, dependencies: CodingDependencies = {}, authorize?: () => void,
+): Promise<CodingContextCompactionResult> {
+  return compactContext(session, version, dependencies, authorize);
 }
 
 async function savedUserContent(storage: SqliteStorage, submission: SubmissionRecord, entryContext = context): Promise<string | undefined> {
@@ -798,6 +1012,8 @@ export async function runCodingSession(
     if (existing?.status === "done" || existing?.status === "unanswered") {
       return codingReceipt(storage, existing, identity);
     }
+    const inspection = await harness.inspect(context);
+    requireNoPendingCompaction(inspection);
     if (!budget) throw new CodingError(`Pi 1.0 does not list model ${options.model} for ${provider}.`);
     if (!hasCodingCredential(provider, dependencies)) {
       throw new CodingError(dependencies.allowEnvKey === false
@@ -809,7 +1025,6 @@ export async function runCodingSession(
     dependencies.signal?.throwIfAborted();
     let packageParts: ReturnType<typeof confirmedPackageReviewParts> | undefined;
     if (!existing && !packageTask && hasNewInput) {
-      const inspection = await harness.inspect(context);
       const pending = packageReviewIds(inspection)[0] ?? inspection.submissions.find(({ conversationId }) => conversationId === ROOT_CONVERSATION_ID)?.requestId;
       if (pending) throw new CodingError(`Resume pending request ${pending} before starting another request in this session.`);
       const input = dependencies.preparedInput ?? await prepareCodingInput(options, workspace);
@@ -918,6 +1133,9 @@ export async function cancelCodingRequest(
     const identity = { session: options.session, requestId: options.requestId };
     const packageTask = await packageReviewTask(harness, options.requestId, context);
     if (packageTask) {
+      const task = await harness.getTask(packageTask, context);
+      if (task?.state.status === "terminal") return { ...identity, ...packageReviewReceipt(task.state.outcome) };
+      requireNoPendingCompaction(await harness.inspect(context));
       await harness.abortTask(packageTask, context);
       const settled = await harness.waitForTask(packageTask, context);
       return { ...identity, ...packageReviewReceipt(settled.state.outcome) };
@@ -925,6 +1143,7 @@ export async function cancelCodingRequest(
     const saved = root && await storage.submissionByRequest(root.id, options.requestId, context);
     if (!root || !saved) throw new CodingError(`No saved request ${options.requestId} exists in coding session ${options.session}.`);
     if (saved.status === "done" || saved.status === "unanswered") return codingReceipt(storage, saved, identity);
+    requireNoPendingCompaction(await harness.inspect(context));
     await root.abort(context);
     const settled = await storage.submissionByRequest(root.id, options.requestId, context);
     if (settled?.status !== "done" && settled?.status !== "unanswered")
@@ -982,6 +1201,7 @@ export async function getCodingSessionStatus(
         ...budget,
         estimatedTokens: estimateCodingContext(view.messages),
         historyCompacted: view.head !== undefined && CompactionEntry.is(view.head),
+        ...(pendingCompaction(inspection) ? { compactionPending: true as const } : {}),
       },
     };
     if (options.requestId !== undefined) {

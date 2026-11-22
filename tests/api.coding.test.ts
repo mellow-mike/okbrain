@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createApiServer, type ApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
-import { listCodingModels, maxLiveAnswerLength, runCodingSession, type CodingContextResetPreview, type CodingContextResetResult, type CodingLiveAnswer, type CodingSessionStatusResult, type SavedCodingRequestInput } from "../src/core/coding/durable.ts";
+import {
+  listCodingModels, maxLiveAnswerLength, runCodingSession,
+  type CodingContextCompactionPreview, type CodingContextCompactionResult, type CodingContextResetPreview,
+  type CodingContextResetResult, type CodingLiveAnswer, type CodingSessionStatusResult, type SavedCodingRequestInput,
+} from "../src/core/coding/durable.ts";
 import type { CodingTaskProgress } from "../src/core/coding/task-progress.ts";
 import type { TeamPreferences, TeamStatus } from "../src/core/coding/team-listener.ts";
 import { loadConfig, saveConfig } from "../src/core/config.ts";
@@ -504,7 +508,87 @@ test("a project owner can review a handoff while keeping archived runs and revie
   }
 });
 
-test("a local standalone context reset preserves the earlier CLI run and fixed identity", async () => {
+test("a project owner can compact reviewed context locally without changing archived evidence", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-project-compaction-");
+  const models = createModels();
+  const model = "local-compaction-fixture";
+  const faux = fauxProvider({ provider: "openai", models: [{ id: model, contextWindow: 4096, maxTokens: 128 }] });
+  models.setProvider(faux.provider);
+  const api = createApiServer({ bundle: root, port: 0, token: ownerToken, coding: { stateDir, models } });
+  const hold = Promise.withResolvers<void>();
+  const session = "reviewed-context";
+  const answer = "Recent context. ".repeat(340);
+  try {
+    const { call, request } = apiClient(api.url);
+    const project = await call<Project>("/projects", { workspace, title: "Local compaction", scopes: ["src"], provider: "openai", model });
+    const path = "/projects/" + project.id;
+    const preview = path + "/compact-context-preview";
+    const apply = path + "/compact-context";
+    const member = await call<{ token: string }>(path + "/members", { name: "compaction-reviewer" });
+    const syntax = { session, version: "a".repeat(64) };
+    expect((await request(preview, { session }, member.token)).status).toBe(403);
+    expect((await request(apply, syntax, member.token)).status).toBe(403);
+    expect((await request(apply, { ...syntax, version: "unreviewed" })).status).toBe(400);
+
+    async function send(requestId: string, files: string[], prompt: string) {
+      const source = { source: "files", files };
+      const { id } = await call<{ id: string }>(path + "/preview", source);
+      await call(path + "/run", { ...source, session, requestId, prompt, previewId: id, approved: true });
+    }
+    const inspect = (requestId: string) => waitFor(
+      () => call<Inspection & { pi?: CodingSessionStatusResult }>(path + "/inspect", { session, requestId }),
+      ({ run }) => run.status !== "running",
+    );
+    faux.setResponses([async () => { await hold.promise; return fauxAssistantMessage("The original answer is saved."); }]);
+    await send("original", ["src/example.ts"], "Review the original source.");
+    expect((await request(preview, { session })).status).toBe(409);
+    hold.resolve();
+    expect((await inspect("original")).run.status).toBe("done");
+    await call(path + "/review", { session, requestId: "original", decision: "accepted" }, member.token);
+    const older = { session, ...await call<CodingContextCompactionPreview>(preview, { session }) };
+
+    faux.setResponses([fauxAssistantMessage(answer)]);
+    await send("recent", [], "Record the latest review.");
+    expect((await inspect("recent")).pi?.context.historyCompacted).toBe(false);
+    expect((await request(apply, older)).status).toBe(409);
+    const approval = { session, ...await call<CodingContextCompactionPreview>(preview, { session }) };
+    const reset = await call<CodingContextResetPreview>(path + "/reset-context-preview", { session });
+    expect((await request(apply, { session, version: reset.version })).status).toBe(409);
+    expect((await request(path + "/reset-context", approval)).status).toBe(409);
+    expect(await call<CodingContextCompactionResult>(apply, approval)).toEqual({ compacted: true, version: approval.version });
+    expect((await inspect("recent")).pi?.context).toMatchObject({ historyCompacted: true });
+    expect(faux.state.callCount).toBe(2);
+    expect(await call<CodingContextCompactionResult>(apply, approval)).toEqual({ compacted: true, version: approval.version, replayed: true });
+
+    const saved = { session, requestId: "original" };
+    expect(await call<Inspection>(path + "/inspect", saved, member.token)).toMatchObject({
+      run: { status: "done", review: "accepted" }, pi: { request: { receipt: { text: "The original answer is saved." } } },
+    });
+    expect(await call<SavedCodingRequestInput>(path + "/source-inspect", saved, member.token)).toMatchObject({
+      groups: [{ files: [{ path: "src/example.ts", text: "export const answer = 42;\n" }] }],
+    });
+    faux.setResponses([(input) => {
+      const context = JSON.stringify(input.messages);
+      expect(context).toContain("Older coding turns are retained locally");
+      expect(context).toContain(answer);
+      expect(context).not.toContain("export const answer = 42");
+      return fauxAssistantMessage("Continued with the local recap.");
+    }]);
+    await send("after-compaction", [], "Continue reviewing the task.");
+    expect((await inspect("after-compaction")).pi?.request?.receipt).toMatchObject({ text: "Continued with the local recap." });
+    const audit = await call<{ kind: string; request_id?: string }[]>(path + "/audit");
+    expect(audit.filter(({ kind }) => kind.startsWith("context_compaction"))).toMatchObject([
+      { kind: "context_compaction", request_id: `context-compaction-${approval.version}` },
+      { kind: "context_compaction_approved", request_id: `context-compaction-${approval.version}` },
+    ]);
+  } finally {
+    hold.resolve();
+    await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a local standalone context reset and compaction preserve earlier CLI runs and fixed identity", async () => {
   const { root, workspace, stateDir } = await fixture("okb-standalone-context-reset-");
   const models = createModels();
   const faux = fauxProvider({ provider: "openai", models: [{ id: "standalone-reset-fixture" }] });
@@ -518,6 +602,12 @@ test("a local standalone context reset preserves the earlier CLI run and fixed i
     const { call, request } = apiClient(api.url);
     faux.setResponses([fauxAssistantMessage("Original CLI receipt before reset.")]);
     await runCodingSession({ ...identity, requestId: first.requestId, prompt: "Original CLI evidence review.", files: ["src/example.ts"] }, { stateDir, models });
+    const compact = { session: identity.session, ...await call<CodingContextCompactionPreview>(path + "/compact-context-preview", { session: identity.session }) };
+    const readonlyClient = apiClient(readonly.url);
+    expect((await readonlyClient.request(path + "/compact-context-preview", { session: identity.session })).status).toBe(403);
+    expect((await readonlyClient.request(path + "/compact-context", compact)).status).toBe(403);
+    expect(await call<CodingContextCompactionResult>(path + "/compact-context", compact)).toEqual({ compacted: false, version: compact.version });
+    expect(await call<CodingContextCompactionResult>(path + "/compact-context", compact)).toEqual({ compacted: false, version: compact.version, replayed: true });
     const { version } = await call<{ version: string }>(path + "/reset-context-preview", { session: identity.session });
     const approval = { session: identity.session, version };
     expect(await call<CodingContextResetPreview>(path + "/reset-context-preview", { session: identity.session, handoff: "  \r\n\t" })).toEqual({ version });
