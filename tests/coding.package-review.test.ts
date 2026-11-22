@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createApiServer } from "../src/api.ts";
-import { cancelCodingRequest, getCodingSessionStatus, runCodingSession, type CodingSessionResult } from "../src/core/coding/durable.ts";
+import { cancelCodingRequest, getCodingSessionStatus, listStandaloneCodingRequests, runCodingSession, type CodingSessionResult } from "../src/core/coding/durable.ts";
 import { previewPackageReviews } from "../src/core/coding/package-review.ts";
 
 async function fixture() {
@@ -58,6 +58,10 @@ test("only sends each reviewed package its own source and recovers durable work 
     const inFlight = await getCodingSessionStatus(options, dependencies);
     expect(inFlight.pendingRequestIds).toEqual([options.requestId]);
     expect(inFlight.request?.status).toBe("placed");
+    expect((await listStandaloneCodingRequests(options.session, dependencies)).requests).toEqual([
+      { requestId: options.requestId, kind: "package-review", status: "placed" },
+      { requestId: "parent-context", kind: "request", status: "done" },
+    ]);
     for (const { path } of packages) await rm(join(workspace, path));
 
     faux.setResponses(Array.from({ length: 2 }, () => (input) => {
@@ -85,6 +89,9 @@ test("only sends each reviewed package its own source and recovers durable work 
     const settled = await getCodingSessionStatus({ ...options, includeReceipt: true }, dependencies);
     expect(settled.pendingRequestIds).toEqual([]);
     expect(settled.request?.receipt).toEqual(receipt);
+    expect((await listStandaloneCodingRequests(options.session, dependencies)).requests[0]).toMatchObject({
+      requestId: options.requestId, kind: "package-review", status: "done",
+    });
     if (parent.status !== "done") throw new Error(parent.reason);
     const modelKey = `${options.provider}/${options.model}`;
     expect(settled.rootUsage.models[modelKey]?.totalTokens).toBe(parent.usage.totalTokens);

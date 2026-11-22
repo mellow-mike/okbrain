@@ -20,6 +20,10 @@ declare module "*/coding.js" {
   const text: string;
   export default text;
 }
+declare module "*/coding-standalone.js" {
+  const text: string;
+  export default text;
+}
 declare module "*/coding-evaluation.js" {
   const text: string;
   export default text;

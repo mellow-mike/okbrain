@@ -25,6 +25,10 @@ Anthropic, and Google Gemini use Pi's model catalogs and explicit credentials.
 The app and CLI report Pi Durable status, active context estimates, and
 recorded usage. Run history shows usage for the selected request and the full
 session, including main and child conversation totals.
+Standalone transcripts share per-user storage between the CLI and the local
+Mac and web apps. Only the local operator can inspect their saved prompts and
+source or start, resume, and cancel requests. The app recovers the workspace
+and model binding from Pi's stored agent configuration.
 Compaction reduces active context while preserving the original transcript.
 The project control plane scopes credentials, members, worker runs, and
 review decisions to registered projects. Independent package review uses Pi

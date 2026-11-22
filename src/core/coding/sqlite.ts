@@ -24,9 +24,9 @@ function executor(database: Database, execute: Execute): SqliteExecutor {
   };
 }
 
-export function openDurableDatabase(path: string): SqliteDatabase {
+export function openDurableDatabase(path: string, create = true): SqliteDatabase {
   ensureExtensionCapableSqlite();
-  const database = new Database(path, { strict: true });
+  const database = new Database(path, { strict: true, readwrite: true, create });
   try {
     database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL");
   } catch (error) {

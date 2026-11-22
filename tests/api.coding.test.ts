@@ -2,10 +2,10 @@ import { expect, test } from "bun:test";
 import { createAssistantMessageEventStream, createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
-import { listCodingModels, maxLiveAnswerLength, type CodingLiveAnswer } from "../src/core/coding/durable.ts";
+import { listCodingModels, maxLiveAnswerLength, runCodingSession, type CodingLiveAnswer, type CodingSessionStatusResult } from "../src/core/coding/durable.ts";
 
 const ownerToken = "local-operator-test";
 type Project = { id: string; workspace: string; credential: string };
@@ -53,6 +53,167 @@ function apiClient(base: string) {
   };
   return { request, call };
 }
+
+test("local coding opens existing standalone Pi receipts and admits app requests only after a fresh source approval", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-standalone-app-");
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: "standalone-test" }] });
+  models.setProvider(faux.provider);
+  const identity = { session: "standalone", workspace, provider: "openai", model: "standalone-test" };
+  faux.setResponses([() => fauxAssistantMessage("Existing standalone answer.")]);
+  await runCodingSession({ ...identity, requestId: "cli-original", prompt: "Original task.", files: ["src/example.ts"] }, { stateDir, models });
+  const api = createApiServer({
+    bundle: workspace, port: 0, token: ownerToken, standaloneCoding: { stateDir, models }, coding: { models, stateDir: join(root, "projects") },
+  });
+  const readonly = createApiServer({ bundle: workspace, readonly: true, port: 0, token: ownerToken, standaloneCoding: { stateDir, models } });
+  type View = {
+    identity?: Pick<typeof identity, "session" | "workspace" | "provider" | "model">;
+    requests: { requestId: string; status: string }[];
+    pi?: CodingSessionStatusResult;
+    active?: { status: string; cancelled?: boolean; error?: string };
+  };
+  try {
+    const { call, request } = apiClient(api.url);
+    expect((await request("/standalone", undefined, null)).status).toBe(401);
+    const dashboard = await request("/standalone");
+    expect(dashboard.headers.get("cache-control")).toBe("no-store");
+    expect(await dashboard.json()).toMatchObject({
+      result: { sessions: [{ ...identity, workspace: expect.any(String), state: "ready" }] },
+    });
+    const bearer = await fetch(new URL("api/coding/standalone", api.url), {
+      headers: { authorization: "Bearer " + ownerToken },
+    });
+    expect(bearer.status).toBe(403);
+    const project = await call<Project>("/projects", { workspace, title: "Separate team space", provider: "openai", model: "standalone-test" });
+    const member = await call<{ token: string }>("/projects/" + project.id + "/members", { name: "reviewer" });
+    expect((await request("/standalone", undefined, member.token)).status).toBe(403);
+    expect((await request("/standalone/inspect", { session: "../projects" })).status).toBe(400);
+    const first = await call<View>("/standalone/inspect", { session: identity.session, requestId: "cli-original" });
+    expect(first.requests).toEqual([expect.objectContaining({ requestId: "cli-original", status: "done" })]);
+    expect(first.pi?.request?.receipt).toMatchObject({ text: "Existing standalone answer." });
+    expect(faux.state.callCount).toBe(1);
+
+    const source = { workspace, source: "files", files: ["src/example.ts"] };
+    const preview = await call<{ id: string }>("/standalone/preview", source);
+    const task = { ...source, ...identity, requestId: "app-follow-up", prompt: "Review the current fixture.", previewId: preview.id };
+    expect((await request("/standalone/run", task)).status).toBe(400);
+    expect((await apiClient(readonly.url).request("/standalone/run", { ...task, approved: true })).status).toBe(403);
+    await writeFile(join(workspace, "src", "example.ts"), "export const answer = 99;\n");
+    expect((await request("/standalone/run", { ...task, approved: true })).status).toBe(409);
+    expect(faux.state.callCount).toBe(1);
+    const revised = await call<{ id: string }>("/standalone/preview", source);
+    const approved = { ...task, previewId: revised.id, approved: true };
+    faux.setResponses([(prompt) => {
+      expect(JSON.stringify(prompt.messages)).toContain("answer = 99");
+      return fauxAssistantMessage("App follow-up answer.");
+    }]);
+    expect(await call("/standalone/run", approved)).toMatchObject({ requestId: task.requestId, status: "running" });
+    const result = await waitFor(
+      () => call<View>("/standalone/inspect", { session: identity.session, requestId: task.requestId }),
+      (view) => view.pi?.request?.status === "done",
+    );
+    expect(result.pi?.request).toMatchObject({
+      status: "done", receipt: { text: "App follow-up answer." },
+      savedPrompt: task.prompt, savedSource: { source: "files", files: [{ path: "src/example.ts", content: "export const answer = 99;\n" }] },
+    });
+    expect(faux.state.callCount).toBe(2);
+    expect((await request("/standalone/cancel", { session: identity.session, requestId: task.requestId })).status).toBe(409);
+    await call("/standalone/run", { ...approved, prompt: "A different request cannot reuse this ID." });
+    const duplicate = await waitFor(
+      () => call<View>("/standalone/inspect", { session: identity.session, requestId: task.requestId }),
+      (view) => view.active?.status === "failed",
+    );
+    expect(duplicate.active?.error).toContain("request ID is already saved");
+    expect(faux.state.callCount).toBe(2);
+
+    const modelStarted = Promise.withResolvers<void>();
+    faux.setResponses([(_input, options) => new Promise((resolve) => {
+      modelStarted.resolve();
+      const interrupted = () => resolve(fauxAssistantMessage("", { stopReason: "aborted" }));
+      if (options?.signal?.aborted) interrupted();
+      else options?.signal?.addEventListener("abort", interrupted, { once: true });
+    })]);
+    const pending = { session: identity.session, requestId: "cancel-app-request" };
+    await call("/standalone/run", { ...approved, ...pending });
+    await modelStarted.promise;
+    await call("/standalone/cancel", pending);
+    const cancelled = await waitFor(
+      () => call<View>("/standalone/inspect", pending),
+      (view) => view.active?.cancelled === true && view.pi?.request?.status === "unanswered",
+    );
+    expect(cancelled.active).toMatchObject({ status: "unanswered", cancelled: true });
+    expect(cancelled.pi?.pendingRequestIds).toEqual([]);
+    expect(faux.state.callCount).toBe(3);
+  } finally {
+    await Promise.all([api.stop(), readonly.stop()]);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the local coding app resumes an interrupted standalone request after the workspace is removed", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-standalone-recovery-");
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: "standalone-replay" }] });
+  models.setProvider(faux.provider);
+  const identity = { session: "legacy", requestId: "interrupted" };
+  const options = { ...identity, workspace, provider: "openai", model: "standalone-replay", prompt: "Read the saved fixture.", files: ["src/example.ts"] };
+  const script = `
+    import { createModels, fauxProvider } from "@earendil-works/pi-ai";
+    import { runCodingSession } from "./src/core/coding/durable.ts";
+    const { options, stateDir } = JSON.parse(process.argv.at(-1));
+    const models = createModels();
+    const faux = fauxProvider({ provider: options.provider, models: [{ id: options.model }] });
+    models.setProvider(faux.provider);
+    faux.setResponses([() => {
+      console.log("generation-started");
+      return new Promise(() => {});
+    }]);
+    const keepAlive = setInterval(() => {}, 1000);
+    try { await runCodingSession(options, { stateDir, models }); }
+    finally { clearInterval(keepAlive); }
+  `;
+  const child = Bun.spawn([process.execPath, "-e", script, "--", JSON.stringify({ options, stateDir })], {
+    cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "inherit",
+  });
+  const timeout = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  const api = createApiServer({ bundle: root, port: 0, token: ownerToken, standaloneCoding: { stateDir, models } });
+  try {
+    const reader = child.stdout.getReader();
+    const marker = await reader.read();
+    reader.releaseLock();
+    expect(new TextDecoder().decode(marker.value).trim()).toBe("generation-started");
+    const { call, request } = apiClient(api.url);
+    expect(await call("/standalone")).toMatchObject({ sessions: [{ session: "legacy", state: "busy" }] });
+    expect(await call("/standalone/inspect", identity)).toEqual({ state: "busy", requests: [] });
+    child.kill("SIGKILL");
+    await child.exited;
+    await rm(workspace, { recursive: true, force: true });
+    type Inspection = { pi?: CodingSessionStatusResult };
+    const inspect = () => call<Inspection>("/standalone/inspect", identity);
+    expect(await inspect()).toMatchObject({
+      requests: [{ requestId: identity.requestId, status: "placed" }],
+      pi: { pendingRequestIds: [identity.requestId], request: {
+        savedPrompt: options.prompt, savedSource: { source: "files", files: [{ path: "src/example.ts", content: "export const answer = 42;\n" }] },
+      } },
+    });
+    expect((await request("/standalone/resume", identity)).status).toBe(400);
+    expect(faux.state.callCount).toBe(0);
+    faux.setResponses([(input) => {
+      expect(JSON.stringify(input.messages)).toContain("answer = 42");
+      return fauxAssistantMessage("Recovered the standalone request.");
+    }]);
+    expect(await call("/standalone/resume", { ...identity, approved: true })).toMatchObject({ status: "running" });
+    const settled = await waitFor(inspect, (view) => view.pi?.request?.status === "done");
+    expect(settled.pi?.request?.receipt).toMatchObject({ text: "Recovered the standalone request." });
+    expect(faux.state.callCount).toBe(1);
+  } finally {
+    clearTimeout(timeout);
+    child.kill("SIGKILL");
+    await child.exited;
+    await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 20_000);
 
 test("browser and IDE share approved, project-scoped Pi runs and authenticated review", async () => {
   const { root, workspace, stateDir } = await fixture("okb-api-coding-");

@@ -13,6 +13,14 @@ For explicit files and repository excerpts, you can let the model look up line n
 
 Use **Project settings** to rotate or remove an API key, inspect the audit log, or set transcript retention. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.
 
+### Open a standalone session
+
+In the Mac or local web app, open **Coding → Standalone sessions** to open an existing `okb code` session or start a new one without registering a project. The same session name opens the same private transcript from either surface. An existing session keeps its workspace, provider, and model. Standalone requests run on the local operator’s computer. Registered projects provide team access, audit and review records, and worker isolation.
+
+Choose a workspace, enter a task, and preview explicit files or tracked repository excerpts. Check the source and approve sending it with the task and the active history. The app uses the selected provider’s environment key or API key saved in **Settings → AI providers**. Inspect the saved task, source, response, and usage in **Run history**.
+
+After an interruption, inspect the saved task and source before choosing **Resume request**. Pi uses the saved bytes, so you can resume even if the original workspace is absent. **Cancel request** withdraws a waiting or running request. If a session is open in another invocation, wait for that invocation to finish before refreshing the list.
+
 ## Give a team member access
 
 Save a project-specific provider API key and create a token for the member in **Project settings → Team access**. Copy the token when it appears. Each token grants access to a single project and expires after seven days. The operator can revoke it before then.

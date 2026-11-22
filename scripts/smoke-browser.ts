@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium, type Browser, type Page } from "playwright";
 import { createApiServer } from "../src/api.ts";
+import { runCodingSession } from "../src/core/coding/durable.ts";
 import { loadConfig } from "../src/core/config.ts";
 import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/core/engine/cache-settings.ts";
 
@@ -16,7 +18,11 @@ process.env.LOCALAPPDATA = join(root, "data");
 const bundle = join(root, "brain");
 const postgresFixture = process.env.OKB_SMOKE_CACHE_URL;
 await mkdir(bundle);
-const server = createApiServer({ bundle, port: 0 });
+const standaloneState = join(root, "standalone-coding");
+const standaloneModels = createModels();
+const standaloneFaux = fauxProvider({ provider: "openai", models: [{ id: "browser-coding-fixture" }] });
+standaloneModels.setProvider(standaloneFaux.provider);
+const server = createApiServer({ bundle, port: 0, standaloneCoding: { stateDir: standaloneState, models: standaloneModels } });
 const finishAnswer = Promise.withResolvers<void>();
 let answerSource = "";
 const chatFixture = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
@@ -502,6 +508,121 @@ try {
   await page.getByRole("combobox", { name: "Provider", exact: true }).selectOption("google");
   assert.equal(await page.getByRole("combobox", { name: "Model", exact: true }).inputValue(), "gemini-3.5-flash-lite");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+
+  process.env.OPENAI_API_KEY = "standalone-browser-fixture-only";
+  const workspace = join(root, "coding-workspace");
+  await mkdir(workspace);
+  const file = join(workspace, "browser.ts");
+  const snapshot = "export const sourceMarker = 'original browser fixture';\n";
+  await writeFile(file, snapshot);
+  const standaloneIdentity = { workspace, session: "existing-cli", provider: "openai", model: "browser-coding-fixture" };
+  standaloneFaux.setResponses([fauxAssistantMessage("Saved CLI answer.")]);
+  await runCodingSession({
+    ...standaloneIdentity, requestId: "cli-complete", prompt: "Saved CLI task.", files: ["browser.ts"],
+  }, { stateDir: standaloneState, models: standaloneModels });
+  await page.getByRole("link", { name: "Standalone sessions", exact: true }).click();
+  await page.getByRole("heading", { name: "Standalone sessions", exact: true }).waitFor();
+  await page.getByText("Saved CLI answer.", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("combobox", { name: "Saved session" }).inputValue(), "existing-cli");
+  assert.equal(await page.getByRole("combobox", { name: "Model", exact: true }).isDisabled(), true);
+  await page.getByText("Saved task and source", { exact: true }).click();
+  await page.getByText("Saved CLI task.", { exact: true }).waitFor();
+  await page.getByText("browser.ts", { exact: true }).click();
+  await page.getByText(snapshot.trim(), { exact: true }).waitFor();
+
+  const interrupted = Bun.spawn([process.execPath, "-e", `
+    import { createModels, fauxProvider } from "@earendil-works/pi-ai";
+    import { runCodingSession } from "./src/core/coding/durable.ts";
+    const { options, stateDir } = JSON.parse(process.argv.at(-1));
+    const models = createModels();
+    const faux = fauxProvider({ provider: options.provider, models: [{ id: options.model }] });
+    models.setProvider(faux.provider);
+    faux.setResponses([() => {
+      console.log("request-started");
+      return new Promise(() => {});
+    }]);
+    const keepAlive = setInterval(() => {}, 1000);
+    try { await runCodingSession(options, { stateDir, models }); }
+    finally { clearInterval(keepAlive); }
+  `, "--", JSON.stringify({
+    stateDir: standaloneState, options: {
+      ...standaloneIdentity, requestId: "cli-interrupted", prompt: "Resume this saved task.", files: ["browser.ts"],
+    },
+  })], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "inherit" });
+  const startupTimeout = setTimeout(() => interrupted.kill("SIGKILL"), 8000);
+  try {
+    const reader = interrupted.stdout.getReader();
+    const marker = await reader.read();
+    reader.releaseLock();
+    assert.equal(new TextDecoder().decode(marker.value).trim(), "request-started");
+  } finally {
+    clearTimeout(startupTimeout);
+    interrupted.kill("SIGKILL");
+    await interrupted.exited;
+  }
+  await rm(file);
+  await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
+  await page.getByRole("combobox", { name: "Saved request" }).selectOption("cli-interrupted");
+  const resume = page.getByRole("button", { name: "Resume request", exact: true });
+  await resume.waitFor();
+  assert.equal(await resume.isEnabled(), false);
+  await page.getByText("Saved task and source", { exact: true }).click();
+  await page.getByText("Resume this saved task.", { exact: true }).waitFor();
+  await page.getByText("browser.ts", { exact: true }).click();
+  await page.getByText(snapshot.trim(), { exact: true }).waitFor();
+  assert.equal(standaloneFaux.state.callCount, 1);
+  standaloneFaux.setResponses([(input) => {
+    assert.match(JSON.stringify(input.messages), /original browser fixture/);
+    return fauxAssistantMessage("Recovered with saved bytes.");
+  }]);
+  await page.getByRole("checkbox", { name: /Approve sending the saved task, source, and active history/ }).check();
+  await resume.click();
+  await page.getByText("Recovered with saved bytes.", { exact: true }).waitFor();
+  assert.equal(standaloneFaux.state.callCount, 2);
+
+  const newFile = "export const sourceMarker = 'approved browser source';\n";
+  await writeFile(file, newFile);
+  for (const args of [["git", "init", "-q"], ["git", "add", "--", "browser.ts"]]) {
+    const git = Bun.spawnSync(args, { cwd: workspace });
+    assert.equal(git.exitCode, 0, git.stderr.toString());
+  }
+  await page.getByRole("combobox", { name: "Saved session" }).selectOption("");
+  await page.getByLabel("Absolute workspace path").fill(workspace);
+  await page.getByLabel("Session name").fill("from-browser");
+  await page.getByRole("combobox", { name: "Source", exact: true }).selectOption("repository");
+  await page.getByLabel("Search source").fill("sourceMarker");
+  const previewStandalone = page.getByRole("button", { name: "Preview source", exact: true });
+  const sendStandalone = page.getByRole("button", { name: "Send request", exact: true });
+  const approveStandalone = page.getByRole("checkbox", { name: /Approve sending the task, selected source/ });
+  await previewStandalone.click();
+  await page.getByText("browser.ts:1–1", { exact: true }).click();
+  await page.getByText(newFile.trim(), { exact: true }).waitFor();
+  assert.equal(await sendStandalone.isEnabled(), false);
+  await page.getByLabel("Task", { exact: true }).fill("Review the tracked source.");
+  await previewStandalone.click();
+  await approveStandalone.check();
+  assert.equal(await sendStandalone.isEnabled(), true);
+  await page.getByLabel("Task", { exact: true }).fill("Review only the approved browser source.");
+  assert.equal(await sendStandalone.isEnabled(), false);
+  await previewStandalone.click();
+  await approveStandalone.check();
+  assert.equal(standaloneFaux.state.callCount, 2);
+  standaloneFaux.setResponses([(input) => {
+    const prompt = JSON.stringify(input.messages);
+    assert.match(prompt, /approved browser source/);
+    assert.match(prompt, /Review only the approved browser source/);
+    return fauxAssistantMessage("Reviewed browser source.");
+  }]);
+  await sendStandalone.click();
+  await page.getByText("Reviewed browser source.", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("combobox", { name: "Saved session" }).inputValue(), "from-browser");
+  assert.equal(standaloneFaux.state.callCount, 3);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
+  await page.getByRole("combobox", { name: "Saved session" }).selectOption("existing-cli");
+  await page.getByRole("combobox", { name: "Saved request" }).selectOption("cli-complete");
+  await page.getByText("Saved CLI answer.", { exact: true }).waitFor();
+
   await page.evaluate(() => { location.hash = "#concept/%ZZ"; });
   await page.getByRole("textbox", { name: "Quick note" }).waitFor();
   assert.deepEqual(outbound, []);

@@ -137,8 +137,10 @@ const ReviewPackage = defineTask<Part, { phase: "review" }, ChildReview>({
 type ReviewInput = { requestId: string; parts: Part[] };
 type ReviewCheckpoint = { phase: "start" } | { phase: "collect"; children: TaskId<ChildReview>[] };
 
+export const packageReviewTaskName = "okbrain.review-packages";
+
 const ReviewPackages = defineTask<ReviewInput, ReviewCheckpoint, ChildReview[]>({
-  name: "okbrain.review-packages", version: 1,
+  name: packageReviewTaskName, version: 1,
   initial: () => ({ phase: "start" }),
   phases: {
     async start({ input }, runtime, context) {

@@ -5,14 +5,14 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import {
-  AssistantEntry, CompactionEntry, createRegistry, Harness, LiveDoc, ROOT_CONVERSATION_ID, UsageDoc, UserEntry,
+  AgentDoc, AssistantEntry, CompactionEntry, createRegistry, Harness, InboxDoc, LiveDoc, ROOT_CONVERSATION_ID, UsageDoc, UserEntry,
   type Conversation, type Cursor, type LiveState, type SettledSubmissionRecord, type SubmissionId, type SubmissionRecord, type UsageState,
 } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, realpath, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { dataDir } from "../config.ts";
 import { ensureExtensionCapableSqlite } from "../engine/custom-sqlite.ts";
@@ -24,9 +24,9 @@ import {
 import { evaluationInput, type EvaluationInput } from "./evaluation.ts";
 import {
   confirmedPackageReviewParts, createPackageReview, PackageReviewError, packageReviewExtension, packageReviewIds,
-  packageReviewReceipt, packageReviewTask, previewPackageReviews, type ChildReview, type PackageReviewScope,
+  packageReviewReceipt, packageReviewTask, packageReviewTaskName, previewPackageReviews, type ChildReview, type PackageReviewScope,
 } from "./package-review.ts";
-import { RepositoryContextError, type RepositoryContextManifest, type RepositoryContextOptions } from "./repository-context.ts";
+import { RepositoryContextError, type RepositoryContextManifest, type RepositoryContextOptions, type RepositoryContextSelection } from "./repository-context.ts";
 import { openDurableDatabase } from "./sqlite.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -42,6 +42,8 @@ const maxPromptBytes = 16 * 1024;
 const maxFileBytes = 32 * 1024;
 const maxAttachmentBytes = 64 * 1024;
 const maxAttachments = 12;
+const sessionNamePattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const requestIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 export const maxLiveAnswerLength = 8192;
 const instructions = [
   "Help with authorized software work using the task and the supplied source files.",
@@ -51,6 +53,8 @@ const instructions = [
 ].join(" ");
 
 export class CodingError extends Error {}
+export class CodingSessionBusyError extends CodingError {}
+export class CodingSessionMissingError extends CodingError {}
 export type CodingLiveAnswer = { text: string; truncated: boolean };
 
 export interface CodingSessionOptions {
@@ -78,7 +82,11 @@ export type CodingSessionStatusOptions = Pick<CodingSessionOptions, "workspace" 
   requestId?: string;
   includeReceipt?: boolean;
   includeEvaluationInput?: boolean;
+  includeSavedSource?: boolean;
 };
+
+export type SavedCodingSource = { source: "files"; files: { path: string; content: string }[] }
+  | ({ source: "repository" } & RepositoryContextSelection);
 
 export interface CodingSessionStatusResult {
   session: string;
@@ -100,6 +108,8 @@ export interface CodingSessionStatusResult {
     reason?: string;
     receipt?: CodingSessionResult;
     evaluationInput?: EvaluationInput;
+    savedPrompt?: string;
+    savedSource?: SavedCodingSource;
   };
 }
 
@@ -112,6 +122,8 @@ export type CodingDependencies = {
   preparedInput?: PreparedCodingInput;
   apiKey?: string;
   allowEnvKey?: boolean;
+  /** Browser submission expects a new ID. Legacy CLI calls can replay saved IDs. */
+  requireNewRequest?: boolean;
   signal?: AbortSignal;
   admitted?: () => void;
   liveAnswer?: (answer: CodingLiveAnswer | undefined) => void | Promise<void>;
@@ -129,11 +141,15 @@ function liveAnswer(state: LiveState | null, submission: SubmissionId): CodingLi
   return text ? { text, truncated: false } : undefined;
 }
 
-function validateOptions(options: CodingSessionStatusOptions): CodingProvider {
-  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(options.session)) {
+function validateSessionName(name: string) {
+  if (!sessionNamePattern.test(name)) {
     throw new CodingError("Use a session name of 1–64 lowercase letters, digits, underscores or hyphens, starting with a letter or digit.");
   }
-  if (options.requestId !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(options.requestId)) {
+}
+
+function validateOptions(options: CodingSessionStatusOptions): CodingProvider {
+  validateSessionName(options.session);
+  if (options.requestId !== undefined && !requestIdPattern.test(options.requestId)) {
     throw new CodingError("Use a request ID of 1–128 letters, digits, dots, underscores or hyphens, starting with a letter or digit.");
   }
   if (!options.workspace.trim()) throw new CodingError("A coding workspace directory is required.");
@@ -165,7 +181,7 @@ function acquireSession(directory: string, name: string): Database {
   } catch (error) {
     database.close();
     if ((error as { code?: string }).code === "SQLITE_BUSY") {
-      throw new CodingError(`Coding session ${name} is already open in another invocation.`);
+      throw new CodingSessionBusyError(`Coding session ${name} is already open in another invocation.`);
     }
     throw error;
   }
@@ -328,6 +344,70 @@ export function hasCodingCredential(provider: CodingProvider, dependencies: Codi
   return dependencies.models !== undefined || codingCredential(provider, dependencies) !== undefined;
 }
 
+type StandaloneState = Pick<CodingDependencies, "stateDir">;
+const codingStateRoot = ({ stateDir }: StandaloneState) => stateDir ?? join(dataDir(), "coding");
+const sessionDirectoryName = (name: string) => `session-${name}`;
+
+async function statIfPresent(path: string) {
+  try { return await lstat(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+async function openCodingStorage(
+  name: string,
+  dependencies: StandaloneState,
+  create: boolean,
+) {
+  validateSessionName(name);
+  const state = codingStateRoot(dependencies);
+  const directory = join(state, sessionDirectoryName(name));
+  const transcript = join(directory, "transcript.sqlite");
+  const missing = () => new CodingSessionMissingError(`No coding session ${name} exists.`);
+  try {
+    if (create && !await statIfPresent(state)) await mkdir(state, { recursive: true, mode: 0o700 });
+    const stateInfo = await statIfPresent(state);
+    if (!stateInfo) throw missing();
+    if (!stateInfo.isDirectory()) throw new CodingError("Coding session state must be a local directory.");
+    if (create) await mkdir(directory, { recursive: true, mode: 0o700 });
+    const directoryInfo = await statIfPresent(directory);
+    if (!directoryInfo) throw missing();
+    if (!directoryInfo.isDirectory()) throw new CodingError("Coding session state must be a directory.");
+    if (process.platform !== "win32" && (directoryInfo.mode & 0o077) !== 0) await chmod(directory, 0o700);
+
+    const files = ["transcript.sqlite", "owner.sqlite"].flatMap(file =>
+      ["", "-wal", "-shm", "-journal"].map(suffix => join(directory, file + suffix)));
+    const infos = await Promise.all(files.map(statIfPresent));
+    if (infos.some(info => info && (!info.isFile() || info.nlink !== 1)))
+      throw new CodingError("Coding session databases must be regular private files.");
+    if (!create && !infos[0]) throw missing();
+
+    const lease = acquireSession(directory, name);
+    try { return { storage: await SqliteStorage.open(openDurableDatabase(transcript, create)), lease }; }
+    catch (error) { lease.close(); throw error; }
+  } catch (error) {
+    if (error instanceof CodingError) throw error;
+    throw new CodingError(`Could not open Pi Durable session ${name}.`, { cause: error });
+  }
+}
+
+async function withCodingStorage<T>(
+  name: string,
+  dependencies: StandaloneState,
+  create: boolean,
+  use: (storage: SqliteStorage) => Promise<T>,
+): Promise<T> {
+  const { storage, lease } = await openCodingStorage(name, dependencies, create);
+  try { return await use(storage); }
+  finally {
+    // A harness closes its storage too. The SDK's storage close is idempotent,
+    // so this also covers callbacks that fail before a harness owns it.
+    try { await storage.close(context); }
+    finally { lease.close(); }
+  }
+}
+
 async function withCodingSession<T>(
   options: CodingSessionStatusOptions,
   dependencies: CodingDependencies,
@@ -345,69 +425,50 @@ async function withCodingSession<T>(
     ? options.workspace : await canonicalWorkspace(options.workspace);
   if (dependencies.workspaceBinding !== undefined && workspace !== dependencies.workspaceBinding)
     throw new CodingError("The authorized workspace path changed since this project was registered.");
-  const directory = join(dependencies.stateDir ?? join(dataDir(), "coding"), `session-${options.session}`);
-  const transcript = join(directory, "transcript.sqlite");
   const models = dependencies.models ?? apiKeyModels(provider, codingCredential(provider, dependencies));
   const model = models.getModel(provider, options.model);
   if (options.thinkingLevel !== undefined && model && !getSupportedThinkingLevels(model).includes(options.thinkingLevel))
     throw new CodingError("The selected model does not support this reasoning level.");
   const budget = model ? codingBudget(model) : undefined;
   const history = codingHistory(budget);
-  const affinityDirectory = dependencies.stateBinding ? join(dependencies.stateBinding, `session-${options.session}`) : directory;
+  const affinityDirectory = join(dependencies.stateBinding ?? codingStateRoot(dependencies), sessionDirectoryName(options.session));
   const affinity = createHash("sha256").update(JSON.stringify([workspace, affinityDirectory, provider, options.model])).digest("hex");
 
-  try {
-    if (create) {
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-    } else if (!(await lstat(transcript).catch(error => {
-      if (error.code !== "ENOENT") throw error;
-      return undefined;
-    }))?.isFile()) {
-      throw new CodingError(`No coding session ${options.session} exists.`);
-    }
-    const directoryInfo = await lstat(directory);
-    if (!directoryInfo.isDirectory()) throw new CodingError("Coding session state must be a directory.");
-    if (process.platform !== "win32" && (directoryInfo.mode & 0o077) !== 0) await chmod(directory, 0o700);
-    const lease = acquireSession(directory, options.session);
+  return withCodingStorage(options.session, dependencies, create, async (storage) => {
+    let harness: Harness | undefined;
     try {
-      const storage = await SqliteStorage.open(openDurableDatabase(transcript));
-      let harness: Harness | undefined;
-      try {
-        const registry = createRegistry();
-        const sourceTool = approvedSourceTool(async (id, toolContext) => {
-          const submission = await storage.submission(id, toolContext);
-          if (submission?.conversationId === ROOT_CONVERSATION_ID && submission.type === "input" && submission.status === "placed")
-            return savedUserContent(storage, submission, toolContext);
-        });
-        registry.install(history);
-        registry.install(packageReviewExtension);
-        registry.install(sourceTool.extension);
-        harness = await Harness.open(storage, {
-          models: budget ? budgetedModels(models, budget, affinity) : models,
-          registry,
-          settings: { compaction: budget ? compactionPolicy(budget) : { backgroundTokens: 0 } },
-        }, context);
-        const root = await harness.conversation(ROOT_CONVERSATION_ID, context);
-        if (root) {
-          const agent = await root.agent(context);
-          if (agent.cwd !== workspace || agent.model?.provider !== provider || agent.model.modelId !== options.model) {
-            throw new CodingError(`Coding session ${options.session} belongs to a different workspace or model.`);
-          }
-          if (options.thinkingLevel !== undefined && agent.thinkingLevel !== options.thinkingLevel)
-            throw new CodingError(`Coding session ${options.session} uses a different reasoning level.`);
+      const registry = createRegistry();
+      const sourceTool = approvedSourceTool(async (id, toolContext) => {
+        const submission = await storage.submission(id, toolContext);
+        if (submission?.conversationId === ROOT_CONVERSATION_ID && submission.type === "input" && submission.status === "placed")
+          return savedUserContent(storage, submission, toolContext);
+      });
+      registry.install(history);
+      registry.install(packageReviewExtension);
+      registry.install(sourceTool.extension);
+      harness = await Harness.open(storage, {
+        models: budget ? budgetedModels(models, budget, affinity) : models,
+        registry,
+        settings: { compaction: budget ? compactionPolicy(budget) : { backgroundTokens: 0 } },
+      }, context);
+      const root = await harness.conversation(ROOT_CONVERSATION_ID, context);
+      if (root) {
+        const agent = await root.agent(context);
+        if (agent.cwd !== workspace || agent.model?.provider !== provider || agent.model.modelId !== options.model) {
+          throw new CodingError(`Coding session ${options.session} belongs to a different workspace or model.`);
         }
-        return await use({ harness, storage, root, workspace, provider, budget, history, sourceTool });
-      } finally {
-        if (harness) await harness.close(context);
-        else await storage.close(context);
+        if (options.thinkingLevel !== undefined && agent.thinkingLevel !== options.thinkingLevel)
+          throw new CodingError(`Coding session ${options.session} uses a different reasoning level.`);
       }
+      return await use({ harness, storage, root, workspace, provider, budget, history, sourceTool });
     } finally {
-      lease.close();
+      if (harness) await harness.close(context);
     }
-  } catch (error) {
-    if (error instanceof CodingError) throw error;
+  }).catch((error: unknown) => {
+    if (error instanceof CodingError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name)))
+      throw error;
     throw new CodingError(`Could not open Pi Durable session ${options.session}.`, { cause: error });
-  }
+  });
 }
 
 async function savedUserContent(storage: SqliteStorage, submission: SubmissionRecord, entryContext = context): Promise<string | undefined> {
@@ -415,6 +476,32 @@ async function savedUserContent(storage: SqliteStorage, submission: SubmissionRe
   const entry = (await storage.entry(submission.conversationId, submission.entry, entryContext))?.entry;
   const user = entry && UserEntry.is(entry) ? entry.model?.[0] : undefined;
   if (user?.role === "user" && typeof user.content === "string") return user.content;
+}
+
+function savedSource(content: string | undefined): Pick<NonNullable<CodingSessionStatusResult["request"]>, "savedPrompt" | "savedSource"> {
+  if (content === undefined) return {};
+  try {
+    const saved = JSON.parse(content) as {
+      task?: unknown;
+      files?: { path: string; content: string }[];
+      repositoryContext?: RepositoryContextManifest;
+      excerpts?: RepositoryContextSelection["excerpts"];
+      guidance?: string;
+    } | null;
+    if (!saved || typeof saved.task !== "string") return {};
+    const savedPrompt = saved.task;
+    if (saved.repositoryContext && Array.isArray(saved.excerpts) && saved.excerpts.every(validSavedFile)) {
+      return { savedPrompt, savedSource: { source: "repository", manifest: saved.repositoryContext,
+        excerpts: saved.excerpts, ...(typeof saved.guidance === "string" ? { guidance: saved.guidance } : {}) } };
+    }
+    if (Array.isArray(saved.files) && saved.files.every(validSavedFile))
+      return { savedPrompt, savedSource: { source: "files", files: saved.files } };
+    return { savedPrompt };
+  } catch { return {}; }
+}
+
+function validSavedFile(value: { path: string; content: string }): boolean {
+  return Boolean(value && typeof value.path === "string" && typeof value.content === "string");
 }
 
 function savedManifest(content: string | undefined): RepositoryContextManifest | undefined {
@@ -499,6 +586,9 @@ export async function runCodingSession(
     const identity = { session: options.session, requestId: options.requestId };
     const existing = await storage.submissionByRequest(ROOT_CONVERSATION_ID, options.requestId, context);
     const packageTask = await packageReviewTask(harness, options.requestId, context);
+    if (dependencies.requireNewRequest && (existing || packageTask)) {
+      throw new CodingError("This request ID is already saved. Choose it in Run history to inspect or resume it.");
+    }
     if (packageTask) {
       const task = await harness.getTask(packageTask, context);
       if (task?.state.status === "terminal") return { ...identity, ...packageReviewReceipt(task.state.outcome) };
@@ -677,7 +767,11 @@ export async function getCodingSessionStatus(
       const submission = await storage.submissionByRequest(root.id, options.requestId, context);
       if (!submission) throw new CodingError(`No saved request ${options.requestId} exists in coding session ${options.session}.`);
       const reason = unansweredReason(submission);
-      const content = await savedUserContent(storage, submission);
+      let content = await savedUserContent(storage, submission);
+      if (content === undefined && options.includeSavedSource && submission.status === "queued") {
+        const item = (await harness.snapshot(InboxDoc, root.id, context))?.items.find(({ id }) => id === submission.id);
+        if (item && "content" in item && typeof item.content === "string") content = item.content;
+      }
       const lookup = approvedSourceLookupEnabled(content);
       const repositoryContext = savedManifest(content);
       const saved = !options.includeEvaluationInput || content === undefined ? undefined : evaluationInput(content);
@@ -697,8 +791,127 @@ export async function getCodingSessionStatus(
         ...(reason ? { reason } : {}),
         ...(saved ? { evaluationInput: saved } : {}),
         ...(receipt ? { receipt } : {}),
+        ...(options.includeSavedSource ? savedSource(content) : {}),
       };
     }
     return result;
+  });
+}
+
+export interface StandaloneCodingIdentity {
+  session: string;
+  workspace: string;
+  provider: CodingProvider;
+  model: string;
+  thinkingLevel?: ModelThinkingLevel;
+}
+
+export type StandaloneCodingSessionSummary = ({ state: "ready" } & StandaloneCodingIdentity)
+  | { session: string; state: "busy" | "unavailable" };
+
+export interface StandaloneCodingRequestSummary {
+  requestId: string;
+  kind: "request" | "package-review";
+  status: SubmissionRecord["status"];
+}
+
+const thinkingLevels = new Set<ModelThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+function isThinkingLevel(value: unknown): value is ModelThinkingLevel {
+  return typeof value === "string" && thinkingLevels.has(value as ModelThinkingLevel);
+}
+
+async function standaloneIdentity(session: string, storage: SqliteStorage): Promise<StandaloneCodingIdentity> {
+  const record = await storage.findDocument({ kind: AgentDoc.definition.kind,
+    scope: { kind: "conversation", conversationId: ROOT_CONVERSATION_ID } }, "current", context);
+  const saved = record && await storage.document(record.id, "current", context);
+  const agent = saved?.value;
+  const model = agent?.model;
+  const unavailable = `The saved workspace and model for coding session ${session} could not be read.`;
+  if (saved?.version !== AgentDoc.definition.version || typeof agent?.cwd !== "string" || !isAbsolute(agent.cwd) ||
+      !model || typeof model !== "object" || Array.isArray(model) || typeof model.provider !== "string" ||
+      !isCodingProvider(model.provider) || typeof model.modelId !== "string" || !model.modelId.trim())
+    throw new CodingError(unavailable);
+  const { thinkingLevel } = agent;
+  if (thinkingLevel !== undefined && !isThinkingLevel(thinkingLevel)) throw new CodingError(unavailable);
+  return { session, workspace: agent.cwd, provider: model.provider, model: model.modelId,
+    ...(thinkingLevel !== undefined ? { thinkingLevel } : {}) };
+}
+
+/** Resolve the immutable workspace and model binding from Pi, including legacy CLI sessions. */
+export function getStandaloneCodingIdentity(session: string, dependencies: StandaloneState = {}): Promise<StandaloneCodingIdentity> {
+  return withCodingStorage(session, dependencies, false, (storage) => standaloneIdentity(session, storage));
+}
+
+/** Only enumerate session directory names under application-owned coding state. */
+export async function listStandaloneCodingSessions(dependencies: StandaloneState = {}): Promise<StandaloneCodingSessionSummary[]> {
+  const root = codingStateRoot(dependencies);
+  const info = await statIfPresent(root);
+  if (!info) return [];
+  if (!info.isDirectory()) throw new CodingError("Coding session state must be a local directory.");
+  const names = (await readdir(root, { withFileTypes: true }))
+    .filter(entry => entry.isDirectory() && entry.name.startsWith("session-"))
+    .map(entry => entry.name.slice("session-".length))
+    .filter(session => sessionNamePattern.test(session)).sort();
+  const sessions: StandaloneCodingSessionSummary[] = [];
+  for (const session of names) {
+    try { sessions.push({ state: "ready", ...await getStandaloneCodingIdentity(session, dependencies) }); }
+    catch (error) {
+      // Aborted invocations may have created an empty directory before admission.
+      if (!(error instanceof CodingSessionMissingError))
+        sessions.push({ session, state: error instanceof CodingSessionBusyError ? "busy" : "unavailable" });
+    }
+  }
+  return sessions;
+}
+
+/** Catalog request IDs and state without opening a harness or materializing transcript entries. */
+export function listStandaloneCodingRequests(session: string, dependencies: StandaloneState = {}): Promise<{
+  identity: StandaloneCodingIdentity;
+  requests: StandaloneCodingRequestSummary[];
+}> {
+  return withCodingStorage(session, dependencies, false, async (storage) => {
+    const identity = await standaloneIdentity(session, storage);
+    const rows: { id: number; summary: StandaloneCodingRequestSummary }[] = [];
+    let cursor: Cursor | undefined;
+    do {
+      const page = await storage.scanSubmissions({ conversationId: ROOT_CONVERSATION_ID }, 64, cursor, context);
+      for (const { id, type, requestId, status } of page.items) {
+        if (type === "input" && requestId && requestIdPattern.test(requestId)) {
+          rows.push({ id, summary: { requestId, kind: "request", status } });
+        }
+      }
+      cursor = page.next;
+    } while (cursor);
+    do {
+      const page = await storage.scanTasks({ conversationId: ROOT_CONVERSATION_ID, kind: packageReviewTaskName }, 16, cursor, context);
+      for (const { id, input, state } of page.items) {
+        if (!input || typeof input !== "object" || Array.isArray(input) ||
+            typeof input.requestId !== "string" || !requestIdPattern.test(input.requestId)) continue;
+        let status: StandaloneCodingRequestSummary["status"] = "placed";
+        if (state.status === "terminal") {
+          const { outcome } = state;
+          const hasSummary = outcome.status === "completed" && Array.isArray(outcome.result) && outcome.result.some(
+            value => value && typeof value === "object" && !Array.isArray(value) && typeof value.summary === "string" && value.summary.length,
+          );
+          status = hasSummary ? "done" : "unanswered";
+        }
+        rows.push({ id, summary: { requestId: input.requestId, kind: "package-review", status } });
+      }
+      cursor = page.next;
+    } while (cursor);
+    return { identity, requests: rows.sort((left, right) => right.id - left.id).map(({ summary }) => summary) };
+  });
+}
+
+/** View a saved request even if its original workspace is currently absent. */
+export async function inspectStandaloneCodingSession(
+  session: string,
+  requestId?: string,
+  dependencies: CodingDependencies = {},
+): Promise<CodingSessionStatusResult> {
+  const identity = await getStandaloneCodingIdentity(session, dependencies);
+  return getCodingSessionStatus({ ...identity, requestId, includeReceipt: true, includeSavedSource: true }, {
+    ...dependencies, workspaceBinding: identity.workspace,
   });
 }

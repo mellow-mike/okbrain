@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { copyFile, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
 import * as sqliteVec from "sqlite-vec";
+import { findDeveloperIdApplication, macSigningOptions, notarizeMacApp, signMacApp } from "./mac-signing.ts";
 
 if (process.platform !== "darwin") throw new Error("The macOS app must be built on a macOS host with Xcode tools.");
 
@@ -15,6 +16,10 @@ const app = join(dist, "okbrain.app");
 const contents = join(app, "Contents");
 const executables = join(contents, "MacOS");
 const resources = join(contents, "Resources");
+const signing = macSigningOptions(process.argv.slice(2), process.env);
+const identity = signing ? await findDeveloperIdApplication(signing.identity) : null;
+const output = join(dist, `${appName}${signing ? "-notarized" : ""}.zip`);
+const pendingOutput = join(dist, `.${appName}-${randomUUID()}.zip`);
 const staging = await mkdtemp(join(tmpdir(), "okbrain-macos-"));
 try {
   await rm(app, { recursive: true, force: true });
@@ -38,10 +43,14 @@ try {
     throw new Error("The SQLite download failed its published checksum.");
   await $`unzip -q ${zip} -d ${staging}`;
   await $`xcrun clang -target ${target} -dynamiclib -O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_COLUMN_METADATA -o ${join(executables, "libsqlite3.dylib")} ${join(staging, sqlite, "sqlite3.c")}`;
-  for (const file of ["okb", "vec0.dylib", "libsqlite3.dylib"])
-    await $`codesign --force --sign - ${join(executables, file)}`;
-  await $`codesign --force --sign - ${app}`;
-  await $`codesign --verify --deep --strict ${app}`;
+  if (identity) {
+    await signMacApp(app, executables, join(root, "packaging", "macos", "okb.entitlements.plist"), identity);
+  } else {
+    for (const file of ["okb", "vec0.dylib", "libsqlite3.dylib"])
+      await $`codesign --force --sign - ${join(executables, file)}`;
+    await $`codesign --force --sign - ${app}`;
+    await $`codesign --verify --deep --strict ${app}`;
+  }
 
   if (process.argv.includes("--smoke")) {
     const child = Bun.spawn([join(executables, "Okbrain"), "--smoke-test"], { stdout: "inherit", stderr: "inherit" });
@@ -51,10 +60,16 @@ try {
     } finally { clearTimeout(timer); }
   }
 
-  const output = join(dist, `${appName}.zip`);
-  await rm(output, { force: true });
-  await $`ditto -c -k --sequesterRsrc --keepParent ${app} ${output}`;
+  if (signing) {
+    const submission = await notarizeMacApp(app, join(staging, "submission.zip"), signing.profile);
+    console.log(`Apple accepted notarization submission ${submission}.`);
+  }
+  await $`ditto -c -k --sequesterRsrc --keepParent ${app} ${pendingOutput}`;
+  await rename(pendingOutput, output);
   console.log(output);
 } finally {
-  await rm(staging, { recursive: true, force: true });
+  await Promise.all([
+    rm(pendingOutput, { force: true }),
+    rm(staging, { recursive: true, force: true }),
+  ]);
 }

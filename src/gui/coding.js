@@ -834,6 +834,13 @@
       '<div class="stack coding-projects"><p class="muted" aria-live="polite">Loading projects…</p></div></div>';
     const page = view.querySelector('.coding-page');
     const projectsEl = page.querySelector('.coding-projects');
+    if (!teamMode && arg === 'standalone') {
+      projectsEl.remove();
+      await window.okbCodingStandalone.mount(page, {
+        coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, report, sessionUsage, usageText,
+      });
+      return;
+    }
     let projects;
     let models;
     try {
@@ -853,6 +860,7 @@
         '<a href="' + projectHref(item.id) + '" data-project-link' + (item.id === project?.id ? ' aria-current="page"' : '') +
         '>' + esc(item.title) + '</a>').join('') + '</div>' : '';
     if (!teamMode) {
+      projectsEl.insertAdjacentHTML('beforeend', '<div class="row coding-project-links"><a href="#coding/standalone">Standalone sessions</a></div>');
       register(projectsEl, models, suggestedWorkspace, readonly);
       teamSettings(projectsEl, readonly, isDetached);
     }

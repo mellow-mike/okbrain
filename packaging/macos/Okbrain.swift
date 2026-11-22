@@ -145,6 +145,7 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
         if let smokeDirectory {
             environment["XDG_CONFIG_HOME"] = smokeDirectory.appendingPathComponent("config").path
             environment["XDG_DATA_HOME"] = smokeDirectory.appendingPathComponent("data").path
+            environment.removeValue(forKey: "OKB_SQLITE_VEC")
         }
         if let sqlite = Bundle.main.url(forAuxiliaryExecutable: "libsqlite3.dylib") {
             environment["OKB_SQLITE_LIB"] = sqlite.path
@@ -240,6 +241,11 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
                         method: 'POST', headers: { 'x-okb-token': window.OKB_TOKEN }, body: '{}',
                     });
                     if (!indexed.ok) return 'The bundled runtime could not open the local index.';
+                    const vectors = await fetch('/api/op/embed', {
+                        method: 'POST', headers: { 'x-okb-token': window.OKB_TOKEN, 'content-type': 'application/json' },
+                        body: JSON.stringify({ provider: 'ollama', model: 'packaging-smoke', limit: 0 }),
+                    });
+                    if (!vectors.ok) return 'The bundled runtime could not load its sqlite-vec extension.';
                     location.hash = 'coding';
                     if (!await ready('.coding-projects form')) return 'The Coding workspace did not initialize.';
                     return true;

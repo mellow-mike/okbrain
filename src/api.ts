@@ -16,10 +16,11 @@ import { BrowserPlanInputError, createBrowserPlan, type BrowserPlan } from "./co
 import type { PlanOptions } from "./core/ai/chatgpt-plan.ts";
 import { providerKeyStatus, setProviderKey } from "./core/ai/local-keys.ts";
 import { AiError, providersFor } from "./core/ai/gateway.ts";
-import { CodingError } from "./core/coding/durable.ts";
+import { CodingError, CodingSessionMissingError } from "./core/coding/durable.ts";
 import { CodingProjectProfileError } from "./core/coding/project-profile.ts";
 import { codingProjectCatalogPath, CodingProjectControl, ProjectControlError, type ProjectControlOptions } from "./core/coding/project-control.ts";
 import { RepositoryContextError } from "./core/coding/repository-context.ts";
+import { StandaloneCodingControl, StandaloneControlError } from "./core/coding/standalone-control.ts";
 import { CodingTeamListener, type TeamStatus } from "./core/coding/team-listener.ts";
 import { BrainMountError } from "./core/brain-mounts.ts";
 import { ConfigError, listBrains, resolveBrain, UnknownBrainError } from "./core/config.ts";
@@ -65,6 +66,7 @@ import guiAppJs from "./gui/app.js" with { type: "text" };
 import guiComputationJs from "./gui/computation.js" with { type: "text" };
 import guiMcpSettingsJs from "./gui/mcp-settings.js" with { type: "text" };
 import guiCodingJs from "./gui/coding.js" with { type: "text" };
+import guiCodingStandaloneJs from "./gui/coding-standalone.js" with { type: "text" };
 import guiCodingEvaluationJs from "./gui/coding-evaluation.js" with { type: "text" };
 import guiGithubJs from "./gui/github.js" with { type: "text" };
 import guiNotionJs from "./gui/notion.js" with { type: "text" };
@@ -97,6 +99,7 @@ const GUI_ASSETS: Record<string, readonly [string | Blob, string]> = {
   "/gui/computation.js": [guiComputationJs, JS],
   "/gui/mcp-settings.js": [guiMcpSettingsJs, JS],
   "/gui/coding.js": [guiCodingJs, JS],
+  "/gui/coding-standalone.js": [guiCodingStandaloneJs, JS],
   "/gui/coding-evaluation.js": [guiCodingEvaluationJs, JS],
   "/gui/github.js": [guiGithubJs, JS],
   "/gui/notion.js": [guiNotionJs, JS],
@@ -126,6 +129,7 @@ export interface ApiOptions {
   readonly?: boolean;
   chatgpt?: Pick<PlanOptions, "path" | "fetch">;
   coding?: ProjectControlOptions;
+  standaloneCoding?: ConstructorParameters<typeof StandaloneCodingControl>[0];
   notion?: NotionSourceOptions;
 }
 
@@ -222,6 +226,7 @@ const opDescriptors = (): unknown =>
 interface ServeState {
   mcp?: ManagedMcpHttp;
   coding?: () => CodingProjectControl;
+  standalone?: StandaloneCodingControl;
   notion?: NotionSource;
   team?: CodingTeamListener;
   projectTokensOnly?: boolean;
@@ -714,9 +719,14 @@ async function codingRequest(req: Request, url: URL, opts: ServeState, cors: Hdr
     return json(401, { error: "A valid coding project or local okbrain token is required." }, headers);
   if (req.method !== "GET" && req.method !== "POST") return json(405, { error: "Method not allowed." }, headers);
   try {
+    const path = url.pathname.slice("/api/coding".length);
+    const standalone = path === "/standalone" || path.startsWith("/standalone/");
+    if (standalone && (!opts.standalone || !owner || !tokenMatches(req.headers.get("x-okb-token"), opts.token)))
+      return json(403, { error: "Standalone sessions are available to the local operator." }, headers);
     // Coding state is separate from bundles. When the browser chose a brain
     // mount, still respect its read-only policy before writing local state.
-    const readonly = opts.readonly || (owner && scopeOf(req, url, opts).readonly);
+    const selected = owner ? scopeOf(req, url, opts) : undefined;
+    const readonly = opts.readonly || selected?.readonly === true;
     let body: Record<string, unknown> = {};
     if (req.method === "POST") {
       if (req.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json")
@@ -730,7 +740,17 @@ async function codingRequest(req: Request, url: URL, opts: ServeState, cors: Hdr
         return json(400, { error: "Send a JSON object." }, headers);
       }
     }
-    const path = url.pathname.slice("/api/coding".length);
+    if (standalone) {
+      const canWrite = () => {
+        if (readonly) return false;
+        try {
+          const current = scopeOf(req, url, opts);
+          return current.bundle === selected?.bundle && !current.readonly;
+        } catch { return false; }
+      };
+      const result = await opts.standalone!.dispatch(req.method, path.slice("/standalone".length), body, canWrite);
+      return json(200, { result }, headers);
+    }
     if (path === "/team" && opts.team) {
       if (!owner) return json(403, { error: "Only the local operator can manage the team listener." }, headers);
       if (req.method === "GET") return json(200, { result: opts.team.status }, headers);
@@ -742,6 +762,8 @@ async function codingRequest(req: Request, url: URL, opts: ServeState, cors: Hdr
     return json(200, { result }, headers);
   } catch (error) {
     if (error instanceof ProjectControlError) return json(error.status, errBody(error), headers);
+    if (error instanceof StandaloneControlError) return json(error.status, errBody(error), headers);
+    if (error instanceof CodingSessionMissingError) return json(404, errBody(error), headers);
     if (error instanceof UploadTooLarge) return json(413, errBody(error), headers);
     if (error instanceof CodingError || error instanceof RepositoryContextError) return json(409, errBody(error), headers);
     if (error instanceof CodingProjectProfileError) return json(400, errBody(error), headers);
@@ -925,6 +947,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
   const mcp = new ManagedMcpHttp();
   const watches = new Map<string | null, BundleWatcher>();
   const team = new CodingTeamListener();
+  const standalone = new StandaloneCodingControl(opts.standaloneCoding);
   const { bundle, readonly = false } = opts;
   const wanted = opts.port ?? DEFAULT_PORT;
   let controller: CodingProjectControl | undefined;
@@ -943,7 +966,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
         if (path === "/api/plan/answer") server.timeout(req, 150);
         if (path === "/api/ask/stream") server.timeout(req, 0);
         if (path.startsWith("/api/coding/")) server.timeout(req, 65);
-        return handleRequest(req, { bundle, servedBrain: opts.servedBrain, watches, port: server.port!, token, readonly, plan, coding, team, notion, mcp });
+        return handleRequest(req, { bundle, servedBrain: opts.servedBrain, watches, port: server.port!, token, readonly, plan, coding, standalone, team, notion, mcp });
       },
     });
   } catch (e) {
@@ -964,7 +987,10 @@ export function createApiServer(opts: ApiOptions): ApiServer {
     async stop() {
       plan.close();
       notion.close();
-      const stopped = await Promise.allSettled([server.stop(true), team.stop(), mcp.stop(), controller?.close(), ...[...watches.values()].map((watcher) => watcher.stop())]);
+      const stopped = await Promise.allSettled([
+        server.stop(true), team.stop(), mcp.stop(), controller?.close(), standalone.close(),
+        ...[...watches.values()].map((watcher) => watcher.stop()),
+      ]);
       const failures = stopped.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
       if (failures.length) throw new AggregateError(failures, "Could not close the okbrain server.");
     },

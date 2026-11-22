@@ -38,10 +38,15 @@ deliberately — a floating `latest` once broke Windows CI (B6).
 
 ## Signing and notarization
 
-The macOS app builds use ad hoc signatures. Developer ID signing, notarization, and signed Windows binaries require publisher credentials.
+The macOS CI artifacts use ad hoc signatures and may require approval under **System Settings → Privacy & Security** when opened after download.
 
-- **macOS** uses `codesign` with a Developer ID certificate, then `notarytool submit` and `stapler`. Downloaded CI builds may require approval under **System Settings → Privacy & Security**.
-- **Windows**: `signtool` with a code-signing certificate — unsigned binaries
-  trip SmartScreen on first run.
+For a distribution build, install the organization's **Developer ID Application** certificate and its private key in the macOS build user's Keychain. Create a notarytool profile using Apple's credential setup. Set `OKB_MAC_SIGN_IDENTITY` to the full certificate name or fingerprint and `OKB_MAC_NOTARY_PROFILE` to the existing profile name. Both values select credentials already in Keychain. [Developer ID signing](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac) · [Notarytool setup](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+
+Run `bun run package:mac --sign --smoke` on each supported Mac architecture. The command signs the bundled libraries and runtime before signing the app. The smoke test opens the app, indexes a temporary brain, loads sqlite-vec, and opens the Coding workspace locally. The packager submits a temporary ZIP to Apple, waits for acceptance, and validates the stapled ticket before writing `dist/okbrain-<version>-macos-<arch>-notarized.zip`. Check the extracted app on a Mac outside the signing environment before publishing it. [Stapling and distribution](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow#Staple-the-ticket-to-your-distribution)
+
+To build a signed Windows archive, install the Windows SDK and open a shell with `signtool.exe` on `PATH`. The signing certificate and its accessible private key must be in the build user's **Personal** certificate store. Set `OKB_WINDOWS_SIGN_THUMBPRINT` to the certificate's 40-digit hexadecimal thumbprint and `OKB_WINDOWS_TIMESTAMP_URL` to your publisher's HTTPS RFC 3161 timestamp endpoint. Run `bun run package --sign` on Windows x64. SignTool signs and timestamp-verifies both `okb.exe` and `vec0.dll` before the packager writes `dist/okb-<version>-windows-x64-signed.zip` and `dist/SHA256SUMS-windows-signed.txt`. [Microsoft SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)
+
+The tag workflow produces ad hoc macOS app bundles and unsigned standalone CLI archives. Publishing signed and notarized artifacts requires authorized native signing hosts and publisher credentials.
+
 - **Linux**: convention is checksums + (optionally) a detached GPG signature
   of `SHA256SUMS.txt`.

@@ -42,6 +42,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   SQLite persistence with a deterministic test provider.
 - [x] Ship local coding sessions with a workspace and attachment scope,
   request IDs, and reviewable responses.
+- [x] Open standalone CLI sessions in the local Mac and web apps. Preview and
+  send new requests, inspect saved source, and resume or cancel pending work.
 - [x] Preview bounded, deterministic excerpts from explicitly scoped Git
   projects. Bind the reviewed selection to its source bytes at admission and
   recover from the stored snapshot.
@@ -526,8 +528,9 @@ Goal: the brain improves itself on a schedule.
       verified locally
 - [x] Homebrew formula + Scoop manifest templates (`packaging/`, both built
       on the okb-and-vec0-side-by-side rule) + `packaging/README.md`
-- [!] Signed/notarized binaries — blocked on org certificates; the hook
-      points and per-OS steps are documented in `packaging/README.md`
+- [!] Signed/notarized release artifacts require publisher credentials. The
+      native packagers support macOS Developer ID and notarization and
+      Windows Authenticode. See `packaging/README.md` for both platforms.
 
 ### 5.2 Multi-brain mounts (brains axis)
 - [x] Config `brains` map (string path or `{ path, readonly }`; `~`
@@ -773,6 +776,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Connected standalone CLI sessions to the Mac and web apps,
+  with source approval, saved request inspection, resume, and cancellation.
+  Added opt-in macOS notarization and Windows Authenticode packaging.
 - 2026-11-22 — Added Gemini and session usage to Coding. Exposed full
   conversation import reports, bounded graph traversal, enrichment path
   allowlists, and a migration actor override in the apps.
