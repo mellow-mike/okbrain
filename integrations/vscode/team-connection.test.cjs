@@ -102,14 +102,15 @@ transportTest('the HTTPS project connection supports scoped previews, runs, and 
   assert.deepEqual(await api('runs'), [run]);
   assert.deepEqual(await api('inspect', identity), { run });
   assert.deepEqual(await api('source-inspect', identity), { prompt: 'Review the renderer', groups: [] });
-  assert.deepEqual(await api('review', { ...identity, decision: 'accepted' }), run);
+  const review = { ...identity, decision: 'accepted', reviewId: 'a'.repeat(32), expectedReviewId: 'b'.repeat(32), note: 'Review complete.' };
+  assert.deepEqual(await api('review', review), run);
   assert.deepEqual(await api('resume', identity), run);
   assert.deepEqual(await api('cancel', identity), run);
   assert.deepEqual(requests, [
     { path: '/api/coding/projects', method: 'GET', body: undefined },
     ...[
       ['presets', undefined], ['preview', repoSource], ['run', runRequest], ['runs', undefined], ['inspect', identity],
-      ['source-inspect', identity], ['review', { ...identity, decision: 'accepted' }], ['resume', identity], ['cancel', identity],
+      ['source-inspect', identity], ['review', review], ['resume', identity], ['cancel', identity],
     ].map(([action, body]) => ({ path: `/api/coding${projectPath}/${action}`, method: body === undefined ? 'GET' : 'POST', body })),
   ]);
 });

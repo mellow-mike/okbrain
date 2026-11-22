@@ -27,6 +27,8 @@ Choose **Preview alternative branch in okbrain** on an eligible accepted run to 
 
 Choose **Compare with original** on a finished alternative run to open both saved answers, review decisions, source references, and request usage in a read-only editor. An accepted alternative has the same patch and GitHub handoffs as an accepted original run.
 
+In either workspace, choose **Accept result** or **Request changes** on a finished run. Enter optional single-line feedback of up to 4 KiB, press Enter with a blank field to record just the decision, or press Esc to cancel. **Review history** shows recent decisions and feedback in the read-only run inspector for authorized project reviewers. If another review arrives first, choose **Refresh Review** to read it and reopen the same action with your feedback filled in.
+
 Choose **Copy run report** on a saved request to copy JSON with the run status, model, context limits, usage, and relative source references. The task, response, and source contents stay in their existing inspection views. Project members can copy the report for runs they can inspect.
 
 With the registered project folder open, choose **okbrain: Preview Repository Coding Request** from the Command Palette. Enter the task and search query, choose approved repository directories, and narrow them to subdirectories if needed. Choose a session and review the fresh excerpts and lookup choice before selecting **Send Request**.

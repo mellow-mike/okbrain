@@ -220,6 +220,148 @@ test('editor copies only the approved report for the currently inspected saved r
   assert.deepEqual(notices, ['Run report copied.']);
 });
 
+test('owner review keeps feedback bound to the inspected run and safely retries the exact decision', async () => {
+  const project = { id: 'fixture', title: 'Project fixture' };
+  const run = { id: 'saved-request', session: 'main', status: 'done', admitted: true };
+  const other = { ...run, id: 'another-request' };
+  const note = '  <feedback> Please add a test.  ';
+  const latest = { id: '1'.repeat(32), decision: 'accepted', reviewer: 'owner', reviewed: '2026-11-22T15:00:00.000Z', note: '<previous feedback>' };
+  const earlier = { ...latest, id: '2'.repeat(32), decision: 'changes_requested', note: 'Earlier feedback' };
+  const newest = { ...latest, id: '3'.repeat(32), reviewer: 'Teammate', note: 'A newer review' };
+  let history = { latestId: latest.id, entries: [latest, earlier], hasEarlier: true };
+  let mode = 'view', lastDocument, actions, editorChanged, workspaceChanged, provideText;
+  let selected = run;
+  const written = [], notices = [], errors = [];
+  const commands = new Map();
+  const inspect = () => commands.get('okbrain.runs')();
+  const switchEditor = () => {
+    const current = vscode.window.activeTextEditor;
+    vscode.window.activeTextEditor = undefined;
+    editorChanged(undefined);
+    vscode.window.activeTextEditor = current;
+    editorChanged(current);
+  };
+  const vscode = {
+    Uri: { from: (uri) => ({ ...uri, toString: () => `${uri.scheme}:${uri.path}?${uri.query}` }) },
+    commands: { registerCommand: (name, action) => commands.set(name, action) },
+    env: {},
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider(_scheme, provider) { provideText = provider.provideTextDocumentContent; },
+      onDidChangeWorkspaceFolders(listener) { workspaceChanged = listener; },
+      async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
+    },
+    window: {
+      onDidChangeActiveTextEditor(listener) { editorChanged = listener; },
+      async showTextDocument(document) {
+        lastDocument = document;
+        this.activeTextEditor = { document };
+        editorChanged(this.activeTextEditor);
+      },
+      async showQuickPick(items, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return items.find((item) => item.label === selected.id);
+        actions = Array.from(items, ({ label }) => label);
+        if (mode !== 'view') return items.find(({ label }) => label === 'Request changes');
+      },
+      async showInputBox(options) {
+        assert.equal(options.prompt, 'Optional feedback for this review');
+        assert.equal(options.title, `Request changes · ${run.session} / ${run.id}`);
+        assert.equal(options.validateInput('😀'.repeat(1024)), null);
+        assert.match(options.validateInput('😀'.repeat(1024) + 'a'), /4 KiB/);
+        assert.ok(options.validateInput('Hidden\x00control'));
+        if (mode === 'dismiss') return undefined;
+        if (mode === 'switch-editor') switchEditor();
+        if (mode === 'switch-workspace') workspaceChanged();
+        if (mode === 'switch-inspection') {
+          selected = other;
+          mode = 'view';
+          await inspect();
+          selected = run;
+        }
+        if (mode === 'conflict-refreshed') assert.equal(options.value, note);
+        return mode === 'blank' ? ' \t ' : note;
+      },
+      async showWarningMessage(_message, choice) {
+        assert.equal(mode, 'conflict');
+        assert.equal(choice, 'Refresh Review');
+        history = { latestId: newest.id, entries: [newest, latest, earlier] };
+        mode = 'conflict-refreshed';
+        return choice;
+      },
+      async showErrorMessage(message, retry) {
+        assert.ok(!message.includes(note));
+        errors.push([message, retry]);
+        if (mode === 'away-on-retry') switchEditor();
+        return retry;
+      },
+      async showInformationMessage(message) { notices.push(message); },
+    },
+  };
+  activateExtension(vscode, { projects: [project], async api(path, data) {
+    if (path.endsWith('/runs')) return [run, other];
+    if (path.endsWith('/inspect')) return { run: selected, reviewHistory: history };
+    assert.ok(path.endsWith('/review'));
+    written.push(JSON.parse(JSON.stringify(data)));
+    if (mode === 'conflict') throw Object.assign(new Error('stale'), { status: 409 });
+    if (mode === 'denied') throw Object.assign(new Error('denied'), { status: 403 });
+    if (mode === 'away-on-retry' || (mode === 'retry' && written.length === 1)) throw new Error('Response lost');
+    return { ...run, project: project.id, review: data.decision };
+  } });
+
+  await inspect();
+  assert.ok(actions.includes('Accept result'));
+  assert.ok(actions.includes('Request changes'));
+  assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
+  assert.match(lastDocument.text, /Review history\n\nAccepted · owner · 2026-11-22T15:00:00.000Z\n<previous feedback>/);
+  assert.ok(lastDocument.text.indexOf('<previous feedback>') < lastDocument.text.indexOf('Earlier feedback'));
+  assert.match(lastDocument.text, /Earlier reviews omitted/);
+  assert.equal(provideText(lastDocument.uri), '');
+  history = { latestId: earlier.id, entries: [latest, earlier] };
+  await inspect();
+  assert.ok(!actions.includes('Request changes'));
+  history = { latestId: latest.id, entries: [latest, earlier] };
+  for (mode of ['dismiss', 'switch-editor', 'switch-workspace', 'switch-inspection']) {
+    await inspect();
+    assert.deepEqual(written, []);
+  }
+
+  mode = 'retry';
+  await inspect();
+  assert.equal(written.length, 2);
+  assert.deepEqual(written[0], written[1]);
+  const { reviewId, ...fields } = written[0];
+  assert.match(reviewId, /^[a-f0-9]{32}$/);
+  assert.deepEqual(fields, { session: run.session, requestId: run.id, decision: 'changes_requested', expectedReviewId: latest.id, note });
+  assert.equal(errors.pop()[1], 'Try Same Review');
+  assert.match(notices.pop(), /saved-request · changes_requested/);
+
+  written.length = 0;
+  mode = 'away-on-retry';
+  await inspect();
+  assert.equal(written.length, 1);
+  assert.equal(errors.pop()[1], 'Try Same Review');
+
+  mode = 'denied';
+  await inspect();
+  assert.deepEqual(errors.pop(), ['denied', undefined]);
+  mode = 'conflict';
+  written.length = 0;
+  await inspect();
+  assert.equal(written.length, 2);
+  assert.equal(written[0].expectedReviewId, latest.id);
+  assert.equal(written[1].expectedReviewId, newest.id);
+  assert.equal(written[1].note, note);
+  assert.notEqual(written[0].reviewId, written[1].reviewId);
+  assert.match(lastDocument.text, /A newer review/);
+
+  mode = 'blank';
+  history = { latestId: null, entries: [] };
+  await inspect();
+  assert.equal(written.at(-1).expectedReviewId, null);
+  assert.ok(!Object.hasOwn(written.at(-1), 'note'));
+});
+
 test('editor sends the accepted request to patch review without calling another API', async () => {
   const project = { id: 'e2bb15ce-a12d-4630-8d72-bbbdbb986ba8', title: 'Project fixture' };
   const runs = [
@@ -726,10 +868,13 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   let nextRunAction = 'View saved request source';
   let lookup = false;
   let manualAttempts = 0;
+  let reviewAttempts = 0;
+  let reviewHistory;
   let availableActions;
   const cloned = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
   const invoke = (command) => commands.get(`okbrain.${command}`)();
   const savedTeamReport = { version: 1, projectId, session: done.session, runStatus: done.status, request: { requestId: done.id } };
+  const teamFeedback = 'Keep this <feedback> in project history.';
   const vscode = {
     Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }), parse: (value) => new URL(value) },
     commands: { registerCommand: (name, run) => commands.set(name, run) },
@@ -761,6 +906,10 @@ test('team commands bind SecretStorage to one project and gate server-side previ
           assert.ok(options.validateInput('../outside'));
           assert.ok(options.validateInput('core/outside-scope'));
           return mode === 'manual-literal' ? '' : 'tests/allocator, tests/edge';
+        }
+        if (options.prompt === 'Optional feedback for this review') {
+          if (mode === 'disconnect-review-note') await invoke('disconnectTeam');
+          return teamFeedback;
         }
         assert.equal(options.prompt, 'Coding session name');
         return 'editor-team';
@@ -797,6 +946,10 @@ test('team commands bind SecretStorage to one project and gate server-side previ
           if (mode === 'replace-retry') await secrets.store('okbrain.team.connection', JSON.stringify({ origin, projectId: newProjectId, token: credential }));
           return 'Try Same Request';
         }
+        if (actions.includes('Try Same Review')) {
+          if (mode === 'replace-review-retry') await secrets.store('okbrain.team.connection', JSON.stringify({ origin, projectId: newProjectId, token: credential }));
+          return 'Try Same Review';
+        }
         errors.push(message);
       },
     },
@@ -820,6 +973,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
       }
       if (action === 'runs') return [done, interrupted, active, branch];
       if (action === 'inspect') return { run: selectedRun, ...(selectedRun === done ? { report: savedTeamReport, alternativeBranchEligible: true } : {}),
+        ...(reviewHistory ? { reviewHistory } : {}),
         pi: { pendingRequestIds: [], request: { receipt: { text: 'Shared result.' } } } };
       if (action === 'source-inspect') return { prompt: 'Saved shared task.', groups: [{ files: [{ path: 'core/sample.ts', text: '<literal source>' }] }] };
       if (action === 'branch-comparison-inspect') {
@@ -828,6 +982,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
       }
       if (action === 'cancel' || action === 'resume') return selectedRun;
       assert.equal(action, 'review');
+      if ((mode === 'review-retry' && reviewAttempts++ === 0) || mode === 'replace-review-retry') throw new Error('Response lost');
       return { ...done, review: data.decision };
     } };
   };
@@ -911,6 +1066,40 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   await invoke('teamRuns');
   assert.deepEqual(calls.pop(), ['review', { session: done.session, requestId: done.id, decision: 'changes_requested' }]);
   calls.length = 0;
+
+  const latestTeamReview = { id: 'b'.repeat(32), decision: 'accepted', reviewer: 'Project reviewer', reviewed: '2026-11-22T15:00:00.000Z', note: teamFeedback };
+  reviewHistory = { latestId: latestTeamReview.id, entries: [latestTeamReview] };
+  mode = 'team-review-report';
+  nextRunAction = 'Copy run report';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect']);
+  assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
+  assert.ok(lastDocument.text.includes(teamFeedback));
+  assert.equal(copied.at(-1), JSON.stringify(savedTeamReport, null, 2));
+  assert.ok(!copied.at(-1).includes(teamFeedback));
+
+  nextRunAction = 'Request changes';
+  mode = 'review-retry';
+  await invoke('teamRuns');
+  const teamReviewCalls = calls.splice(0);
+  assert.deepEqual(teamReviewCalls.map(([action]) => action), ['runs', 'inspect', 'review', 'review']);
+  assert.deepEqual(teamReviewCalls[2], teamReviewCalls[3]);
+  const { reviewId, ...teamReview } = teamReviewCalls[2][1];
+  assert.match(reviewId, /^[a-f0-9]{32}$/);
+  assert.deepEqual(teamReview, { session: done.session, requestId: done.id, decision: 'changes_requested', expectedReviewId: latestTeamReview.id, note: teamFeedback });
+
+  mode = 'replace-review-retry';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect', 'review']);
+  mode = 'connect';
+  await invoke('connectTeam');
+  mode = 'disconnect-review-note';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect']);
+  assert.equal(entries.size, 0);
+  mode = 'connect';
+  await invoke('connectTeam');
+  reviewHistory = undefined;
   selectedRun = active;
   nextRunAction = 'Cancel request';
   await invoke('teamRuns');

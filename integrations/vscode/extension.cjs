@@ -8,6 +8,7 @@ const { teamUrl, isTeamToken, connectTeam, isBranchComparisonSide } = require('.
 
 const savedSourceScheme = 'okbrain-saved-source';
 const teamSecret = 'okbrain.team.connection';
+const reviewIdPattern = /^[a-f0-9]{32}$/u;
 const openingSources = new Map();
 let inspection = 0;
 let requestReview = 0;
@@ -91,8 +92,9 @@ async function openTeamConnection(secrets) {
   const isBound = async () => current() && (await secrets.get(teamSecret)) === saved && current();
   const connection = await connectTeam(binding.origin, binding.token, binding.projectId);
   if (!await isBound() || !current()) return undefined;
-  return { ...connection, current, isBound, async api(path, data, timeoutMs) {
+  return { ...connection, current, isBound, async api(path, data, timeoutMs, stillSelected) {
     if (!await isBound() || !current()) throw new Error('The team connection changed. Reopen this action.');
+    if (stillSelected && !stillSelected()) throw new Error('The selected coding run changed. Reopen this action.');
     const result = await connection.api(path, data, timeoutMs);
     if (!await isBound() || !current()) throw new Error('The team connection changed. Reopen this action.');
     return result;
@@ -522,17 +524,97 @@ function sourceLookupLines(lookup) {
     `${lookup.refused} refused · ${lookup.incomplete} incomplete`, ...(lookup.truncated === true ? ['Additional ranges omitted.'] : [])];
 }
 
-async function inspectRun(connection, project, selected) {
+function reviewNoteProblem(note) {
+  if (Buffer.byteLength(note) > 4096) return 'Keep feedback within 4 KiB of text.';
+  if (Buffer.from(note).toString('utf8') !== note || /[\x00-\x08\x0b-\x1f\x7f-\x9f]/u.test(note))
+    return 'Use plain text without control characters.';
+  return null;
+}
+
+function validReviewHistory(history) {
+  return Array.isArray(history?.entries) && history.entries.length <= 20 &&
+    history.latestId === (history.entries[0]?.id ?? null) && history.entries.every((entry) =>
+      typeof entry?.id === 'string' && reviewIdPattern.test(entry.id) &&
+      (entry.decision === 'accepted' || entry.decision === 'changes_requested') &&
+      typeof entry.reviewer === 'string' && typeof entry.reviewed === 'string' &&
+      (entry.note === undefined || (typeof entry.note === 'string' && !reviewNoteProblem(entry.note))));
+}
+
+function reviewHistoryLines(history) {
+  if (!history?.entries.length) return [];
+  return ['Review history', ...history.entries.flatMap(({ decision, reviewer, reviewed, note }) => [
+    '', `${decision === 'accepted' ? 'Accepted' : 'Changes requested'} · ${reviewer} · ${reviewed}`,
+    ...(note === undefined ? [] : [note]),
+  ]), ...(history.hasEarlier === true ? ['', 'Earlier reviews omitted.'] : [])];
+}
+
+async function recordRunReview(connection, project, run, action, history, pending, isSelected, refresh) {
+  const team = connection.mode === 'team';
+  const canSubmit = async () => isSelected() && (!team || await connection.isBound()) && isSelected();
+  if (!await canSubmit()) return;
+  const { decision } = action;
+  const identity = { session: run.session, requestId: run.id };
+  let note;
+  if (history) {
+    const input = await vscode.window.showInputBox({
+      title: `${action.label} · ${run.session} / ${run.id}`,
+      prompt: 'Optional feedback for this review', placeHolder: 'Press Enter to save without feedback',
+      value: pending?.decision === decision ? pending.note : undefined, ignoreFocusOut: true,
+      validateInput: (value) => reviewNoteProblem(value.replaceAll('\r\n', '\n')),
+    });
+    if (input === undefined || !await canSubmit()) return;
+    const text = input.replaceAll('\r\n', '\n');
+    const problem = reviewNoteProblem(text);
+    if (problem) throw new Error(problem);
+    if (text.trim()) note = text;
+  }
+
+  const request = { ...identity, decision, ...(history ? { reviewId: randomUUID().replaceAll('-', ''),
+    expectedReviewId: history.latestId, ...(note === undefined ? {} : { note }) } : {}) };
+  let result;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (!await canSubmit()) return;
+    try {
+      result = await connection.api(pathFor(project, 'review'), request, undefined, isSelected);
+      break;
+    } catch (error) {
+      if (!await canSubmit()) return;
+      const status = error.status ?? error.statusCode;
+      if (history && status === 409) {
+        const choice = await vscode.window.showWarningMessage('The review changed. Refresh and read the latest feedback before submitting again.',
+          'Refresh Review');
+        if (choice === 'Refresh Review' && await canSubmit()) await refresh({ decision, note });
+        return;
+      }
+      if (!history || attempt > 0 || (Number.isInteger(status) && status < 500)) throw error;
+      const retry = await vscode.window.showErrorMessage('Could not confirm whether the review was recorded.', 'Try Same Review');
+      if (retry !== 'Try Same Review') return;
+    }
+  }
+  if (!await canSubmit()) return;
+  if (result?.id !== identity.requestId || result?.session !== identity.session ||
+      (result.project !== undefined && result.project !== project.id)) throw new Error('Could not verify the saved review. Refresh Run history.');
+  await vscode.window.showInformationMessage(`Request ${result.id} · ${result.review || result.status}`);
+}
+
+async function inspectRun(connection, project, selected, pendingReview) {
   const current = ++inspection;
   const team = connection.mode === 'team';
   const isCurrent = () => current === inspection && (!team || connection.current());
   const inspectedWorkspace = workspaceRevision;
   const folders = () => JSON.stringify(localWorkspaceFolders().map(({ uri }) => uri.fsPath));
   const startingFolders = folders();
+  const beforeInspectEditor = editorRevision;
+  const previousEditor = vscode.window.activeTextEditor;
   const identity = { session: selected.session, requestId: selected.id };
-  const { run, pi, admissionMissing, liveAnswer, taskProgress, report, alternativeBranchEligible } =
+  const { run, pi, admissionMissing, liveAnswer, taskProgress, report, alternativeBranchEligible, reviewHistory } =
     await connection.api(pathFor(project, 'inspect'), identity);
   if (!isCurrent()) return;
+  const sameRun = run.session === identity.session && run.id === identity.requestId &&
+    (run.project === undefined || run.project === project.id);
+  const history = sameRun && validReviewHistory(reviewHistory) ? reviewHistory : undefined;
+  const historyLines = reviewHistoryLines(history);
+  const stableEditorBeforeInspection = beforeInspectEditor === editorRevision && previousEditor === vscode.window.activeTextEditor;
   const receipt = pi?.request?.receipt;
   const progress = taskProgressLines(taskProgress ?? pi?.request?.taskProgress, run.status === 'running');
   const budget = contextBudgetLines(pi?.context);
@@ -542,6 +624,7 @@ async function inspectRun(connection, project, selected) {
     project.title, ...(team ? [`Team workspace: ${connection.url.origin}`] : []),
     `Session: ${run.session}`, `Request: ${run.id}`, `Status: ${run.status}`,
     ...(run.review ? [`Review: ${run.review} by ${run.reviewer}`] : []),
+    ...(historyLines.length ? ['', ...historyLines] : []),
     ...(run.error ? ['', run.error] : []),
     ...(admissionMissing ? ['', 'This request has no saved admission. Resume to recover its status.'] : []),
     ...(progress.length ? ['', ...progress] : []),
@@ -553,7 +636,10 @@ async function inspectRun(connection, project, selected) {
     ...(budget.length ? ['', ...budget] : []),
     ...(pi?.usage ? ['', 'Recorded session usage', JSON.stringify(pi.usage, null, 2)] : []),
   ].join('\n');
-  if (team) await showReadOnlyText('Team coding run', contents, isCurrent);
+  let reviewDocument;
+  if (team || history) reviewDocument = await showReadOnlyText(team ? 'Team coding run' : 'Coding run', contents,
+    () => isCurrent() && (!history || (inspectedWorkspace === workspaceRevision && startingFolders === folders() &&
+      beforeInspectEditor === editorRevision && previousEditor === vscode.window.activeTextEditor)));
   else await showText(contents);
 
   if (!isCurrent()) return;
@@ -564,7 +650,9 @@ async function inspectRun(connection, project, selected) {
   const idle = run.admitted && run.status !== 'running' && run.status !== 'interrupted' && pi?.pendingRequestIds?.length === 0;
   const canChangeContext = () => !team && !run.branch && idle && sameInspection();
   const compactionPending = pi?.context?.compactionPending === true;
-  const sameRun = run.session === identity.session && run.id === identity.requestId;
+  const reviewInspection = () => stableEditorBeforeInspection && sameInspection() && (!(team || history) ||
+    (!!reviewDocument && vscode.window.activeTextEditor?.document === reviewDocument));
+  const canReview = run.status === 'done' && sameRun && (reviewHistory === undefined || !!history) && reviewInspection();
   const canCopyReport = !admissionMissing && run.status !== 'running' &&
     (run.admitted === true || pi?.request?.requestId === identity.requestId) &&
     sameRun &&
@@ -583,7 +671,7 @@ async function inspectRun(connection, project, selected) {
   if (canCompare && sameInspection()) choices.push({ label: 'Compare with original', action: 'branch-comparison-inspect' });
   if ((!team || !run.branch) && (run.status === 'running' || run.status === 'interrupted')) choices.push({ label: 'Cancel request', action: 'cancel' });
   if ((!team || !run.branch) && run.status === 'interrupted') choices.push({ label: 'Resume from saved context', action: 'resume' });
-  if (run.status === 'done') choices.push(
+  if (canReview) choices.push(
     { label: 'Accept result', action: 'review', decision: 'accepted' },
     { label: 'Request changes', action: 'review', decision: 'changes_requested' });
   if (canChangeContext()) {
@@ -609,7 +697,7 @@ async function inspectRun(connection, project, selected) {
     if (canOpenAlternative && sameInspection()) return openWeb(connection, project, run, action.action);
     return;
   }
-  if (action.action === 'refresh') return inspectRun(connection, project, run);
+  if (action.action === 'refresh') return inspectRun(connection, project, run, pendingReview);
   if (action.action === 'source-inspect') return showSavedRequestSource(connection, project, identity, isCurrent);
   if (action.action === 'copy-report') {
     if (!canCopyReport || !sameInspection()) return;
@@ -619,12 +707,17 @@ async function inspectRun(connection, project, selected) {
   }
   if (action.action === 'reset-context') return resetOwnerContext(connection, project, run.session, () => !compactionPending && canChangeContext());
   if (action.action === 'compact-context') return compactOwnerContext(connection, project, run.session, canChangeContext);
+  if (action.action === 'review') {
+    if (canReview) return recordRunReview(connection, project, run, action, history, pendingReview, reviewInspection,
+      (draft) => inspectRun(connection, project, run, draft));
+    return;
+  }
   if (action.action === 'resume') {
     const proceed = await vscode.window.showWarningMessage('Resuming can make another provider call using the saved context.',
       { modal: true }, 'Resume');
     if (!proceed || (team && !isCurrent())) return;
   }
-  const result = await connection.api(pathFor(project, action.action), action.decision ? { ...identity, decision: action.decision } : identity);
+  const result = await connection.api(pathFor(project, action.action), identity);
   await vscode.window.showInformationMessage(`Request ${result.id} · ${result.review || result.status}`);
 }
 

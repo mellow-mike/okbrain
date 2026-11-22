@@ -940,9 +940,11 @@ async function codingRequest(req: Request, url: URL, opts: ServeState, cors: Hdr
     }
     const canWrite = () => {
       if (readonly) return false;
+      // Project members are bound to the served brain, not a caller-supplied mount.
+      if (!selected) return teamControlWritable(opts);
       try {
         const current = scopeOf(req, url, opts);
-        return current.bundle === selected?.bundle && !current.readonly;
+        return current.bundle === selected.bundle && !current.readonly;
       } catch { return false; }
     };
     if (standalone) {
@@ -1016,7 +1018,7 @@ async function codingTeamRequest(req: Request, team: TeamStatus, local: ServeSta
   if (url.pathname.startsWith("/api/coding/")) {
     if (req.method === "OPTIONS") return new Response(null, { status: headers ? 204 : 403, headers });
     return codingRequest(req, url, {
-      bundle: local.bundle, port: team.port, token: "", readonly: !teamControlWritable(local),
+      bundle: local.bundle, servedBrain: local.servedBrain, port: team.port, token: "", readonly: !teamControlWritable(local),
       coding: local.coding, projectTokensOnly: true,
     }, headers ?? {});
   }

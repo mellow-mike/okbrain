@@ -21,7 +21,7 @@
     }
     const res = await fetch(codingPath + path, options);
     const payload = await res.json();
-    if (!res.ok) throw new Error(payload.error || 'The coding request failed.');
+    if (!res.ok) throw Object.assign(new Error(payload.error || 'The coding request failed.'), { status: res.status });
     return payload.result;
   }
 
@@ -813,6 +813,25 @@
       prompt.focus();
       return true;
     };
+    panel.loadReviewFollowUp = (name, note) => {
+      if (busy || readonly || detached() || (alternativeSessionName.test(name) && !ownerWritable)) return false;
+      const hasDraft = preview || prompt.value.trim() || enrollment.checked || approvedSourceLookup.checked ||
+        session.value !== session.defaultValue || requestId.value !== requestId.defaultValue;
+      if (hasDraft && !confirm('Replace the current task and use this review note in session ' + name + '?')) return;
+      session.value = name;
+      requestId.value = crypto.randomUUID();
+      evaluationPrompt = undefined;
+      prompt.value = note;
+      approvedSourceLookup.checked = false;
+      if (enrollment.checked) {
+        enrollment.checked = false;
+        enrollment.dispatchEvent(new Event('change'));
+      }
+      updateBranchMode();
+      report(feedback, undefined, 'Review note loaded. Preview source before sending.');
+      prompt.focus();
+      return true;
+    };
     panel.loadGitHubIssue = (issue) => {
       if (busy || readonly || detached() || !panel.isConnected) return false;
       const task = ['GitHub issue #' + issue.number + ' · ' + issue.title, issue.url, issue.body].filter(Boolean).join('\n\n');
@@ -1329,12 +1348,155 @@
     };
   }
 
-  function activity(parent, project, readonly, detached, { reviewPatch, ownerActions, initialRun }) {
+  function mountRunReview(panel, { prefix, readonly, detached, refresh, loadFollowUp, afterAccepted }) {
+    panel.innerHTML = '<details data-review-history hidden><summary>Review history</summary><ol class="coding-review-history"></ol>' +
+      '<p class="muted" data-review-capped hidden>Showing the most recent review decisions.</p></details>' +
+      '<div class="row" data-review-follow-up hidden><button type="button">Use review note in follow-up</button></div>' +
+      '<div class="stack" data-review-draft hidden><label class="field"><span>Review note (optional)</span>' +
+      '<textarea rows="3" maxlength="4096" aria-describedby="coding-review-limit"></textarea></label>' +
+      '<p class="muted" id="coding-review-limit"></p><div class="row">' +
+      '<button type="button" data-review-decision="accepted">Accept result</button>' +
+      '<button type="button" data-review-decision="changes_requested">Request changes</button></div></div>' +
+      '<div class="coding-feedback" role="status"></div>';
+    const historyPanel = panel.querySelector('[data-review-history]');
+    const historyList = historyPanel.querySelector('ol');
+    const capped = panel.querySelector('[data-review-capped]');
+    const draft = panel.querySelector('[data-review-draft]');
+    const note = panel.querySelector('textarea');
+    const limit = panel.querySelector('#coding-review-limit');
+    const decisions = [...panel.querySelectorAll('[data-review-decision]')];
+    const followUpRow = panel.querySelector('[data-review-follow-up]');
+    const followUp = followUpRow.querySelector('button');
+    const feedback = panel.querySelector('[role="status"]');
+    const encoder = new TextEncoder();
+    const brain = document.querySelector('#brain')?.value;
+    const currentView = () => panel.isConnected && !detached() && document.querySelector('#brain')?.value === brain;
+    let target = null;
+    let history = null;
+    let snapshot = '';
+    let revision = 0;
+    let pending = null;
+    let busy = false;
+    let needsRefresh = false;
+
+    function latestNote() {
+      const latest = history?.entries[0];
+      return latest?.id === history?.latestId && latest?.decision === 'changes_requested' && typeof latest.note === 'string' &&
+        latest.note.trim() ? latest.note : '';
+    }
+
+    function update() {
+      const bytes = encoder.encode(note.value).length;
+      const invalidText = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\ud800-\udfff]/u.test(note.value);
+      limit.textContent = invalidText ? 'Use plain text with tabs or line breaks.' : bytes.toLocaleString() + ' of 4,096 UTF-8 bytes';
+      const editable = target && history && !readonly;
+      draft.hidden = !editable;
+      note.disabled = busy;
+      for (const button of decisions) button.disabled = !editable || busy || needsRefresh || bytes > 4096 || invalidText;
+      followUpRow.hidden = !target?.canFollowUp || !latestNote();
+      followUp.disabled = busy || needsRefresh;
+    }
+
+    function showHistory() {
+      const entries = history?.entries ?? [];
+      const shown = JSON.stringify(entries);
+      if (shown !== snapshot) {
+        snapshot = shown;
+        historyList.replaceChildren(...entries.map((entry) => {
+          const item = document.createElement('li');
+          const summary = document.createElement('p');
+          summary.textContent = [statuses[entry.decision], entry.reviewer, time(entry.reviewed)].join(' · ');
+          item.append(summary);
+          if (entry.note) {
+            const text = document.createElement('p');
+            text.className = 'coding-review-note';
+            text.textContent = entry.note;
+            item.append(text);
+          }
+          return item;
+        }));
+      }
+      if (historyPanel.hidden && entries.length) historyPanel.open = true;
+      historyPanel.hidden = !entries.length;
+      capped.hidden = history?.hasEarlier !== true;
+    }
+
+    note.addEventListener('input', update);
+    followUp.addEventListener('click', () => {
+      if (!target || followUpRow.hidden || followUp.disabled || !currentView()) return;
+      if (loadFollowUp(target.session, latestNote()) === false)
+        report(feedback, new Error('Wait for the current request to finish sending before using this review note.'));
+    });
+    for (const button of decisions) button.addEventListener('click', async () => {
+      if (!target || button.disabled || !currentView()) return;
+      const current = revision;
+      const isCurrent = () => current === revision && currentView();
+      const decision = button.dataset.reviewDecision;
+      const text = note.value || undefined;
+      if (!pending || pending.decision !== decision || pending.note !== text) {
+        const { session, requestId } = target;
+        pending = { session, requestId, decision, reviewId: crypto.randomUUID().replaceAll('-', ''),
+          expectedReviewId: history.latestId, ...(text === undefined ? {} : { note: text }) };
+      }
+      busy = true;
+      update();
+      report(feedback, undefined, 'Saving review…');
+      try {
+        await coding(prefix + '/review', pending);
+        if (!isCurrent()) return;
+        pending = null;
+        note.value = '';
+        needsRefresh = true;
+        await refresh();
+        if (!isCurrent()) return;
+        report(feedback, undefined, 'Review saved.');
+        if (decision === 'accepted') afterAccepted();
+      } catch (error) {
+        if (!isCurrent()) return;
+        if (error.status === 409) {
+          pending = null;
+          needsRefresh = true;
+          await refresh();
+          if (isCurrent()) report(feedback, new Error(error.message + ' Read the latest decisions and choose again.'));
+        } else {
+          const uncertain = !error.status || error.status >= 500;
+          report(feedback, uncertain ? new Error(error.message + ' Use the same decision to retry this review.') : error);
+        }
+      } finally {
+        if (isCurrent()) {
+          busy = false;
+          update();
+        }
+      }
+    });
+
+    return (row, savedHistory, canFollowUp) => {
+      const next = row?.status === 'done' ? { ...identity(row), canFollowUp } : null;
+      if (next?.session !== target?.session || next?.requestId !== target?.requestId) {
+        revision++;
+        pending = null;
+        busy = false;
+        note.value = '';
+        historyPanel.hidden = true;
+        report(feedback);
+      }
+      target = next;
+      history = next && Array.isArray(savedHistory?.entries) && (savedHistory.latestId === null || typeof savedHistory.latestId === 'string')
+        ? savedHistory : null;
+      needsRefresh = !history;
+      panel.hidden = !target || !history;
+      showHistory();
+      update();
+    };
+  }
+
+  function activity(parent, project, readonly, detached, { reviewPatch, ownerActions, initialRun, loadReviewFollowUp }) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
     panel.className = 'coding-panel coding-activity stack';
     panel.innerHTML = '<div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh</button></div>' +
       '<div class="stack coding-runs" data-runs></div><div class="stack" data-inspect aria-live="polite"></div>' +
+      '<section class="stack" data-run-review hidden></section>' +
       '<div class="row" data-compare-branch hidden></div>' +
       '<section class="stack" data-saved-request-source hidden></section>' +
       (ownerActions ? '<section class="stack" data-branch-preview hidden></section>' +
@@ -1344,6 +1506,10 @@
     const list = panel.querySelector('[data-runs]');
     const inspected = panel.querySelector('[data-inspect]');
     const feedback = panel.querySelector('[role="status"]');
+    const setRunReview = mountRunReview(panel.querySelector('[data-run-review]'), {
+      prefix, readonly, detached, refresh, loadFollowUp: loadReviewFollowUp,
+      afterAccepted: () => inspected.querySelector('[data-review-patch]')?.focus(),
+    });
     const setSavedSourceRun = mountSavedSource(panel.querySelector('[data-saved-request-source]'), prefix, detached);
     const contextPanel = panel.querySelector('[data-context-controls]');
     const setContextSession = contextPanel ? mountContextControls(contextPanel, {
@@ -1375,8 +1541,10 @@
       if (detached() || current !== generation) return;
       const pi = result.pi;
       const row = result.run;
+      if (row?.session !== run.session || row?.id !== run.id) throw new Error('The saved run did not match the selected request.');
       const compactionPending = pi?.context?.compactionPending === true;
       const branch = row.branch || alternativeSessionName.test(row.session);
+      setRunReview(row, result.reviewHistory, !readonly && (!branch || !!ownerActions));
       setComparisonRun(row);
       if (pi && !branch) ownerActions?.markCompactionPending(row.session, compactionPending);
       setContextSession?.(!branch && idle && pi && !pi.pendingRequestIds.length ? row.session : null, compactionPending);
@@ -1400,7 +1568,7 @@
       inspected.innerHTML = '<div class="coding-result stack"><h4>' + esc(row.id) + '</h4>' +
         '<p>' + esc(labelStatus(row)) + ' · ' + esc(row.session) + ' · ' + esc(row.actor) + '</p>' +
         (row.branch ? '<p class="muted">Alternative to ' + esc(row.branch.session) + ' · ' + esc(row.branch.requestId) + '</p>' : '') +
-        (row.reviewer ? '<p class="muted">Reviewed by ' + esc(row.reviewer) + ' · ' + esc(time(row.reviewed)) + '</p>' : '') +
+        (row.reviewer && !result.reviewHistory?.entries?.length ? '<p class="muted">Reviewed by ' + esc(row.reviewer) + ' · ' + esc(time(row.reviewed)) + '</p>' : '') +
         (branchReason ? '<p class="muted">' + esc(branchReason) + '</p>' : '') +
         (error ? '<div class="notice">' + esc(error) + '</div>' : '') +
         (result.admissionMissing ? '<p class="muted">Pi did not save this request. Resume will make this ID available for resubmission.</p>' : '') +
@@ -1433,8 +1601,6 @@
         appendAction(bar, 'Cancel run', '/cancel', row);
       }
       if (row.status === 'done') {
-        appendAction(bar, 'Accept result', '/review', row, { decision: 'accepted' });
-        appendAction(bar, 'Request changes', '/review', row, { decision: 'changes_requested' });
         if (row.review === 'accepted' && reviewPatch) {
           const patch = document.createElement('button');
           patch.type = 'button';
@@ -1446,7 +1612,7 @@
       }
     }
 
-    function appendAction(container, label, action, row, extras) {
+    function appendAction(container, label, action, row) {
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = label;
@@ -1455,10 +1621,8 @@
         button.disabled = true;
         report(feedback);
         try {
-          await coding(prefix + action, { ...identity(row), ...extras });
+          await coding(prefix + action, identity(row));
           await refresh();
-          if (extras?.decision === 'accepted' && !detached() && selected?.id === row.id && selected.session === row.session)
-            inspected.querySelector('[data-review-patch]')?.focus();
         } catch (error) { report(feedback, error); }
         finally { button.disabled = false; }
       });
@@ -1496,6 +1660,7 @@
           setContextSession?.(null);
           setBranchTarget?.(null);
           setComparisonRun(null);
+          setRunReview(null);
           inspected.replaceChildren();
           if (focusResult) report(feedback, new Error('That request is no longer in Run history.'));
         }
@@ -1517,6 +1682,7 @@
         setContextSession?.(null);
         setBranchTarget?.(null);
         setComparisonRun(null);
+        setRunReview(null);
         inspected.replaceChildren();
       }
       selected = row;
@@ -2217,6 +2383,7 @@
     const runs = activity(right, project, readonly, isDetached, {
       initialRun,
       reviewPatch: teamMode ? undefined : (row) => openPatch(row),
+      loadReviewFollowUp: (session, note) => composerPanel.loadReviewFollowUp(session, note),
       ownerActions: teamMode || readonly ? undefined : {
         clearConsent: (session) => clearComposerConsent(session),
         markCompactionPending: (session, pending) => composerPanel.setCompactionPending(session, pending),

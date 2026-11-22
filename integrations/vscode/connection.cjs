@@ -38,8 +38,9 @@ async function connect(override) {
           headers: { 'x-okb-token': token.trim(), ...(data === undefined ? {} : { 'content-type': 'application/json' }) },
           ...(data === undefined ? {} : { body: JSON.stringify(data) }),
         });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || `okbrain returned HTTP ${response.status}.`);
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) throw Object.assign(new Error(payload?.error || `okbrain returned HTTP ${response.status}.`), { status: response.status });
+        if (!payload || !Object.hasOwn(payload, 'result')) throw new Error('okbrain returned an invalid coding response.');
         return payload.result;
       }
       const projects = await api('/projects', undefined, 2500);

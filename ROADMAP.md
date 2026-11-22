@@ -123,6 +123,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   subprocesses, per-project credentials, and team status and cancellation.
 - [x] Verify local crash recovery and request replay, project-scoped audit,
   transcript deletion, review and approval, and a team browser through local HTTPS.
+- [x] Record durable review decisions and optional notes in the Mac, web, and
+  editor apps. Reuse the latest change-request note in a reviewed follow-up.
 - [x] Add opt-in Linux Docker worker isolation and owner-configured transcript
   expiry with expired-ID replay protection. Verify with a real offline Docker run
   and application-level retention tests.
@@ -855,6 +857,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added private Coding review history, safe review retries,
+  and a browser follow-up draft from saved change requests.
 - 2026-11-22 — Added private Ask drafts with model attribution and verified
   citations. Tested explicit save, lost-response recovery, and mount binding.
 - 2026-11-22 — Added reviewed GitHub issue drafts in Coding and portable

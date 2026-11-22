@@ -15,6 +15,14 @@ For explicit files and repository excerpts, you can let the model look up line n
 
 Use **Project settings** to rotate or remove an API key, inspect the audit log, or set transcript retention. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.
 
+### Record review feedback
+
+In **Run history**, select a finished project run, add an optional **Review note**, then choose **Accept result** or **Request changes**. Open **Review history** for the latest 20 decisions, reviewers, timestamps, and notes. VS Code and Cursor show the same history when you inspect a project run and ask for optional feedback when you record a decision. If someone reviews the run while you are preparing your feedback, reopen it and review their decision before submitting yours.
+
+If the latest decision requests changes and has a note, choose **Use review note in follow-up** in the Mac or web app. The note fills the editable task for a new request in the same session. Review your task and sources before approving the send. The normal session history accompanies the request.
+
+Review notes are visible to authorized project reviewers and expire with the run's transcript. Existing runs start their history with the last saved decision. The audit log keeps review action and identity metadata. The run report includes the current decision.
+
 ### Reuse a request preset
 
 Presets keep a recurring task, repository search query, and [version 1 project profile](#reuse-a-project-profile) together. In the Mac or web app, choose **Tracked repository excerpts**, fill in the task and search query, and set the directories and budget or supply a profile under **Scope and budget**. Open **Run presets**, enter a name, and choose **Save new preset**. The local owner can select an existing preset to update it from the form or remove it. Project members can load the same presets. Keep prompts and profile guidance suitable for sharing with everyone who can access the project.

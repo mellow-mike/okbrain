@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { createAssistantMessageEventStream, createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -17,6 +18,7 @@ import type { TeamPreferences, TeamStatus } from "../src/core/coding/team-listen
 import { loadConfig, saveConfig } from "../src/core/config.ts";
 import type { CodingProjectProfile } from "../src/core/coding/project-profile.ts";
 import type { CodingRunReport } from "../src/core/coding/run-report.ts";
+import { ensureExtensionCapableSqlite } from "../src/core/engine/custom-sqlite.ts";
 
 const ownerToken = "local-operator-test";
 type Project = { id: string; workspace: string; credential: string };
@@ -360,6 +362,112 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Coding review history keeps private notes, rejects stale decisions, and survives restarts", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-review-history-");
+  const model = "review-history-fixture";
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: model }] });
+  models.setProvider(faux.provider);
+  faux.setResponses([fauxAssistantMessage("Review this saved response.")]);
+  const open = (readonly = false) => createApiServer({ bundle: root, port: 0, token: ownerToken, readonly, coding: { stateDir, models } });
+  let api: ApiServer | undefined = open();
+  const close = async () => {
+    const current = api;
+    api = undefined;
+    await current?.stop();
+  };
+  type Entry = { id: string; decision: string; reviewer: string; reviewed: string; note?: string };
+  type View = Inspection & { reviewHistory: { latestId: string | null; entries: Entry[] } };
+  const identity = { session: "review-notes", requestId: "result" };
+  async function status(response: Promise<Response>, expected: number) {
+    const settled = await response;
+    const explanation = await settled.json() as { error?: string };
+    expect(settled.status, explanation.error).toBe(expected);
+  }
+  try {
+    const settings = { title: "Project review history", scopes: ["src"], workspace, provider: "openai", model };
+    const owner = apiClient(api.url);
+    const project = await owner.call<Project>("/projects", settings);
+    const other = await owner.call<Project>("/projects", { ...settings, title: "Unrelated project" });
+    const path = "/projects/" + project.id;
+    const member = (await owner.call<{ token: string }>(path + "/members", { name: "round-one" })).token;
+    const anotherWithSameName = (await owner.call<{ token: string }>(path + "/members", { name: "round-one" })).token;
+    const otherMember = (await owner.call<{ token: string }>("/projects/" + other.id + "/members", { name: "unrelated" })).token;
+    const selected = { source: "files", files: ["src/example.ts"] };
+    const preview = await owner.call<{ id: string }>(path + "/preview", selected);
+    await owner.call(path + "/run", { ...identity, ...selected, prompt: "Review the exported value.", approved: true, previewId: preview.id });
+    const inspect = (client: ReturnType<typeof apiClient>, token?: string) => client.call<View>(path + "/inspect", identity, token);
+    const done = await waitFor(() => inspect(owner), (view) => view.run.status === "done");
+    expect(done.reviewHistory).toEqual({ latestId: null, entries: [] });
+    await close();
+
+    // An older catalog already has a latest decision but no separate review history.
+    ensureExtensionCapableSqlite();
+    {
+      using catalog = new Database(join(stateDir, "projects.sqlite"), { strict: true });
+      catalog.run(`UPDATE runs SET review = 'accepted', reviewer = 'human:legacy-reviewer', reviewed = '2026-01-01T00:00:00.000Z'
+        WHERE project = ? AND session = ? AND id = ?`, [project.id, identity.session, identity.requestId]);
+    }
+    api = open();
+    const reopened = apiClient(api.url);
+    const listener = await reopened.call<{ url: string }>("/team", { action: "start", port: 0 });
+    const team = apiClient(listener.url);
+    const seeded = (await inspect(team, member)).reviewHistory;
+    expect(seeded.latestId).toMatch(/^[a-f0-9]{32}$/);
+    expect(seeded.entries).toEqual([{ id: seeded.latestId!, reviewer: "human:legacy-reviewer", decision: "accepted",
+      reviewed: "2026-01-01T00:00:00.000Z" }]);
+
+    const note = "Keep the retry behavior explicit.\n<em>Review the boundary.</em>";
+    const first = { ...identity, decision: "changes_requested", reviewId: "a".repeat(32), expectedReviewId: seeded.latestId,
+      note: note.replace("\n", "\r\n") };
+    const later = { ...identity, decision: "accepted", reviewId: "b".repeat(32), expectedReviewId: first.reviewId, note: " \t\n " };
+    await status(team.request(path + "/inspect", identity, otherMember), 403);
+    await status(team.request(path + "/review", first, otherMember), 403);
+    await status(team.request(path + "/review", { ...first, note: "🌿".repeat(1025) }, member), 400);
+    await status(team.request(path + "/review", { ...first, note: "bad\0text" }, member), 400);
+    await status(team.request(path + "/review", { ...first, expectedReviewId: null }, member), 409);
+    expect(await team.call(path + "/review", first, member)).toMatchObject({ review: "changes_requested", reviewer: "human:round-one" });
+    expect(await team.call(path + "/review", { ...identity, decision: first.decision }, member)).toMatchObject({ review: "changes_requested" });
+    await status(team.request(path + "/review", { ...first, note: "Rewritten after submission" }, member), 409);
+    await status(reopened.request(path + "/review", first), 409);
+    await status(team.request(path + "/review", first, anotherWithSameName), 409);
+    await status(reopened.request(path + "/review", { ...later, expectedReviewId: seeded.latestId }), 409);
+    expect(await reopened.call(path + "/review", later)).toMatchObject({ review: "accepted" });
+    // Delayed retry acknowledges the original write while leaving the newer decision in effect.
+    expect(await team.call(path + "/review", first, member)).toMatchObject({ review: "accepted" });
+    const actual = await inspect(team, member);
+    expect(actual.reviewHistory.latestId).toBe(later.reviewId);
+    expect(actual.reviewHistory.entries).toHaveLength(3);
+    expect(actual.reviewHistory.entries[0]).not.toHaveProperty("note");
+    expect(actual.reviewHistory.entries[1]).toMatchObject({ id: first.reviewId, decision: "changes_requested", reviewer: "human:round-one", note });
+    expect(actual.reviewHistory.entries[0]!.reviewed > actual.reviewHistory.entries[1]!.reviewed).toBe(true);
+    const audit = await reopened.call<{ kind: string }[]>(path + "/audit");
+    expect(audit.filter(({ kind }) => ["changes_requested", "accepted"].includes(kind))).toHaveLength(2);
+    for (const value of [actual.run, actual.pi, actual.report, audit, await reopened.call(path + "/runs")])
+      expect(JSON.stringify(value)).not.toContain("Keep the retry behavior explicit");
+    expect(faux.state.callCount).toBe(1);
+    await close();
+
+    api = open(true);
+    const readOnly = apiClient(api.url);
+    expect((await inspect(readOnly)).reviewHistory).toEqual(actual.reviewHistory);
+    await status(readOnly.request(path + "/review", { ...later, reviewId: "c".repeat(32), expectedReviewId: later.reviewId }), 403);
+    await close();
+
+    api = open();
+    const final = apiClient(api.url);
+    await final.call(path + "/delete-session", { session: identity.session, confirm: identity.session });
+    await status(final.request(path + "/inspect", identity), 404);
+    expect((await final.call<{ kind: string }[]>(path + "/audit")).map(({ kind }) => kind)).toContain("changes_requested");
+    await close();
+    using catalog = new Database(join(stateDir, "projects.sqlite"), { readonly: true, strict: true });
+    expect(catalog.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM run_reviews").get()?.count).toBe(0);
+  } finally {
+    await close();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 25_000);
 
 test("project run presets share request drafts and require fresh source approval", async () => {
   const { root, workspace, stateDir } = await fixture("okb-coding-presets-");

@@ -89,7 +89,12 @@ transcript eligible for recovery. Transcript deletion clears the local run
 records for the whole conversation family and drops the alternatives’ patch
 and publication records.
 The project control plane scopes credentials, members, worker runs, and
-review decisions to registered projects. Owners can save named task, query,
+review decisions to registered projects. The selected run exposes its private
+review notes with authenticated reviewer identities. New clients submit a
+stable review ID and the last observed decision ID. A retry acknowledges the
+same review without changing the latest decision, which still governs patch
+and publication approval. Review notes share the run's deletion policy.
+Owners can save named task, query,
 and repository profile presets in the project catalog. Project members can
 load them in the team web app or editor. The editor stores the team token,
 HTTPS origin, and project identity together in SecretStorage and uses the

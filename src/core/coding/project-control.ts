@@ -37,17 +37,22 @@ import type { TeamStartup } from "./team-listener.ts";
 import { runCodingWorkerCheck } from "./worker-check.ts";
 
 type Json = Record<string, unknown>;
-type Actor = { id: string; owner: boolean; project?: string };
+type Actor = { id: string; owner: boolean; project?: string; memberId?: string };
 type ProjectRow = {
   id: string; title: string; workspace: string; scopes: string; provider: CodingProvider; model: string;
   thinking: ModelThinkingLevel | null; api_key: string | null; created: string;
 };
 type PresetRow = { id: string; name: string; prompt: string; query: string; profile: string };
 type RunStatus = "running" | "interrupted" | "done" | "unanswered" | "failed" | "cancelled";
+type ReviewDecision = "accepted" | "changes_requested";
 type RunRow = {
   project: string; session: string; id: string; actor: string; status: RunStatus; signature: string;
   admitted: number; created: string; updated: string; error: string | null;
-  review: "accepted" | "changes_requested" | null; reviewer: string | null; reviewed: string | null;
+  review: ReviewDecision | null; reviewer: string | null; reviewed: string | null;
+};
+type RunReviewRow = {
+  id: string; decision: ReviewDecision; reviewer: string; reviewed: string; note: string | null;
+  session: string; request_id: string; expected_id: string | null; member_id: string | null;
 };
 type BranchRow = {
   session: string; parent_session: string; parent_request: string; version: string;
@@ -102,6 +107,7 @@ const branchVersionPattern = /^[a-f0-9]{64}$/u;
 const requestPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const presetPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const maxProjectPresets = 24;
+const reviewHistoryLimit = 20;
 const now = () => new Date().toISOString();
 const digest = (input: string) => createHash("sha256").update(input).digest("hex");
 const retentionActor = "system:transcript-retention";
@@ -116,6 +122,24 @@ function field(body: Json, name: string, max = 256): string {
   if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value) > max)
     throw new ProjectControlError(`Enter a value for ${name} up to ${max} UTF-8 bytes.`);
   return value.trim();
+}
+
+function isReviewId(value: unknown): value is string {
+  return typeof value === "string" && value.length === 32 && /^[a-f0-9]+$/u.test(value);
+}
+
+function reviewSubmission(body: Json): { id: string; expected: string | null; note: string | null } | undefined {
+  if (!Object.hasOwn(body, "reviewId") && !Object.hasOwn(body, "expectedReviewId") && !Object.hasOwn(body, "note")) return;
+  const { reviewId, expectedReviewId, note } = body;
+  if (!isReviewId(reviewId) || (expectedReviewId !== null && !isReviewId(expectedReviewId)))
+    throw new ProjectControlError("Use a valid review ID and the latest review ID from inspection.");
+  if (note === undefined) return { id: reviewId, expected: expectedReviewId, note: null };
+  if (typeof note !== "string")
+    throw new ProjectControlError("Enter an optional plain-text review note up to 4096 UTF-8 bytes.");
+  const text = note.replaceAll("\r\n", "\n");
+  if (Buffer.byteLength(text) > 4096 || /[\x00-\x08\x0b-\x1f\x7f-\x9f]/u.test(text) || !text.isWellFormed())
+    throw new ProjectControlError("Enter an optional plain-text review note up to 4096 UTF-8 bytes.");
+  return { id: reviewId, expected: expectedReviewId, note: text.trim() ? text : null };
 }
 
 function stringList(value: unknown, max: number): string[] {
@@ -284,6 +308,20 @@ export class CodingProjectControl {
           PRIMARY KEY (project, session, id)
         );
         CREATE INDEX IF NOT EXISTS runs_project_updated ON runs(project, updated DESC);
+        CREATE TABLE IF NOT EXISTS run_reviews(
+          seq INTEGER PRIMARY KEY,
+          project TEXT NOT NULL, session TEXT NOT NULL, request_id TEXT NOT NULL, id TEXT NOT NULL,
+          decision TEXT NOT NULL CHECK(decision IN ('accepted','changes_requested')),
+          reviewer TEXT NOT NULL, reviewed TEXT NOT NULL, note TEXT, expected_id TEXT, member_id TEXT,
+          UNIQUE(project, id),
+          FOREIGN KEY(project, session, request_id) REFERENCES runs(project, session, id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS run_reviews_latest ON run_reviews(project, session, request_id, seq DESC);
+        INSERT INTO run_reviews(project, session, request_id, id, decision, reviewer, reviewed)
+          SELECT project, session, id, lower(hex(randomblob(16))), review, reviewer, reviewed FROM runs
+          WHERE review IN ('accepted','changes_requested') AND reviewer IS NOT NULL AND reviewed IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM run_reviews
+              WHERE run_reviews.project = runs.project AND run_reviews.session = runs.session AND run_reviews.request_id = runs.id);
         CREATE TABLE IF NOT EXISTS conversation_branches(
           project TEXT NOT NULL REFERENCES projects(id), session TEXT NOT NULL,
           parent_session TEXT NOT NULL, parent_request TEXT NOT NULL, version TEXT NOT NULL,
@@ -453,10 +491,10 @@ export class CodingProjectControl {
   #identity(owner: boolean, token: string | null): Actor {
     if (owner) return { id: resolveActor(), owner };
     if (token?.startsWith("okbp_") && token.length === 48) {
-      const member = this.#get<{ project: string; actor: string }>(
-        "SELECT project, actor FROM members WHERE secret = ? AND expires > ?", digest(token), now(),
+      const member = this.#get<{ id: string; project: string; actor: string }>(
+        "SELECT id, project, actor FROM members WHERE secret = ? AND expires > ?", digest(token), now(),
       );
-      if (member) return { id: member.actor, owner: false, project: member.project };
+      if (member) return { id: member.actor, owner: false, project: member.project, memberId: member.id };
     }
     throw new ProjectControlError("A valid coding project or local okbrain token is required.", 401);
   }
@@ -1063,19 +1101,57 @@ export class CodingProjectControl {
     return this.#runView(this.#readRun(project.id, run.session, run.requestId));
   }
 
-  #review(project: ProjectRow, body: Json, actor: Actor) {
+  #reviewHistory(project: string, session: string, requestId: string) {
+    const rows = this.#all<Pick<RunReviewRow, "id" | "decision" | "reviewer" | "reviewed" | "note">>(`
+      SELECT id, decision, reviewer, reviewed, note FROM run_reviews
+      WHERE project = ? AND session = ? AND request_id = ? ORDER BY seq DESC LIMIT ?`,
+      project, session, requestId, reviewHistoryLimit + 1);
+    return {
+      latestId: rows[0]?.id ?? null,
+      entries: rows.slice(0, reviewHistoryLimit).map(({ id, decision, reviewer, reviewed, note }) => ({
+        id, decision, reviewer, reviewed, ...(note !== null ? { note } : {}),
+      })),
+      ...(rows.length > reviewHistoryLimit ? { hasEarlier: true } : {}),
+    };
+  }
+
+  #review(project: ProjectRow, body: Json, actor: Actor, canWrite: () => boolean) {
     const run = this.#runParts(body);
     const row = this.#readRun(project.id, run.session, run.requestId);
+    if (this.#sessionDeleting(project.id, run.session))
+      throw new ProjectControlError("This transcript is being deleted.", 409);
     const decision = body.decision;
     if (row.status !== "done" || (decision !== "accepted" && decision !== "changes_requested"))
       throw new ProjectControlError("Choose a review decision for a finished result.", 409);
-    if (row.review !== decision || row.reviewer !== actor.id) {
-      this.#db.transaction(() => {
-        this.#write("UPDATE runs SET review = ?, reviewer = ?, reviewed = ? WHERE project = ? AND session = ? AND id = ?",
-          decision, actor.id, now(), project.id, run.session, run.requestId);
-        this.#audit(project.id, decision, actor.id, run.session, run.requestId);
-      })();
+    const submission = reviewSubmission(body);
+    if (!submission && row.review === decision && row.reviewer === actor.id) return this.#runView(row);
+    const memberId = actor.memberId ?? null;
+    const latestId = this.#get<{ id: string }>(`SELECT id FROM run_reviews
+      WHERE project = ? AND session = ? AND request_id = ? ORDER BY seq DESC LIMIT 1`, project.id, run.session, run.requestId)?.id ?? null;
+    if (submission) {
+      const prior = this.#get<RunReviewRow>(`SELECT id, decision, reviewer, reviewed, note, session, request_id, expected_id, member_id
+        FROM run_reviews WHERE project = ? AND id = ?`, project.id, submission.id);
+      if (prior) {
+        if (prior.session !== run.session || prior.request_id !== run.requestId || prior.decision !== decision ||
+            prior.reviewer !== actor.id || prior.member_id !== memberId || prior.note !== submission.note || prior.expected_id !== submission.expected)
+          throw new ProjectControlError("This review ID already belongs to a different review. Refresh before submitting.", 409);
+        return this.#runView(row);
+      }
+      if (submission.expected !== latestId)
+        throw new ProjectControlError("The review changed. Refresh the result before submitting your review.", 409);
     }
+    const previous = Date.parse(row.reviewed ?? "");
+    // Patch and GitHub approvals use this timestamp to bind the latest decision.
+    const reviewed = new Date(Math.max(Date.now(), Number.isFinite(previous) ? previous + 1 : 0)).toISOString();
+    if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to save this review.", 403);
+    this.#db.transaction(() => {
+      this.#write(`INSERT INTO run_reviews(project, session, request_id, id, decision, reviewer, reviewed, note, expected_id, member_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, project.id, run.session, run.requestId, submission?.id ?? randomBytes(16).toString("hex"),
+        decision, actor.id, reviewed, submission?.note ?? null, latestId, memberId);
+      this.#write("UPDATE runs SET review = ?, reviewer = ?, reviewed = ? WHERE project = ? AND session = ? AND id = ?",
+        decision, actor.id, reviewed, project.id, run.session, run.requestId);
+      this.#audit(project.id, decision, actor.id, run.session, run.requestId);
+    })();
     return this.#runView(this.#readRun(project.id, run.session, run.requestId));
   }
 
@@ -1812,7 +1888,10 @@ export class CodingProjectControl {
       if (action === "evaluation-inspect" || action === "evaluation-review")
         return this.#withSession(project, body, () => this.#evaluate(project, body, actor, action === "evaluation-review"));
       if (action === "run") return this.#withSession(project, body, () => this.#start(project, body, actor, canWrite));
-      if (action === "inspect") return this.#withSession(project, body, () => this.#inspect(project, body, actor, canWrite));
+      if (action === "inspect") return this.#withSession(project, body, async () => {
+        const inspected = await this.#inspect(project, body, actor, canWrite);
+        return { ...inspected, reviewHistory: this.#reviewHistory(project.id, inspected.run.session, inspected.run.id) };
+      });
       if (action === "source-inspect") return this.#withSession(project, body, () => this.#sourceInspect(project, body, actor));
       if (action === "branch-comparison-inspect") return this.#withSession(project, body, () => this.#compareBranch(project, body, actor));
       if (action === "reset-context-preview" || action === "reset-context" || action === "compact-context-preview" || action === "compact-context") {
@@ -1822,7 +1901,10 @@ export class CodingProjectControl {
       }
       if (action === "resume") return this.#withSession(project, body, () => this.#resume(project, body, actor));
       if (action === "cancel") return this.#withSession(project, body, () => this.#cancel(project, body, actor));
-      if (action === "review") return this.#withSession(project, body, async () => this.#review(project, body, actor));
+      if (action === "review") return this.#withSession(project, body, async () => {
+        const currentActor = this.#identity(localOwner, token);
+        return this.#review(this.#project(project.id, currentActor), body, currentActor, canWrite);
+      });
       if (action === "patch-proposals") return this.#withSession(project, body, () => this.#patchProposals(project, body, actor));
       if (action === "patch-preview" || action === "patch-apply")
         return this.#withSession(project, body, () => this.#patch(project, body, actor, action === "patch-apply", canWrite));

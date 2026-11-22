@@ -53,6 +53,9 @@
 .coding-preview details, .coding-result details { border-top: 1px solid var(--line); padding-top: var(--space-2); }
 .coding-preview pre, .coding-result pre { max-height: 26rem; overflow: auto; }
 .coding-result { border-top: 1px solid var(--line); padding-top: var(--space-4); }
+.coding-review-history { padding-inline-start: var(--space-5); }
+.coding-review-history li { margin-block: var(--space-2); overflow-wrap: anywhere; }
+.coding-review-note { white-space: pre-wrap; }
 .coding-feedback:empty { display: none; }
 .coding-runs { max-height: 20rem; overflow-y: auto; padding: var(--space-1); }
 .coding-run {
