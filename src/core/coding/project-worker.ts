@@ -1,4 +1,7 @@
 import { mkdirSync } from "node:fs";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { dockerWorkerStateDir, planDockerWorker, type DockerWorkerConfig } from "./docker-worker.ts";
@@ -6,21 +9,28 @@ import {
   canonicalWorkspace, CodingError, maxLiveAnswerLength, prepareCodingInput, runCodingSession,
   type CodingLiveAnswer, type CodingSessionOptions, type PreparedCodingInput,
 } from "./durable.ts";
+import { checkProviderModel, parseProviderCheckOutcome, type ProviderCheckInput, type ProviderCheckOutcome } from "./provider-check.ts";
 import { parseCodingTaskProgress, type CodingTaskProgress } from "./task-progress.ts";
 
 type Request = { stateDir: string; workspaceBinding: string; options: CodingSessionOptions; apiKey?: string };
-type WorkerRequest = Request & { stateBinding?: string; preparedInput?: PreparedCodingInput };
+type WorkerRequest = Request & { type?: undefined; stateBinding?: string; preparedInput?: PreparedCodingInput };
+type ProviderCheckRequest = ProviderCheckInput & { type: "provider-check" };
 type Event = { type: "admitted" } | { type: "answer"; answer: CodingLiveAnswer | null }
   | { type: "task-progress"; progress: CodingTaskProgress | null }
-  | { type: "settled"; status: "done" | "unanswered" } | { type: "error"; error: string };
+  | { type: "settled"; status: "done" | "unanswered" } | { type: "error"; error: string }
+  | { type: "provider-check"; outcome: ProviderCheckOutcome };
 type WorkerCallbacks = {
   admitted: () => void;
   liveAnswer: (answer: CodingLiveAnswer | undefined) => void;
   taskProgress: (progress: CodingTaskProgress | undefined) => void;
 };
 const maxWorkerInputBytes = 512 * 1024; // Even doubly escaped explicit text must fit the pipe.
+const maxProviderCheckInputBytes = 24 * 1024;
+const maxProviderCheckOutputBytes = 1024;
+const providerWorkerDeadline = 20_000;
 export const projectWorkerArg = "--project-worker";
 export class ProjectWorkerInterrupted extends Error {}
+export class ProjectProviderCheckDisallowed extends Error {}
 
 export async function runProjectWorker(): Promise<number> {
   if (process.stdin.isTTY || process.stdout.isTTY) return 2;
@@ -28,6 +38,10 @@ export async function runProjectWorker(): Promise<number> {
   const controller = new AbortController();
   const send = (event: Event) => new Promise<void>((resolve) =>
     process.stdout.write(JSON.stringify(event) + "\n", () => resolve()));
+  const finish = () => {
+    input.close();
+    process.stdin.pause();
+  };
   let started = false;
   try {
     for await (const line of input) {
@@ -37,7 +51,20 @@ export async function runProjectWorker(): Promise<number> {
       }
       if (Buffer.byteLength(line) > maxWorkerInputBytes) return 2;
       started = true;
-      const request = JSON.parse(line) as WorkerRequest;
+      const request = JSON.parse(line) as WorkerRequest | ProviderCheckRequest;
+      if (request.type === "provider-check") {
+        if (Object.keys(request).length !== 4 || Buffer.byteLength(line) > maxProviderCheckInputBytes ||
+            typeof request.provider !== "string" || typeof request.model !== "string" || typeof request.apiKey !== "string") return 2;
+        void checkProviderModel(request, controller.signal).then(async (outcome) => {
+          await send({ type: "provider-check", outcome });
+          finish();
+        }, () => {
+          process.exitCode = 1;
+          finish();
+        });
+        continue;
+      }
+      if (request.type !== undefined) return 2;
       if (request.stateBinding !== undefined && (request.stateDir !== dockerWorkerStateDir || request.options.prompt !== undefined)) return 2;
       void runCodingSession(request.options, {
         stateDir: request.stateDir,
@@ -52,13 +79,11 @@ export async function runProjectWorker(): Promise<number> {
         taskProgress: (progress) => send({ type: "task-progress", progress: progress ?? null }),
       }).then(async (result) => {
         await send({ type: "settled", status: result.status });
-        input.close();
-        process.stdin.pause();
+        finish();
       }, async (error: unknown) => {
         if (error instanceof CodingError) await send({ type: "error", error: error.message });
         else process.exitCode = 1;
-        input.close();
-        process.stdin.pause();
+        finish();
       });
     }
   } catch {
@@ -70,14 +95,18 @@ export async function runProjectWorker(): Promise<number> {
 }
 
 const workerEnvs = new Set(["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "OKB_SQLITE_LIB"]);
+const workerEnv = () => Object.fromEntries(Object.entries(process.env).filter(([name]) => workerEnvs.has(name.toUpperCase())));
+
+function workerArgv() {
+  // The standalone app starts its CLI entry again. Development runs the source module with Bun.
+  return Bun.embeddedFiles.length > 0
+    ? [process.execPath, projectWorkerArg]
+    : [process.execPath, "--no-env-file", import.meta.path];
+}
 
 function launchPipe(request: WorkerRequest, signal: AbortSignal, callbacks: WorkerCallbacks, docker?: ReturnType<typeof planDockerWorker>) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => workerEnvs.has(name.toUpperCase())));
-  const standalone = Bun.embeddedFiles.length > 0;
-  // The standalone app starts its CLI entry again. Development runs the source module with Bun.
-  const argv = docker?.argv ?? (standalone
-    ? [process.execPath, projectWorkerArg]
-    : [process.execPath, "--no-env-file", import.meta.path]);
+  const env = workerEnv();
+  const argv = docker?.argv ?? workerArgv();
   const line = JSON.stringify(request) + "\n";
   if (Buffer.byteLength(line) > maxWorkerInputBytes) throw new CodingError("The approved coding request exceeds the worker input limit.");
   const child = Bun.spawn(argv, { cwd: request.stateBinding ?? request.stateDir, env, stdin: "pipe", stdout: "pipe", stderr: "ignore" });
@@ -134,6 +163,76 @@ function launchPipe(request: WorkerRequest, signal: AbortSignal, callbacks: Work
     }
   })();
   return { stop, result };
+}
+
+function providerWorkerUnavailable() {
+  return new ProjectWorkerInterrupted("The configured coding worker could not report a provider check result.");
+}
+
+/** Contact only the selected provider from a worker with no workspace or saved session. */
+export async function launchProjectProviderCheck(
+  { provider, model, apiKey }: ProviderCheckInput,
+  options: { docker?: DockerWorkerConfig; signal: AbortSignal; canLaunch?: () => boolean },
+): Promise<ProviderCheckOutcome> {
+  const signal = AbortSignal.any([options.signal, AbortSignal.timeout(providerWorkerDeadline)]);
+  const env = workerEnv();
+  let directory: string | undefined;
+  let docker: ReturnType<typeof planDockerWorker> | undefined;
+  let completed = false;
+  try {
+    signal.throwIfAborted();
+    const request: ProviderCheckRequest = { type: "provider-check", provider, model, apiKey };
+    const line = JSON.stringify(request) + "\n";
+    if (Buffer.byteLength(line) > maxProviderCheckInputBytes) throw providerWorkerUnavailable();
+    directory = await mkdtemp(join(await realpath(tmpdir()), "okb-provider-check-"));
+    signal.throwIfAborted();
+    if (options.canLaunch && !options.canLaunch()) throw new ProjectProviderCheckDisallowed();
+    if (options.docker) docker = planDockerWorker(options.docker, directory, "provider-check");
+    const child = Bun.spawn(docker?.argv ?? workerArgv(), {
+      cwd: directory, env, stdin: "pipe", stdout: "pipe", stderr: "ignore", maxBuffer: maxProviderCheckOutputBytes,
+    });
+    const stop = () => {
+      if (child.exitCode === null) {
+        try { child.kill("SIGKILL"); } catch { /* the child may have exited */ }
+      }
+    };
+    signal.addEventListener("abort", stop, { once: true });
+    if (signal.aborted) stop();
+    try {
+      // Only this private pipe carries the credential. Docker logging is disabled in the shared plan.
+      await child.stdin.write(line);
+      await child.stdin.flush();
+      const bytes = Buffer.alloc(maxProviderCheckOutputBytes);
+      let length = 0;
+      for await (const chunk of child.stdout) {
+        if (chunk.byteLength > bytes.length - length) throw providerWorkerUnavailable();
+        bytes.set(chunk, length);
+        length += chunk.byteLength;
+      }
+      if (await child.exited !== 0 || signal.aborted) throw providerWorkerUnavailable();
+      const event: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length)));
+      const outcome = event && typeof event === "object" && "type" in event && event.type === "provider-check" &&
+        "outcome" in event && Object.keys(event).length === 2 ? parseProviderCheckOutcome(event.outcome) : undefined;
+      if (!outcome) throw providerWorkerUnavailable();
+      completed = true;
+      return outcome;
+    } finally {
+      signal.removeEventListener("abort", stop);
+      stop();
+      try { await child.stdin.end(); } catch { /* the child may have already closed its pipe */ }
+      await child.exited;
+    }
+  } catch (error) {
+    if (error instanceof ProjectProviderCheckDisallowed) throw error;
+    // Never attach raw process errors, paths, or child output to this diagnostic.
+    throw providerWorkerUnavailable();
+  } finally {
+    if (docker && !completed) await docker.cleanup(env).catch(() => {});
+    if (directory) {
+      try { await rm(directory, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 }); }
+      catch { throw providerWorkerUnavailable(); }
+    }
+  }
 }
 
 export function launchProjectWorker(request: Request, signal: AbortSignal, callbacks: WorkerCallbacks, docker?: DockerWorkerConfig) {

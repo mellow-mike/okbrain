@@ -269,7 +269,9 @@ In the Mac or local web app, open **Coding → Project settings → Deployment c
 
 With a writable brain selected on a server using Linux Docker workers, choose **Run offline worker check**. The check looks up the pinned image in local Docker, inspects the configured network, and launches a disposable container with Docker's `none` network. The result lists the observed session mount, filesystem and process controls, and network isolation. Use the passing, failing, or skipped checks to see which controls ran. The probe uses synthetic files and requires no provider account. [Docker `none` network](https://docs.docker.com/engine/network/drivers/none/)
 
-Verify provider egress, team access through the deployed HTTPS endpoint, and backup restoration on your actual enterprise host before inviting the team.
+To check provider egress from the intended host, select **Test provider connection**, review the selected model and credential source, then choose **Run provider check**. Reopen Deployment checks and confirm again if the settings or key change. The configured process or Docker worker makes one model metadata request to the provider. The Docker worker uses the configured network and a disposable mount. The request carries only the model identifier and the credential needed for lookup. The panel shows the outcome and, when available, the HTTP status. A passing result verifies outbound HTTPS and model metadata access for that credential. Use a normally approved Coding run to verify generation access. [OpenAI model retrieval](https://developers.openai.com/api/reference/resources/models/methods/retrieve), [Claude model retrieval](https://platform.claude.com/docs/en/api/models/retrieve), [Gemini model retrieval](https://aistudio.google.com/api-reference/models/get-model)
+
+Verify provider access, team access through the deployed HTTPS endpoint, and backup restoration on your actual enterprise host before inviting the team.
 
 ### Limit transcript retention
 

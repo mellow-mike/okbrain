@@ -1722,6 +1722,7 @@ try {
   await page.evaluate((id) => { location.hash = "#coding/" + id; }, project.id);
 
   const deploymentPath = "/api/coding" + projectPath + "/deployment-check";
+  const providerCheckPath = "/api/coding" + projectPath + "/provider-check";
   async function openDeployment(view: Page) {
     await view.getByText("Project settings", { exact: true }).click();
     const deployment = view.locator("[data-deployment-checks]");
@@ -1731,20 +1732,100 @@ try {
     assert.ok(check.ok(), await check.text());
     return deployment;
   }
-  const deployment = await openDeployment(page);
-  await deployment.getByText("Local process · Server OS account", { exact: true }).waitFor();
-  await deployment.getByText("Keep until manually deleted", { exact: true }).waitFor();
-  await deployment.getByText("openai / browser-project-fixture", { exact: true }).waitFor();
-  await deployment.getByText("Stopped", { exact: true }).waitFor();
-  assert.equal(await deployment.getByRole("button", { name: "Run offline worker check", exact: true }).count(), 0);
-  await deployment.getByText("Deployment checks", { exact: true }).click();
-  await page.getByText("Project settings", { exact: true }).click();
+  const providerCheckRoute = "**" + providerCheckPath;
+  const deploymentRoute = "**" + deploymentPath;
+  const originalProviderBinding = "a".repeat(64);
+  const refreshedProviderBinding = "b".repeat(64);
+  let currentProviderBinding = originalProviderBinding;
+  const providerAttempts: string[] = [];
+  let providerChecks = 0;
+  await page.route(deploymentRoute, async (route) => {
+    const response = await route.fetch();
+    const payload = await response.json();
+    payload.result.providerCheckBinding = currentProviderBinding;
+    await route.fulfill({ response, json: payload });
+  });
+  await page.route(providerCheckRoute, async (route) => {
+    const request = route.request();
+    assert.equal(request.method(), "POST");
+    const body = request.postDataJSON();
+    const binding = providerAttempts.length ? refreshedProviderBinding : originalProviderBinding;
+    assert.deepEqual(body, { approved: true, binding });
+    providerAttempts.push(body.binding);
+    if (body.binding !== currentProviderBinding) {
+      return route.fulfill({ status: 409, json: {
+        error: "The provider settings changed. Reopen Deployment checks and confirm the current settings.",
+      } });
+    }
+    providerChecks++;
+    const passed = providerChecks === 2;
+    await route.fulfill({ json: { result: {
+      provider: "openai", model: "browser-project-fixture", worker: "process", network: null, origin: "fixture",
+      status: passed ? "passed" : "failed", code: passed ? "ready" : "denied", httpStatus: passed ? 200 : 401,
+      checkedAt: "2026-11-22T00:00:00Z", message: passed ? "Provider metadata lookup succeeded." : "Check the API key for this <model> lookup.",
+    } } });
+  });
+  const deployment = page.locator("[data-deployment-checks]");
+  try {
+    await openDeployment(page);
+    await deployment.getByText("Local process · Server OS account", { exact: true }).waitFor();
+    await deployment.getByText("Keep until manually deleted", { exact: true }).waitFor();
+    await deployment.getByText("openai / browser-project-fixture", { exact: true }).waitFor();
+    await deployment.getByText("Stopped", { exact: true }).waitFor();
+    assert.equal(await deployment.getByRole("button", { name: "Run offline worker check", exact: true }).count(), 0);
+    const provider = deployment.locator("[data-provider-check]");
+    const testProvider = provider.getByRole("button", { name: "Test provider connection", exact: true });
+    const runProvider = provider.getByRole("button", { name: "Run provider check", exact: true });
+    await testProvider.press("Enter");
+    await provider.getByText("Look up model browser-project-fixture at openai over HTTPS. The local worker uses the server environment key to authenticate this single model metadata request.", { exact: true }).waitFor();
+    assert.equal(await runProvider.evaluate((button) => button === document.activeElement), true);
+    assert.equal(providerChecks, 0);
+    await provider.getByRole("button", { name: "Cancel", exact: true }).click();
+    await runProvider.waitFor({ state: "hidden" });
+    assert.equal(providerChecks, 0);
+    await testProvider.click();
+    currentProviderBinding = refreshedProviderBinding;
+    await runProvider.click();
+    await provider.getByText("The provider settings changed. Reopen Deployment checks and confirm the current settings.", { exact: true }).waitFor();
+    assert.deepEqual(providerAttempts, [originalProviderBinding]);
+    assert.equal(providerChecks, 0);
+    const summary = deployment.getByText("Deployment checks", { exact: true });
+    await summary.click();
+    await summary.click();
+    await testProvider.click();
+    assert.deepEqual(providerAttempts, [originalProviderBinding]);
+    await runProvider.click();
+    await provider.getByText(/Check the API key for this <model> lookup\. · HTTP 401 · Checked/).waitFor();
+    assert.equal(await provider.locator("model").count(), 0);
+    assert.equal(providerChecks, 1);
+    await testProvider.click();
+    await runProvider.click();
+    await provider.getByText(/Provider metadata lookup succeeded\. · Checked/).waitFor();
+    assert.deepEqual(providerAttempts, [originalProviderBinding, refreshedProviderBinding, refreshedProviderBinding]);
+    assert.equal(providerChecks, 2);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+    await deployment.getByText("Deployment checks", { exact: true }).click();
+    await page.getByText("Project settings", { exact: true }).click();
+  } finally {
+    await page.unroute(providerCheckRoute);
+    await page.unroute(deploymentRoute);
+  }
 
   // The Linux worker smoke exercises Docker itself. Supply its response shape here to exercise the browser action.
   const image = "sha256:" + "a".repeat(64);
-  const deploymentRoute = "**" + deploymentPath;
+  const dockerProviderBinding = "c".repeat(64);
   const workerCheckMessage = "The temporary <state> mount was writable.";
   let workerChecks = 0;
+  let dockerNetwork = "none";
+  let dockerProviderChecks = 0;
+  await page.route(providerCheckRoute, async (route) => {
+    assert.deepEqual(route.request().postDataJSON(), { approved: true, binding: dockerProviderBinding });
+    dockerProviderChecks++;
+    await route.fulfill({ json: { result: {
+      provider: "openai", model: "browser-project-fixture", worker: "docker", network: "bridge", origin: "fixture",
+      status: "passed", code: "ready", httpStatus: 200, checkedAt: "2026-11-22T00:00:00Z", message: "Docker provider metadata lookup succeeded.",
+    } } });
+  });
   await page.route(deploymentRoute, async (route) => {
     if (route.request().method() === "POST") {
       workerChecks++;
@@ -1756,20 +1837,38 @@ try {
     }
     const response = await route.fetch();
     const payload = await response.json();
-    payload.result.worker = { mode: "docker", image, network: "none" };
+    payload.result.worker = { mode: "docker", image, network: dockerNetwork };
+    payload.result.providerCheckBinding = dockerNetwork === "none" ? null : dockerProviderBinding;
     await route.fulfill({ response, json: payload });
   });
   try {
     await openDeployment(page);
     await deployment.getByText(image, { exact: true }).waitFor();
+    await deployment.getByText("Testing the provider connection requires a network-enabled worker.", { exact: true }).waitFor();
+    assert.equal(await deployment.getByRole("button", { name: "Test provider connection", exact: true }).count(), 0);
     assert.equal(workerChecks, 0);
+    assert.equal(dockerProviderChecks, 0);
     await deployment.getByRole("button", { name: "Run offline worker check", exact: true }).click();
     await deployment.getByText("State mount · Passed · " + workerCheckMessage, { exact: true }).waitFor();
     assert.equal(await deployment.locator("state").count(), 0);
     assert.equal(workerChecks, 1);
+    const deploymentSummary = deployment.getByText("Deployment checks", { exact: true });
+    await deploymentSummary.click();
+    dockerNetwork = "bridge";
+    await deploymentSummary.click();
+    await deployment.getByText("bridge", { exact: true }).waitFor();
+    await deployment.getByRole("button", { name: "Test provider connection", exact: true }).click();
+    await deployment.getByText(/The Docker worker on network bridge uses the server environment key/).waitFor();
+    assert.equal(dockerProviderChecks, 0);
+    await deployment.getByRole("button", { name: "Run provider check", exact: true }).click();
+    await deployment.getByText(/Docker provider metadata lookup succeeded\. · Checked/).waitFor();
+    assert.equal(dockerProviderChecks, 1);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
     await page.getByText("Project settings", { exact: true }).click();
-  } finally { await page.unroute(deploymentRoute); }
+  } finally {
+    await page.unroute(deploymentRoute);
+    await page.unroute(providerCheckRoute);
+  }
 
   const readOnlyDeploymentMount = await changeMount({ action: "register", name: readonlyBrain, path: readonlyFolder, readonly: true });
   assert.ok(readOnlyDeploymentMount.ok, await readOnlyDeploymentMount.text());
@@ -1777,12 +1876,14 @@ try {
   readonlyCoding.setDefaultTimeout(8000);
   try {
     const deploymentMethods: string[] = [];
+    let readonlyProviderChecks = 0;
     await readonlyCoding.addInitScript((name) => localStorage.setItem("okb-gui-brain", name), readonlyBrain);
     readonlyCoding.on("pageerror", (error) => errors.push(error.message));
     await readonlyCoding.route("**/*", async (route) => {
       const req = route.request();
       const url = new URL(req.url());
       if (url.origin !== origin) { outbound.push(url.href); return route.abort(); }
+      if (url.pathname === providerCheckPath) { readonlyProviderChecks++; return route.abort(); }
       if (url.pathname !== deploymentPath) return route.continue();
       deploymentMethods.push(req.method());
       assert.equal(req.headers()["x-okb-brain"], readonlyBrain);
@@ -1790,15 +1891,17 @@ try {
       assert.ok(response.ok(), await response.text());
       const payload = await response.json();
       assert.equal(payload.result.worker.mode, "process");
-      payload.result.worker = { mode: "docker", image, network: "none" };
+      payload.result.worker = { mode: "docker", image, network: "bridge" };
       await route.fulfill({ response, json: payload });
     });
     await readonlyCoding.goto(server.url + "#coding/" + project.id);
     assert.equal(await readonlyCoding.locator("#brain").inputValue(), readonlyBrain);
     const readonlyDeployment = await openDeployment(readonlyCoding);
     await readonlyDeployment.getByText(image, { exact: true }).waitFor();
-    await readonlyDeployment.getByText("none", { exact: true }).waitFor();
+    await readonlyDeployment.getByText("bridge", { exact: true }).waitFor();
     assert.equal(await readonlyDeployment.getByRole("button", { name: "Run offline worker check", exact: true }).count(), 0);
+    assert.equal(await readonlyDeployment.getByRole("button", { name: "Test provider connection", exact: true }).count(), 0);
+    assert.equal(readonlyProviderChecks, 0);
     assert.equal(await readonlyCoding.evaluate(() => document.documentElement.scrollWidth), 375);
     assert.deepEqual(deploymentMethods, ["GET"]);
   } finally {

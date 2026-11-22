@@ -138,6 +138,13 @@ The Mac and web project settings summarize deployment configuration for the
 local operator. An explicit offline check uses the production launch plan
 with a disposable session and the `none` network, and reports observed worker
 controls without exposing credentials or transcripts.
+The local operator can also approve a provider metadata lookup from the
+configured worker. It uses the project's selected model and effective key,
+with a disposable working directory and no source or transcript access.
+An opaque approval value binds the confirmed configuration and credential.
+The control plane rechecks mount policy at worker launch.
+The worker issues a single GET to the installed provider's model endpoint.
+The result contains a normalized outcome and optional HTTP status.
 
 ---
 

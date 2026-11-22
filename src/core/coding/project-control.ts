@@ -1,6 +1,6 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, rmSync } from "node:fs";
 import { lstat, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -31,7 +31,8 @@ import {
 import { githubBranchRef, githubCreatePatchCommit, githubCreatePatchRef, githubPreparePatchBranch } from "./github-branch.ts";
 import { excludedPath, selectRepositoryContext } from "./repository-context.ts";
 import { validateCodingProjectProfile, type CodingProjectProfile } from "./project-profile.ts";
-import { launchProjectWorker, ProjectWorkerInterrupted } from "./project-worker.ts";
+import { launchProjectProviderCheck, launchProjectWorker, ProjectProviderCheckDisallowed, ProjectWorkerInterrupted } from "./project-worker.ts";
+import { checkProviderModel, type ProviderCheckOutcome } from "./provider-check.ts";
 import type { CodingTaskProgress } from "./task-progress.ts";
 import type { TeamStartup } from "./team-listener.ts";
 import { runCodingWorkerCheck } from "./worker-check.ts";
@@ -203,10 +204,25 @@ export interface ProjectControlOptions {
   stateDir?: string;
   models?: CodingDependencies["models"];
   githubFetch?: GitHubFetch;
+  providerCheckFetch?: typeof fetch;
   workerImage?: string;
   workerNetwork?: string;
   retentionAllowed?: () => boolean;
 }
+
+type ProviderDiagnosticCode = ProviderCheckOutcome["code"] | "worker-unavailable";
+const providerCheckMessages: Record<ProviderDiagnosticCode, string> = {
+  ready: "The configured model lookup succeeded.",
+  denied: "The provider declined the lookup. Check the active credential and its model read permissions.",
+  "model-unavailable": "The provider could not find the configured model for this credential.",
+  "rate-limited": "The provider limited the lookup. Try again when requests are available.",
+  redirected: "The provider lookup redirected. Check the worker's network and proxy configuration.",
+  unreachable: "The worker could not reach the provider. Check its network and outbound HTTPS access.",
+  "timed-out": "The provider check ran out of time. Check the worker's network and try again.",
+  "invalid-response": "The lookup returned an unexpected response. Check the configured model and the worker's proxy settings.",
+  "provider-error": "The provider returned an error during model lookup. Check the HTTP status and try again.",
+  "worker-unavailable": "The configured worker could not complete the check. Check the server's worker setup.",
+};
 
 export function codingProjectCatalogPath(stateDir = join(dataDir(), "coding-projects")) {
   return join(stateDir, "projects.sqlite");
@@ -243,11 +259,14 @@ export class CodingProjectControl {
   readonly #evaluations: CodingEvaluations;
   readonly #models: CodingDependencies["models"];
   readonly #githubFetch: GitHubFetch;
+  readonly #providerCheckFetch: typeof fetch | undefined;
+  readonly #providerCheckSecret = randomBytes(32);
   readonly #dockerWorker: DockerWorkerConfig | undefined;
   readonly #retentionAllowed: () => boolean;
   readonly #active = new Map<string, Running>();
   #patchInFlight = false;
   #workerCheckInFlight = false;
+  #providerCheckInFlight: AbortController | undefined;
   readonly #gates = new Map<string, Promise<void>>();
   readonly #requests = new Set<Promise<unknown>>();
   #retentionTimer: ReturnType<typeof setInterval> | undefined;
@@ -257,6 +276,7 @@ export class CodingProjectControl {
   constructor(options: ProjectControlOptions = {}) {
     this.#models = options.models;
     this.#githubFetch = options.githubFetch ?? fetch;
+    this.#providerCheckFetch = options.providerCheckFetch;
     this.#retentionAllowed = options.retentionAllowed ?? (() => true);
     try {
       this.#dockerWorker = dockerWorkerConfig(
@@ -268,6 +288,7 @@ export class CodingProjectControl {
       throw error;
     }
     if (this.#dockerWorker && this.#models) throw new ProjectControlError("Injected providers cannot run in a Docker worker.", 409);
+    if (this.#dockerWorker && this.#providerCheckFetch) throw new ProjectControlError("Injected provider checks cannot run in a Docker worker.", 409);
     const catalog = codingProjectCatalogPath(options.stateDir);
     this.#directory = dirname(catalog);
     mkdirSync(this.#directory, { recursive: true, mode: 0o700 });
@@ -402,6 +423,7 @@ export class CodingProjectControl {
   async close() {
     this.#closing = true;
     clearInterval(this.#retentionTimer);
+    this.#providerCheckInFlight?.abort();
     const active = [...this.#active.values()];
     for (const { stop } of active) stop?.();
     await Promise.allSettled([...active.map(({ promise }) => promise), ...this.#requests, this.#retentionSweep]);
@@ -1358,20 +1380,74 @@ export class CodingProjectControl {
   async #deploymentCheck(project: ProjectRow, method: string, body: Json, actor: Actor, canWrite: () => boolean) {
     if (!actor.owner) throw new ProjectControlError("Deployment checks are available to the local okbrain operator.", 403);
     const worker = this.#dockerWorker;
-    if (method === "GET") return {
-      worker: worker ? { mode: "docker", image: worker.image, network: worker.network } : { mode: "process" },
-      retention: this.#retentionSettings(project.id),
-      provider: project.provider,
-      model: project.model,
-      credential: this.#credentialSource(project, actor),
-    };
+    if (method === "GET") {
+      const apiKey = codingCredential(project.provider, this.#dependencies(project, actor));
+      return {
+        worker: worker ? { mode: "docker", image: worker.image, network: worker.network } : { mode: "process" },
+        retention: this.#retentionSettings(project.id),
+        provider: project.provider,
+        model: project.model,
+        credential: apiKey ? (project.api_key ? "project" : "environment") : "missing",
+        providerCheckBinding: apiKey && worker?.network !== "none" && canWrite() ? this.#providerCheckBinding(project, apiKey) : null,
+      };
+    }
     if (!canWrite()) throw new ProjectControlError("Open a writable brain to run the offline worker check.", 403);
     if (Object.keys(body).length) throw new ProjectControlError("The offline worker check uses the server's configured Docker worker. Send an empty object.");
     if (!worker) throw new ProjectControlError("Configure a Linux Docker worker to run the offline worker check.", 409);
-    if (this.#workerCheckInFlight) throw new ProjectControlError("An offline worker check is in progress. Try again when it finishes.", 409);
+    if (this.#workerCheckInFlight || this.#providerCheckInFlight)
+      throw new ProjectControlError("A deployment check is in progress. Try again when it finishes.", 409);
     this.#workerCheckInFlight = true;
     try { return await runCodingWorkerCheck(worker); }
     finally { this.#workerCheckInFlight = false; }
+  }
+
+  #providerCheckBinding(project: ProjectRow, apiKey: string) {
+    const worker = this.#dockerWorker;
+    const settings = [project.id, project.provider, project.model, worker?.image, worker?.network, Boolean(project.api_key), apiKey];
+    return createHmac("sha256", this.#providerCheckSecret).update(JSON.stringify(settings)).digest("hex");
+  }
+
+  async #providerCheck(project: ProjectRow, body: Json, actor: Actor, canWrite: () => boolean) {
+    this.#requireOwner(actor);
+    if (!canWrite()) throw new ProjectControlError("Open a writable brain to test the provider connection.", 403);
+    const binding = body.binding;
+    if (Object.keys(body).length !== 2 || body.approved !== true || typeof binding !== "string" ||
+        binding.length !== 64 || !/^[a-f0-9]+$/.test(binding))
+      throw new ProjectControlError("Confirm the configured provider and model before testing the connection.");
+    if (this.#dockerWorker?.network === "none")
+      throw new ProjectControlError("Choose a Docker worker network with provider access to test the connection.", 409);
+    const apiKey = codingCredential(project.provider, this.#dependencies(project, actor));
+    if (!apiKey) throw new ProjectControlError("Save a project credential or configure the local provider key first.", 409);
+    if (!timingSafeEqual(Buffer.from(binding, "hex"), Buffer.from(this.#providerCheckBinding(project, apiKey), "hex")))
+      throw new ProjectControlError("The provider settings changed. Reopen Deployment checks and confirm the current settings.", 409);
+    if (this.#workerCheckInFlight || this.#providerCheckInFlight)
+      throw new ProjectControlError("A deployment check is in progress. Try again when it finishes.", 409);
+
+    const cancel = new AbortController();
+    const deadline = AbortSignal.timeout(18_000);
+    const signal = AbortSignal.any([cancel.signal, deadline]);
+    this.#providerCheckInFlight = cancel;
+    const { provider, model } = project;
+    const input = { provider, model, apiKey };
+    let code: ProviderDiagnosticCode;
+    let httpStatus: number | undefined;
+    try {
+      const outcome = this.#providerCheckFetch
+        ? await checkProviderModel(input, signal, this.#providerCheckFetch)
+        : await launchProjectProviderCheck(input, { signal, docker: this.#dockerWorker, canLaunch: canWrite });
+      ({ code, httpStatus } = outcome);
+    } catch (error) {
+      if (error instanceof ProjectProviderCheckDisallowed)
+        throw new ProjectControlError("The brain mount changed or is read-only.", 403);
+      code = deadline.aborted ? "timed-out" : "worker-unavailable";
+    } finally {
+      this.#providerCheckInFlight = undefined;
+    }
+    return {
+      provider, model, worker: this.#dockerWorker ? "docker" : "process", network: this.#dockerWorker?.network ?? null,
+      origin: this.#providerCheckFetch ? "fixture" : "worker", status: code === "ready" ? "passed" : "failed",
+      code, ...(httpStatus === undefined ? {} : { httpStatus }), checkedAt: now(), message: providerCheckMessages[code],
+    };
   }
 
   async #retention(project: ProjectRow, method: string, body: Json, actor: Actor) {
@@ -1863,6 +1939,7 @@ export class CodingProjectControl {
     const action = match[2];
     if (action === "deployment-check" && (method === "GET" || method === "POST"))
       return this.#deploymentCheck(project, method, body, actor, canWrite);
+    if (action === "provider-check" && method === "POST") return this.#providerCheck(project, body, actor, canWrite);
     if (action === "retention" && (method === "GET" || method === "POST")) return this.#retention(project, method, body, actor);
     if (action === "presets" && (method === "GET" || method === "POST")) return this.#presets(project, method, body, actor);
     if (action && method === "POST" && (githubPullActions.includes(action) || githubBranchActions.includes(action)))

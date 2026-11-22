@@ -1695,10 +1695,97 @@
     return { refresh, selectRun };
   }
 
+  function mountProviderCheck(panel, { prefix, readonly, current, opened }) {
+    panel.innerHTML = '<div class="row"><button type="button" aria-expanded="false" aria-controls="provider-check-consent">Test provider connection</button></div>' +
+      '<p class="muted" data-provider-network-required hidden>Testing the provider connection requires a network-enabled worker.</p>' +
+      '<div id="provider-check-consent" class="card stack" hidden><p id="provider-check-scope"></p>' +
+      '<div class="row"><button type="button" class="primary" aria-describedby="provider-check-scope">Run provider check</button>' +
+      '<button type="button">Cancel</button></div></div>' +
+      '<div class="coding-feedback" role="status"></div>';
+    const [start, run, cancel] = panel.querySelectorAll('button');
+    const consent = panel.querySelector('#provider-check-consent');
+    const scope = panel.querySelector('#provider-check-scope');
+    const networkRequired = panel.querySelector('[data-provider-network-required]');
+    const feedback = panel.querySelector('[role="status"]');
+    let target = null;
+    let approved = null;
+    let running = false;
+    let offline = false;
+
+    function update() {
+      panel.hidden = !target && !offline;
+      start.parentElement.hidden = !target;
+      networkRequired.hidden = !offline;
+      consent.hidden = !approved;
+      start.setAttribute('aria-expanded', String(!!approved));
+      start.disabled = run.disabled = cancel.disabled = !target || running;
+    }
+
+    start.addEventListener('click', () => {
+      if (!current() || !opened() || !target || running) return;
+      approved = target;
+      const { worker, provider, model, credential } = approved;
+      const boundary = worker.mode === 'docker' ? 'The Docker worker on network ' + worker.network : 'The local worker';
+      const key = credential === 'project' ? 'the saved project key' : 'the server environment key';
+      scope.textContent = 'Look up model ' + model + ' at ' + provider + ' over HTTPS. ' + boundary +
+        ' uses ' + key + ' to authenticate this single model metadata request.';
+      report(feedback);
+      update();
+      run.focus();
+    });
+    cancel.addEventListener('click', () => {
+      if (running || !approved) return;
+      approved = null;
+      update();
+      start.focus();
+    });
+    run.addEventListener('click', async () => {
+      if (!current() || !opened() || !approved || target !== approved || running) return;
+      const checked = approved;
+      const active = () => current() && opened() && target === checked;
+      running = true;
+      update();
+      report(feedback, undefined, 'Checking provider connection…');
+      try {
+        const result = await coding(prefix + '/provider-check', { approved: true, binding: checked.providerCheckBinding });
+        if (!active()) return;
+        const network = checked.worker.mode === 'docker' ? checked.worker.network : null;
+        if (result.provider !== checked.provider || result.model !== checked.model || result.worker !== checked.worker.mode || result.network !== network)
+          throw new Error('The deployment configuration changed. Reopen Deployment checks before trying again.');
+        const passed = result.status === 'passed';
+        const message = [result.message || (passed ? 'Provider connection verified.' : 'The provider connection check failed.'),
+          !passed && Number.isSafeInteger(result.httpStatus) ? 'HTTP ' + result.httpStatus : '',
+          typeof result.checkedAt === 'string' && Number.isFinite(Date.parse(result.checkedAt)) ? 'Checked ' + time(result.checkedAt) : '',
+        ].filter(Boolean).join(' · ');
+        report(feedback, passed ? undefined : new Error(message), message);
+      } catch (error) { if (active()) report(feedback, error); }
+      finally {
+        running = false;
+        if (active()) {
+          approved = null;
+          update();
+          if (document.activeElement === document.body || consent.contains(document.activeElement)) start.focus();
+        } else if (current()) update();
+      }
+    });
+
+    return (settings) => {
+      target = !readonly && (settings?.credential === 'project' || settings?.credential === 'environment') ? settings : null;
+      offline = target?.worker.mode === 'docker' && target.worker.network === 'none';
+      const binding = target?.providerCheckBinding;
+      if (offline || typeof binding !== 'string' || !/^[a-f0-9]{64}$/u.test(binding)) target = null;
+      approved = null;
+      scope.textContent = '';
+      report(feedback);
+      update();
+    };
+  }
+
   function mountDeploymentChecks(panel, prefix, readonly, isDetached) {
     panel.innerHTML = '<summary>Deployment checks</summary><div class="stack coding-form">' +
       '<dl class="coding-grid coding-deployment-summary" hidden></dl>' +
       '<div class="coding-feedback" role="status" data-deployment-status></div>' +
+      '<section class="stack" data-provider-check hidden></section>' +
       '<div class="stack" data-offline-worker hidden>' +
       '<p class="muted">The test container runs the configured local image with networking disabled. ' +
       'The configured network is checked for availability. Provider connectivity and backup recovery need separate checks.</p>' +
@@ -1715,6 +1802,8 @@
     const button = workerPanel.querySelector('button');
     const result = workerPanel.querySelector('section');
     const projectSettings = panel.parentElement.closest('details');
+    const opened = () => projectSettings.open && panel.open;
+    const setProviderCheck = mountProviderCheck(panel.querySelector('[data-provider-check]'), { prefix, readonly, current, opened });
     let version = 0;
     let visible = false;
     let available = false;
@@ -1726,14 +1815,15 @@
     }
 
     async function refresh() {
-      if (!projectSettings.open || !panel.open || !current()) return;
+      if (!opened() || !current()) return;
       const attempt = ++version;
       available = false;
       updateAction();
+      setProviderCheck(null);
       configuration.hidden = true;
       report(settingsFeedback, undefined, 'Loading deployment configuration…');
       const [settings, listener] = await Promise.allSettled([coding(endpoint), coding('/team')]);
-      if (attempt !== version || !current()) return;
+      if (attempt !== version || !current() || !opened()) return;
       if (settings.status === 'rejected') {
         report(settingsFeedback, settings.reason);
         return;
@@ -1755,14 +1845,16 @@
       configuration.hidden = false;
       available = docker && !readonly;
       updateAction();
+      setProviderCheck(settings.value);
       report(settingsFeedback);
     }
 
     function visibilityChanged() {
-      const open = projectSettings.open && panel.open;
+      const open = opened();
       if (visible === open) return;
       visible = open;
       if (open) void refresh();
+      else setProviderCheck(null);
     }
     projectSettings.addEventListener('toggle', visibilityChanged);
     panel.addEventListener('toggle', visibilityChanged);

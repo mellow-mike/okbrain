@@ -134,6 +134,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Give the local operator deployment settings and a disposable offline
   Docker worker check in the Mac and web apps. Exercise the real isolation
   controls, a missing local image, and member and read-only authorization.
+- [x] Add an explicitly approved model metadata lookup from the configured
+  worker so the operator can check provider access on the deployment host.
 - [ ] Verify failure, retention, access policy, and worker isolation on the
   intended enterprise deployment, including actual provider egress and backups.
 - [x] Add explicitly previewed, independent Pi Durable package reviews with
@@ -857,6 +859,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added an owner-approved model lookup from the configured Coding
+  worker. Live provider evaluation and intended deployment verification remain open.
 - 2026-11-22 — Added private Coding review history, safe review retries,
   and a browser follow-up draft from saved change requests.
 - 2026-11-22 — Added private Ask drafts with model attribution and verified

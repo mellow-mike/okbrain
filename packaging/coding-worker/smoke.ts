@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { createApiServer, type ApiServer } from "../../src/api.ts";
 import { dockerWorkerConfig, planDockerWorker } from "../../src/core/coding/docker-worker.ts";
 import { listCodingModels } from "../../src/core/coding/durable.ts";
+import { launchProjectProviderCheck, ProjectWorkerInterrupted } from "../../src/core/coding/project-worker.ts";
 import { ensureExtensionCapableSqlite } from "../../src/core/engine/custom-sqlite.ts";
 
 const isolation = dockerWorkerConfig(process.argv[2], "none");
@@ -125,6 +126,24 @@ try {
   server = createServer(isolation.image);
   const model = listCodingModels().find(({ provider }) => provider === "openai")!.models[0]!.id;
   const settings = { workspace, provider: "openai", model, apiKey: "offline-smoke-only" };
+  const providerTmp = join(root, "provider-tmp");
+  await mkdir(providerTmp, { mode: 0o700 });
+  const previousTmp = process.env.TMPDIR;
+  process.env.TMPDIR = providerTmp;
+  try {
+    const input = { provider: "openai" as const, model, apiKey: settings.apiKey };
+    const launch = (docker = isolation) => launchProjectProviderCheck(input, { docker, signal: AbortSignal.timeout(15_000) });
+    const offlineProvider = await launch();
+    assert.ok(offlineProvider.code === "unreachable" || offlineProvider.code === "timed-out", JSON.stringify(offlineProvider));
+    assert.deepEqual(Object.keys(offlineProvider), ["code"]);
+    assert.deepEqual(await readdir(providerTmp), []);
+    await assert.rejects(launch({ ...isolation, image: `sha256:${"0".repeat(64)}` }),
+      (error) => error instanceof ProjectWorkerInterrupted && !String(error).includes(settings.apiKey) && !String(error).includes(root));
+    assert.deepEqual(await readdir(providerTmp), []);
+  } finally {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
+  }
   const project = await call<{ id: string; workerIsolation: string }>("/projects", { ...settings, title: "Offline Docker smoke" });
   assert.equal(project.workerIsolation, "docker");
   const other = await call<{ id: string }>("/projects", { ...settings, title: "Separate offline project" });
@@ -132,9 +151,15 @@ try {
   const member = await call<{ id: string; token: string }>(path + "/members", { name: "smoke-reviewer" });
   const diagnostics = path + "/deployment-check";
   const catalogFiles = (await readdir(stateDir)).sort();
+  const refusedProvider = await request(path + "/provider-check", { approved: true, binding: "a".repeat(64) });
+  assert.equal(refusedProvider.status, 409);
+  const providerFailure = await refusedProvider.text();
+  assert.match(providerFailure, /Docker worker network with provider access/u);
+  assert.ok(!providerFailure.includes(settings.apiKey));
+  assert.deepEqual((await readdir(stateDir)).sort(), catalogFiles);
   assert.deepEqual(await call(diagnostics), {
     worker: { mode: "docker", image: isolation.image, network: "none" },
-    retention: { active: true, days: null }, provider: "openai", model, credential: "project",
+    retention: { active: true, days: null }, provider: "openai", model, credential: "project", providerCheckBinding: null,
   });
   assert.equal((await request(diagnostics, undefined, member.token)).status, 403);
   assert.equal((await request(diagnostics, {}, member.token)).status, 403);
@@ -302,7 +327,7 @@ try {
   const audit = await call<{ kind: string; session: string | null }[]>(path + "/audit");
   assert.ok(audit.some(({ kind, session }) => kind === "session_expired" && session === offline.session));
 
-  console.log("Docker Coding smoke passed. Verified deployment diagnostics, offline worker isolation and admission, scoped access, Pi branch recovery, quiesced backup restoration, owner context maintenance, archived receipts, and retention tombstones.");
+  console.log("Docker Coding smoke passed. Verified deployment and provider diagnostics, offline worker isolation and admission, scoped access, Pi branch recovery, quiesced backup restoration, owner context maintenance, archived receipts, and retention tombstones.");
 } finally {
   await closeServer();
   await rm(root, { recursive: true, force: true });
