@@ -10,6 +10,7 @@ import { createApiServer } from "../src/api.ts";
 import { runCodingSession } from "../src/core/coding/durable.ts";
 import { loadConfig } from "../src/core/config.ts";
 import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/core/engine/cache-settings.ts";
+import { parse } from "../src/core/okf/document.ts";
 import { githubBranchBrowserFixture } from "./github-branch-browser-fixture.ts";
 
 const root = await mkdtemp(join(tmpdir(), "okbrain-browser-smoke-"));
@@ -436,6 +437,8 @@ try {
   const conversationRows = Array.from({ length: 52 }, (_, i) => ({
     uuid: `browser-conversation-${i + 1}`,
     name: `Browser conversation ${String(i + 1).padStart(2, "0")}`,
+    created_at: "2026-01-02T03:04:05Z",
+    updated_at: "2026-02-03T04:05:06Z",
     chat_messages: [{ sender: "human", text: "Private synthetic conversation excerpt." }],
   }));
   await conversations.getByLabel("Export provider").selectOption("claude");
@@ -464,7 +467,38 @@ try {
   await conversationReport.getByRole("button", { name: "Next draft rows" }).click();
   const laterDraft = conversationReport.getByRole("link", { name: "Browser conversation 52", exact: true });
   await laterDraft.waitFor();
-  assert.match(decodeURIComponent(await laterDraft.getAttribute("href") || ""), /^#concept\/db_only\/conversations\/claude\//);
+  const draftHref = decodeURIComponent(await laterDraft.getAttribute("href") || "");
+  assert.match(draftHref, /^#concept\/db_only\/conversations\/claude\//);
+  const draftFile = Bun.file(join(bundle, draftHref.slice("#concept/".length) + ".md"));
+  const initialDraft = parse(await draftFile.text());
+  const draftSources = initialDraft.frontmatter.sources;
+  assert.deepEqual(draftSources, [{
+    id: "export", resource: "claude-export:conversation", conversation_id: "browser-conversation-52",
+    created_at: "2026-01-02T03:04:05Z", last_modified: "2026-02-03T04:05:06Z",
+  }]);
+  await laterDraft.click();
+  const draftHeading = page.getByRole("heading", { name: "Browser conversation 52", exact: true });
+  await draftHeading.waitFor();
+  const editDraft = page.locator("#c-actions").getByRole("link", { name: "Edit", exact: true });
+  const draftEditor = page.locator("#edf");
+  const saveDraft = draftEditor.getByRole("button", { name: "Save", exact: true });
+  await editDraft.click();
+  const editedText = "This is a local addition to the imported conversation.";
+  await draftEditor.getByLabel("Body (markdown; links normalize on save)", { exact: true }).fill(initialDraft.body + "\n" + editedText + "\n");
+  const bodySave = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/write_concept");
+  await saveDraft.click();
+  assert.equal(Object.hasOwn((await bodySave).request().postDataJSON(), "sources"), false);
+  await page.locator("#c-body").getByText(editedText, { exact: true }).waitFor();
+  const editedDraft = parse(await draftFile.text());
+  assert.match(editedDraft.body, /This is a local addition to the imported conversation\./);
+  assert.deepEqual(editedDraft.frontmatter.sources, draftSources);
+  assert.deepEqual(editedDraft.frontmatter.source_import, initialDraft.frontmatter.source_import);
+
+  await editDraft.click();
+  await draftEditor.locator("#ed-sources").getByPlaceholder("title", { exact: true }).fill("Original Claude conversation");
+  await saveDraft.click();
+  await draftHeading.waitFor();
+  assert.deepEqual(parse(await draftFile.text()).frontmatter.sources, [{ ...draftSources[0], title: "Original Claude conversation" }]);
 
   const localSourceFiles = [
     { format: "email", name: "field.eml", title: "Trip email", mime: "message/rfc822",
@@ -659,6 +693,11 @@ try {
   });
   const projectPath = "/projects/" + project.id;
   const projectSource = { source: "files", files: ["browser.ts"] };
+  const projectPrompt = "Review <strong>the browser source</strong> in this project.";
+  const sourceRequests: unknown[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith(projectPath + "/source-inspect")) sourceRequests.push(request.postDataJSON());
+  });
   const projectPreview = await codingFixture<{ id: string }>(projectPath + "/preview", projectSource);
   projectFaux.setResponses([async () => {
     await finishProject.promise;
@@ -666,11 +705,15 @@ try {
   }]);
   await codingFixture(projectPath + "/run", {
     ...projectSource, previewId: projectPreview.id, approved: true, session: "project-browser", requestId: "project-task-progress",
-    prompt: "Review the browser source in this project.",
+    prompt: projectPrompt,
   });
   await page.evaluate((id) => { location.hash = "#coding/" + id; }, project.id);
   await page.getByRole("button", { name: /project-task-progress/ }).click();
   await page.getByText("Model response · 1 running", { exact: true }).waitFor();
+  const savedProjectSource = page.locator("[data-saved-request-source]");
+  const viewSavedProjectSource = savedProjectSource.getByRole("button", { name: "View saved request source", exact: true });
+  const hideSavedProjectSource = savedProjectSource.getByRole("button", { name: "Hide saved request source", exact: true });
+  assert.equal(await viewSavedProjectSource.count(), 0);
   const cancelProject = page.getByRole("button", { name: "Cancel run", exact: true });
   await cancelProject.focus();
   await page.waitForResponse((res) => new URL(res.url()).pathname.endsWith(projectPath + "/inspect"));
@@ -696,6 +739,58 @@ try {
   await page.getByRole("button", { name: "Apply to worktree", exact: true }).click();
   await page.getByText(/Applied to the local worktree/).waitFor();
   assert.equal(await Bun.file(file).text(), branchAfter);
+
+  await viewSavedProjectSource.waitFor();
+  assert.deepEqual(sourceRequests, []);
+  assert.equal(await savedProjectSource.locator("pre").count(), 0);
+  await viewSavedProjectSource.click();
+  await savedProjectSource.getByText(projectPrompt, { exact: true }).waitFor();
+  assert.deepEqual(sourceRequests, [{ session: "project-browser", requestId: "project-task-progress" }]);
+  assert.equal(await savedProjectSource.locator("pre strong").count(), 0);
+  assert.equal(await page.getByText("Project response ready for review.", { exact: true }).isVisible(), true);
+  await savedProjectSource.getByText("browser.ts", { exact: true }).click();
+  assert.equal(await savedProjectSource.locator("details pre").textContent(), branchBefore);
+  await hideSavedProjectSource.click();
+  assert.equal(await savedProjectSource.locator("pre").count(), 0);
+
+  const secondSource = { source: "files", files: [] };
+  const secondPrompt = "Review the second request without attachments.";
+  const secondPreview = await codingFixture<{ id: string }>(projectPath + "/preview", secondSource);
+  projectFaux.setResponses([fauxAssistantMessage("Second project response.")]);
+  await codingFixture(projectPath + "/run", {
+    ...secondSource, previewId: secondPreview.id, approved: true, session: "project-browser-other", requestId: "project-prompt-only",
+    prompt: secondPrompt,
+  });
+  await page.locator(".coding-activity").getByRole("button", { name: "Refresh", exact: true }).click();
+  const secondRun = page.getByRole("button", { name: /project-prompt-only/ });
+  await secondRun.waitFor();
+  const heldSource = Promise.withResolvers<void>();
+  const releaseSource = Promise.withResolvers<void>();
+  await page.route("**" + projectPath + "/source-inspect", async (route) => {
+    const response = await route.fetch();
+    heldSource.resolve();
+    await releaseSource.promise;
+    await route.fulfill({ response });
+  }, { times: 1 });
+  const firstSourceResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith(projectPath + "/source-inspect") &&
+    response.request().postDataJSON().requestId === "project-task-progress");
+  try {
+    await viewSavedProjectSource.click();
+    await heldSource.promise;
+    await secondRun.click();
+    await page.getByText("Second project response.", { exact: true }).waitFor();
+    assert.equal(await savedProjectSource.locator("pre").count(), 0);
+    await viewSavedProjectSource.click();
+    await savedProjectSource.getByText(secondPrompt, { exact: true }).waitFor();
+    await savedProjectSource.getByText("No source files were included in this request.", { exact: true }).waitFor();
+  } finally {
+    releaseSource.resolve();
+  }
+  const staleSource = await firstSourceResponse;
+  assert.equal(staleSource.ok(), true);
+  await staleSource.finished();
+  assert.equal(await savedProjectSource.locator("pre").textContent(), secondPrompt);
+
   const github = page.locator("[data-coding-github]");
   await github.getByRole("button", { name: "Detect GitHub remotes", exact: true }).click();
   await github.getByRole("button", { name: "Save connection", exact: true }).click();

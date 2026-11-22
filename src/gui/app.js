@@ -854,14 +854,20 @@ async function renderEdit(id, seq) {
   });
 
   var srcEl = document.getElementById('ed-sources');
-  function addSource(s) {
-    s = s || {};
+  var originalSources = new Map();
+  function addSource(original) {
+    var s = typeof original === 'string' ? { resource: original } : original || {};
     srcEl.insertAdjacentHTML('beforeend',
       '<div class="srow"><input placeholder="id" value="' + esc(s.id || '') + '" data-k="id">' +
       '<input placeholder="resource (URL, /path.md, or scope)" value="' + esc(s.resource || '') + '" data-k="resource">' +
       '<input placeholder="title" value="' + esc(s.title || '') + '" data-k="title">' +
       '<input placeholder="author (actor)" value="' + esc(s.author || '') + '" data-k="author">' +
       '<button type="button" class="small" data-del title="remove" aria-label="remove source">✕</button></div>');
+    if (original !== undefined) {
+      var row = srcEl.lastElementChild;
+      var values = Array.from(row.querySelectorAll('input'), function (input) { return input.value.trim(); });
+      originalSources.set(row, { source: s, values: values });
+    }
   }
   sources.forEach(addSource);
   document.getElementById('ed-addsrc').addEventListener('click', function () { addSource(); });
@@ -870,14 +876,27 @@ async function renderEdit(id, seq) {
     if (b) b.closest('.srow').remove();
   });
   function collectSources() {
-    return Array.prototype.map.call(srcEl.querySelectorAll('.srow'), function (row) {
-      var s = {};
-      row.querySelectorAll('input').forEach(function (inp) {
-        var v = inp.value.trim();
-        if (v) s[inp.getAttribute('data-k')] = v;
+    var retained = 0;
+    var changed = false;
+    var entries = [];
+    srcEl.querySelectorAll('.srow').forEach(function (row) {
+      var original = originalSources.get(row);
+      if (original) retained++;
+      var source = { ...original?.source };
+      row.querySelectorAll('input').forEach(function (input, index) {
+        var value = input.value.trim();
+        if (value === (original?.values[index] ?? '')) return;
+        var key = input.dataset.k;
+        if (value) source[key] = value;
+        else delete source[key];
+        if (original) changed = true;
       });
-      return s;
-    }).filter(function (s) { return s.resource; });
+      if (typeof source.resource !== 'string' || !source.resource.trim()) return;
+      entries.push(source);
+      if (!original) changed = true;
+    });
+    // Ordinary edits leave even legacy source forms to the portable writer.
+    if (changed || retained !== originalSources.size) return JSON.stringify(entries);
   }
 
   var bodyEl = document.getElementById('ed-body');
@@ -929,7 +948,8 @@ async function renderEdit(id, seq) {
     ['type', 'title', 'description', 'resource'].forEach(function (n) { if (val(n)) params[n] = val(n); });
     var sa = localToIso(val('stale-after'));
     params['stale-after'] = sa;
-    params.sources = JSON.stringify(collectSources());
+    var sourceUpdates = collectSources();
+    if (sourceUpdates !== undefined) params.sources = sourceUpdates;
     Okb.working(msgEl, 'saving');
     try {
       var r;
@@ -944,7 +964,7 @@ async function renderEdit(id, seq) {
         delete params['stale-after'];
         delete params.sources;
         r = await api('new_concept', params);
-        if (sa || collectSources().length) await api('write_concept', { id: r.id, 'stale-after': sa, sources: JSON.stringify(collectSources()) });
+        if (sa || sourceUpdates !== undefined) await api('write_concept', { id: r.id, 'stale-after': sa, sources: sourceUpdates });
       }
       msgEl.textContent = (r.noop ? 'unchanged ' : r.created ? 'created ' : 'updated ') + r.id;
       location.hash = conceptHref(r.id).slice(1);

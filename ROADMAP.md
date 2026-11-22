@@ -55,6 +55,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   inspection, with review controls available after completion.
 - [x] Show Pi Durable task stages and counts for the selected request and
   its child conversations in app and editor run inspection.
+- [x] Let project reviewers inspect the saved task and exact admitted source
+  for a selected run in the app or editor, including each package review.
 - [x] Offer an approved-source line lookup for explicit files and scoped
   excerpts, using Pi Durable replay against the saved request bytes.
 - [x] Add versioned project profiles, a rebuildable worktree-aware symbol and
@@ -687,7 +689,9 @@ Goal: the brain improves itself on a schedule.
 ## Cross-cutting (ongoing, never "done")
 - [ ] Cross-platform: every feature green on macOS/Linux/Windows CI
 - [ ] Logging + actionable error messages on every failure path
-- [ ] Performance: cold start, index build, search latency tracked as they grow
+- [x] Track app process startup, fresh index build, and warm search latency in
+  Linux CI. Run `bun run build` and `bun run scripts/benchmark-personal.ts` to
+  repeat the 1,024-note offline benchmark locally.
 - [ ] Security: trust boundary honored on every new op; SSRF guard on `fetch_url`
 - [ ] Docs upkeep: `ROADMAP.md` + `CONTEXT.md` + `docs/context/REFERENCES.md` current
 
@@ -783,6 +787,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added saved source inspection to project review in the Mac app,
+  web app, and editor. Preserved imported source metadata in the note editor
+  and added startup, index, and search measurements to Linux CI.
 - 2026-11-22 — Connected applied coding patches to GitHub branch and pull
   request creation, with exact file previews and recovery after an interrupted write.
 - 2026-11-22 — Exposed Pi Durable task stages in app and editor run inspection.

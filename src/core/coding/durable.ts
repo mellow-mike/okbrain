@@ -483,6 +483,12 @@ async function savedUserContent(storage: SqliteStorage, submission: SubmissionRe
   if (user?.role === "user" && typeof user.content === "string") return user.content;
 }
 
+async function queuedUserContent(harness: Harness, submission: SubmissionRecord): Promise<string | undefined> {
+  if (submission.status !== "queued") return;
+  const item = (await harness.snapshot(InboxDoc, submission.conversationId, context))?.items.find(({ id }) => id === submission.id);
+  if (item && "content" in item && typeof item.content === "string") return item.content;
+}
+
 function savedSource(content: string | undefined): Pick<NonNullable<CodingSessionStatusResult["request"]>, "savedPrompt" | "savedSource"> {
   if (content === undefined) return {};
   try {
@@ -507,6 +513,34 @@ function savedSource(content: string | undefined): Pick<NonNullable<CodingSessio
 
 function validSavedFile(value: { path: string; content: string }): boolean {
   return Boolean(value && typeof value.path === "string" && typeof value.content === "string");
+}
+
+type SavedSourceGroup = {
+  label?: string;
+  files: Array<{ path: string; text: string; startLine?: number; endLine?: number }>;
+};
+
+export type SavedCodingRequestInput = { prompt: string; guidance?: string; groups: SavedSourceGroup[] };
+
+function sourceFiles(source: SavedCodingSource): SavedSourceGroup["files"] {
+  if (source.source === "files") return source.files.map(({ path, content }) => ({ path, text: content }));
+  return source.excerpts.map(({ path, content, startLine, endLine }) => ({ path, text: content, startLine, endLine }));
+}
+
+function savedPackageSource(input: unknown, requestId: string): SavedCodingRequestInput | null {
+  if (!input || typeof input !== "object" || !("requestId" in input) || input.requestId !== requestId ||
+      !("parts" in input) || !Array.isArray(input.parts) || input.parts.length < 2 || input.parts.length > 3) return null;
+  const groups: SavedSourceGroup[] = [];
+  let prompt: string | undefined;
+  for (const part of input.parts) {
+    if (typeof part?.project !== "string" || typeof part.content !== "string") return null;
+    const { savedPrompt, savedSource: source } = savedSource(part.content);
+    if (savedPrompt === undefined || !source || source.source !== "repository" ||
+        (prompt !== undefined && prompt !== savedPrompt)) return null;
+    prompt = savedPrompt;
+    groups.push({ label: part.project, files: sourceFiles(source) });
+  }
+  return prompt === undefined ? null : { prompt, groups };
 }
 
 function savedManifest(content: string | undefined): RepositoryContextManifest | undefined {
@@ -741,6 +775,33 @@ export async function cancelCodingRequest(
   });
 }
 
+/** Read a single request's Pi admission without accessing the worktree or provider. */
+export async function getSavedCodingRequestInput(
+  options: CodingSessionStatusOptions & { requestId: string },
+  dependencies: CodingDependencies & { workspaceBinding: string },
+): Promise<SavedCodingRequestInput | null> {
+  try {
+    return await withCodingSession(options, dependencies, false, async ({ harness, storage, root }) => {
+      if (!root) return null;
+      const taskId = await packageReviewTask(harness, options.requestId, context);
+      if (taskId) return savedPackageSource((await harness.getTask(taskId, context))?.input, options.requestId);
+      const submission = await storage.submissionByRequest(root.id, options.requestId, context);
+      if (!submission || submission.type !== "input") return null;
+      const content = await savedUserContent(storage, submission) ?? await queuedUserContent(harness, submission);
+      const { savedPrompt: prompt, savedSource: source } = savedSource(content);
+      if (prompt === undefined) return null;
+      const files = source ? sourceFiles(source) : [];
+      return {
+        prompt, groups: files.length ? [{ files }] : [],
+        ...(source?.source === "repository" && source.guidance !== undefined ? { guidance: source.guidance } : {}),
+      };
+    });
+  } catch (error) {
+    if (error instanceof CodingSessionMissingError) return null;
+    throw error;
+  }
+}
+
 /** Inspect saved context and accounting without starting or resuming any model request. */
 export async function getCodingSessionStatus(
   options: CodingSessionStatusOptions,
@@ -791,11 +852,8 @@ export async function getCodingSessionStatus(
         ? await readCodingTaskProgress(harness, { conversation: root.id, submission: submission.id }, context).catch(() => undefined)
         : undefined;
       const reason = unansweredReason(submission);
-      let content = await savedUserContent(storage, submission);
-      if (content === undefined && options.includeSavedSource && submission.status === "queued") {
-        const item = (await harness.snapshot(InboxDoc, root.id, context))?.items.find(({ id }) => id === submission.id);
-        if (item && "content" in item && typeof item.content === "string") content = item.content;
-      }
+      const content = await savedUserContent(storage, submission) ??
+        (options.includeSavedSource ? await queuedUserContent(harness, submission) : undefined);
       const lookup = approvedSourceLookupEnabled(content);
       const repositoryContext = savedManifest(content);
       const saved = !options.includeEvaluationInput || content === undefined ? undefined : evaluationInput(content);

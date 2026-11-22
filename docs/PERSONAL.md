@@ -119,7 +119,7 @@ Select **Preview files** to see new, changed, saved, and skipped items. Markdown
 
 Use the same source name and relative paths for a later import. A Notion page ID in the exported filename also identifies renamed pages. A changed source is an optional new draft. Earlier drafts retain any local edits, and files absent from the new selection leave the existing notes intact. Save location and source history stay within the selected brain.
 
-Expand a source in **Import history** to review recent imports and open drafts. **Import from this source again** reuses the format and source name. The history is derived from saved draft provenance and follows the drafts if you move the bundle. Deleting a draft removes it from the history. Earlier ChatGPT and Claude drafts may lack the date of import.
+Expand a source in **Import history** to review recent imports and open drafts. **Import from this source again** reuses the format and source name. The history is derived from saved draft provenance and follows the drafts if you move the bundle. Editing a draft keeps its source identifiers and import history unless you remove the source. Deleting a draft removes it from the history. Earlier ChatGPT and Claude drafts may lack the date of import.
 
 ### Import email and calendar files
 

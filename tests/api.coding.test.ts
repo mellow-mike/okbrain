@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createApiServer, type ApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
-import { listCodingModels, maxLiveAnswerLength, runCodingSession, type CodingLiveAnswer, type CodingSessionStatusResult } from "../src/core/coding/durable.ts";
+import { listCodingModels, maxLiveAnswerLength, runCodingSession, type CodingLiveAnswer, type CodingSessionStatusResult, type SavedCodingRequestInput } from "../src/core/coding/durable.ts";
 import type { CodingTaskProgress } from "../src/core/coding/task-progress.ts";
 
 const ownerToken = "local-operator-test";
@@ -258,6 +258,7 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     const inspect = () => call<Inspection>(path + "/inspect", identity, member.token);
     const failed = await waitFor(inspect, (value) => value.run.status === "failed");
     expect(failed.run).toMatchObject({ status: "failed", admitted: false, error: expect.stringContaining("selected files changed") });
+    expect(await call(path + "/source-inspect", identity, member.token)).toBeNull();
     expect(faux.state.callCount).toBe(0);
 
     const after = await call<{ id: string }>(path + "/preview", source, member.token);
@@ -283,6 +284,16 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     expect(calls[0]).toContain("answer = 43");
     expect(await call<Run>(path + "/run", approved, member.token)).toMatchObject({ status: "done" });
     expect((await request(path + "/run", { ...approved, prompt: "Different task" }, member.token)).status).toBe(409);
+    await writeFile(join(workspace, "src", "example.ts"), "export const answer = 44;\n");
+    expect(JSON.stringify(await inspect())).not.toContain("export const answer = 43;");
+    const saved = await request(path + "/source-inspect", identity, member.token);
+    expect(saved.headers.get("cache-control")).toBe("no-store");
+    expect(await saved.json()).toEqual({ result: {
+      prompt: task.prompt, groups: [{ files: [{ path: "src/example.ts", text: "export const answer = 43;\n" }] }],
+    } });
+    expect((await request(path + "/source-inspect", { ...identity, requestId: "missing" }, member.token)).status).toBe(404);
+    expect((await request("/projects/" + other.id + "/source-inspect", identity, member.token)).status).toBe(403);
+    expect((await request(path + "/source-inspect", identity, null)).status).toBe(401);
     expect(faux.state.callCount).toBe(1);
     expect(await call<Run>(path + "/review", { ...identity, decision: "accepted" }, member.token))
       .toMatchObject({ review: "accepted", reviewer: "human:reviewer" });
@@ -294,6 +305,59 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     expect(await call<Run[]>(path + "/runs")).toEqual([]);
     await call(path + "/members", { revoke: member.id });
     expect((await request(path + "/runs", undefined, member.token)).status).toBe(401);
+  } finally {
+    await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("source inspection reopens archived profile and package inputs from a read-only app", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-saved-coding-source-");
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: "saved-source-test" }] });
+  models.setProvider(faux.provider);
+  const open = (readonly: boolean) => createApiServer({ bundle: root, port: 0, token: ownerToken, readonly, coding: { stateDir, models } });
+  let api = open(false);
+  try {
+    for (const args of [["init", "--quiet"], ["add", "--", "src/example.ts", "private/example.ts"]]) {
+      const git = Bun.spawnSync(["git", ...args], { cwd: workspace, stdout: "ignore", stderr: "pipe" });
+      if (git.exitCode !== 0) throw new Error(git.stderr.toString());
+    }
+    const { call } = apiClient(api.url);
+    const project = await call<Project>("/projects", {
+      workspace, title: "Saved source", scopes: ["src", "private"], provider: "openai", model: "saved-source-test",
+    });
+    const path = "/projects/" + project.id;
+    const member = await call<{ token: string }>(path + "/members", { name: "saved-source-reviewer" });
+    const guidance = "Cite the relevant source lines.";
+    const repository = { source: "repository", query: "answer", profile: { version: 1, name: "Source", projects: ["src"], guidance } };
+    const packages = { source: "packages", packages: [{ project: "src", query: "answer" }, { project: "private", query: "text" }] };
+    type Excerpt = { path: string; content: string; startLine: number; endLine: number };
+    const repositoryPreview = await call<{ manifest: { id: string }; excerpts: Excerpt[] }>(path + "/preview", repository);
+    const packagePreview = await call<{ id: string; packages: { project: string; excerpts: Excerpt[] }[] }>(path + "/preview", packages);
+    const repositoryRequest = { session: "profile", requestId: "profile-request" };
+    const packageRequest = { session: "packages", requestId: "package-request" };
+    faux.setResponses(["Profile review", "First package", "Second package"].map((answer) => fauxAssistantMessage(answer)));
+    await call(path + "/run", { ...repository, ...repositoryRequest, prompt: "Review the profile.", approved: true, previewId: repositoryPreview.manifest.id });
+    expect(await waitFor(() => call<Inspection>(path + "/inspect", repositoryRequest), ({ run }) => run.status !== "running"))
+      .toMatchObject({ run: { status: "done", admitted: true } });
+    await call(path + "/run", { ...packages, ...packageRequest, prompt: "Review both packages.", approved: true, previewId: packagePreview.id });
+    expect(await waitFor(() => call<Inspection>(path + "/inspect", packageRequest), ({ run }) => run.status !== "running"))
+      .toMatchObject({ run: { status: "done", admitted: true } });
+    const beforeAudit = await call<unknown[]>(path + "/audit");
+    await api.stop();
+    await rm(workspace, { recursive: true });
+    api = open(true);
+    const readonly = apiClient(api.url);
+    const savedFiles = (excerpts: Excerpt[]) => excerpts.map(({ content, ...source }) => ({ ...source, text: content }));
+    expect(await readonly.call<SavedCodingRequestInput>(path + "/source-inspect", repositoryRequest)).toEqual({
+      prompt: "Review the profile.", guidance, groups: [{ files: savedFiles(repositoryPreview.excerpts) }],
+    });
+    expect(await readonly.call<SavedCodingRequestInput>(path + "/source-inspect", packageRequest, member.token)).toEqual({
+      prompt: "Review both packages.", groups: packagePreview.packages.map(({ project, excerpts }) => ({ label: project, files: savedFiles(excerpts) })),
+    });
+    expect(await readonly.call<unknown[]>(path + "/audit")).toEqual(beforeAudit);
+    expect(faux.state.callCount).toBe(3);
   } finally {
     await api.stop();
     await rm(root, { recursive: true, force: true });
@@ -866,6 +930,8 @@ test("scopes bounded answer and task progress to the selected running request", 
     const older = await call<Inspection>(path + "/inspect", first);
     expect(older.liveAnswer).toBeUndefined();
     expect(older.taskProgress).toBeUndefined();
+    expect((await request(path + "/source-inspect", first)).status).toBe(409);
+    expect((await request(path + "/source-inspect", second)).status).toBe(409);
     await call(path + "/cancel", second);
     const cancelled = await waitFor(() => call<Inspection>(path + "/inspect", second), (value) => value.run.status === "cancelled");
     expect(cancelled.run.status).toBe("cancelled");
@@ -909,6 +975,7 @@ test("cancels a running provider request through the coding API", async () => {
       (value) => value.run.status === "cancelled",
     );
     expect(cancelled.run).toMatchObject({ status: "cancelled", admitted: true });
+    expect(await call<SavedCodingRequestInput>(path + "/source-inspect", identity)).toEqual({ prompt: "Review this work", groups: [] });
     expect(faux.state.callCount).toBe(1);
   } finally {
     await api.stop();
@@ -965,6 +1032,10 @@ test("resumes an interrupted HTTP run from the admitted source after the control
     recovery = createApiServer({ bundle: root, port: 0, token: ownerToken, coding: { stateDir, models } });
     const recovered = apiClient(recovery.url);
     expect(await recovered.call<Inspection>(path + "/inspect", identity)).toMatchObject({ run: { status: "interrupted" } });
+    expect(await recovered.call<SavedCodingRequestInput>(path + "/source-inspect", identity)).toEqual({
+      prompt: "Review persisted bytes.", groups: [{ files: [{ path: "src/example.ts", text: "export const answer = 42;\n" }] }],
+    });
+    expect(faux.state.callCount).toBe(0);
     expect(await recovered.call<Run>(path + "/resume", identity)).toMatchObject({ status: "running" });
     const after = await waitFor(
       () => recovered.call<Inspection>(path + "/inspect", identity),

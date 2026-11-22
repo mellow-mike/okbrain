@@ -43,6 +43,13 @@ jobs:
           bunx --bun playwright install --with-deps --only-shell chromium
           bun run smoke:browser
 
+      - name: Record local app latency
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bun run build
+          bun run scripts/benchmark-personal.ts | tee -a "$GITHUB_STEP_SUMMARY"
+
   coding-worker:
     name: Linux Docker coding worker
     runs-on: ubuntu-latest

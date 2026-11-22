@@ -11,7 +11,7 @@ import {
   ApprovedPatchError, approvedPatchBytes, approvedPatchFiles, approvedPatchState, patchDigest, withPreparedPatch, type PatchFileReceipt,
 } from "./approved-patch.ts";
 import {
-  cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, getCodingSessionStatus, hasCodingCredential,
+  cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, getCodingSessionStatus, getSavedCodingRequestInput, hasCodingCredential,
   listCodingModels, previewCodingAttachments, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions,
 } from "./durable.ts";
@@ -433,7 +433,7 @@ export class CodingProjectControl {
     };
   }
 
-  #dependencies(project: ProjectRow, actor: Actor): CodingDependencies {
+  #dependencies(project: ProjectRow, actor: Actor): CodingDependencies & { workspaceBinding: string } {
     return {
       stateDir: join(this.#directory, `project-${project.id}`),
       models: this.#models,
@@ -595,6 +595,18 @@ export class CodingProjectControl {
         return { run: value, admissionMissing: true };
       throw error;
     }
+  }
+
+  async #sourceInspect(project: ProjectRow, body: Json, actor: Actor) {
+    const run = this.#runParts(body);
+    const row = this.#readRun(project.id, run.session, run.requestId);
+    if (this.#get("SELECT session FROM session_deletions WHERE project = ? AND session = ?", project.id, run.session))
+      throw new ProjectControlError("This transcript is being deleted.", 409);
+    if (row.status === "running" || this.#active.has(`${project.id}/${run.session}`))
+      throw new ProjectControlError("Wait for the active request in this session before opening saved source.", 409);
+    // Pi can save its admission before the catalog receives the worker event.
+    if (!row.admitted && row.status !== "interrupted") return null;
+    return getSavedCodingRequestInput(this.#session(project, run), this.#dependencies(project, actor));
   }
 
   async #evaluate(project: ProjectRow, body: Json, actor: Actor, save: boolean) {
@@ -1247,7 +1259,8 @@ export class CodingProjectControl {
       const projects = actor.owner ? this.#all<ProjectRow>("SELECT * FROM projects ORDER BY created DESC") : [this.#project(actor.project!, actor)];
       return projects.map((row) => this.#projectView(row, actor));
     }
-    if (method === "POST" && readonly && !path.endsWith("/preview") && !path.endsWith("/inspect") && !path.endsWith("/evaluation-inspect"))
+    if (method === "POST" && readonly && !path.endsWith("/preview") && !path.endsWith("/inspect") &&
+        !path.endsWith("/evaluation-inspect") && !path.endsWith("/source-inspect"))
       throw new ProjectControlError("This server is attached to a read-only brain mount.", 403);
     if (path === "/projects" && method === "POST") return this.#addProject(body, actor);
     const match = /^\/projects\/([a-f0-9-]{36})\/([a-z-]+)$/.exec(path);
@@ -1270,6 +1283,7 @@ export class CodingProjectControl {
         return this.#withSession(project, body, () => this.#evaluate(project, body, actor, action === "evaluation-review"));
       if (action === "run") return this.#withSession(project, body, () => this.#start(project, body, actor));
       if (action === "inspect") return this.#withSession(project, body, () => this.#inspect(project, body, actor));
+      if (action === "source-inspect") return this.#withSession(project, body, () => this.#sourceInspect(project, body, actor));
       if (action === "resume") return this.#withSession(project, body, () => this.#resume(project, body, actor));
       if (action === "cancel") return this.#withSession(project, body, () => this.#cancel(project, body, actor));
       if (action === "review") return this.#withSession(project, body, async () => this.#review(project, body, actor));

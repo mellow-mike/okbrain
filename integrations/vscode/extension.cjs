@@ -5,6 +5,10 @@ const { randomUUID } = require('node:crypto');
 const { connect, projectFile } = require('./connection.cjs');
 const { taskProgressLines } = require('./run-progress.cjs');
 
+const savedSourceScheme = 'okbrain-saved-source';
+const openingSources = new Map();
+let inspection = 0;
+
 function pathFor(project, action) {
   return `/projects/${encodeURIComponent(project.id)}/${action}`;
 }
@@ -31,6 +35,40 @@ async function chooseProject(connection, choices) {
 async function showText(content) {
   const document = await vscode.workspace.openTextDocument({ language: 'plaintext', content });
   return vscode.window.showTextDocument(document, { preview: true, preserveFocus: false });
+}
+
+async function showSavedRequestSource(connection, project, identity, isCurrent) {
+  let source;
+  try {
+    source = await connection.api(pathFor(project, 'source-inspect'), identity);
+  } catch (error) {
+    if (isCurrent()) throw error;
+    return;
+  }
+  if (!isCurrent()) return;
+  if (!source) return vscode.window.showInformationMessage('No saved request source is available.');
+
+  const lines = [project.title, `Session: ${identity.session}`, `Request: ${identity.requestId}`, '', 'Saved task', source.prompt];
+  if (source.guidance) lines.push('', 'Project guidance', source.guidance);
+  if (!source.groups.length) lines.push('', 'No source files were included in this request.');
+  for (const group of source.groups) {
+    if (group.label) lines.push('', group.label);
+    for (const file of group.files) {
+      const range = file.startLine === undefined ? '' : `:${file.startLine}–${file.endLine}`;
+      lines.push('', file.path + range, file.text);
+    }
+  }
+  const uri = vscode.Uri.from({ scheme: savedSourceScheme, path: '/Saved request source.txt', query: randomUUID() });
+  const key = uri.toString();
+  openingSources.set(key, lines.join('\n'));
+  try {
+    let document = await vscode.workspace.openTextDocument(uri);
+    if (!isCurrent()) return;
+    if (document.languageId !== 'plaintext') document = await vscode.languages.setTextDocumentLanguage(document, 'plaintext');
+    if (isCurrent()) await vscode.window.showTextDocument(document, { preview: true, preserveFocus: false });
+  } finally {
+    openingSources.delete(key);
+  }
 }
 
 async function runActiveFile(connection) {
@@ -81,8 +119,11 @@ async function runActiveFile(connection) {
 }
 
 async function inspectRun(connection, project, selected) {
+  const current = ++inspection;
+  const isCurrent = () => current === inspection;
   const identity = { session: selected.session, requestId: selected.id };
   const { run, pi, admissionMissing, liveAnswer, taskProgress } = await connection.api(pathFor(project, 'inspect'), identity);
+  if (!isCurrent()) return;
   const receipt = pi?.request?.receipt;
   const progress = taskProgressLines(taskProgress ?? pi?.request?.taskProgress, run.status === 'running');
   await showText([
@@ -98,7 +139,10 @@ async function inspectRun(connection, project, selected) {
     ...(pi?.usage ? ['', 'Recorded session usage', JSON.stringify(pi.usage, null, 2)] : []),
   ].join('\n'));
 
+  if (!isCurrent()) return;
   const choices = [{ label: 'Refresh', action: 'refresh' }, { label: 'Open in okbrain', action: 'open' }];
+  if (run.status !== 'running' && (run.admitted || pi?.request || (run.status === 'interrupted' && !admissionMissing)))
+    choices.push({ label: 'View saved request source', action: 'source-inspect' });
   if (run.status === 'running' || run.status === 'interrupted') choices.push({ label: 'Cancel request', action: 'cancel' });
   if (run.status === 'interrupted') choices.push({ label: 'Resume from saved context', action: 'resume' });
   if (run.status === 'done') choices.push(
@@ -106,10 +150,11 @@ async function inspectRun(connection, project, selected) {
     { label: 'Request changes', action: 'review', decision: 'changes_requested' });
   if (run.review === 'accepted') choices.push({ label: 'Prepare GitHub pull request in okbrain', action: 'github' });
   const action = await vscode.window.showQuickPick(choices, { placeHolder: 'Choose a run action', ignoreFocusOut: true });
-  if (!action) return;
+  if (!action || !isCurrent()) return;
   if (action.action === 'open') return openWeb(connection, project);
   if (action.action === 'github') return openWeb(connection, project, run);
   if (action.action === 'refresh') return inspectRun(connection, project, run);
+  if (action.action === 'source-inspect') return showSavedRequestSource(connection, project, identity, isCurrent);
   if (action.action === 'resume') {
     const proceed = await vscode.window.showWarningMessage('Resuming can make another provider call using the saved context.',
       { modal: true }, 'Resume');
@@ -133,6 +178,9 @@ async function listRuns(connection) {
 }
 
 function activate(context) {
+  context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(savedSourceScheme, {
+    provideTextDocumentContent: (uri) => openingSources.get(uri.toString()) ?? '',
+  }));
   const register = (command, action) => context.subscriptions.push(vscode.commands.registerCommand(command, async () => {
     try {
       if (!vscode.workspace.isTrusted || vscode.env.remoteName) throw new Error('Open a trusted local folder to use okbrain Coding.');

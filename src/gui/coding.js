@@ -244,6 +244,88 @@
     return details;
   }
 
+  function savedSourceContents(panel, source) {
+    const task = document.createElement('h5');
+    task.textContent = 'Saved task';
+    const prompt = document.createElement('pre');
+    prompt.textContent = source.prompt;
+    panel.replaceChildren(task, prompt);
+    if (source.guidance) panel.append(disclosure('Project guidance', source.guidance));
+    if (!source.groups.length) {
+      const description = document.createElement('p');
+      description.className = 'muted';
+      description.textContent = 'No source files were included in this request.';
+      panel.append(description);
+    }
+    for (const group of source.groups) {
+      if (group.label) {
+        const heading = document.createElement('h5');
+        heading.textContent = group.label;
+        panel.append(heading);
+      }
+      for (const file of group.files) {
+        const lines = file.startLine === undefined ? '' : ':' + file.startLine + '–' + file.endLine;
+        panel.append(disclosure(file.path + lines, file.text));
+      }
+    }
+  }
+
+  function mountSavedSource(panel, prefix, detached) {
+    panel.innerHTML = '<div class="row"><button type="button" aria-expanded="false" aria-controls="coding-saved-source-content">' +
+      'View saved request source</button></div><div role="status" class="coding-feedback"></div>' +
+      '<div id="coding-saved-source-content" class="coding-preview stack" hidden></div>';
+    const button = panel.querySelector('button');
+    const feedback = panel.querySelector('[role="status"]');
+    const content = panel.querySelector('#coding-saved-source-content');
+    let run = null;
+    let pending = null;
+
+    function clear() {
+      pending = null;
+      button.textContent = 'View saved request source';
+      button.setAttribute('aria-expanded', 'false');
+      content.hidden = true;
+      content.replaceChildren();
+      report(feedback);
+    }
+
+    button.addEventListener('click', async () => {
+      if (!run || detached()) return;
+      if (button.getAttribute('aria-expanded') === 'true') {
+        clear();
+        return;
+      }
+      const request = identity(run);
+      pending = request;
+      button.textContent = 'Hide saved request source';
+      button.setAttribute('aria-expanded', 'true');
+      feedback.textContent = 'Reading saved request source…';
+      try {
+        const source = await coding(prefix + '/source-inspect', request);
+        if (pending !== request || detached()) return;
+        if (!source) {
+          clear();
+          feedback.textContent = 'No saved request source is available.';
+          return;
+        }
+        savedSourceContents(content, source);
+        content.hidden = false;
+        report(feedback);
+      } catch (error) {
+        if (pending !== request || detached()) return;
+        clear();
+        report(feedback, error);
+      }
+    });
+
+    return (nextRun) => {
+      if (run?.id === nextRun?.id && run?.session === nextRun?.session) return;
+      run = nextRun;
+      clear();
+      panel.hidden = !run;
+    };
+  }
+
   function composer(parent, project, readonly, detached, selectRun) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
@@ -413,11 +495,13 @@
     panel.className = 'coding-panel coding-activity stack';
     panel.innerHTML = '<div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh</button></div>' +
       '<div class="stack coding-runs" data-runs></div><div class="stack" data-inspect aria-live="polite"></div>' +
+      '<section class="stack" data-saved-request-source hidden></section>' +
       '<div class="coding-feedback" role="status"></div>';
     parent.append(panel);
     const list = panel.querySelector('[data-runs]');
     const inspected = panel.querySelector('[data-inspect]');
     const feedback = panel.querySelector('[role="status"]');
+    const setSavedSourceRun = mountSavedSource(panel.querySelector('[data-saved-request-source]'), prefix, detached);
     let selected = null;
     let timer;
     let generation = 0;
@@ -436,6 +520,9 @@
       if (detached() || current !== generation) return;
       const pi = result.pi;
       const row = result.run;
+      const canViewSource = row.status !== 'running' &&
+        (row.admitted || pi?.request || (row.status === 'interrupted' && !result.admissionMissing));
+      setSavedSourceRun(canViewSource ? row : null);
       const receipt = pi?.request?.receipt;
       const error = row.error || receipt?.reason;
       const snippet = receipt?.repositoryContext?.files || pi?.request?.repositoryContext?.files || [];
@@ -531,7 +618,11 @@
           });
         }
         if (target) await readRun(target, current);
-        else { selected = null; inspected.replaceChildren(); }
+        else {
+          selected = null;
+          setSavedSourceRun(null);
+          inspected.replaceChildren();
+        }
         if (focusResult && target && current === generation) {
           const heading = inspected.querySelector('h4');
           heading?.setAttribute('tabindex', '-1');
@@ -544,6 +635,10 @@
     }
 
     function selectRun(row) {
+      if (selected?.id !== row.id || selected.session !== row.session) {
+        setSavedSourceRun(null);
+        inspected.replaceChildren();
+      }
       selected = row;
       report(feedback);
       return refresh(true);

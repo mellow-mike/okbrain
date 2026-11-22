@@ -9,6 +9,8 @@ Use the **Coding** workspace in the Mac app or local web app to review source fi
 3. Describe the task and select tracked excerpts or explicit files. Choose **Preview source**, inspect the actual text, and approve sending it with the task and active conversation history. Sending with a changed file selection requires a fresh preview.
 4. Select the request in **Run history**. Ordinary requests can show a short preview of the answer as it arrives. When the run finishes, inspect the full result and its recorded provider usage before choosing **Accept result** or **Request changes**. An interrupted run can resume with its stored input, or be cancelled. A follow-up uses the same session and a new request ID.
 
+Choose **View saved request source** in the app or editor to review a selected run’s task and approved files or excerpts. For an independent package review, the source is grouped by package. The preview reads from the saved Pi admission, so it includes the evidence the run used even if the checkout changes.
+
 For explicit files and repository excerpts, you can let the model look up line numbers inside the current request’s approved source. Select the option before previewing, then review the selection and approve it. Each lookup reads at most 24 consecutive lines from a single saved file or excerpt. The provider may make an extra request to turn the lookup results into an answer. Completed requests report usage from both turns. A later request starts with its own choice.
 
 Use **Project settings** to rotate or remove an API key, inspect the audit log, or set transcript retention. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.
@@ -25,7 +27,7 @@ After an interruption, inspect the saved task and source before choosing **Resum
 
 Save a project-specific provider API key and create a token for the member in **Project settings → Team access**. Copy the token when it appears. Each token grants access to a single project and expires after seven days. The operator can revoke it before then.
 
-In **Coding → Team browser access**, start a separate listener. A member opens the team workspace URL and enters their project token. They can preview and approve sources, inspect project runs, cancel or resume runs, and record reviews. Project configuration, credentials, token management, and transcript deletion stay with the local operator.
+In **Coding → Team browser access**, start a separate listener. A member opens the team workspace URL and enters their project token. They can preview and approve sources, inspect project runs and their saved task and source, cancel or resume runs, and record reviews. Project configuration, credentials, token management, and transcript deletion stay with the local operator.
 
 The team listener binds to `127.0.0.1`. For remote access, an operator can configure a TLS reverse proxy that directs the declared HTTPS origin to the team listener and sets the upstream Host header to `127.0.0.1:<team port>`. The listener serves only the coding workspace and its project-token routes. Keep the separate local operator listener private. Team listener settings reset when the okbrain server stops.
 
