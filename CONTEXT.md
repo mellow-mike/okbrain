@@ -70,8 +70,11 @@ usage. Branches cover ordinary file and repository reviews. Independent
 package reviews, evaluations, and manual context maintenance use regular
 project sessions. The local owner can apply and publish a reviewed branch
 patch through the usual approvals. Its pull request binds the exact branch
-publication receipt and checks the recorded GitHub head. A prepared patch on
-any branch keeps the shared transcript eligible for recovery.
+publication receipt and checks the recorded GitHub head. Published patch links
+use both recorded commits. A prepared patch on any branch keeps the shared
+transcript eligible for recovery. Transcript deletion clears the local run
+records for the whole conversation family and drops the alternatives’ patch
+and publication records.
 The project control plane scopes credentials, members, worker runs, and
 review decisions to registered projects. Owners can save named task, query,
 and repository profile presets in the project catalog. Project members can

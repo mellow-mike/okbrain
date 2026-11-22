@@ -100,6 +100,12 @@ export function githubComparison(repository: string, rawBase: unknown, rawHead: 
   return `${githubUrl(repository)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?expand=1`;
 }
 
+export function githubCommitComparison(repository: string, base: string, head: string): string {
+  if (base === head || !/^[a-f0-9]{40}$/u.test(base) || !/^[a-f0-9]{40}$/u.test(head))
+    throw new GitHubError("The recorded GitHub commits could not be verified.", 409);
+  return `${githubUrl(repository)}/compare/${base}..${head}`;
+}
+
 export interface GitHubPullDraft {
   base: string;
   head: string;

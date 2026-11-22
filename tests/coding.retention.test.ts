@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { createApiServer, type ApiServer } from "../src/api.ts";
 import { ensureExtensionCapableSqlite } from "../src/core/engine/custom-sqlite.ts";
 
+// This scenario settles six Pi transcripts serially before exercising restarts.
 test("project transcript retention protects unfinished work and refuses replay of expired IDs", async () => {
   const root = await mkdtemp(join(tmpdir(), "okb-coding-retention-"));
   const workspace = join(root, "workspace");
@@ -31,6 +32,7 @@ test("project transcript retention protects unfinished work and refuses replay o
     headers: { ...(member ? { authorization: `Bearer ${member}` } : { "x-okb-token": token }),
       ...(data ? { "content-type": "application/json" } : {}) },
     body: data ? JSON.stringify(data) : undefined,
+    signal: AbortSignal.timeout(6000),
   });
   const call = async <T>(path: string, data?: object) => {
     const response = await request(path, data);
@@ -129,7 +131,7 @@ test("project transcript retention protects unfinished work and refuses replay o
     await close();
     await rm(root, { recursive: true, force: true });
   }
-}, 10_000);
+}, 25_000);
 
 test("retention uses alternative branch activity and expires the shared transcript as a unit", async () => {
   const root = await mkdtemp(join(tmpdir(), "okb-branch-retention-"));

@@ -250,7 +250,7 @@
             session: run.session, requestId: run.id, base: form.elements.base.value, head: form.elements.head.value,
           });
           if (current !== revision) return;
-          comparison.innerHTML = external(receipt.url, 'Open GitHub comparison');
+          comparison.innerHTML = external(receipt.url, run.branch ? 'Review the published patch on GitHub' : 'Open GitHub comparison');
           comparison.querySelector('a').focus();
         });
       });
@@ -364,14 +364,14 @@
           const preview = await coding(path + 'pr-preview', details);
           if (revision !== current) return;
           prReceipt.innerHTML = '<p data-pr-summary></p><p data-pr-head hidden></p><pre data-pr-markdown></pre>' +
-            '<div>' + external(preview.comparison, 'Review the comparison on GitHub') + '</div>' +
+            '<div>' + external(preview.comparison, preview.headCommit ? 'Review the published patch on GitHub' : 'Review the comparison on GitHub') + '</div>' +
             '<label class="row"><input type="checkbox" data-pr-confirm><span>Approve this exact title, Markdown and branch comparison</span></label>' +
             '<div class="row"><button type="button" class="primary" data-pr-publish disabled>Publish to GitHub</button></div>';
           prReceipt.querySelector('[data-pr-summary]').textContent = preview.title + ' · ' + preview.repository +
             ' · ' + preview.head + ' → ' + preview.base + (preview.draft ? ' · Draft' : '');
           const head = prReceipt.querySelector('[data-pr-head]');
           if (preview.headCommit) {
-            head.textContent = 'Recorded head commit ' + preview.headCommit;
+            head.textContent = 'Recorded commits ' + preview.baseCommit + ' → ' + preview.headCommit;
             head.hidden = false;
           }
           prReceipt.querySelector('[data-pr-markdown]').textContent = preview.body;

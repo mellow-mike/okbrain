@@ -24,7 +24,7 @@ import { dockerWorkerConfig, type DockerWorkerConfig } from "./docker-worker.ts"
 import { PackageReviewError, previewPackageReviews, validatePackageReviews } from "./package-review.ts";
 import { codingPatchProposals } from "./patch-proposals.ts";
 import {
-  githubActivity, githubBranch, githubComparison, githubCreatePull, githubFindPull, githubPullBody, githubPullDraft,
+  githubActivity, githubBranch, githubCommitComparison, githubComparison, githubCreatePull, githubFindPull, githubPullBody, githubPullDraft,
   GitHubError, githubRemotes, githubToken, githubUrl, type GitHubFetch, type GitHubPullReceipt,
 } from "./github.ts";
 import { githubBranchRef, githubCreatePatchCommit, githubCreatePatchRef, githubPreparePatchBranch } from "./github-branch.ts";
@@ -1170,11 +1170,16 @@ export class CodingProjectControl {
 
   #finishDeletion(project: string, session: string, actor: string, automatic: boolean) {
     this.#db.transaction(() => {
+      const family = `project = ? AND (session = ? OR session IN
+        (SELECT session FROM conversation_branches WHERE project = ? AND parent_session = ?))`;
+      const bindings = [project, session, project, session];
       if (automatic) this.#write(`INSERT OR IGNORE INTO expired_requests(project, session, id)
-        SELECT project, session, id FROM runs WHERE project = ? AND (session = ? OR session IN
-          (SELECT session FROM conversation_branches WHERE project = ? AND parent_session = ?))`, project, session, project, session);
-      this.#write(`DELETE FROM runs WHERE project = ? AND (session = ? OR session IN
-        (SELECT session FROM conversation_branches WHERE project = ? AND parent_session = ?))`, project, session, project, session);
+        SELECT project, session, id FROM runs WHERE ${family}`, ...bindings);
+      for (const table of ["applied_patches", "github_branch_publications", "github_publications"]) {
+        this.#write(`DELETE FROM ${table} WHERE project = ? AND session IN
+          (SELECT session FROM conversation_branches WHERE project = ? AND parent_session = ?)`, project, project, session);
+      }
+      this.#write(`DELETE FROM runs WHERE ${family}`, ...bindings);
       this.#write("DELETE FROM conversation_branches WHERE project = ? AND parent_session = ?", project, session);
       this.#write("DELETE FROM session_deletions WHERE project = ? AND session = ?", project, session);
       this.#audit(project, automatic ? "session_expired" : "session_deleted", actor, session);
@@ -1362,14 +1367,14 @@ export class CodingProjectControl {
     return this.#publicationView(this.#publication(project, run)!);
   }
 
-  #publishedAlternativeCommit(project: ProjectRow, run: RunRow, repository: string, base: string, head: string) {
+  #publishedAlternativeCommits(project: ProjectRow, run: RunRow, repository: string, base: string, head: string) {
     if (!this.#branch(project.id, run.session)) return undefined;
     const published = this.#branchPublication(project.id, run);
     if (!published?.created || !published.commit_sha)
       throw new ProjectControlError("Publish the applied patch from this alternative run before preparing its GitHub review.", 409);
     if (published.repository !== repository || published.base !== base || published.head !== head)
       throw new ProjectControlError("Use the GitHub repository and branches recorded for this alternative run.", 409);
-    return published.commit_sha;
+    return { baseCommit: published.base_sha, headCommit: published.commit_sha };
   }
 
   async #verifyAlternativeHead(project: ProjectRow, repository: string, head: string, expectedCommit: string) {
@@ -1390,22 +1395,24 @@ export class CodingProjectControl {
       if (!saved) throw new ProjectControlError("Confirm the pull request preview before attempting recovery.", 409);
       if (saved.repository !== bound.repository) throw new ProjectControlError("Reconnect the approved repository to recover this pull request.", 409);
       if (saved.pull_number !== null) return this.#publicationView(saved);
-      const expectedHead = this.#publishedAlternativeCommit(project, run, saved.repository, saved.base, saved.head);
+      const expectedHead = this.#publishedAlternativeCommits(project, run, saved.repository, saved.base, saved.head)?.headCommit;
       const found = await githubFindPull(saved.repository, saved.base, saved.head, saved.approval, token, this.#githubFetch, expectedHead);
       if (found.pull) authorize();
       return found.pull ? this.#finishPublication(project.id, run, actor, found.pull, true) : this.#publicationView(saved);
     }
 
     const draft = githubPullDraft(body);
-    const expectedHead = this.#publishedAlternativeCommit(project, run, bound.repository, draft.base, draft.head);
+    const commits = this.#publishedAlternativeCommits(project, run, bound.repository, draft.base, draft.head);
+    const expectedHead = commits?.headCommit;
     const approval = digest(JSON.stringify([1, project.id, bound.repository, run.session, run.id, run.signature, run.reviewed, draft,
       ...(expectedHead ? [expectedHead] : []),
     ]));
     const approvedDraft = { ...draft, body: githubPullBody(draft.body, approval) };
     if (action === "github-pr-preview") {
       if (expectedHead) await this.#verifyAlternativeHead(project, bound.repository, draft.head, expectedHead);
-      return { approval, repository: bound.repository, ...approvedDraft, comparison: githubComparison(bound.repository, draft.base, draft.head),
-        ...(expectedHead ? { headCommit: expectedHead } : {}),
+      const comparison = commits ? githubCommitComparison(bound.repository, commits.baseCommit, commits.headCommit)
+        : githubComparison(bound.repository, draft.base, draft.head);
+      return { approval, repository: bound.repository, ...approvedDraft, comparison, ...commits,
       };
     }
     if (body.approved !== true || body.approval !== approval)
@@ -1477,6 +1484,7 @@ export class CodingProjectControl {
     this.#requireOwner(actor);
     const request = this.#runParts(body);
     const runId = { session: request.session, id: request.requestId };
+    if (branchSessionPattern.test(runId.session)) this.#readRun(project.id, runId.session, runId.id);
     const saved = this.#branchPublication(project.id, runId);
     if (action === "github-branch-inspect") return saved ? this.#branchView(saved) : null;
     this.#requirePatchSlot(project, runId.session);
@@ -1654,6 +1662,7 @@ export class CodingProjectControl {
         this.#requireOwner(actor);
         const request = this.#runParts(body);
         if (action === "github-pr-inspect") {
+          if (branchSessionPattern.test(request.session)) this.#readRun(project.id, request.session, request.requestId);
           const saved = this.#publication(project.id, { session: request.session, id: request.requestId });
           return saved ? this.#publicationView(saved) : null;
         }
@@ -1675,8 +1684,9 @@ export class CodingProjectControl {
           throw new ProjectControlError("Accept the coding request in Review before preparing a GitHub handoff.", 409);
         const base = githubBranch(body.base);
         const head = githubBranch(body.head);
-        this.#publishedAlternativeCommit(project, run, bound.repository, base, head);
-        const url = githubComparison(bound.repository, base, head);
+        const commits = this.#publishedAlternativeCommits(project, run, bound.repository, base, head);
+        const url = commits ? githubCommitComparison(bound.repository, commits.baseCommit, commits.headCommit)
+          : githubComparison(bound.repository, base, head);
         this.#audit(project.id, "github_handoff", actor.id, run.session, run.id);
         return { url, repository: bound.repository, session: run.session, requestId: run.id };
       }

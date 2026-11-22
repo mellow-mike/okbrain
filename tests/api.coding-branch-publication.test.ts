@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { githubBranchBrowserFixture } from "../scripts/github-branch-browser-fixture.ts";
 import { createApiServer } from "../src/api.ts";
+import { ensureExtensionCapableSqlite } from "../src/core/engine/custom-sqlite.ts";
 
 test("an accepted alternative publishes only its reviewed patch and recorded GitHub head", async () => {
   const root = await mkdtemp(join(tmpdir(), "okb-branch-publication-"));
@@ -101,10 +103,12 @@ test("an accepted alternative publishes only its reviewed patch and recorded Git
     expect(github.writes).toEqual([]);
     await post(base + "/github-branch-publish", { ...branch, approval: branchPreview.approval, approved: true });
     expect((await post(base + "/github-pr-preview", { ...pull, head: "another-head" }, 409)).error).toContain("recorded for this alternative");
-    const { result: pullPreview } = await post<{ approval: string; headCommit: string }>(base + "/github-pr-preview", pull);
-    expect(pullPreview.headCommit).toBe(github.commitSha);
+    const { result: pullPreview } = await post<{ approval: string; headCommit: string; baseCommit: string; comparison: string }>(base + "/github-pr-preview", pull);
+    const pinnedComparison = `https://github.com/${github.repository}/compare/${github.baseSha}..${github.commitSha}`;
+    expect(pullPreview).toMatchObject({ baseCommit: github.baseSha, headCommit: github.commitSha, comparison: pinnedComparison });
     const confirmed = { ...pull, approval: pullPreview.approval, approved: true };
     github.moveHead("5".repeat(40));
+    expect((await post<{ url: string }>(base + "/github-handoff", { ...alternative, ...branches })).result.url).toBe(pinnedComparison);
     expect((await post(base + "/github-pr-publish", confirmed, 409)).error).toContain("no longer points");
     expect(github.writes).toEqual(["/git/blobs", "/git/trees", "/git/commits", "/git/refs"]);
     github.moveHead(github.commitSha);
@@ -121,6 +125,19 @@ test("an accepted alternative publishes only its reviewed patch and recorded Git
     expect((await post(base + "/github-pr-inspect", original)).result).toBeNull();
     expect(github.writes.filter((action) => action === "/pulls")).toHaveLength(1);
     expect(provider.state.callCount).toBe(2);
+    await post(base + "/delete-session", { session: original.session, confirm: original.session });
+    await post(base + "/github-pr-inspect", alternative, 404);
+    await post(base + "/github-branch-inspect", alternative, 404);
+    await server.stop();
+    server = undefined;
+    ensureExtensionCapableSqlite();
+    using catalog = new Database(join(stateDir, "projects.sqlite"), { readonly: true });
+    for (const table of ["applied_patches", "github_branch_publications", "github_publications"]) {
+      using rows = catalog.prepare(`SELECT 1 FROM ${table} WHERE project = ? AND session = ?`);
+      expect(rows.all(project.id, alternative.session)).toEqual([]);
+    }
+    using audit = catalog.prepare("SELECT kind FROM audit WHERE project = ? AND session = ? AND kind = 'github_pr_recovered'");
+    expect(audit.get(project.id, alternative.session)).toEqual({ kind: "github_pr_recovered" });
   } finally {
     await server?.stop();
     await rm(root, { recursive: true, force: true });
