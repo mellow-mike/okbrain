@@ -10,15 +10,15 @@ test("a source retrieval benchmark is scoped to the writable local operator and 
   const root = await mkdtemp(join(tmpdir(), "okb-retrieval-benchmark-"));
   const bundle = join(root, "brain");
   const workspace = join(root, "repository");
-  const locked = join(root, "read-only-brain");
   const token = "local-benchmark-test-owner";
-  await Promise.all([mkdir(bundle), mkdir(workspace), mkdir(locked)]);
-  const server = createApiServer({ bundle, token, port: 0, coding: { stateDir: join(root, "coding") } });
-  const call = (path: string, body?: unknown, options: { member?: string; brain?: string; anonymous?: boolean } = {}) =>
-    fetch(new URL("api/" + path, server.url), {
+  await Promise.all([mkdir(bundle), mkdir(workspace)]);
+  const boot = (readonly = false) => createApiServer({ bundle, token, readonly, port: 0, coding: { stateDir: join(root, "coding") } });
+  let server: ReturnType<typeof boot> | undefined = boot();
+  const call = (path: string, body?: unknown, options: { member?: string; anonymous?: boolean } = {}) =>
+    fetch(new URL("api/" + path, server!.url), {
       method: body === undefined ? "GET" : "POST",
       headers: { ...(options.anonymous ? {} : options.member ? { authorization: `Bearer ${options.member}` } : { "x-okb-token": token }),
-        ...(options.brain ? { "x-okb-brain": options.brain } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+        ...(body === undefined ? {} : { "content-type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(8000),
     });
   const result = async <T,>(response: Response): Promise<T> => {
@@ -28,6 +28,8 @@ test("a source retrieval benchmark is scoped to the writable local operator and 
   };
 
   try {
+    const mounts = async () => (await (await call("brains")).json() as { brains: unknown[] }).brains;
+    const existingMounts = await mounts();
     const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.toUpperCase().startsWith("GIT_")));
     const git = (...args: string[]) => execFileSync("git", args, { cwd: workspace, stdio: "ignore",
       env: { ...gitEnv, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: join(root, "unused-config") } });
@@ -44,14 +46,12 @@ test("a source retrieval benchmark is scoped to the writable local operator and 
     const base = `coding/projects/${full.id}`;
     const path = `${base}/retrieval-benchmark`;
     const member = await result<{ token: string }>(await call(`${base}/members`, { name: "fixture-reviewer" }));
-    expect((await call("brains/mounts", { action: "register", name: "locked-benchmark", path: locked, readonly: true })).status).toBe(200);
     const start = { action: "start", study: "subsystem", repetitions: 2, tokenBudget: 12288 };
 
     expect(await result(await call(path))).toEqual({ status: "idle" });
     expect((await call(path, undefined, { anonymous: true })).status).toBe(401);
     expect((await call(path, undefined, { member: member.token })).status).toBe(403);
     expect((await call(path, start, { member: member.token })).status).toBe(403);
-    expect((await call(path, start, { brain: "locked-benchmark" })).status).toBe(403);
     expect((await call(path, { ...start, workspace })).status).toBe(400);
     expect((await call(path, { ...start, repetitions: 51 })).status).toBe(400);
     expect((await call(path, { ...start, tokenBudget: "12288" })).status).toBe(400);
@@ -85,8 +85,16 @@ test("a source retrieval benchmark is scoped to the writable local operator and 
     expect(terminal).toMatchObject({ id: newer.id, status: "failed" });
     expect(await result(await call(path, { action: "cancel", id: newer.id }))).toEqual(terminal);
     expect(await result(await call(`${base}/runs`))).toEqual([]);
-  } finally {
+
     await server.stop();
+    server = undefined;
+    server = boot(true);
+    expect(await result(await call(path))).toEqual({ status: "idle" });
+    expect((await call(path, start)).status).toBe(403);
+    expect(await result(await call(path))).toEqual({ status: "idle" });
+    expect(await mounts()).toEqual(existingMounts);
+  } finally {
+    await server?.stop();
     await rm(root, { recursive: true, force: true });
   }
 }, 15_000);
