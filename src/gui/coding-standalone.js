@@ -11,7 +11,8 @@
   const statusLabel = (status) => statusLabels[status] || status || 'Saved';
 
   async function mount(parent, { coding, readonly, detached, defaultModels, entries, field, previewContents,
-    report, sessionUsage, usageText, contextSummary, showTaskProgress, taskProgressPanel, mountContextControls, mountRunCopies }) {
+    report, sessionUsage, usageText, contextSummary, showTaskProgress, taskProgressPanel, mountContextControls, mountRunCopies,
+    sourceLookupSummary }) {
     const header = parent.querySelector('header');
     header.innerHTML = '<div class="row coding-project-links"><a href="#coding">Project workspace</a></div>' +
       '<h2 class="display">Standalone sessions</h2><p class="muted">Open sessions from this app or the CLI.</p>';
@@ -298,7 +299,7 @@
         (status === 'running' ? '<div data-live-answer hidden><p class="muted"></p><pre></pre></div>' : '') +
         (answer ? '<pre data-answer></pre>' : '') + '<div class="row" data-run-copy-actions hidden></div>' +
         (request?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
-        (request?.approvedSourceLookup ? '<p class="muted">Approved source lookup enabled.</p>' : '') +
+        sourceLookupSummary(request) +
         (pi ? '<p class="muted">Request usage · ' + esc(usageText(request?.usage)) + '</p>' +
           contextSummary(pi.context) + sessionUsage(pi) : '') +
         (savedPrompt || savedSource ? '<details data-saved-task><summary>Saved task and source</summary>' +

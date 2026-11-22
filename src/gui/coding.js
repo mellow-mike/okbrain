@@ -85,6 +85,18 @@
     ].join(' · ');
   }
 
+  function sourceLookupSummary(request) {
+    if (!request?.approvedSourceLookup) return '';
+    const lookup = request.sourceLookup;
+    if (!Array.isArray(lookup?.served)) return '<p class="muted">Approved source lookup enabled.</p>';
+    const ranges = lookup.served.map(({ path, startLine, endLine }) => '<li><code>' +
+      esc(path + ':' + startLine + (endLine === startLine ? '' : '–' + endLine)) + '</code></li>').join('');
+    const counts = [lookup.served.length + ' served', lookup.refused + ' refused', lookup.incomplete + ' incomplete'];
+    if (lookup.truncated) counts.push('Receipt limit reached');
+    return '<details data-source-lookup-receipt><summary>Approved source lookups</summary><p>' + esc(counts.join(' · ')) + '</p>' +
+      (ranges ? '<ul class="plain">' + ranges + '</ul>' : '') + '</details>';
+  }
+
   function contextSummary(context) {
     const tokens = (value) => value.toLocaleString() + ' tokens';
     const positiveLimit = (value) => Number.isSafeInteger(value) && value > 0;
@@ -1373,7 +1385,7 @@
         (error ? '<div class="notice">' + esc(error) + '</div>' : '') +
         (result.admissionMissing ? '<p class="muted">Pi did not save this request. Resume will make this ID available for resubmission.</p>' : '') +
         (pi ? '<p class="muted">Request usage · ' + esc(usageText(pi.request?.usage)) + '</p>' + contextSummary(pi.context) : '') +
-        (pi?.request?.approvedSourceLookup ? '<p class="muted">Approved source lookup enabled for this request.</p>' : '') +
+        sourceLookupSummary(pi?.request) +
         (receipt?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
         taskProgressPanel +
         (row.status === 'running' ? '<div data-live-answer hidden><p class="muted"></p><pre></pre></div>' : '') +
@@ -2130,7 +2142,7 @@
       projectsEl.remove();
       await window.okbCodingStandalone.mount(page, {
         coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, report, sessionUsage, usageText, contextSummary,
-        showTaskProgress, taskProgressPanel, mountContextControls, mountRunCopies,
+        showTaskProgress, taskProgressPanel, mountContextControls, mountRunCopies, sourceLookupSummary,
       });
       return;
     }

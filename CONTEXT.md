@@ -27,6 +27,10 @@ from Pi session status. Run history shows recorded usage for the selected
 request and the full session, including main and child conversation totals.
 For a saved request, the controller supplies a versioned run report with
 identity, status, usage, and relative references from the admitted source.
+Completed opt-in requests report the ranges served by Pi's durable lookup
+results and counts of refused or incomplete calls. The receipt matches the
+request's own conversation and admitted source. It omits tool arguments,
+result text, and paths from refused calls.
 The app and editor copy that report to the clipboard on request. Task text,
 response text, source bodies, and credentials are outside the report schema.
 Run inspection projects Pi Durable's live task graph to bounded counts for
@@ -81,8 +85,11 @@ and repository profile presets in the project catalog. Project members can
 load them in the team web app or editor. The editor stores the team token,
 HTTPS origin, and project identity together in SecretStorage and uses the
 member route for repository previews and run review. Each request requires
-approval of a new preview of the current source. Independent package review uses Pi
-Durable child conversations with explicit package previews and combined usage.
+approval of a new preview of the current source. The editor can also build a
+one-off scoped repository request for an open local project. Its repository
+and active-file approvals render in read-only documents and remain bound to
+the reviewed project and source. Independent package review uses Pi Durable
+child conversations with explicit package previews and combined usage.
 An explicit owner preference can restore the team loopback listener's fixed
 port and HTTPS origin after a writable server restart from the same catalog.
 The saved port is reserved from the owner listener. Bind failures stay visible

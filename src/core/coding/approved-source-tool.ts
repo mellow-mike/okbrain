@@ -1,9 +1,11 @@
 import type { Context } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool, LiveDoc, ROOT_CONVERSATION_ID, type SubmissionId } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, LiveDoc, type ConversationId, type SubmissionId } from "@earendil-works/pi-durable";
 import { evaluationInput } from "./evaluation.ts";
 
 export const approvedSourceToolName = "lookup_approved_source";
+export const maxApprovedSourceLookups = 4;
+export const maxApprovedSourceLookupLines = 24;
 
 export function approvedSourceLookupEnabled(content: string | undefined): boolean {
   if (content === undefined) return false;
@@ -11,7 +13,7 @@ export function approvedSourceLookupEnabled(content: string | undefined): boolea
   catch { return false; }
 }
 
-export function approvedSourceTool(readInput: (id: SubmissionId, context: Context) => Promise<string | undefined>) {
+export function approvedSourceTool(readInput: (conversation: ConversationId, id: SubmissionId, context: Context) => Promise<string | undefined>) {
   const lookup = defineTool({
     name: approvedSourceToolName,
     description: "Read up to 24 consecutive lines already approved for this request. Use the exact workspace-relative path and inclusive line numbers from the supplied source. The range must be inside a single approved file or excerpt.",
@@ -24,13 +26,12 @@ export function approvedSourceTool(readInput: (id: SubmissionId, context: Contex
     async execute({ path, startLine, endLine }, api, context) {
       const live = await api.snapshot(LiveDoc, api.conversationId, context);
       const inputs = live?.run?.inputs;
-      const saved = api.conversationId === ROOT_CONVERSATION_ID && inputs?.length === 1
-        ? await readInput(inputs[0]!, context) : undefined;
+      const saved = inputs?.length === 1 ? await readInput(api.conversationId, inputs[0]!, context) : undefined;
       if (!saved || !approvedSourceLookupEnabled(saved))
         throw new Error("Approved source lookup is unavailable for this request.");
-      if (!live?.tools?.slice(0, 4).some(({ callId }) => callId === api.callId))
+      if (!live?.tools?.slice(0, maxApprovedSourceLookups).some(({ callId }) => callId === api.callId))
         throw new Error("The lookup round supports up to four approved ranges.");
-      if (endLine < startLine || endLine - startLine >= 24)
+      if (endLine < startLine || endLine - startLine >= maxApprovedSourceLookupLines)
         throw new Error("Choose an inclusive range of up to 24 approved lines.");
       const source = evaluationInput(saved)?.sources.find((entry) =>
         entry.path === path && startLine >= entry.startLine && endLine <= entry.endLine);

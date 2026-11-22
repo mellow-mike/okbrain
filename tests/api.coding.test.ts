@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createApiServer, type ApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
+import type { CodingSourceLookupReceipt } from "../src/core/coding/approved-source-receipt.ts";
 import {
   listCodingModels, maxLiveAnswerLength, runCodingSession,
   type CodingContextCompactionPreview, type CodingContextCompactionResult, type CodingContextResetPreview,
@@ -22,7 +23,7 @@ type Project = { id: string; workspace: string; credential: string };
 type Presets = { presets: { id: string; name: string; prompt: string; query: string; profile: CodingProjectProfile }[] };
 type Run = { id: string; status: string; actor: string; admitted: boolean; error: string | null; review: string | null };
 type Inspection = { run: Run; liveAnswer?: CodingLiveAnswer; taskProgress?: CodingTaskProgress; report?: CodingRunReport;
-  pi?: { request?: { receipt?: { text?: string } } } };
+  pi?: { request?: { receipt?: { text?: string }; sourceLookup?: CodingSourceLookupReceipt } } };
 
 async function fixture(prefix: string) {
   const root = await mkdtemp(join(tmpdir(), prefix));
@@ -1210,6 +1211,13 @@ test("allows an approved source lookup only for the submitted preview and opt-in
     await call(path + "/run", { ...body, approvedSourceLookup: true });
     const done = await waitFor(() => call<Inspection>(path + "/inspect", identity), ({ run }) => run.status !== "running");
     expect(done.pi?.request?.receipt?.text).toBe("Checked the approved line.");
+    const attachmentLookups = { served: [{ path: "src/example.ts", startLine: 1, endLine: 1 }], refused: 2, incomplete: 0 };
+    expect(done.pi?.request?.sourceLookup).toEqual(attachmentLookups);
+    expect(done.report?.request.sourceLookup).toEqual(attachmentLookups);
+    for (const receipt of [done.pi?.request?.sourceLookup, done.report?.request.sourceLookup]) {
+      expect(JSON.stringify(receipt)).not.toContain("private/example.ts");
+      expect(JSON.stringify(receipt)).not.toContain("export const answer");
+    }
     expect((await request(path + "/run", body)).status).toBe(409);
     await call(path + "/run", { ...body, approvedSourceLookup: true });
     expect(faux.state.callCount).toBe(2);
@@ -1218,6 +1226,8 @@ test("allows an approved source lookup only for the submitted preview and opt-in
     await call(path + "/run", { ...body, ...followup });
     const defaultRun = await waitFor(() => call<Inspection>(path + "/inspect", followup), ({ run }) => run.status !== "running");
     expect(defaultRun.pi?.request?.receipt?.text).toBe("Reviewed without a lookup.");
+    expect(defaultRun.pi?.request?.sourceLookup).toBeUndefined();
+    expect(defaultRun.report?.request.sourceLookup).toBeUndefined();
     expect(faux.state.callCount).toBe(3);
 
     const file = "src/indexed.ts";
@@ -1254,6 +1264,9 @@ test("allows an approved source lookup only for the submitted preview and opt-in
       previewId: excerpts.manifest.id, approvedSourceLookup: true });
     const excerptRun = await waitFor(() => call<Inspection>(path + "/inspect", repositoryRun), ({ run }) => run.status !== "running");
     expect(excerptRun.pi?.request?.receipt?.text).toBe("Checked line 81 in the saved excerpt.");
+    const excerptLookups = { served: [{ path: file, startLine: 81, endLine: 81 }], refused: 1, incomplete: 0 };
+    expect(excerptRun.pi?.request?.sourceLookup).toEqual(excerptLookups);
+    expect(excerptRun.report?.request.sourceLookup).toEqual(excerptLookups);
     expect(faux.state.callCount).toBe(5);
   } finally {
     await api.stop();

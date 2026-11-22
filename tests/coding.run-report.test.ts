@@ -36,8 +36,15 @@ test("run reports keep only known receipt, repository, budget, and usage fields"
     files: [{ ...source, reason: privateText, content: privateText }],
   };
   const unsafeUsage = { ...usage, cost: { ...usage.cost, privateField: privateText }, privateField: privateText };
+  const approvedLookup = { path: source.path, startLine: 8, endLine: 9 };
   const unsafeRequest = {
     requestId, status: "done" as const, approvedSourceLookup: true as const, stopReason: "stop" as const,
+    sourceLookup: { served: [
+      { ...approvedLookup, content: privateText },
+      { ...approvedLookup, path: `/home/${privateText}` },
+      { ...approvedLookup, path: `src/${privateText}` },
+      { ...approvedLookup, startLine: 1 },
+    ], refused: 2, incomplete: 0, rawError: privateText },
     usage: unsafeUsage, repositoryContext: unsafeManifest, reason: privateText, savedPrompt: privateText,
     receipt: { session, requestId, status: "done" as const, text: privateText, stopReason: "stop" as const, usage: unsafeUsage },
     savedSource: { source: "repository" as const, manifest: unsafeManifest, guidance: privateText, excerpts: [{ ...source, content: privateText }] },
@@ -53,6 +60,7 @@ test("run reports keep only known receipt, repository, budget, and usage fields"
     version: 1, projectId, session, provider: "anthropic", model: "claude-sonnet-4-6", runStatus: "done", review: "accepted",
     context: { ...context, compactionPending: true },
     request: { requestId, status: "done", approvedSourceLookup: true, stopReason: "stop", usage,
+      sourceLookup: { served: [approvedLookup], refused: 2, incomplete: 0, truncated: true },
       repositoryContext: { id, workspaceRevision, ...counters, limitsReached, index, files: [source] } },
     receipt: { status: "done", stopReason: "stop", usage },
     usage: { models: { [modelKey]: usage }, tools: { [approvedSourceToolName]: usage } }, rootUsage: nonemptyLedger,

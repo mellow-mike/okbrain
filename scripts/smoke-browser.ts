@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,11 +7,12 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium, type Browser, type Page, type Request as BrowserRequest } from "playwright";
 import { createApiServer } from "../src/api.ts";
+import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
 import { runCodingSession } from "../src/core/coding/durable.ts";
 import type { CodingRunReport } from "../src/core/coding/run-report.ts";
 import { loadConfig } from "../src/core/config.ts";
 import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/core/engine/cache-settings.ts";
-import { fmGenerated, parse } from "../src/core/okf/document.ts";
+import { fmGenerated, parse, serialize } from "../src/core/okf/document.ts";
 import { githubBranchBrowserFixture } from "./github-branch-browser-fixture.ts";
 
 const root = await mkdtemp(join(tmpdir(), "okbrain-browser-smoke-"));
@@ -647,6 +648,57 @@ try {
   await neighbors.getByRole("button", { name: "Show links", exact: true }).click();
   await neighbors.getByRole("heading", { name: "2 hops away", exact: true }).waitFor();
   await neighbors.getByRole("link", { name: "Graph destination", exact: true }).waitFor();
+
+  const exactTag = `Garden/orchid & Québec? #:% + "double" 'quote' <spring>`;
+  await Promise.all([
+    { id: "tagged-exact", type: "conversation", title: "Field tag example", tags: [exactTag] },
+    { id: "tagged-prefix", type: "conversation", title: "Field tag extension", tags: [exactTag + " extra"] },
+    { id: "tagged-title", type: "conversation", title: "Field title with " + exactTag, tags: [] },
+    { id: "tagged-reference", type: "reference", title: "Field reference", tags: [exactTag] },
+  ].map(({ id, ...frontmatter }) => writeFile(join(bundle, id + ".md"), serialize({ frontmatter, body: "Local tag test.\n" }))));
+  await nav.getByRole("link", { name: "Sources", exact: true }).click();
+  await page.getByRole("link", { name: "Browse conversation drafts", exact: true }).click();
+  const browseTag = page.getByRole("combobox", { name: "Tag", exact: true });
+  const browseType = page.getByRole("combobox", { name: "Type", exact: true });
+  const browseQuery = page.getByRole("searchbox", { name: "Filter title, ID, or tags", exact: true });
+  const browseResults = page.locator("#b-out");
+  const exactNote = browseResults.getByRole("link", { name: "Field tag example", exact: true });
+  const similarTag = browseResults.getByRole("link", { name: "Field tag extension", exact: true });
+  const incidentalTitle = browseResults.getByRole("link", { name: "Field title with " + exactTag, exact: true });
+  const otherType = browseResults.getByRole("link", { name: "Field reference", exact: true });
+  await exactNote.waitFor();
+  assert.equal(await browseType.inputValue(), "conversation");
+  await browseQuery.click();
+  await browseQuery.fill("Field");
+  await similarTag.waitFor();
+  await incidentalTitle.waitFor();
+  await browseTag.selectOption({ label: exactTag });
+  assert.equal(await browseQuery.inputValue(), "Field");
+  const selectedTagUrl = page.url();
+  assert.deepEqual([...new URLSearchParams(new URL(selectedTagUrl).hash.slice("#browse?".length))],
+    [["tag", exactTag], ["type", "conversation"]]);
+  await exactNote.waitFor();
+  assert.equal(await similarTag.count(), 0);
+  assert.equal(await incidentalTitle.count(), 0);
+  assert.equal(await otherType.count(), 0);
+  await exactNote.click();
+  const readTag = page.locator(".concept-side").getByRole("link", { name: "Browse notes tagged " + exactTag, exact: true });
+  await readTag.waitFor();
+  await page.goBack();
+  assert.equal(page.url(), selectedTagUrl);
+  await exactNote.waitFor();
+  assert.equal(await browseTag.inputValue(), exactTag);
+  assert.equal(await browseType.inputValue(), "conversation");
+  await page.goForward();
+  await readTag.waitFor();
+  await readTag.press("Enter");
+  await otherType.waitFor();
+  assert.equal(await browseType.inputValue(), "");
+  assert.equal(await browseTag.inputValue(), exactTag);
+  assert.equal(await browseTag.evaluate((element) => element === document.activeElement), true);
+  const tagBounds = await browseTag.boundingBox();
+  assert.ok(tagBounds && tagBounds.x + tagBounds.width <= 375);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
 
   await nav.getByRole("link", { name: "Stats", exact: true }).click();
   await page.getByLabel("From concept ID", { exact: true }).fill("external");
@@ -2354,6 +2406,27 @@ try {
   assert.equal(await pullLink.getAttribute("href"), `https://github.com/${githubFixture.repository}/pull/22`);
   assert.deepEqual(githubFixture.writes, ["/git/blobs", "/git/trees", "/git/commits", "/git/refs", "/pulls"]);
   assert.equal(await Bun.file(file).text(), branchAfter);
+
+  const lookupIdentity = { session: "browser-source-lookups", requestId: "browser-lookup" };
+  projectFaux.setResponses([
+    fauxAssistantMessage([
+      fauxToolCall(approvedSourceToolName, { path: "browser.ts", startLine: 1, endLine: 1 }, { id: "read-approved" }),
+      fauxToolCall(approvedSourceToolName, { path: "outside-project.ts", startLine: 1, endLine: 1 }, { id: "read-outside" }),
+    ], { stopReason: "toolUse" }),
+    fauxAssistantMessage("Reviewed the line returned from the saved preview."),
+  ]);
+  const lookupPreview = await codingFixture<{ id: string }>(projectPath + "/preview", projectSource);
+  await codingFixture(projectPath + "/run", { ...projectSource, ...lookupIdentity, previewId: lookupPreview.id,
+    approved: true, approvedSourceLookup: true, prompt: "Check the exact line from this preview.",
+  });
+  const lookupRoute = "#coding/" + project.id + "?" + new URLSearchParams({ session: lookupIdentity.session, request: lookupIdentity.requestId });
+  await page.evaluate((hash) => { location.hash = hash; }, lookupRoute);
+  await page.getByText("Reviewed the line returned from the saved preview.", { exact: true }).waitFor();
+  const lookups = page.locator("[data-source-lookup-receipt]");
+  await lookups.getByText("Approved source lookups", { exact: true }).click();
+  await lookups.getByText("browser.ts:1", { exact: true }).waitFor();
+  await lookups.getByText("1 served · 1 refused · 0 incomplete", { exact: true }).waitFor();
+  assert.ok(!(await lookups.textContent())?.includes("outside-project.ts"));
 
   await page.evaluate(() => { location.hash = "#concept/%ZZ"; });
   await page.getByRole("textbox", { name: "Quick note" }).waitFor();

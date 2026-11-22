@@ -12,6 +12,8 @@ Open **Review** to see suggested notes and the reasons they surfaced. Overdue cl
 
 In **Search**, set **Maximum results** and choose your retrieval profile before submitting. Leave semantic retrieval off to search without provider calls.
 
+In **Browse**, choose **Tag** to show notes with that exact tag. Combine it with a type or text filter. Selecting a tag on a note opens the filtered list. If you open a note from that list, use Back to return to the same tag and type.
+
 In an open note, expand **View Markdown source** to inspect or copy its saved Markdown and YAML, including on a read-only brain. To remove a note’s resource URL, open **Edit**, clear **Resource (URI)**, and save. Its source citations stay in the **Sources** field. Provenance entries for notes in the bundle open those notes from the reader or graph. The offline graph links to notes included in the export.
 
 Open **Inbox** and choose **File note** on an unread capture. Enter a new concept ID such as `projects/garden-notes`, preview the destination, then confirm. Filing preserves the note and its provenance in the chosen folder and removes the inbox tag. A forwarding note at the old address lets existing links reach the filed note. Links to old heading anchors land on the forwarding note, and the graph shows the forward as a separate link. Keep private notes within `db_only/`. If interrupted after copying, preview the same destination and confirm to finish an unchanged filing.

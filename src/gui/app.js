@@ -64,6 +64,20 @@ function conceptLink(id, title) {
 function chips(tags) {
   return (tags || []).map(function (t) { return '<span class="chip">' + esc(t) + '</span>'; }).join(' ');
 }
+function browseHref(type, tag) {
+  if (tag === null) return type ? '#browse/' + encodeURIComponent(type) : '#browse';
+  var filters = new URLSearchParams({ tag: tag });
+  if (type) filters.set('type', type);
+  return '#browse?' + filters.toString();
+}
+function tagLabel(tag) { return tag.trim() ? tag : '(blank tag)'; }
+function tagLinks(tags, type) {
+  return tags.map(function (tag) {
+    var label = tagLabel(tag);
+    return '<a class="chip tag-link" href="' + esc(browseHref(type, tag)) + '" aria-label="' +
+      esc('Browse notes tagged ' + label) + '">' + esc(label) + '</a>';
+  }).join(' ');
+}
 function dateOf(iso) { return iso ? esc(String(iso).slice(0, 10)) : '—'; }
 function badges(s) { return '<span class="badges">' + R.badges(s) + '</span>'; }
 function basename(p) { return String(p || '').split(/[\\/]/).filter(Boolean).pop() || p; }
@@ -256,9 +270,13 @@ function route() {
   activeAsk = null;
   var h = location.hash.slice(1) || 'home';
   var slash = h.indexOf('/');
-  var name = slash < 0 ? h : h.slice(0, slash);
+  var filteredBrowse = h.startsWith('browse?');
+  var name = filteredBrowse ? 'browse' : slash < 0 ? h : h.slice(0, slash);
   var arg = null;
-  try { if (slash >= 0) arg = decodeURIComponent(h.slice(slash + 1)); }
+  try {
+    if (filteredBrowse) arg = new URLSearchParams(h.slice('browse?'.length));
+    else if (slash >= 0) arg = decodeURIComponent(h.slice(slash + 1));
+  }
   catch (error) { name = 'home'; }
   if (!Object.hasOwn(routes, name)) name = 'home';
   var fn = routes[name];
@@ -573,13 +591,16 @@ function doctorSummary(r) {
 
 // ---- browse --------------------------------------------------------------
 
-async function renderBrowse(initialType, seq) {
+async function renderBrowse(filters, seq) {
+  var initialType = filters instanceof URLSearchParams ? filters.get('type') : filters;
+  var initialTag = filters instanceof URLSearchParams ? filters.get('tag') : null;
   view.innerHTML =
     '<div class="stack wide"><h2>Browse</h2>' +
-    '<div class="toolbar"><input id="b-q" type="search" placeholder="Filter title / id / tags…">' +
-    '<select id="b-type"><option value="">all types</option></select>' +
-    '<select id="b-status"><option value="">any status</option><option>draft</option><option>stable</option><option>deprecated</option></select>' +
-    '<select id="b-sort"><option value="updated">newest first</option><option value="title">title</option><option value="type">type</option></select>' +
+    '<div class="toolbar"><input id="b-q" type="search" aria-label="Filter title, ID, or tags" placeholder="Filter title / id / tags…">' +
+    '<select id="b-type" aria-label="Type"><option value="">all types</option></select>' +
+    '<select id="b-tag" aria-label="Tag"><option value="">Any tag</option></select>' +
+    '<select id="b-status" aria-label="Status"><option value="">any status</option><option>draft</option><option>stable</option><option>deprecated</option></select>' +
+    '<select id="b-sort" aria-label="Sort by"><option value="updated">newest first</option><option value="title">title</option><option value="type">type</option></select>' +
     '<span id="b-count" class="muted right"></span></div><div id="b-out"></div></div>';
   var out = document.getElementById('b-out');
   Okb.working(out, 'loading');
@@ -600,12 +621,24 @@ async function renderBrowse(initialType, seq) {
     typeSel.appendChild(o);
   });
   if (initialType) typeSel.value = initialType;
+  var query = document.getElementById('b-q');
+  var tagSel = document.getElementById('b-tag');
+  var statusSel = document.getElementById('b-status');
+  var sortSel = document.getElementById('b-sort');
+  var tags = Array.from(new Set(rows.flatMap(function (r) { return r.tags; })));
+  if (initialTag !== null && !tags.includes(initialTag)) tags.push(initialTag);
+  tags.sort(function (a, b) { return a.localeCompare(b); });
+  tags.forEach(function (tag) { tagSel.add(new Option(tagLabel(tag), tag)); });
+  if (initialTag !== null) tagSel.selectedIndex = tags.indexOf(initialTag) + 1;
+  function selectedTag() { return tagSel.selectedIndex > 0 ? tagSel.value : null; }
   function draw() {
-    var q = document.getElementById('b-q').value.trim().toLowerCase();
-    var type = typeSel.value, status = document.getElementById('b-status').value;
-    var sort = document.getElementById('b-sort').value;
+    var q = query.value.trim().toLowerCase();
+    var type = typeSel.value, status = statusSel.value;
+    var tag = selectedTag();
+    var sort = sortSel.value;
     var list = rows.filter(function (r) {
       if (type && r.type !== type) return false;
+      if (tag !== null && !r.tags.includes(tag)) return false;
       if (status && r.status !== status) return false;
       if (q && (r.id + ' ' + r.title + ' ' + r.tags.join(' ')).toLowerCase().indexOf(q) < 0) return false;
       return true;
@@ -622,16 +655,23 @@ async function renderBrowse(initialType, seq) {
           return '<tr><td>' + conceptLink(r.id, r.title) + '<br><code>' + esc(r.id) + '</code>' +
             (r.description ? '<div class="muted">' + esc(r.description) + '</div>' : '') + '</td>' +
             '<td>' + typeChip(r.type) + '</td><td>' + badges(r) + '</td>' +
-            '<td class="nowrap muted">' + dateOf(r.updated) + '</td><td>' + chips(r.tags) + '</td></tr>';
+            '<td class="nowrap muted">' + dateOf(r.updated) + '</td><td>' + tagLinks(r.tags, type) + '</td></tr>';
         }).join('') + '</tbody></table>'
       : '<div class="empty">No concepts match.</div>';
   }
-  ['b-q', 'b-type', 'b-status', 'b-sort'].forEach(function (id) {
-    document.getElementById(id).addEventListener('input', draw);
-    document.getElementById(id).addEventListener('change', draw);
-  });
+  query.addEventListener('input', draw);
+  statusSel.addEventListener('change', draw);
+  sortSel.addEventListener('change', draw);
+  function changeFilters() {
+    var href = browseHref(typeSel.value, selectedTag());
+    if (location.hash !== href) history.replaceState(null, '', href);
+    draw();
+  }
+  typeSel.addEventListener('change', changeFilters);
+  tagSel.addEventListener('change', changeFilters);
   draw();
   Okb.enter(out.querySelector('tbody'));
+  if (initialTag !== null && (document.activeElement === document.body || document.activeElement === view)) tagSel.focus();
 }
 
 // ---- concept (reader) ----------------------------------------------------
@@ -670,7 +710,8 @@ async function renderConcept(id, seq, was) {
     mountMarkdownSource(view.querySelector('#c-source'), c.raw);
     return;
   }
-  var tags = Array.isArray(fm.tags) ? fm.tags : (typeof fm.tags === 'string' ? [fm.tags] : []);
+  var tags = Array.isArray(fm.tags) ? fm.tags.filter(function (tag) { return typeof tag === 'string'; }) :
+    (typeof fm.tags === 'string' && fm.tags.trim() ? [fm.tags] : []);
   var inInbox = tags.indexOf('inbox') >= 0;
   var verified = Array.isArray(fm.verified) ? fm.verified : (fm.verified ? [fm.verified] : []);
   var sources = Array.isArray(fm.sources) ? fm.sources : (fm.sources ? [fm.sources] : []);
@@ -678,7 +719,7 @@ async function renderConcept(id, seq, was) {
 
   var meta = '<dl class="kv">';
   if (fm.resource) meta += '<dt>Resource</dt><dd>' + R.resourceLink(fm.resource) + '</dd>';
-  if (tags.length) meta += '<dt>Tags</dt><dd>' + chips(tags) + '</dd>';
+  if (tags.length) meta += '<dt>Tags</dt><dd>' + tagLinks(tags) + '</dd>';
   meta += '<dt>Generated</dt><dd>' + R.actorLine(fm.generated) + (fm.timestamp && !fm.generated ? ' <span class="muted">(v0.1 timestamp ' + esc(fm.timestamp) + ')</span>' : '') + '</dd>';
   meta += '<dt>Verified</dt><dd>' + (verified.length ? verified.map(R.actorLine).join('<br>') : '<span class="muted">never</span>') + '</dd>';
   if (fm.stale_after) meta += '<dt>Stale after</dt><dd>' + esc(fm.stale_after) + '</dd>';

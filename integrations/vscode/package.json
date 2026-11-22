@@ -18,6 +18,7 @@
     "commands": [
       { "command": "okbrain.open", "title": "Open Coding Workspace", "category": "okbrain" },
       { "command": "okbrain.runFile", "title": "Preview Active File for Coding Request", "category": "okbrain" },
+      { "command": "okbrain.runRepository", "title": "Preview Repository Coding Request", "category": "okbrain" },
       { "command": "okbrain.runPreset", "title": "Preview Saved Request Preset", "category": "okbrain" },
       { "command": "okbrain.runs", "title": "Inspect and Review Coding Runs", "category": "okbrain" },
       { "command": "okbrain.connectTeam", "title": "Connect to Team Workspace", "category": "okbrain" },

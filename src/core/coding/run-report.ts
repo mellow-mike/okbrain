@@ -1,6 +1,7 @@
 import type { StopReason, Usage } from "@earendil-works/pi-ai";
 import type { UsageState } from "@earendil-works/pi-durable";
-import { approvedSourceToolName } from "./approved-source-tool.ts";
+import { approvedSourceToolName, maxApprovedSourceLookups } from "./approved-source-tool.ts";
+import { approvedSourceLookupRange, maxRecordedSourceLookups, type CodingSourceLookupReceipt } from "./approved-source-receipt.ts";
 import type { CodingSessionStatusResult } from "./durable.ts";
 
 const sessionName = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
@@ -49,6 +50,7 @@ export interface CodingRunReport {
     requestId: string;
     status: string;
     approvedSourceLookup?: true;
+    sourceLookup?: CodingSourceLookupReceipt;
     stopReason?: StopReason;
     usage?: Usage;
     repositoryContext?: RepositoryReport;
@@ -141,6 +143,21 @@ function repositoryReport(value: unknown): RepositoryReport | undefined {
   };
 }
 
+function sourceLookupReport(value: unknown, sources: FileRange[] | undefined, files: { path: string }[] | undefined): CodingSourceLookupReceipt | undefined {
+  if (!record(value)) return;
+  const { refused, incomplete } = value;
+  if (!count(refused) || !count(incomplete) || refused + incomplete > maxRecordedSourceLookups || !Array.isArray(value.served)) return;
+  const served = value.served.slice(0, maxApprovedSourceLookups).flatMap((item) => {
+    const range = approvedSourceLookupRange(item);
+    if (!range) return [];
+    const approved = sources ? sources.some((file) =>
+      file.path === range.path && range.startLine >= file.startLine && range.endLine <= file.endLine)
+      : files?.some((file) => file.path === range.path);
+    return approved ? [range] : [];
+  });
+  return { served, refused, incomplete, ...(value.truncated === true || served.length !== value.served.length ? { truncated: true } : {}) };
+}
+
 function packageReports(value: unknown, parentId: string): PackageReport[] | undefined {
   if (!Array.isArray(value)) return;
   const validIds = new Set([1, 2, 3].map((part) => `${parentId}-package-${part}`));
@@ -171,6 +188,8 @@ export function codingRunReport(
   const explicitPaths = Array.isArray(request.sourcePaths) ? request.sourcePaths
     : Array.isArray(savedFiles) ? savedFiles.slice(0, maxFiles).flatMap((file) => record(file) ? [file.path] : []) : undefined;
   const files = explicitPaths?.slice(0, maxFiles).filter(safePath).map((path) => ({ path }));
+  const sourceLookup = request.status === "done" && request.approvedSourceLookup === true
+    ? sourceLookupReport(request.sourceLookup, manifest?.files, files) : undefined;
   const requestUsage = usageReport(request.usage);
   const receiptUsage = usageReport(receipt?.status === "done" ? receipt.usage : undefined);
   const packages = packageReports(receipt?.packageReviews, run.requestId);
@@ -188,6 +207,7 @@ export function codingRunReport(
     request: {
       requestId: request.requestId, status: request.status,
       ...(request.approvedSourceLookup === true ? { approvedSourceLookup: true } : {}),
+      ...(sourceLookup ? { sourceLookup } : {}),
       ...(request.stopReason && stopReasons.has(request.stopReason) ? { stopReason: request.stopReason } : {}),
       ...(requestUsage ? { usage: requestUsage } : {}),
       ...(manifest ? { repositoryContext: manifest } : {}),

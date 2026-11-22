@@ -47,6 +47,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   apps, clear its resource URI, and set the search result limit and profile.
 - [x] Build a first search index and run the original query from Search. Open
   the reviewed Markdown picker from Add and link directly imported notes.
+- [x] Filter Browse by exact tag and follow note tags into that view. Retain
+  the tag and type when returning from a note.
 
 ### Stage 8 — Enterprise coding
 
@@ -90,6 +92,9 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   for a selected run in the app or editor, including each package review.
 - [x] Offer an approved-source line lookup for explicit files and scoped
   excerpts, using Pi Durable replay against the saved request bytes.
+- [x] Report the approved ranges Pi actually served and counts of refused
+  calls in saved run inspection. Enforce the current approved source on
+  ordinary and alternative requests.
 - [x] Add versioned project profiles, a rebuildable worktree-aware symbol and
   dependency index, selection explanations, and stable Pi provider affinity.
 - [x] Save reusable project request presets in the Mac and web apps. Use a
@@ -106,6 +111,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   Verify the author, reviewer, and injected-provider metrics in separate browsers.
 - [x] Load the six pinned Vite cases and three retrieval recipes from the Mac
   and web apps. Verify the Git checkout and bind each trial to a fresh preview.
+- [x] Rehearse all 36 pinned Vite trials through the team API on the exact
+  checkout with an injected provider and separate fixture reviewer.
 - [ ] Measure live provider usage and tokens per accepted result with
   independent human review of citations and outcomes.
 - [x] Add project authorization, expiring member tokens, dedicated worker
@@ -139,6 +146,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   from a verified base, recover a lost response, and use the branch in the PR flow.
 - [x] Package VS Code and Cursor integration for approved active-file requests
   and reviewing runs.
+- [x] Preview one-off requests from local registered repositories in VS Code
+  and Cursor. Bind active-file and repository sends to read-only previews.
 - [x] Connect the VS Code and Cursor extension to an HTTPS team workspace
   for approved repository requests, saved source inspection, and review.
 - [x] Restore an owner-approved team listener across server restarts, report
@@ -840,6 +849,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added exact tag browsing, local repository requests in the
+  editor, and Pi source lookup receipts. Rehearsed all 36 pinned Vite trials
+  with an injected provider and a separate fixture reviewer.
 - 2026-11-22 — Added owner deployment checks in the Mac and web apps and
   verified the offline Docker probe. Live provider and host drills remain open.
 - 2026-11-22 — Added first search from Search and a Markdown picker from Add,

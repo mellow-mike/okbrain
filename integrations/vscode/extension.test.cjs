@@ -50,6 +50,8 @@ test('editor inspection shows the context budget and opens approved source only 
   let availableActions;
   let lastDocument;
   let savedContext = { estimatedTokens: 1050, limitTokens: 2400, maxOutputTokens: 400, modelWindowTokens: 3200, historyCompacted: true };
+  const lookup = { served: [{ path: 'src/example.ts', startLine: 2, endLine: 4, text: 'Do not repeat this lookup content' },
+    { path: '../out-of-scope.ts', startLine: 1, endLine: 1 }], refused: 2, incomplete: 1, truncated: true };
   let sourceReads = 0;
   let provideSource;
   const commands = new Map();
@@ -58,7 +60,8 @@ test('editor inspection shows the context budget and opens approved source only 
     async api(path, identity) {
       if (path === '/projects/fixture/runs') return runs;
       if (path === '/projects/fixture/inspect') return { run: runs.find((run) => run.id === identity.requestId),
-        ...(identity.requestId === 'saved' ? { pi: { context: savedContext, usage: { models: {} } } } : {}) };
+        ...(identity.requestId === 'saved' ? { pi: { context: savedContext, usage: { models: {} },
+          request: { requestId: 'saved', approvedSourceLookup: true, sourceLookup: lookup } } } : {}) };
       assert.equal(path, '/projects/fixture/source-inspect');
       assert.equal(identity.session, 'main');
       assert.equal(identity.requestId, 'saved');
@@ -99,11 +102,14 @@ test('editor inspection shows the context budget and opens approved source only 
   await inspect();
   assert.ok(!availableActions.includes('View saved request source'));
   assert.doesNotMatch(lastDocument.text, /Session context budget/);
+  assert.doesNotMatch(lastDocument.text, /Approved source lookup/);
   selectedRun = 'saved';
   await inspect();
   assert.ok(availableActions.includes('View saved request source'));
   assert.equal(sourceReads, 0);
   assert.ok(!lastDocument.text.includes(source.prompt));
+  assert.match(lastDocument.text, /Approved source lookup\nsrc\/example\.ts:2–4\n2 refused · 1 incomplete\nAdditional ranges omitted\./);
+  assert.doesNotMatch(lastDocument.text, /out-of-scope\.ts|Do not repeat this lookup content/);
   assert.ok(lastDocument.text.includes([
     'Session context budget',
     `Estimated active context: ${(1050).toLocaleString()} tokens`,
@@ -438,7 +444,96 @@ test('editor compares only the exact settled alternative and its original in a r
   assert.match(documents[0].text, /Alternative run[\s\S]*Session alt-review · request same-id[\s\S]*Alternative saved answer\nPreview limit reached\./);
 });
 
-test('editor previews a matching preset, requires approval, and retries exactly one stable request', async () => {
+test('active-file send and retry require the same read-only review and original file version', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'okbrain-active-file-'));
+  try {
+    const activeFile = join(workspace, 'entry.ts');
+    const original = { uri: { scheme: 'file', fsPath: activeFile }, version: 1, isDirty: false };
+    const source = { source: 'files', files: ['entry.ts'] };
+    const content = '<exact saved fixture>\n  keep spaces';
+    await writeFile(activeFile, content);
+    const project = { id: 'fixture', workspace, title: 'Active-file fixture', provider: 'openai', model: 'fixture' };
+    const previewId = 'b'.repeat(64);
+    const commands = new Map();
+    const calls = [];
+    const errors = [];
+    let provideText;
+    let editorChanged;
+    let mode;
+    const vscode = {
+      Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }) },
+      commands: { registerCommand: (name, run) => commands.set(name, run) },
+      env: {},
+      ProgressLocation: { Notification: 1 },
+      workspace: {
+        isTrusted: true,
+        getConfiguration: () => ({ inspect: () => undefined }),
+        registerTextDocumentContentProvider(_scheme, provider) { provideText = provider.provideTextDocumentContent; },
+        async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
+      },
+      window: {
+        onDidChangeActiveTextEditor(callback) { editorChanged = callback; },
+        async showTextDocument(document) { this.activeTextEditor = { document }; editorChanged(); },
+        async withProgress(_options, work) { return work(); },
+        async showInputBox({ prompt }) { return prompt === 'Coding session name' ? 'active-review' : 'Review the saved entry.'; },
+        async showQuickPick(items, options) {
+          assert.equal(options.placeHolder, 'Choose source lookup for this request');
+          assert.equal(items[1].label, 'Allow lookups in the approved file');
+          return mode === 'lookup-cancelled' ? undefined : items[1];
+        },
+        async showInformationMessage(_message, ...actions) {
+          if (!actions.includes('Send Request')) return;
+          const previewEditor = this.activeTextEditor;
+          assert.equal(previewEditor.document.uri.scheme, 'okbrain-saved-source');
+          assert.match(previewEditor.document.text, /Source lookup: Allowed within the approved file/);
+          assert.ok(previewEditor.document.text.endsWith('File: entry.ts\n' + content));
+          if (mode === 'file-version-changed') original.version++;
+          if (mode === 'editor-changed-and-returned') {
+            this.activeTextEditor = { document: original }; editorChanged();
+            this.activeTextEditor = previewEditor; editorChanged();
+          }
+          return mode === 'send-cancelled' ? undefined : 'Send Request';
+        },
+        async showErrorMessage(message, ...actions) {
+          if (!actions.includes('Try Same Request')) return errors.push(message);
+          if (mode === 'stale-retry') { this.activeTextEditor = { document: original }; editorChanged(); }
+          return 'Try Same Request';
+        },
+      },
+    };
+    activateExtension(vscode, { projects: [project], async api(path, body) {
+      calls.push([path, JSON.parse(JSON.stringify(body))]);
+      if (path === '/projects/fixture/preview') return { source: 'files', id: previewId,
+        files: [{ path: mode === 'wrong-file' ? 'other.ts' : 'entry.ts', content }] };
+      assert.equal(path, '/projects/fixture/run');
+      if (calls.length === 2) throw new Error('The first response was lost');
+      return { id: body.requestId, status: 'running' };
+    } });
+    async function launch(state) {
+      mode = state;
+      vscode.window.activeTextEditor = { document: original };
+      calls.length = 0;
+      await commands.get('okbrain.runFile')();
+    }
+
+    for (const state of ['lookup-cancelled', 'send-cancelled', 'file-version-changed', 'editor-changed-and-returned', 'wrong-file']) {
+      await launch(state);
+      assert.deepEqual(calls, [['/projects/fixture/preview', source]]);
+    }
+    assert.deepEqual(errors, ['Could not verify the active file preview.']);
+    await launch('stale-retry');
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview', '/projects/fixture/run']);
+    await launch('retry');
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview', '/projects/fixture/run', '/projects/fixture/run']);
+    assert.deepEqual(calls[1], calls[2]);
+    const { requestId, ...body } = calls[1][1];
+    assert.match(requestId, /^ide-[a-f0-9-]{36}$/);
+    assert.deepEqual(body, { ...source, session: 'active-review', prompt: 'Review the saved entry.', previewId,
+      approved: true, approvedSourceLookup: true });
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
+test('editor previews local presets and scoped repository requests with exact approval and stable retries', async () => {
   const root = await mkdtemp(join(tmpdir(), 'okbrain-editor-preset-'));
   try {
     const workspace = join(root, 'project');
@@ -449,13 +544,15 @@ test('editor previews a matching preset, requires approval, and retries exactly 
     await Promise.all([writeFile(activeFile, 'active'), writeFile(otherFile, 'separate')]);
     const folder = { uri: { scheme: 'file', fsPath: workspace } };
     const otherFolder = { uri: { scheme: 'file', fsPath: separate } };
-    const project = { id: 'fixture', title: 'Project fixture', workspace, provider: 'openai', model: 'fixture-model' };
+    const project = { id: 'fixture', title: 'Project fixture', workspace, scopes: ['src', 'docs,examples'], provider: 'openai', model: 'fixture-model' };
     const otherProject = { ...project, id: 'other', workspace: separate };
     const profile = { version: 1, name: 'Focused profile', projects: ['src'], guidance: 'Previewed guidance.' };
     const preset = { id: 'preset-1', name: 'Review API', prompt: 'Review <exact> request.', query: 'lookupApi', profile };
     const preview = { source: 'repository', manifest: { id: 'a'.repeat(64) }, guidance: profile.guidance,
       excerpts: [{ path: 'src/example.ts', startLine: 8, endLine: 9, content: '<exact>\n  spaced text' }] };
     const expectedSource = { source: 'repository', query: preset.query, profile };
+    const manualPrompt = 'Review the selected workspace query.';
+    const manualSource = { source: 'repository', query: 'local allocator', projects: ['src/allocator'] };
     const calls = [];
     const commands = new Map();
     const errors = [];
@@ -463,6 +560,8 @@ test('editor previews a matching preset, requires approval, and retries exactly 
     let provideText;
     let lastDocument;
     let mode;
+    const manual = () => mode.startsWith('manual-');
+    const lookupEnabled = () => mode === 'send-lookup' || mode === 'manual-retry';
     const vscode = {
       Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }) },
       commands: { registerCommand: (name, run) => commands.set(name, run) },
@@ -481,24 +580,41 @@ test('editor previews a matching preset, requires approval, and retries exactly 
           lastDocument = document;
           this.activeTextEditor = { document };
         },
-        async showInputBox() { return 'preset-review'; },
+        async showInputBox(options) {
+          if (options.prompt === 'What should Pi review or propose?') return manualPrompt;
+          if (options.prompt === 'Search the project repository for source') return manualSource.query;
+          if (options.prompt === 'Narrow to repository subdirectories (optional)') {
+            assert.ok(options.validateInput('../outside'));
+            assert.ok(options.validateInput('src-extra/allocator'));
+            assert.equal(options.validateInput(manualSource.projects[0]), null);
+            return manualSource.projects[0];
+          }
+          assert.equal(options.prompt, 'Coding session name');
+          return manual() ? 'repository-review' : 'preset-review';
+        },
         async withProgress(_options, work) { return work(); },
         async showQuickPick(items, options) {
           if (options.placeHolder === 'Choose a saved request preset') return mode === 'dismiss-preset' ? undefined : items[0];
+          if (options.placeHolder === 'Choose approved repository directories') {
+            assert.deepEqual(Array.from(items, ({ path }) => path), project.scopes);
+            return mode === 'manual-cancel-directories' ? undefined : [items[0]];
+          }
           assert.equal(options.placeHolder, 'Choose source lookup for this request');
           if (mode === 'dismiss-lookup') return undefined;
-          return items[mode === 'send-lookup' ? 1 : 0];
+          return items[lookupEnabled() ? 1 : 0];
         },
         async showInformationMessage(message, ...actions) {
           if (!actions.includes('Send Request')) return undefined;
           assert.match(message, /active session history/);
           assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
-          assert.ok(lastDocument.text.includes('Task\n' + preset.prompt));
+          assert.ok(lastDocument.text.includes('Task\n' + (manual() ? manualPrompt : preset.prompt)));
+          if (manual()) assert.match(lastDocument.text, /Repository search: local allocator/);
           assert.ok(lastDocument.text.includes('Project guidance\n' + profile.guidance));
           assert.ok(lastDocument.text.includes('src/example.ts:8–9\n' + preview.excerpts[0].content));
-          assert.ok(lastDocument.text.includes(mode === 'send-lookup' ? 'Source lookup: Allowed within the approved excerpts' : 'Source lookup: Off'));
+          assert.ok(lastDocument.text.includes(lookupEnabled() ? 'Source lookup: Allowed within the approved excerpts' : 'Source lookup: Off'));
           if (mode === 'switch-workspace') this.activeTextEditor = { document: { uri: { scheme: 'file', fsPath: otherFile } } };
-          return mode === 'dismiss-send' ? undefined : 'Send Request';
+          if (mode === 'manual-leave-preview') this.activeTextEditor = { document: { uri: { scheme: 'file', fsPath: activeFile } } };
+          return mode.endsWith('dismiss-send') ? undefined : 'Send Request';
         },
         async showErrorMessage(message, ...actions) {
           if (actions.includes('Try Same Request')) return 'Try Same Request';
@@ -515,21 +631,21 @@ test('editor previews a matching preset, requires approval, and retries exactly 
           return { presets: [preset] };
         }
         if (path === '/projects/fixture/preview') {
-          assert.deepEqual(JSON.parse(JSON.stringify(input)), expectedSource);
+          assert.deepEqual(JSON.parse(JSON.stringify(input)), manual() ? manualSource : expectedSource);
           return preview;
         }
         assert.equal(path, '/projects/fixture/run');
         submitted.push(JSON.parse(JSON.stringify(input)));
-        if (submitted.length === 1) throw new Error('First response lost');
+        if (submitted.length === 1 || (mode === 'manual-retry' && calls.filter((entry) => entry === path).length === 1))
+          throw new Error('First response lost');
         return { id: input.requestId, status: 'running' };
       },
     });
-    const launch = commands.get('okbrain.runPreset');
     const launchFrom = async (state, fsPath = activeFile) => {
       mode = state;
       vscode.window.activeTextEditor = { document: { uri: { scheme: 'file', fsPath } } };
       calls.length = 0;
-      await launch();
+      await commands.get(manual() ? 'okbrain.runRepository' : 'okbrain.runPreset')();
     };
 
     await launchFrom('non-project', join(root, 'unregistered.ts'));
@@ -557,6 +673,21 @@ test('editor previews a matching preset, requires approval, and retries exactly 
     await launchFrom('send-no-lookup');
     assert.equal(Object.hasOwn(submitted[2], 'approvedSourceLookup'), false);
     assert.notEqual(submitted[2].requestId, requestId);
+
+    await launchFrom('manual-cancel-directories');
+    assert.deepEqual(calls, []);
+    await launchFrom('manual-dismiss-send');
+    assert.deepEqual(calls, ['/projects/fixture/preview']);
+    await launchFrom('manual-leave-preview');
+    assert.deepEqual(calls, ['/projects/fixture/preview']);
+    assert.equal(submitted.length, 3);
+    await launchFrom('manual-retry');
+    assert.deepEqual(calls, ['/projects/fixture/preview', '/projects/fixture/run', '/projects/fixture/run']);
+    const [manualSend, retried] = submitted.slice(3);
+    assert.deepEqual(retried, manualSend);
+    assert.match(manualSend.requestId, /^ide-[a-f0-9-]{36}$/);
+    assert.deepEqual(manualSend, { ...manualSource, prompt: manualPrompt, session: 'repository-review', requestId: manualSend.requestId,
+      previewId: preview.manifest.id, approved: true, approvedSourceLookup: true });
     assert.deepEqual(errors, []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -613,7 +744,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
       async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
     },
     window: {
-      async showTextDocument(document) { lastDocument = document; },
+      async showTextDocument(document) { lastDocument = document; this.activeTextEditor = { document }; },
       async showInputBox(options) {
         if (options.prompt === 'Team workspace HTTPS address') {
           assert.ok(options.validateInput('http://workspace.example.test'));

@@ -11,7 +11,7 @@ Use the **Coding** workspace in the Mac app or local web app to review source fi
 
 Choose **View saved request source** in the app or editor to review a selected run’s task and approved files or excerpts. For an independent package review, the source is grouped by package. The preview reads from the saved Pi admission, so it includes the evidence the run used even if the checkout changes.
 
-For explicit files and repository excerpts, you can let the model look up line numbers inside the current request’s approved source. Select the option before previewing, then review the selection and approve it. Each lookup reads at most 24 consecutive lines from a single saved file or excerpt. The provider may make an extra request to turn the lookup results into an answer. Completed requests report usage from both turns. A later request starts with its own choice.
+For explicit files and repository excerpts, you can let the model look up line numbers inside the current request’s approved source. Select the option before previewing, then review the selection and approve it. Each lookup reads at most 24 consecutive lines from a single saved file or excerpt. The provider may make an extra request to turn the lookup results into an answer. Completed requests report usage from both turns. Open **Approved source lookups** in Run history to see the ranges Pi returned and the counts of refused or incomplete calls. The run report and editor inspection include the same bounded receipt. A later request starts with its own choice.
 
 Use **Project settings** to rotate or remove an API key, inspect the audit log, or set transcript retention. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.
 
@@ -50,6 +50,8 @@ Install the okbrain VSIX and choose **okbrain: Connect to Team Workspace** from 
 Choose **okbrain: Preview Team Coding Request**. Pick a saved preset or enter a task, repository query, and permitted directories. Inspect the fresh server-side excerpts in the editor, then approve the send. You can allow Pi to look up lines within those excerpts for this request. A local checkout is optional because the team server reads the registered repository.
 
 Use **okbrain: Inspect and Review Team Coding Runs** to see progress and results, open saved request sources, record a review, cancel, or resume. Use **okbrain: Open Team Workspace in Browser** to open the HTTPS origin and sign in there. **okbrain: Disconnect from Team Workspace** clears the editor’s saved connection. The operator can revoke the project token from **Team access**.
+
+For a local registered project, choose **okbrain: Preview Repository Coding Request** to create a one-off request from tracked excerpts. Enter the task and repository query, choose the permitted directories, and review the exact task and source in the read-only preview before sending. The active-file command also uses a read-only preview and requires a fresh review if the selected file or workspace changes before approval or retry.
 
 ## Start a request in the CLI
 
@@ -154,6 +156,8 @@ Register the root of a clean Vite v7.0.0 checkout at `b85f32275b443bf6b647572a92
 In **New request → Independent evaluation → Pinned Vite benchmark**, select a study, case, and strategy, then choose **Use pinned case**. Each study has six cases. **Package directories** uses a 4,096-token excerpt budget, and **Subsystem directories** uses 12,288. **Explicit files** starts with the known evidence paths. **Lexical** searches the permitted study directories, and **Indexed profile** uses the same budget with separate primary and shared directories.
 
 The app fills the task, citation targets, and source recipe in a fresh session. Choose **Preview source**, check the selection, and approve sending it. The server verifies the pinned commit and clean tracked checkout before previewing and sending, and records timing for the approved preview. The reserved study IDs keep these trials separate from custom runs. Use the normal independent review to record results.
+
+An offline rehearsal submitted all 36 trial combinations against the clean pinned checkout through the team API. Separate fixture accounts exercised author and reviewer permissions. The report preserved six strategy groups under the injected provider origin. The rehearsal used scripted answers to exercise evidence and reporting. Live provider quality and independently reviewed outcomes remain open.
 
 ### Review independent packages
 

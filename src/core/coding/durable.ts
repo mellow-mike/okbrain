@@ -18,6 +18,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { dataDir } from "../config.ts";
 import { ensureExtensionCapableSqlite } from "../engine/custom-sqlite.ts";
 import { approvedSourceLookupEnabled, approvedSourceTool } from "./approved-source-tool.ts";
+import { readApprovedSourceLookupReceipt, type CodingSourceLookupReceipt } from "./approved-source-receipt.ts";
 import {
   ConversationBranchError, forkConversationBranch, previewConversationBranch, previewConversationBranchAdmission,
   readConversationBranch, verifyConversationBranchAdmission,
@@ -128,6 +129,7 @@ export interface CodingSessionStatusResult {
     requestId: string;
     status: SubmissionRecord["status"];
     approvedSourceLookup?: true;
+    sourceLookup?: CodingSourceLookupReceipt;
     repositoryContext?: RepositoryContextManifest;
     usage?: Usage;
     stopReason?: AssistantMessage["stopReason"];
@@ -502,9 +504,10 @@ async function withCodingSession<T>(
     try {
       let conversationId = ROOT_CONVERSATION_ID;
       const registry = createRegistry();
-      const sourceTool = approvedSourceTool(async (id, toolContext) => {
+      const sourceTool = approvedSourceTool(async (callingConversation, id, toolContext) => {
+        if (callingConversation !== conversationId) return;
         const submission = await storage.submission(id, toolContext);
-        if (submission?.conversationId === conversationId && submission.type === "input" && submission.status === "placed")
+        if (submission?.conversationId === callingConversation && submission.type === "input" && submission.status === "placed")
           return savedUserContent(storage, submission, toolContext);
       });
       registry.install(history);
@@ -1337,6 +1340,8 @@ async function readCodingSessionStatus(
     const content = await savedUserContent(storage, submission) ??
       (options.includeSavedSource || options.includeSourcePaths ? await queuedUserContent(harness, submission) : undefined);
     const lookup = approvedSourceLookupEnabled(content);
+    const sourceLookup = lookup && content !== undefined && submission.type === "input" && submission.status === "done"
+      ? await readApprovedSourceLookupReceipt(harness, storage, submission, content, context) : undefined;
     const repositoryContext = savedManifest(content);
     const saved = !options.includeEvaluationInput || content === undefined ? undefined : evaluationInput(content);
     const receipt = options.includeReceipt && (submission.status === "done" || submission.status === "unanswered")
@@ -1355,6 +1360,7 @@ async function readCodingSessionStatus(
       requestId: options.requestId,
       status: submission.status,
       ...(lookup ? { approvedSourceLookup: true } : {}),
+      ...(sourceLookup ? { sourceLookup } : {}),
       ...(repositoryContext ? { repositoryContext } : {}),
       ...accounting,
       ...(reason ? { reason } : {}),

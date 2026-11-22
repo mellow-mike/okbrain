@@ -105,6 +105,8 @@ form .grid.three { grid-template-columns: 1fr 1fr 1fr; }
 .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: var(--space-6); }
 .toolbar { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; margin-bottom: var(--space-4); }
 .toolbar input[type="search"] { flex: 1; min-width: 160px; }
+#b-tag { max-width: 100%; }
+#b-out { overflow-x: auto; }
 .muted { color: var(--muted); }
 .right { margin-left: auto; }
 
@@ -126,6 +128,9 @@ div.error::before { content: "Error"; display: block; margin-bottom: var(--space
         font-size: 12px; line-height: 16px; color: var(--ink-2); white-space: nowrap;
         background: var(--chip-bg); border: 1px solid var(--line); border-radius: var(--radius-full); }
 .chip a { font-family: var(--font-read); font-weight: 600; color: var(--ink); }
+.chip.tag-link {
+  min-height: 22px; height: auto; max-width: 100%; display: inline-block; white-space: normal; overflow-wrap: anywhere;
+}
 .chip.warn { color: var(--warn); border-color: currentColor; background: transparent; }
 .swatch { width: 8px; height: 8px; border-radius: var(--radius-full); flex: none; }
 .badges { display: inline-flex; gap: var(--space-1); flex-wrap: wrap; vertical-align: middle; }
@@ -145,8 +150,8 @@ div.error::before { content: "Error"; display: block; margin-bottom: var(--space
 .list { display: flex; flex-direction: column; gap: var(--space-2); }
 .card { padding: var(--space-3) var(--space-4); background: var(--plane); border: 1px solid var(--line); border-radius: var(--radius-md); }
 .card .title { font-family: var(--font-read); font-size: 16px; line-height: 22px; font-weight: 600; font-variant-numeric: lining-nums; }
-.card .title a, .tbl td > a:first-child { text-decoration-color: transparent; }
-.card .title a:hover, .tbl td > a:first-child:hover { text-decoration-color: currentColor; }
+.card .title a, .tbl td > a:first-child:not(.tag-link) { text-decoration-color: transparent; }
+.card .title a:hover, .tbl td > a:first-child:not(.tag-link):hover { text-decoration-color: currentColor; }
 .card .title .muted { font-family: var(--font-mono); font-size: 12px; font-weight: 400; }
 .card .why { margin: var(--space-1) 0 var(--space-2); font-size: 12px; line-height: 16px; color: var(--ink-2); }
 .card .why code { color: var(--muted); }
@@ -201,7 +206,7 @@ div.error::before { content: "Error"; display: block; margin-bottom: var(--space
           color: var(--muted); border-bottom: 1px solid var(--line-strong); }
 .tbl td { padding: var(--space-3) var(--space-4) var(--space-3) 0; vertical-align: top; color: var(--ink-2);
           border-bottom: 1px solid var(--line); transition: background-color var(--dur-quick) var(--ease-out); }
-.tbl td > a:first-child { font-family: var(--font-read); font-size: 15px; line-height: 20px; font-weight: 600; color: var(--ink); }
+.tbl td > a:first-child:not(.tag-link) { font-family: var(--font-read); font-size: 15px; line-height: 20px; font-weight: 600; color: var(--ink); }
 .tbl td code { display: inline-block; margin-top: 2px; color: var(--muted); }
 .tbl td .muted { font-size: 12px; line-height: 16px; }
 .tbl td.nowrap { white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
