@@ -76,6 +76,9 @@ test("origin save does not contact the remote and refuses replacement, credentia
   expect(changed).toMatchObject({ fetch: upstream, push: "https://different.invalid/team/brain.git" });
   await syncSettings(root, identity);
   await expect(syncBundle(root)).rejects.toThrow("changes the fetch or push destination");
+  git(root, "config", "--unset", "url.https://different.invalid/.pushInsteadOf");
+  git(root, "config", "remote.origin.pushurl", "https://example.invalid/team/other.git");
+  await expect(syncBundle(root)).rejects.toThrow("changes the fetch or push destination");
   expect(git(root, "ls-files")).toBe("");
   expect(existsSync(join(root, ".gitignore"))).toBe(false);
 
