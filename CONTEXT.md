@@ -296,7 +296,9 @@ rejects on any warning class — doctor is the only strict surface.
   omit the directory (its own `index.md`, inside the ignored dir, still lists
   its concepts for local browsing). Scope is "under a `db_only/` directory"
   (`inDbOnlyDir`), matching git's directory-pattern semantics. Static HTML
-  excludes those concepts by default. Local retrieval, the live GUI, and
+  excludes those concepts by default. Remote sync also checks Git history
+  for `db_only/` directories that were deleted from the current checkout.
+  Local retrieval, the live GUI, and
   MCP clients attached to that brain can read them. A note may also declare
   `db_only: true`. The writer omits that note from generated public index and
   log entries. Git sync excludes its precise path from staging and adds it to

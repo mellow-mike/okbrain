@@ -167,6 +167,32 @@ describe("syncBundle", () => {
 });
 
 describe("db_only privacy", () => {
+  test.each(["db_only", "nested/DB_ONLY"])("blocks sync when %s survives only in Git history", async (privateDir) => {
+    const root = await dir(privateDir === "db_only" ? "private-history-root" : "private-history-nested");
+    const remote = root + "-remote.git";
+    g(base, "init", "--bare", remote);
+    await writeFile(join(root, "db_only.md"), NOTE, "utf8");
+    await syncBundle(root); // A public note with this name is allowed.
+    const privatePath = `${privateDir}/note.md`;
+    await mkdir(join(root, privateDir), { recursive: true });
+    await writeFile(join(root, privatePath), NOTE, "utf8");
+    g(root, "add", "-f", "--", privatePath);
+    g(root, "commit", "-m", "local history fixture");
+    g(root, "rm", "--", privatePath);
+    g(root, "commit", "-m", "remove local history fixture");
+    g(root, "remote", "add", "origin", remote);
+    const head = g(root, "rev-parse", "HEAD");
+    await writeFile(join(root, "new-public.md"), NOTE, "utf8");
+
+    expect(g(root, "ls-files")).not.toContain(privatePath);
+    const attempt = await okb(["sync", "--bundle", root]);
+    expect(attempt.code).not.toBe(0);
+    expect(attempt.stderr).toContain("Git history contains a db_only directory");
+    expect(g(root, "rev-parse", "HEAD")).toBe(head);
+    expect(g(root, "diff", "--cached", "--name-only")).toBe("");
+    expect(g(remote, "for-each-ref", "refs/heads")).toBe("");
+  });
+
   test("db_only concepts never reach committed index.md, log.md, or git", async () => {
     const root = await dir("b7");
     await writeConcept(root, {

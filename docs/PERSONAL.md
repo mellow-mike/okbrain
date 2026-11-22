@@ -146,7 +146,7 @@ okb serve --open
 okb export-viz
 ```
 
-The local GUI can browse, search, and edit conversation drafts in its selected bundle. **Settings → Sync now** accepts an optional commit message and uses an automatic timestamped message when the field is blank. Sync keeps untracked `db_only/` files out of Git and omits private note metadata from the shared root index and log. When managing the bundle directly with Git, verify that `db_only/` is ignored and untracked. **Settings → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`. Select **Embed app fonts in graph export** or pass `--fonts` to include the app's typefaces for offline viewing.
+The local GUI can browse, search, and edit conversation drafts in its selected bundle. **Settings → Sync now** accepts an optional commit message and uses an automatic timestamped message when the field is blank. Sync keeps untracked `db_only/` files out of Git and omits private note metadata from the shared root index and log. Remote sync stops when Git history still contains a `db_only/` directory, even after its files have been deleted. When managing the bundle directly with Git, verify that `db_only/` is ignored and untracked. **Settings → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`. Select **Embed app fonts in graph export** or pass `--fonts` to include the app's typefaces for offline viewing.
 
 ### Export notes to Markdown or Obsidian
 

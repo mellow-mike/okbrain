@@ -151,6 +151,11 @@ async function verifyPrivatePaths(root: string, marked: ReadonlySet<string>): Pr
     throw new SyncError("Git history contains a private note path. Review the repository before syncing.");
 }
 
+async function verifyPrivateDirectoryHistory(root: string): Promise<void> {
+  const found = await git(root, ["log", "--all", "--full-history", "-1", "--format=%H", "--", ":(glob,icase)**/db_only/**"]);
+  if (found.trim()) throw new SyncError("Git history contains a db_only directory. Review the repository history before syncing.");
+}
+
 async function verifyNoPrivateStagedNotes(root: string): Promise<void> {
   const changed = await git(root, ["diff", "--cached", "--text", "-G", "db_only", "--name-only", "-z", "--diff-filter=ACMR", "--", "*.md"]);
   for (const path of changed.split("\0").filter(Boolean)) {
@@ -254,6 +259,8 @@ export async function syncBundle(root: string, message?: string): Promise<SyncRe
   const marked = await privateNotesForSync(root);
   const privatePaths = new Set([...marked].map((id) => gitPathEquals(privatePath(id))));
   await verifyPrivatePaths(root, marked);
+  if ((await runGit(root, ["remote", "get-url", "origin"])).code === 0)
+    await verifyPrivateDirectoryHistory(root);
   await verifyNoPrivateStagedNotes(root);
   await localExcludes(root, marked);
   if (marked.size) {
@@ -304,6 +311,7 @@ export async function syncBundle(root: string, message?: string): Promise<SyncRe
       pulled = true;
     }
     await verifyPrivatePaths(root, await privateNotesForSync(root));
+    await verifyPrivateDirectoryHistory(root);
     const push = await runGit(root, hasUpstream ? ["push"] : ["push", "-u", "origin", branch]);
     if (push.code !== 0)
       throw new SyncError(

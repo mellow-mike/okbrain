@@ -787,6 +787,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Blocked remote sync when deleted `db_only/` files remain in
+  Git history. Verified the staging area and a disposable remote stay intact.
 - 2026-11-22 — Added saved source inspection to project review in the Mac app,
   web app, and editor. Preserved imported source metadata in the note editor
   and added startup, index, and search measurements to Linux CI.
