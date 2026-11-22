@@ -1921,6 +1921,7 @@ try {
     title: "Task progress fixture", workspace, scopes: ["."], provider: "openai", model: "browser-project-fixture",
   });
   const projectPath = "/projects/" + project.id;
+  const retrievalBenchmarkPath = "/api/coding" + projectPath + "/retrieval-benchmark";
   const projectSource = { source: "files", files: ["browser.ts"] };
   const projectPrompt = "Review <strong>the browser source</strong> in this project.";
   const patchPrefix = "diff --git a/browser.ts b/browser.ts\n--- a/browser.ts\n+++ b/browser.ts\n@@ -1 +1 @@\n-" + branchBefore + "+";
@@ -1929,9 +1930,12 @@ try {
   const projectAnswer = "Project response ready for review.\n\n```diff\n" + proposedPatch + "```\n\n```diff\n" + alternatePatch + "```";
   const sourceRequests: unknown[] = [];
   const proposalRequests: unknown[] = [];
+  const retrievalPosts: unknown[] = [];
   page.on("request", (request) => {
-    if (new URL(request.url()).pathname.endsWith(projectPath + "/source-inspect")) sourceRequests.push(request.postDataJSON());
-    if (new URL(request.url()).pathname.endsWith(projectPath + "/patch-proposals")) proposalRequests.push(request.postDataJSON());
+    const path = new URL(request.url()).pathname;
+    if (path.endsWith(projectPath + "/source-inspect")) sourceRequests.push(request.postDataJSON());
+    if (path.endsWith(projectPath + "/patch-proposals")) proposalRequests.push(request.postDataJSON());
+    if (path === retrievalBenchmarkPath && request.method() === "POST") retrievalPosts.push(request.postDataJSON());
   });
   const projectPreview = await codingFixture<{ id: string }>(projectPath + "/preview", projectSource);
   projectFaux.setResponses([async () => {
@@ -2100,6 +2104,7 @@ try {
   try {
     const deploymentMethods: string[] = [];
     let readonlyProviderChecks = 0;
+    let readonlyRetrievalChecks = 0;
     await readonlyCoding.addInitScript((name) => localStorage.setItem("okb-gui-brain", name), readonlyBrain);
     readonlyCoding.on("pageerror", (error) => errors.push(error.message));
     await readonlyCoding.route("**/*", async (route) => {
@@ -2107,6 +2112,7 @@ try {
       const url = new URL(req.url());
       if (url.origin !== origin) { outbound.push(url.href); return route.abort(); }
       if (url.pathname === providerCheckPath) { readonlyProviderChecks++; return route.abort(); }
+      if (url.pathname === retrievalBenchmarkPath) { readonlyRetrievalChecks++; return route.abort(); }
       if (url.pathname !== deploymentPath) return route.continue();
       deploymentMethods.push(req.method());
       assert.equal(req.headers()["x-okb-brain"], readonlyBrain);
@@ -2122,11 +2128,13 @@ try {
     const readonlyDeployment = await openDeployment(readonlyCoding);
     assert.equal(await readonlyCoding.getByText("Prepare GitHub checkout", { exact: true }).count(), 0);
     assert.equal(await readonlyCoding.getByText("Prepare Vite benchmark checkout", { exact: true }).count(), 0);
+    assert.equal(await readonlyCoding.getByText("Source retrieval benchmark", { exact: true }).count(), 0);
     await readonlyDeployment.getByText(image, { exact: true }).waitFor();
     await readonlyDeployment.getByText("bridge", { exact: true }).waitFor();
     assert.equal(await readonlyDeployment.getByRole("button", { name: "Run offline worker check", exact: true }).count(), 0);
     assert.equal(await readonlyDeployment.getByRole("button", { name: "Test provider connection", exact: true }).count(), 0);
     assert.equal(readonlyProviderChecks, 0);
+    assert.equal(readonlyRetrievalChecks, 0);
     assert.equal(await readonlyCoding.evaluate(() => document.documentElement.scrollWidth), 375);
     assert.deepEqual(deploymentMethods, ["GET"]);
   } finally {
@@ -2377,6 +2385,7 @@ try {
     await reviewerPage.getByRole("button", { name: /project-task-progress/ }).click();
     assert.equal(await reviewerPage.getByText("Prepare GitHub checkout", { exact: true }).count(), 0);
     assert.equal(await reviewerPage.getByText("Prepare Vite benchmark checkout", { exact: true }).count(), 0);
+    assert.equal(await reviewerPage.getByText("Source retrieval benchmark", { exact: true }).count(), 0);
     const copiedByMember = await copyRunReport(reviewerPage, "project-browser", "project-task-progress", [...projectPrivateText, reviewer.token, evaluationKey]);
     assert.deepEqual(copiedByMember.report, projectReport.report);
     const teamReview = reviewerPage.locator("[data-run-review]");
@@ -3235,6 +3244,127 @@ try {
     } finally {
       await page.unroute(listRoute);
       await page.unroute(inspectRoute);
+    }
+  }
+
+  {
+    const endpoint = "**" + retrievalBenchmarkPath;
+    const benchmark = page.locator(".coding-retrieval-benchmark");
+    const summary = benchmark.getByText("Source retrieval benchmark", { exact: true });
+    const study = benchmark.getByRole("combobox", { name: "Benchmark study", exact: true });
+    const repetitions = benchmark.getByLabel("Repetitions", { exact: true });
+    const budget = benchmark.getByLabel("Token budget", { exact: true });
+    const run = benchmark.getByRole("button", { name: "Run retrieval benchmark", exact: true });
+    const cancel = benchmark.getByRole("button", { name: "Cancel benchmark", exact: true });
+    const progress = benchmark.getByRole("progressbar", { name: "Benchmark progress", exact: true });
+    const copy = benchmark.getByRole("button", { name: "Copy benchmark report", exact: true });
+    const revision = "b85f32275b443bf6b647572a9209f1e078b5b4dd";
+    const settings = { study: "subsystem", repetitions: 2, tokenBudget: 6400 };
+    const start = { action: "start", ...settings };
+    const firstId = "0fd85f55-0314-4c9e-96dd-6245104c327b";
+    const staleId = "754f666a-2a64-4774-89d3-2d5ee09d9bca";
+    const cancelId = "5332ca67-0e49-4328-baf2-74c80699d80f";
+    const commonMetrics = { samples: 12, firstPreviewMs: 20, p50PreviewMs: 12.4, p95PreviewMs: 28.6,
+      relevantFiles: 30, exactEvidence: 30, expectedEvidence: 30, fileRecall: 1, evidenceRecall: 1, completeTasks: 12,
+      meanContextBytes: 4500, meanEstimatedExcerptTokens: 2250, cappedPreviews: 0 };
+    const report = { repository: "https://github.com/vitejs/vite.git", tag: "v7.0.0", revision,
+      evaluationSeries: "vite-b85f322-subsystem-6400", trackedPaths: 2380, repetitions: settings.repetitions, tokenBudget: settings.tokenBudget,
+      scope: "subsystem directories", accounting: "Fixture repository previews with pinned evidence. No model or human acceptance measurements.",
+      strategies: {
+        explicit: { ...commonMetrics, meanEstimatedExcerptTokens: null },
+        lexical: { ...commonMetrics, fileRecall: 0.8, evidenceRecall: 0.5, relevantFiles: 24, exactEvidence: 15, completeTasks: 4 },
+        indexed: { ...commonMetrics, evidenceRecall: 0.9, exactEvidence: 27, completeTasks: 10 },
+      }, tasks: [],
+    };
+    const modelCalls = projectFaux.state.callCount;
+    const requests: unknown[] = [];
+    const projectPosts: string[] = [];
+    assert.deepEqual(retrievalPosts, []);
+    const recordRetrievalPost = (request: BrowserRequest) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === "POST" && path.startsWith("/api/coding" + projectPath + "/")) projectPosts.push(path);
+    };
+    const state = (status: string, id: string, completed: number) => ({ status, id, ...settings, completed, total: 36, revision,
+      ...(status === "completed" ? { report } : {}) });
+    let current = { status: "idle" } as { status: string } | ReturnType<typeof state>;
+    let firstCompleted = false;
+    let cancelled = false;
+    let starts = 0;
+    page.on("request", recordRetrievalPost);
+    await page.route(endpoint, async (route) => {
+      const request = route.request();
+      assert.equal(request.headers()["x-okb-token"], server.token);
+      if (request.method() === "GET") {
+        if (current.status === "running" && starts === 1)
+          current = firstCompleted ? state("completed", firstId, 36) : state("running", firstId, 6);
+        if (current.status === "cancelling" && cancelled) current = state("cancelled", cancelId, 12);
+        return route.fulfill({ json: { result: current } });
+      }
+      assert.equal(request.method(), "POST");
+      const body = request.postDataJSON() as { action: string; id?: string };
+      requests.push(body);
+      if (body.action === "start") {
+        assert.deepEqual(body, start);
+        current = ++starts === 1 ? state("running", firstId, 0) : state("running", staleId, 3);
+      } else if (body.action === "cancel" && body.id === staleId) {
+        current = state("running", cancelId, 12);
+        return route.fulfill({ status: 409, json: { error: "The running benchmark changed. Refresh before cancelling." } });
+      } else {
+        assert.deepEqual(body, { action: "cancel", id: cancelId });
+        current = state("cancelling", cancelId, 12);
+      }
+      return route.fulfill({ json: { result: current } });
+    });
+    try {
+      const idle = page.waitForResponse((response) => new URL(response.url()).pathname === retrievalBenchmarkPath &&
+        response.request().method() === "GET");
+      await summary.click();
+      assert.equal((await idle).ok(), true);
+      await run.waitFor();
+      assert.deepEqual(requests, []);
+      assert.equal(await copy.isVisible(), false);
+      await study.selectOption("subsystem");
+      assert.equal(await budget.inputValue(), "12288");
+      await repetitions.fill(String(settings.repetitions));
+      await budget.fill(String(settings.tokenBudget));
+      assert.deepEqual(requests, []);
+      await run.click();
+      await benchmark.getByText("Running retrieval benchmark…", { exact: true }).waitFor();
+      await benchmark.getByText("6 of 36 previews", { exact: true }).waitFor();
+      assert.equal(await progress.getAttribute("value"), "6");
+      assert.equal(await progress.getAttribute("max"), "36");
+      assert.equal(await run.isEnabled(), false);
+      firstCompleted = true;
+      await benchmark.getByText("Benchmark completed.", { exact: true }).waitFor();
+      await benchmark.getByText("36 of 36 previews", { exact: true }).waitFor();
+      for (const label of ["Explicit files", "Lexical", "Indexed profile"]) await benchmark.getByRole("heading", { name: label, exact: true }).waitFor();
+      await benchmark.getByText("Evidence recall 90%", { exact: true }).waitFor();
+      await benchmark.getByText("Evidence recall 50%", { exact: true }).waitFor();
+      await copy.click();
+      await benchmark.getByText("Benchmark report copied.", { exact: true }).waitFor();
+      assert.deepEqual(JSON.parse(await page.evaluate(() => navigator.clipboard.readText())), report);
+      await verifyClipboardFallback(page, "Copy benchmark report", "Clipboard unavailable. Copy the selected benchmark report JSON.",
+        "Benchmark report JSON", JSON.stringify(report, null, 2));
+
+      await run.click();
+      await benchmark.getByText("3 of 36 previews", { exact: true }).waitFor();
+      assert.equal(await copy.isVisible(), false);
+      await cancel.click();
+      await benchmark.getByText("12 of 36 previews", { exact: true }).waitFor();
+      assert.deepEqual(requests, [start, start, { action: "cancel", id: staleId }]);
+      await cancel.click();
+      await benchmark.getByText("Cancelling retrieval benchmark…", { exact: true }).waitFor();
+      cancelled = true;
+      await benchmark.getByText("Benchmark cancelled.", { exact: true }).waitFor();
+      assert.equal(await copy.isVisible(), false);
+      assert.deepEqual(requests, [start, start, { action: "cancel", id: staleId }, { action: "cancel", id: cancelId }]);
+      assert.deepEqual(projectPosts, Array(4).fill(retrievalBenchmarkPath));
+      assert.equal(projectFaux.state.callCount, modelCalls);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+      await summary.click();
+    } finally {
+      page.off("request", recordRetrievalPost);
+      await page.unroute(endpoint);
     }
   }
 

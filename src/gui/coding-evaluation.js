@@ -436,5 +436,217 @@
     });
   }
 
-  window.okbCodingEvaluation = { composerOptions, mount };
+  const retrievalStudies = {
+    package: { label: 'Package directories', budget: 4096 },
+    subsystem: { label: 'Subsystem directories', budget: 12288 },
+  };
+  const retrievalStatuses = {
+    idle: 'No benchmark has run for this project.',
+    running: 'Running retrieval benchmark…',
+    cancelling: 'Cancelling retrieval benchmark…',
+    completed: 'Benchmark completed.',
+    cancelled: 'Benchmark cancelled.',
+    failed: 'Benchmark failed.',
+  };
+
+  function retrievalStrategy(label, result) {
+    const card = element('article', undefined, 'stack coding-panel');
+    const percent = (value) => value.toLocaleString(undefined, { style: 'percent', maximumFractionDigits: 1 });
+    card.append(element('h5', label),
+      element('p', 'File recall ' + percent(result.fileRecall)),
+      element('p', 'Evidence recall ' + percent(result.evidenceRecall)),
+      element('p', 'Preview p50 / p95 ' + number(result.p50PreviewMs) + ' / ' + number(result.p95PreviewMs) + ' ms'),
+      element('p', 'Mean context ' + number(result.meanContextBytes) + ' bytes'),
+      element('p', number(result.samples) + ' previews · ' + number(result.cappedPreviews) + ' reached a limit', 'muted'));
+    return card;
+  }
+
+  function mountRetrievalBenchmark(parent, { prefix, coding, readonly, detached }) {
+    if (readonly) return;
+    const path = prefix + '/retrieval-benchmark';
+    const panel = element('details', undefined, 'coding-panel coding-retrieval-benchmark');
+    panel.innerHTML = '<summary>Source retrieval benchmark</summary><div class="stack coding-form">' +
+      '<p>Compare retrieval strategies on six cases in a clean checkout at the pinned Vite revision. The benchmark reads local source and makes no model calls.</p>' +
+      '<form class="stack"><fieldset class="stack" disabled><legend>Benchmark settings</legend>' +
+      '<label class="field"><span id="retrieval-study-label">Benchmark study</span>' +
+      '<select name="study" aria-labelledby="retrieval-study-label"></select></label>' +
+      '<div class="coding-grid"><label class="field"><span>Repetitions</span><input name="repetitions" type="number" value="5" min="1" max="50" required></label>' +
+      '<label class="field"><span>Token budget</span><input name="budget" type="number" value="4096" min="1" max="16384" required></label></div>' +
+      '<p class="muted">The token budget applies to lexical and indexed previews. Explicit files use the known evidence paths as a baseline.</p>' +
+      '<div class="row"><button type="submit">Run retrieval benchmark</button></div></fieldset></form>' +
+      '<p data-job-status role="status">Loading benchmark status…</p><p data-job-settings class="muted" hidden></p>' +
+      '<div class="stack" data-job-progress hidden><progress aria-label="Benchmark progress"></progress><p></p></div>' +
+      '<p class="coding-feedback error" data-job-error></p><div class="row"><button type="button" class="small" data-cancel hidden>Cancel benchmark</button>' +
+      '<button type="button" class="small" data-refresh>Refresh benchmark</button></div>' +
+      '<p class="coding-feedback error" data-request-error role="status"></p>' +
+      '<div class="stack" data-report hidden><h4>Retrieval results</h4><div class="coding-grid" data-strategies></div>' +
+      '<div class="row"><button type="button" class="small" data-copy>Copy benchmark report</button></div>' +
+      '<label class="field" data-json hidden><span>Benchmark report JSON</span><textarea rows="8" readonly spellcheck="false"></textarea></label>' +
+      '<p class="coding-feedback" role="status" data-copy-feedback></p></div></div>';
+    parent.append(panel);
+
+    const form = panel.querySelector('form');
+    const fields = form.querySelector('fieldset');
+    const study = form.elements.study;
+    const budget = form.elements.budget;
+    study.replaceChildren(...Object.entries(retrievalStudies).map(([id, item]) => new Option(item.label, id)));
+    study.addEventListener('change', () => { budget.value = retrievalStudies[study.value].budget; });
+    const status = panel.querySelector('[data-job-status]');
+    const settings = panel.querySelector('[data-job-settings]');
+    const progress = panel.querySelector('[data-job-progress]');
+    const bar = progress.querySelector('progress');
+    const progressText = progress.querySelector('p');
+    const jobError = panel.querySelector('[data-job-error]');
+    const requestError = panel.querySelector('[data-request-error]');
+    const cancel = panel.querySelector('[data-cancel]');
+    const refreshButton = panel.querySelector('[data-refresh]');
+    const report = panel.querySelector('[data-report]');
+    const strategies = report.querySelector('[data-strategies]');
+    const copyButton = report.querySelector('[data-copy]');
+    const fallback = report.querySelector('[data-json]');
+    const jsonField = fallback.querySelector('textarea');
+    const copyFeedback = report.querySelector('[data-copy-feedback]');
+    let state;
+    let timer;
+    let reading = false;
+    let changing = false;
+    let readGeneration = 0;
+    let copyGeneration = 0;
+
+    const visible = () => !detached() && panel.isConnected && panel.open;
+    const active = () => state?.status === 'running' || state?.status === 'cancelling';
+
+    function controls() {
+      fields.disabled = !state || changing || active();
+      cancel.hidden = !active();
+      cancel.disabled = changing || state?.status !== 'running' || !state.id;
+      refreshButton.disabled = changing;
+    }
+
+    function show(next) {
+      const sameReport = report.hidden === false && next?.status === 'completed' && state?.id === next.id;
+      state = next;
+      const caption = retrievalStatuses[next?.status] || 'Loading benchmark status…';
+      if (status.textContent !== caption) status.textContent = caption;
+      settings.hidden = !next?.study;
+      settings.textContent = next?.study ? [retrievalStudies[next.study]?.label || next.study,
+        number(next.repetitions) + (next.repetitions === 1 ? ' repetition' : ' repetitions'),
+        number(next.tokenBudget) + ' tokens', next.revision].join(' · ') : '';
+      progress.hidden = !(next?.total > 0);
+      if (!progress.hidden) {
+        bar.max = next.total;
+        bar.value = next.completed;
+        progressText.textContent = number(next.completed) + ' of ' + number(next.total) + ' previews';
+      }
+      jobError.textContent = next?.error || '';
+      if (!sameReport) {
+        ++copyGeneration;
+        fallback.hidden = true;
+        jsonField.value = '';
+        copyFeedback.textContent = '';
+        const data = next?.status === 'completed' ? next.report?.strategies : null;
+        report.hidden = !data;
+        strategies.replaceChildren(...(data ? [retrievalStrategy('Explicit files', data.explicit),
+          retrievalStrategy('Lexical', data.lexical), retrievalStrategy('Indexed profile', data.indexed)] : []));
+      }
+      controls();
+    }
+
+    function schedule() {
+      clearTimeout(timer);
+      if (visible() && active()) timer = setTimeout(refresh, 1000);
+    }
+
+    async function refresh(keepError = false) {
+      if (!visible() || reading || changing) return;
+      clearTimeout(timer);
+      const current = ++readGeneration;
+      reading = true;
+      controls();
+      try {
+        const result = await coding(path);
+        if (!visible() || current !== readGeneration) return;
+        show(result);
+        if (!keepError) requestError.textContent = '';
+      } catch (error) {
+        if (visible() && current === readGeneration) {
+          if (!state) status.textContent = 'Could not load benchmark status.';
+          if (!keepError) requestError.textContent = error.message;
+        }
+      } finally {
+        if (current === readGeneration) {
+          reading = false;
+          controls();
+          schedule();
+        }
+      }
+    }
+
+    async function change(body) {
+      if (!visible() || changing) return;
+      clearTimeout(timer);
+      ++readGeneration;
+      reading = false;
+      changing = true;
+      let reconcile = false;
+      requestError.textContent = '';
+      controls();
+      try {
+        const result = await coding(path, body);
+        if (visible()) show(result);
+      } catch (error) {
+        if (visible()) requestError.textContent = error.message;
+        reconcile = true;
+      } finally {
+        changing = false;
+        if (visible()) {
+          controls();
+          if (reconcile || !state) void refresh(reconcile);
+          else schedule();
+        }
+      }
+    }
+
+    panel.addEventListener('toggle', () => {
+      if (visible()) void refresh();
+      else {
+        clearTimeout(timer);
+        ++readGeneration;
+        reading = false;
+        requestError.textContent = '';
+        show(undefined);
+      }
+    });
+    refreshButton.addEventListener('click', () => { void refresh(); });
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (fields.disabled || !form.reportValidity()) return;
+      void change({ action: 'start', study: study.value, repetitions: form.elements.repetitions.valueAsNumber, tokenBudget: budget.valueAsNumber });
+    });
+    cancel.addEventListener('click', () => {
+      if (!cancel.disabled) void change({ action: 'cancel', id: state.id });
+    });
+    copyButton.addEventListener('click', async () => {
+      if (!visible() || report.hidden || !state?.report) return;
+      const current = ++copyGeneration;
+      const isCurrent = () => visible() && current === copyGeneration;
+      const json = JSON.stringify(state.report, null, 2);
+      try {
+        await navigator.clipboard.writeText(json);
+        if (!isCurrent()) return;
+        fallback.hidden = true;
+        jsonField.value = '';
+        copyFeedback.textContent = 'Benchmark report copied.';
+      } catch {
+        if (!isCurrent()) return;
+        jsonField.value = json;
+        fallback.hidden = false;
+        jsonField.focus();
+        jsonField.select();
+        copyFeedback.textContent = 'Clipboard unavailable. Copy the selected benchmark report JSON.';
+      }
+    });
+  }
+
+  window.okbCodingEvaluation = { composerOptions, mount, mountRetrievalBenchmark };
 })();

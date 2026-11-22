@@ -2725,7 +2725,12 @@
       prefix: projectUrl(project.id), coding, readonly, detached: isDetached,
       canLoadCase: composerPanel.canLoadEvaluationCase, loadCase: composerPanel.loadEvaluationCase,
     });
-    if (!teamMode) refreshDeployment = settings(left, project, readonly, composerPanel.updateProject, runs.refresh, isDetached);
+    if (!teamMode) {
+      window.okbCodingEvaluation.mountRetrievalBenchmark(right, {
+        prefix: projectUrl(project.id), coding, readonly, detached: isDetached,
+      });
+      refreshDeployment = settings(left, project, readonly, composerPanel.updateProject, runs.refresh, isDetached);
+    }
     const github = document.createElement('div');
     github.dataset.codingGithub = '';
     left.append(github);

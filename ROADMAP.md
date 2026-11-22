@@ -122,6 +122,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   and web apps. Verify the Git checkout and bind each trial to a fresh preview.
 - [x] Prepare the verified public Vite revision in the project form and show a
   queue of saved attempts ready for independent project review.
+- [x] Run both Vite source retrieval studies from the Mac and web apps with
+  progress, cancellation, and exportable results from the shared benchmark.
 - [x] Rehearse all 36 pinned Vite trials through the team API on the exact
   checkout with an injected provider and separate fixture reviewer.
 - [ ] Measure live provider usage and tokens per accepted result with
@@ -872,6 +874,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added the app source retrieval benchmark with measured results
+  from both pinned studies. The work creates no Coding requests or provider usage.
 - 2026-11-22 — Prepared the exact Vite benchmark checkout in the Coding apps
   and added a queue for independent evaluation reviewers.
 - 2026-11-22 — Added GitHub checkout setup in the apps and protected private tags

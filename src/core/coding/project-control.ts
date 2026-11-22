@@ -31,9 +31,10 @@ import {
 import { githubBranchRef, githubCreatePatchCommit, githubCreatePatchRef, githubPreparePatchBranch } from "./github-branch.ts";
 import { createCodingGitHubCheckout } from "./github-checkout.ts";
 import { excludedPath, selectRepositoryContext } from "./repository-context.ts";
-import { validateCodingProjectProfile, type CodingProjectProfile } from "./project-profile.ts";
+import { maxProfileTokens, validateCodingProjectProfile, type CodingProjectProfile } from "./project-profile.ts";
 import { launchProjectProviderCheck, launchProjectWorker, ProjectProviderCheckDisallowed, ProjectWorkerInterrupted } from "./project-worker.ts";
 import { checkProviderModel, type ProviderCheckOutcome } from "./provider-check.ts";
+import { measurePinnedViteRetrieval, requirePinnedViteRetrievalScope, RetrievalBenchmarkError, type BenchmarkReport } from "./retrieval-benchmark.ts";
 import type { CodingTaskProgress } from "./task-progress.ts";
 import type { TeamStartup } from "./team-listener.ts";
 import { runCodingWorkerCheck } from "./worker-check.ts";
@@ -211,6 +212,17 @@ export interface ProjectControlOptions {
   retentionAllowed?: () => boolean;
 }
 
+type RetrievalBenchmarkInput = { study: "package" | "subsystem"; repetitions: number; tokenBudget: number };
+type RetrievalBenchmarkState = RetrievalBenchmarkInput & {
+  id: string;
+  status: "running" | "cancelling" | "completed" | "cancelled" | "failed";
+  completed: number;
+  total: number;
+  revision: string;
+  report?: BenchmarkReport;
+  error?: string;
+};
+
 type ProviderDiagnosticCode = ProviderCheckOutcome["code"] | "worker-unavailable";
 const providerCheckMessages: Record<ProviderDiagnosticCode, string> = {
   ready: "The configured model lookup succeeded.",
@@ -269,6 +281,8 @@ export class CodingProjectControl {
   #workerCheckInFlight = false;
   #providerCheckInFlight: AbortController | undefined;
   #checkoutInFlight: AbortController | undefined;
+  readonly #benchmarkStates = new Map<string, RetrievalBenchmarkState>();
+  #activeBenchmark: { project: string; cancel: AbortController; promise: Promise<void> } | undefined;
   readonly #gates = new Map<string, Promise<void>>();
   readonly #requests = new Set<Promise<unknown>>();
   #retentionTimer: ReturnType<typeof setInterval> | undefined;
@@ -427,9 +441,11 @@ export class CodingProjectControl {
     clearInterval(this.#retentionTimer);
     this.#providerCheckInFlight?.abort();
     this.#checkoutInFlight?.abort();
+    const benchmark = this.#activeBenchmark;
+    benchmark?.cancel.abort();
     const active = [...this.#active.values()];
     for (const { stop } of active) stop?.();
-    await Promise.allSettled([...active.map(({ promise }) => promise), ...this.#requests, this.#retentionSweep]);
+    await Promise.allSettled([...active.map(({ promise }) => promise), ...this.#requests, this.#retentionSweep, benchmark?.promise]);
     try {
       this.#db.close(true);
     } finally {
@@ -1416,6 +1432,78 @@ export class CodingProjectControl {
       active: this.#retentionAllowed() };
   }
 
+  #retrievalBenchmark(project: ProjectRow, method: string, body: Json, actor: Actor, canWrite: () => boolean) {
+    if (!actor.owner) throw new ProjectControlError("Source retrieval benchmarks are available to the local okbrain operator.", 403);
+    const state = this.#benchmarkStates.get(project.id);
+    if (method === "GET") return state ?? { status: "idle" };
+    const writable = () => !this.#closing && canWrite();
+    if (!writable()) throw new ProjectControlError("Open a writable brain to run or stop the source benchmark.", 403);
+    if (body.action === "cancel") {
+      if (Object.keys(body).length !== 2 || typeof body.id !== "string")
+        throw new ProjectControlError("Select the running benchmark to stop.");
+      if (!state || state.id !== body.id)
+        throw new ProjectControlError("The selected benchmark changed. Refresh its status before stopping it.", 409);
+      if (state.status !== "running" || this.#activeBenchmark?.project !== project.id) return state;
+      const stopping: RetrievalBenchmarkState = { ...state, status: "cancelling" };
+      this.#benchmarkStates.set(project.id, stopping);
+      this.#activeBenchmark.cancel.abort();
+      return stopping;
+    }
+
+    const { study, repetitions, tokenBudget } = body;
+    if (body.action !== "start" || Object.keys(body).length !== 4 || (study !== "package" && study !== "subsystem") ||
+        typeof repetitions !== "number" || !Number.isInteger(repetitions) || repetitions < 1 || repetitions > 50 ||
+        typeof tokenBudget !== "number" || !Number.isInteger(tokenBudget) || tokenBudget < 1 || tokenBudget > maxProfileTokens)
+      throw new ProjectControlError(`Choose a Vite study, 1–50 repetitions, and an excerpt budget of 1–${maxProfileTokens} tokens.`);
+    if (this.#activeBenchmark)
+      throw new ProjectControlError("A source benchmark is already running. Wait for it to finish or stop it first.", 409);
+
+    const allowedScopes = JSON.parse(project.scopes) as string[];
+    try { requirePinnedViteRetrievalScope(study, allowedScopes); }
+    catch (error) {
+      if (error instanceof RetrievalBenchmarkError) throw new ProjectControlError(error.message, error.status);
+      throw error;
+    }
+    const total = pinnedEvaluationRubric.studies.find((entry) => entry.id === study)!.tasks.length * 3 * repetitions;
+    const initial: RetrievalBenchmarkState = { id: randomUUID(), study, repetitions, tokenBudget, status: "running", completed: 0, total,
+      revision: pinnedEvaluationRubric.revision };
+    const cancel = new AbortController();
+    this.#benchmarkStates.delete(project.id);
+    this.#benchmarkStates.set(project.id, initial);
+    if (this.#benchmarkStates.size > 16) this.#benchmarkStates.delete(this.#benchmarkStates.keys().next().value!);
+    const promise = this.#measureRetrieval(project, initial, allowedScopes, cancel.signal, writable)
+      .finally(() => { this.#activeBenchmark = undefined; });
+    this.#activeBenchmark = { project: project.id, cancel, promise };
+    return initial;
+  }
+
+  async #measureRetrieval(project: ProjectRow, initial: RetrievalBenchmarkState, allowedScopes: readonly string[],
+    signal: AbortSignal, canWrite: () => boolean) {
+    const publish = (state: Partial<RetrievalBenchmarkState>) => {
+      const current = this.#benchmarkStates.get(project.id)!;
+      this.#benchmarkStates.set(project.id, { ...current, ...state });
+    };
+    const requireWrite = () => {
+      signal.throwIfAborted();
+      if (!canWrite()) throw new ProjectControlError("The brain mount changed or is read-only.", 403);
+    };
+    try {
+      const workspace = await this.#workspace(project);
+      requireWrite();
+      const { study, repetitions, tokenBudget } = initial;
+      const report = await measurePinnedViteRetrieval({ workspace, study, repetitions, tokenBudget, allowedScopes, signal,
+        progress: (completed) => { requireWrite(); publish({ completed }); },
+      });
+      requireWrite();
+      publish({ status: "completed", completed: initial.total, report });
+    } catch (error) {
+      if (signal.aborted) publish({ status: "cancelled" });
+      else publish({ status: "failed", error: error instanceof PinnedEvaluationWorkspaceError ||
+        error instanceof RetrievalBenchmarkError || error instanceof ProjectControlError ? error.message
+        : "Unable to measure source retrieval. Check the registered workspace and Git checkout." });
+    }
+  }
+
   async #deploymentCheck(project: ProjectRow, method: string, body: Json, actor: Actor, canWrite: () => boolean) {
     if (!actor.owner) throw new ProjectControlError("Deployment checks are available to the local okbrain operator.", 403);
     const worker = this.#dockerWorker;
@@ -1982,6 +2070,8 @@ export class CodingProjectControl {
     if (!match) throw new ProjectControlError("Coding endpoint not found.", 404);
     const project = this.#project(match[1]!, actor);
     const action = match[2];
+    if (action === "retrieval-benchmark" && (method === "GET" || method === "POST"))
+      return this.#retrievalBenchmark(project, method, body, actor, canWrite);
     if (action === "deployment-check" && (method === "GET" || method === "POST"))
       return this.#deploymentCheck(project, method, body, actor, canWrite);
     if (action === "provider-check" && method === "POST") return this.#providerCheck(project, body, actor, canWrite);

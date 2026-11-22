@@ -124,6 +124,12 @@ fixed tag must resolve to the pinned commit. The app checks the detached
 worktree before use and preserves tracked symlink entries as link text.
 The evaluation queue derives readiness from the authenticated member and the
 saved run and review states. Provider origin remains visible on each attempt.
+The Mac and web source benchmark use the same measurement code as the Vite
+benchmark script. The owner launches one local study at a time against the
+registered project and its permitted paths. Progress and the latest reports
+live in the running controller. Cancellation binds to the selected job ID.
+Reports contain timings, sizes, and pinned evidence metrics without source
+excerpts or any Coding request.
 GitHub activity and compare handoff use a bound project remote.
 The local operator can prepare one shallow GitHub branch checkout in private
 Coding app data before registering a project. A transient Contents-read
