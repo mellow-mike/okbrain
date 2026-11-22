@@ -33,6 +33,7 @@ import { validateCodingProjectProfile, type CodingProjectProfile } from "./proje
 import { launchProjectWorker, ProjectWorkerInterrupted } from "./project-worker.ts";
 import type { CodingTaskProgress } from "./task-progress.ts";
 import type { TeamStartup } from "./team-listener.ts";
+import { runCodingWorkerCheck } from "./worker-check.ts";
 
 type Json = Record<string, unknown>;
 type Actor = { id: string; owner: boolean; project?: string };
@@ -221,6 +222,7 @@ export class CodingProjectControl {
   readonly #retentionAllowed: () => boolean;
   readonly #active = new Map<string, Running>();
   #patchInFlight = false;
+  #workerCheckInFlight = false;
   readonly #gates = new Map<string, Promise<void>>();
   readonly #requests = new Set<Promise<unknown>>();
   #retentionTimer: ReturnType<typeof setInterval> | undefined;
@@ -438,8 +440,13 @@ export class CodingProjectControl {
       ...(actor.owner ? { workspace } : {}),
       scopes: JSON.parse(scopes) as string[],
       workerIsolation: this.#dockerWorker ? "docker" : "process",
-      credential: api_key ? "project" : actor.owner && hasCodingCredential(row.provider, { models: this.#models }) ? "environment" : "missing",
+      credential: this.#credentialSource(row, actor),
     };
+  }
+
+  #credentialSource(project: ProjectRow, actor: Actor) {
+    if (project.api_key) return "project";
+    return actor.owner && hasCodingCredential(project.provider, { models: this.#models }) ? "environment" : "missing";
   }
 
   #identity(owner: boolean, token: string | null): Actor {
@@ -1266,12 +1273,33 @@ export class CodingProjectControl {
       .finally(() => { this.#retentionSweep = undefined; });
   }
 
+  #retentionSettings(project: string) {
+    return { days: this.#get<{ days: number }>("SELECT days FROM transcript_retention WHERE project = ?", project)?.days ?? null,
+      active: this.#retentionAllowed() };
+  }
+
+  async #deploymentCheck(project: ProjectRow, method: string, body: Json, actor: Actor, canWrite: () => boolean) {
+    if (!actor.owner) throw new ProjectControlError("Deployment checks are available to the local okbrain operator.", 403);
+    const worker = this.#dockerWorker;
+    if (method === "GET") return {
+      worker: worker ? { mode: "docker", image: worker.image, network: worker.network } : { mode: "process" },
+      retention: this.#retentionSettings(project.id),
+      provider: project.provider,
+      model: project.model,
+      credential: this.#credentialSource(project, actor),
+    };
+    if (!canWrite()) throw new ProjectControlError("Open a writable brain to run the offline worker check.", 403);
+    if (Object.keys(body).length) throw new ProjectControlError("The offline worker check uses the server's configured Docker worker. Send an empty object.");
+    if (!worker) throw new ProjectControlError("Configure a Linux Docker worker to run the offline worker check.", 409);
+    if (this.#workerCheckInFlight) throw new ProjectControlError("An offline worker check is in progress. Try again when it finishes.", 409);
+    this.#workerCheckInFlight = true;
+    try { return await runCodingWorkerCheck(worker); }
+    finally { this.#workerCheckInFlight = false; }
+  }
+
   async #retention(project: ProjectRow, method: string, body: Json, actor: Actor) {
     this.#requireOwner(actor);
-    if (method === "GET") {
-      return { days: this.#get<{ days: number }>("SELECT days FROM transcript_retention WHERE project = ?", project.id)?.days ?? null,
-        active: this.#retentionAllowed() };
-    }
+    if (method === "GET") return this.#retentionSettings(project.id);
     const days = body.days;
     if (days !== null && (typeof days !== "number" || !Number.isInteger(days) || days < 1 || days > 365)) {
       throw new ProjectControlError("Choose 1–365 days or keep transcripts until you delete them.");
@@ -1740,6 +1768,8 @@ export class CodingProjectControl {
     if (!match) throw new ProjectControlError("Coding endpoint not found.", 404);
     const project = this.#project(match[1]!, actor);
     const action = match[2];
+    if (action === "deployment-check" && (method === "GET" || method === "POST"))
+      return this.#deploymentCheck(project, method, body, actor, canWrite);
     if (action === "retention" && (method === "GET" || method === "POST")) return this.#retention(project, method, body, actor);
     if (action === "presets" && (method === "GET" || method === "POST")) return this.#presets(project, method, body, actor);
     if (action && method === "POST" && (githubPullActions.includes(action) || githubBranchActions.includes(action)))

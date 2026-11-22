@@ -251,6 +251,14 @@ export OKB_CODING_WORKER_IMAGE=$(docker image inspect --format '{{.Id}}' okbrain
 bun run packaging/coding-worker/smoke.ts "$OKB_CODING_WORKER_IMAGE"
 ```
 
+### Check a deployment from the app
+
+In the Mac or local web app, open **Coding → Project settings → Deployment checks**. The local operator can review the worker mode, pinned image ID and configured network, project provider and model, credential source, transcript retention policy, and team listener status. The panel shows credential presence without revealing its value. Project member tokens cannot open this panel.
+
+With a writable brain selected on a server using Linux Docker workers, choose **Run offline worker check**. The check looks up the pinned image in local Docker, inspects the configured network, and launches a disposable container with Docker's `none` network. The result lists the observed session mount, filesystem and process controls, and network isolation. Use the passing, failing, or skipped checks to see which controls ran. The probe uses synthetic files and requires no provider account. [Docker `none` network](https://docs.docker.com/engine/network/drivers/none/)
+
+Verify provider egress, team access through the deployed HTTPS endpoint, and backup restoration on your actual enterprise host before inviting the team.
+
 ### Limit transcript retention
 
 In **Project settings → Transcript retention**, set the number of days to keep inactive sessions. Leave the field blank to keep transcripts until you delete them. Saving a limit checks sessions in the selected project immediately. The Coding server also checks at startup and hourly, processing up to 24 expired sessions per check. Activity includes run status, review, patch application, and activity in any alternative review branch. A running or interrupted request or a pending approved patch protects the entire transcript.

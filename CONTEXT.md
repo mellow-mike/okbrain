@@ -110,6 +110,10 @@ Linux deployments can select a pinned worker image. The host verifies the
 preview before sending the exact approved data to a container with a single
 session mount. Project retention uses the recovery ledger to expire inactive
 terminal sessions while preserving audit records and refusing expired IDs.
+The Mac and web project settings summarize deployment configuration for the
+local operator. An explicit offline check uses the production launch plan
+with a disposable session and the `none` network, and reports observed worker
+controls without exposing credentials or transcripts.
 
 ---
 

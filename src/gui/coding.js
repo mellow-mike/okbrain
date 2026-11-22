@@ -1497,7 +1497,102 @@
     return { refresh, selectRun };
   }
 
-  function settings(parent, project, readonly, projectChanged, runsChanged) {
+  function mountDeploymentChecks(panel, prefix, readonly, isDetached) {
+    panel.innerHTML = '<summary>Deployment checks</summary><div class="stack coding-form">' +
+      '<dl class="coding-grid coding-deployment-summary" hidden></dl>' +
+      '<div class="coding-feedback" role="status" data-deployment-status></div>' +
+      '<div class="stack" data-offline-worker hidden>' +
+      '<p class="muted">The test container runs the configured local image with networking disabled. ' +
+      'The configured network is checked for availability. Provider connectivity and backup recovery need separate checks.</p>' +
+      '<div class="row"><button type="button" disabled>Run offline worker check</button></div>' +
+      '<div class="coding-feedback" role="status" data-worker-status></div>' +
+      '<section class="stack" hidden><h4>Offline worker check</h4><p></p><ul class="plain"></ul></section></div></div>';
+    const brain = document.querySelector('#brain')?.value;
+    const current = () => panel.isConnected && !isDetached() && document.querySelector('#brain')?.value === brain;
+    const endpoint = prefix + '/deployment-check';
+    const configuration = panel.querySelector('dl');
+    const settingsFeedback = panel.querySelector('[data-deployment-status]');
+    const workerFeedback = panel.querySelector('[data-worker-status]');
+    const workerPanel = panel.querySelector('[data-offline-worker]');
+    const button = workerPanel.querySelector('button');
+    const result = workerPanel.querySelector('section');
+    const projectSettings = panel.parentElement.closest('details');
+    let version = 0;
+    let visible = false;
+    let available = false;
+    let running = false;
+
+    function updateAction() {
+      button.disabled = !available || running;
+      workerPanel.hidden = !available;
+    }
+
+    async function refresh() {
+      if (!projectSettings.open || !panel.open || !current()) return;
+      const attempt = ++version;
+      available = false;
+      updateAction();
+      configuration.hidden = true;
+      report(settingsFeedback, undefined, 'Loading deployment configuration…');
+      const [settings, listener] = await Promise.allSettled([coding(endpoint), coding('/team')]);
+      if (attempt !== version || !current()) return;
+      if (settings.status === 'rejected') {
+        report(settingsFeedback, settings.reason);
+        return;
+      }
+      const { worker, retention, provider, model, credential } = settings.value;
+      const docker = worker.mode === 'docker';
+      const listenerText = listener.status === 'rejected' ? 'Status unavailable' : listener.value
+        ? 'Running on local port ' + listener.value.port + (listener.value.publicOrigin ? ' · HTTPS proxy configured' : '')
+        : 'Stopped';
+      const credentialLabels = { project: 'Saved project key', environment: 'Server environment key', missing: 'Missing' };
+      const keep = retention.days === null ? 'Keep until manually deleted' : retention.days + (retention.days === 1 ? ' day' : ' days');
+      const fields = [['Worker isolation', docker ? 'Docker' : 'Local process · Server OS account']];
+      if (docker) fields.push(['Worker image', worker.image], ['Configured network', worker.network]);
+      fields.push(['Transcript retention', retention.active ? keep : 'Automatic cleanup unavailable · ' + keep],
+        ['Provider and model', provider + ' / ' + model], ['Provider credential', credentialLabels[credential] || 'Status unavailable'],
+        ['Team listener', listenerText]);
+      configuration.innerHTML = fields.map(([label, value]) => '<div><dt class="muted">' + esc(label) + '</dt><dd>' +
+        esc(value) + '</dd></div>').join('');
+      configuration.hidden = false;
+      available = docker && !readonly;
+      updateAction();
+      report(settingsFeedback);
+    }
+
+    function visibilityChanged() {
+      const open = projectSettings.open && panel.open;
+      if (visible === open) return;
+      visible = open;
+      if (open) void refresh();
+    }
+    projectSettings.addEventListener('toggle', visibilityChanged);
+    panel.addEventListener('toggle', visibilityChanged);
+    button.addEventListener('click', async () => {
+      if (!current() || !projectSettings.open || !panel.open || button.disabled) return;
+      running = true;
+      updateAction();
+      result.hidden = true;
+      report(workerFeedback, undefined, 'Running offline worker check…');
+      try {
+        const check = await coding(endpoint, {});
+        if (!current()) return;
+        const labels = { passed: 'Passed', failed: 'Failed', skipped: 'Skipped', unavailable: 'Unavailable' };
+        result.querySelector('p').textContent = labels[check.status] + ' · ' + time(check.checkedAt);
+        result.querySelector('ul').replaceChildren(...check.checks.map((entry) => {
+          const item = document.createElement('li');
+          item.textContent = entry.label + ' · ' + labels[entry.status] + (entry.message ? ' · ' + entry.message : '');
+          return item;
+        }));
+        result.hidden = false;
+        report(workerFeedback, undefined, 'Offline worker check ' + check.status + '.');
+      } catch (error) { if (current()) report(workerFeedback, error); }
+      finally { running = false; if (current()) updateAction(); }
+    });
+    return refresh;
+  }
+
+  function settings(parent, project, readonly, projectChanged, runsChanged, isDetached) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('details');
     panel.className = 'coding-panel';
@@ -1516,6 +1611,7 @@
       field('Type the session name again', '', 'text', 'name="confirm" maxlength="64" required') +
       '<p class="muted" data-branch-transcript hidden>Transcript deletion includes the original session and all of its alternative branches.</p>' +
       '<div class="row"><button type="submit" class="danger">Delete session and transcript</button></div></form>' +
+      '<details data-deployment-checks></details>' +
       '<details data-audit><summary>Audit events</summary><ol class="coding-audit"></ol></details>' +
       '<div class="coding-feedback" role="status"></div></div>';
     parent.append(panel);
@@ -1534,6 +1630,7 @@
     const credential = panel.querySelector('[data-credential]');
     panel.querySelectorAll('button').forEach((button) => button.disabled = readonly);
     saveRetention.disabled = true;
+    const refreshDeployment = mountDeploymentChecks(panel.querySelector('[data-deployment-checks]'), prefix, readonly, isDetached);
 
     function setProject(current) {
       project = current;
@@ -1551,6 +1648,7 @@
       report(feedback);
       try {
         setProject(await coding(prefix + '/credential', { apiKey }));
+        void refreshDeployment();
         keyForm.reset();
         feedback.textContent = apiKey ? 'Project key saved.' : 'Project key removed.';
       } catch (error) { report(feedback, error); }
@@ -1605,6 +1703,7 @@
       try {
         const value = retention.elements.days.value;
         const { removed } = await coding(prefix + '/retention', { days: value === '' ? null : Number(value) });
+        void refreshDeployment();
         feedback.textContent = removed === 1 ? 'Retention saved. One transcript expired.' :
           removed > 1 ? 'Retention saved. ' + removed + ' transcripts expired.' : 'Retention policy saved.';
         await runsChanged();
@@ -1657,9 +1756,10 @@
       } catch (error) { report(feedback, error); }
     });
     setProject(project);
+    return refreshDeployment;
   }
 
-  function teamSettings(parent, readonly, isDetached) {
+  function teamSettings(parent, readonly, isDetached, listenerChanged) {
     const panel = document.createElement('details');
     panel.className = 'coding-panel';
     panel.innerHTML = '<summary>Team browser access</summary><div class="stack coding-form">' +
@@ -1735,6 +1835,7 @@
     function setStatus(next) {
       if (status && !next) startOnLaunch.checked = false;
       status = next;
+      listenerChanged();
       if (status) {
         port.value = status.port;
         publicOrigin.value = status.publicOrigin || '';
@@ -2057,10 +2158,11 @@
       '<div class="row coding-project-links" aria-label="Coding projects">' + projects.map((item) =>
         '<a href="' + projectHref(item.id) + '" data-project-link' + (item.id === project?.id ? ' aria-current="page"' : '') +
         '>' + esc(item.title) + '</a>').join('') + '</div>' : '';
+    let refreshDeployment;
     if (!teamMode) {
       projectsEl.insertAdjacentHTML('beforeend', '<div class="row coding-project-links"><a href="#coding/standalone">Standalone sessions</a></div>');
       register(projectsEl, models, suggestedWorkspace, readonly);
-      teamSettings(projectsEl, readonly, isDetached);
+      teamSettings(projectsEl, readonly, isDetached, () => { if (refreshDeployment) void refreshDeployment(); });
     }
     if (!project) return;
     const intro = document.createElement('header');
@@ -2095,7 +2197,7 @@
       prefix: projectUrl(project.id), coding, readonly, detached: isDetached,
       canLoadCase: composerPanel.canLoadEvaluationCase, loadCase: composerPanel.loadEvaluationCase,
     });
-    if (!teamMode) settings(left, project, readonly, composerPanel.updateProject, runs.refresh);
+    if (!teamMode) refreshDeployment = settings(left, project, readonly, composerPanel.updateProject, runs.refresh, isDetached);
     const github = document.createElement('div');
     github.dataset.codingGithub = '';
     left.append(github);

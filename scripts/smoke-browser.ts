@@ -1503,6 +1503,92 @@ try {
     prompt: projectPrompt,
   });
   await page.evaluate((id) => { location.hash = "#coding/" + id; }, project.id);
+
+  const deploymentPath = "/api/coding" + projectPath + "/deployment-check";
+  async function openDeployment(view: Page) {
+    await view.getByText("Project settings", { exact: true }).click();
+    const deployment = view.locator("[data-deployment-checks]");
+    const response = view.waitForResponse((reply) => new URL(reply.url()).pathname === deploymentPath && reply.request().method() === "GET");
+    await deployment.getByText("Deployment checks", { exact: true }).click();
+    const check = await response;
+    assert.ok(check.ok(), await check.text());
+    return deployment;
+  }
+  const deployment = await openDeployment(page);
+  await deployment.getByText("Local process · Server OS account", { exact: true }).waitFor();
+  await deployment.getByText("Keep until manually deleted", { exact: true }).waitFor();
+  await deployment.getByText("openai / browser-project-fixture", { exact: true }).waitFor();
+  await deployment.getByText("Stopped", { exact: true }).waitFor();
+  assert.equal(await deployment.getByRole("button", { name: "Run offline worker check", exact: true }).count(), 0);
+  await deployment.getByText("Deployment checks", { exact: true }).click();
+  await page.getByText("Project settings", { exact: true }).click();
+
+  // The Linux worker smoke exercises Docker itself. Supply its response shape here to exercise the browser action.
+  const image = "sha256:" + "a".repeat(64);
+  const deploymentRoute = "**" + deploymentPath;
+  const workerCheckMessage = "The temporary <state> mount was writable.";
+  let workerChecks = 0;
+  await page.route(deploymentRoute, async (route) => {
+    if (route.request().method() === "POST") {
+      workerChecks++;
+      assert.deepEqual(route.request().postDataJSON(), {});
+      return route.fulfill({ json: { result: {
+        isolation: "docker", status: "passed", configuredNetwork: "none", checkedAt: "2026-11-22T00:00:00Z",
+        checks: [{ id: "mount", label: "State mount", status: "passed", message: workerCheckMessage }],
+      } } });
+    }
+    const response = await route.fetch();
+    const payload = await response.json();
+    payload.result.worker = { mode: "docker", image, network: "none" };
+    await route.fulfill({ response, json: payload });
+  });
+  try {
+    await openDeployment(page);
+    await deployment.getByText(image, { exact: true }).waitFor();
+    assert.equal(workerChecks, 0);
+    await deployment.getByRole("button", { name: "Run offline worker check", exact: true }).click();
+    await deployment.getByText("State mount · Passed · " + workerCheckMessage, { exact: true }).waitFor();
+    assert.equal(await deployment.locator("state").count(), 0);
+    assert.equal(workerChecks, 1);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+    await page.getByText("Project settings", { exact: true }).click();
+  } finally { await page.unroute(deploymentRoute); }
+
+  const readOnlyDeploymentMount = await changeMount({ action: "register", name: readonlyBrain, path: readonlyFolder, readonly: true });
+  assert.ok(readOnlyDeploymentMount.ok, await readOnlyDeploymentMount.text());
+  const readonlyCoding = await browser.newPage({ viewport: { width: 375, height: 700 }, reducedMotion: "reduce" });
+  readonlyCoding.setDefaultTimeout(8000);
+  try {
+    const deploymentMethods: string[] = [];
+    await readonlyCoding.addInitScript((name) => localStorage.setItem("okb-gui-brain", name), readonlyBrain);
+    readonlyCoding.on("pageerror", (error) => errors.push(error.message));
+    await readonlyCoding.route("**/*", async (route) => {
+      const req = route.request();
+      const url = new URL(req.url());
+      if (url.origin !== origin) { outbound.push(url.href); return route.abort(); }
+      if (url.pathname !== deploymentPath) return route.continue();
+      deploymentMethods.push(req.method());
+      assert.equal(req.headers()["x-okb-brain"], readonlyBrain);
+      const response = await route.fetch();
+      assert.ok(response.ok(), await response.text());
+      const payload = await response.json();
+      assert.equal(payload.result.worker.mode, "process");
+      payload.result.worker = { mode: "docker", image, network: "none" };
+      await route.fulfill({ response, json: payload });
+    });
+    await readonlyCoding.goto(server.url + "#coding/" + project.id);
+    assert.equal(await readonlyCoding.locator("#brain").inputValue(), readonlyBrain);
+    const readonlyDeployment = await openDeployment(readonlyCoding);
+    await readonlyDeployment.getByText(image, { exact: true }).waitFor();
+    await readonlyDeployment.getByText("none", { exact: true }).waitFor();
+    assert.equal(await readonlyDeployment.getByRole("button", { name: "Run offline worker check", exact: true }).count(), 0);
+    assert.equal(await readonlyCoding.evaluate(() => document.documentElement.scrollWidth), 375);
+    assert.deepEqual(deploymentMethods, ["GET"]);
+  } finally {
+    await readonlyCoding.close();
+    const removedReadonlyDeployment = await changeMount({ action: "remove", previous: readonlyBrain });
+    assert.ok(removedReadonlyDeployment.ok, await removedReadonlyDeployment.text());
+  }
   const projectComposer = page.locator(".coding-composer");
   const presets = projectComposer.locator("[data-run-presets]");
   const presetSelector = presets.getByRole("combobox", { name: "Saved preset", exact: true });

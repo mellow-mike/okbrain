@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createModels, fauxAssistantMessage, fauxProvider, type Models } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createApiServer, type ApiServer } from "../../src/api.ts";
@@ -23,6 +23,8 @@ let server: ApiServer | undefined;
 
 type Run = { status: string; admitted: boolean; error: string | null };
 type Inspection = { run: Run; pi: { request: { approvedSourceLookup?: boolean; receipt: unknown } } };
+type DeploymentCheck = { isolation: string; status: string; configuredNetwork: string; checkedAt: string;
+  checks: { id: string; status: string; message?: string }[] };
 
 function request(path: string, body?: object, member?: string) {
   return fetch(new URL("api/coding" + path, server!.url), {
@@ -32,7 +34,7 @@ function request(path: string, body?: object, member?: string) {
       ...(body !== undefined ? { "content-type": "application/json" } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(path.endsWith("/deployment-check") ? 45_000 : 10_000),
   });
 }
 
@@ -128,6 +130,27 @@ try {
   const other = await call<{ id: string }>("/projects", { ...settings, title: "Separate offline project" });
   const path = `/projects/${project.id}`;
   const member = await call<{ id: string; token: string }>(path + "/members", { name: "smoke-reviewer" });
+  const diagnostics = path + "/deployment-check";
+  const catalogFiles = (await readdir(stateDir)).sort();
+  assert.deepEqual(await call(diagnostics), {
+    worker: { mode: "docker", image: isolation.image, network: "none" },
+    retention: { active: true, days: null }, provider: "openai", model, credential: "project",
+  });
+  assert.equal((await request(diagnostics, undefined, member.token)).status, 403);
+  assert.equal((await request(diagnostics, {}, member.token)).status, 403);
+  const deployment = await call<DeploymentCheck>(diagnostics, {});
+  assert.equal(deployment.isolation, "docker");
+  assert.equal(deployment.status, "passed", JSON.stringify(deployment.checks));
+  assert.equal(deployment.configuredNetwork, "none");
+  assert.ok(Number.isFinite(Date.parse(deployment.checkedAt)));
+  const checks = new Map(deployment.checks.map(({ id, status }) => [id, status]));
+  for (const id of ["local-image", "configured-network", "session-mount", "sibling-isolation", "docker-socket", "non-root",
+    "capabilities", "no-new-privileges", "seccomp", "read-only-root", "offline-network"]) assert.equal(checks.get(id), "passed", id);
+  const deploymentJson = JSON.stringify(deployment);
+  for (const value of [root, token, member.token, settings.apiKey, "/var/run/docker.sock"])
+    assert.ok(!deploymentJson.includes(value));
+  assert.deepEqual(await call(path + "/runs"), []);
+  assert.deepEqual((await readdir(stateDir)).sort(), catalogFiles);
   const selection = { source: "files", files: ["app.ts"] };
   const before = await call<{ id: string }>(path + "/preview", selection);
   const admittedSource = "export const answer = 43;\n";
@@ -208,6 +231,11 @@ try {
   // request also demonstrates that a settled receipt needs no worker.
   const unavailableImage = `sha256:${"0".repeat(64)}`;
   server = createServer(unavailableImage);
+  const missingDeployment = await call<DeploymentCheck>(diagnostics, {});
+  assert.equal(missingDeployment.status, "failed");
+  assert.equal(missingDeployment.checks.find(({ id }) => id === "local-image")?.status, "failed");
+  assert.equal(missingDeployment.checks.find(({ id }) => id === "session-mount")?.status, "skipped");
+  assert.ok(!JSON.stringify(missingDeployment).includes(root));
   const projects = await call<{ id: string; workspace?: string }[]>("/projects", undefined, member.token);
   assert.deepEqual(projects.map(({ id }) => id), [project.id]);
   assert.equal(projects[0]?.workspace, undefined);
@@ -274,7 +302,7 @@ try {
   const audit = await call<{ kind: string; session: string | null }[]>(path + "/audit");
   assert.ok(audit.some(({ kind, session }) => kind === "session_expired" && session === offline.session));
 
-  console.log("Docker Coding smoke passed. Verified offline worker isolation and admission, scoped access, Pi branch recovery, quiesced backup restoration, owner context maintenance, archived receipts, and retention tombstones.");
+  console.log("Docker Coding smoke passed. Verified deployment diagnostics, offline worker isolation and admission, scoped access, Pi branch recovery, quiesced backup restoration, owner context maintenance, archived receipts, and retention tombstones.");
 } finally {
   await closeServer();
   await rm(root, { recursive: true, force: true });

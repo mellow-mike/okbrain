@@ -118,6 +118,9 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Exercise offline Linux Docker backup and restore with the real worker.
   Verify saved receipt replay after checkout removal, member scope, and
   expired-ID protection across restores.
+- [x] Give the local operator deployment settings and a disposable offline
+  Docker worker check in the Mac and web apps. Exercise the real isolation
+  controls, a missing local image, and member and read-only authorization.
 - [ ] Verify failure, retention, access policy, and worker isolation on the
   intended enterprise deployment, including actual provider egress and backups.
 - [x] Add explicitly previewed, independent Pi Durable package reviews with
