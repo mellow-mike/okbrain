@@ -23,7 +23,10 @@ import { listBrains, loadConfig, resolveBrain, saveConfig, type AiSettings, type
 import { calibration, CLAIM_TYPE, isClaimDeadline, overdueClaimDates, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
 import { watchBundleInForeground, type BundleWatchStatus } from "./engine/bundle-watch.ts";
 import { buildIndex, updateIndexFor, withIndexWrite, type IndexStats } from "./engine/index-build.ts";
-import type { Engine, Neighbor, VectorStore } from "./engine/interface.ts";
+import type { Awaitable, IndexEngine, IndexVectors, Neighbor } from "./engine/interface.ts";
+import { readCacheSettings, setCacheSettings } from "./engine/cache-settings.ts";
+import { localBundleWatchBackend } from "./context.ts";
+import { EngineError } from "./engine/sqlite.ts";
 import { suggestLinks, type LinkSuggestion } from "./graph/link-suggest.ts";
 import { extractTargets } from "./graph/links.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
@@ -110,13 +113,13 @@ export interface OpContext {
    * Without `createIfMissing`, a bundle with no index yet must fail loudly —
    * silently opening an empty index would truncate search (see 1.4 decision).
    */
-  engine(createIfMissing?: boolean): Engine;
+  engine(createIfMissing?: boolean): Awaitable<IndexEngine>;
   /** True when a derived index already exists (write ops refresh it, never create it). */
-  hasIndex(): boolean;
+  hasIndex(): Awaitable<boolean>;
   /** Open (or return) the vector store; same create semantics as `engine`. */
-  vectors(createIfMissing?: boolean): VectorStore;
+  vectors(createIfMissing?: boolean): Awaitable<IndexVectors>;
   /** True when a vector store exists (write ops refresh it, never create it). */
-  hasVectors(): boolean;
+  hasVectors(): Awaitable<boolean>;
   /** User config (config.json via okb init); adapter-loaded, {} when absent. */
   config(): OkbConfig;
   /** Who this caller's writes are attributed to (OKF actor, §7). */
@@ -285,15 +288,21 @@ const DIR_MARK: Record<Dir, string> = { out: "→", in: "←", both: "↔" };
 
 /** Incrementally refresh written concepts in the derived caches — where they exist. */
 async function reindex(ctx: OpContext, ids: string[]): Promise<void> {
-  await withIndexWrite(ctx.bundle, async () => {
-    if (ctx.hasIndex()) for (const id of ids) await updateIndexFor(ctx.bundle, id, ctx.engine());
+  if (ids.length === 0) return;
+  await afterMarkdownWrite(async () => {
+    await withIndexWrite(ctx.bundle, async () => {
+      if (!(await ctx.hasIndex())) return;
+      const engine = await ctx.engine();
+      for (const id of ids) await updateIndexFor(ctx.bundle, id, engine);
+    });
   });
-  if (!ctx.hasVectors()) return;
   try {
+    if (!(await ctx.hasVectors())) return;
+    const vectors = await ctx.vectors();
     const emb = gatewayEmbedder(ctx.config().ai ?? {});
     for (const id of ids) {
-      if (await isPrivateConceptAt(ctx.bundle, id)) ctx.vectors().remove(id);
-      else await embedConcept(ctx.bundle, id, ctx.vectors(), emb);
+      if (await isPrivateConceptAt(ctx.bundle, id)) await vectors.remove(id);
+      else await embedConcept(ctx.bundle, id, vectors, emb);
     }
   } catch (e) {
     // Never fail a write over a derived cache; `okb embed` reconciles later.
@@ -303,8 +312,16 @@ async function reindex(ctx: OpContext, ids: string[]): Promise<void> {
   }
 }
 
-function requireNode(eng: Engine, id: string): void {
-  if (!eng.getNode(id))
+async function afterMarkdownWrite(refresh: () => Promise<void>): Promise<void> {
+  try { await refresh(); }
+  catch (error) {
+    if (!(error instanceof EngineError)) throw error;
+    log.warn("The Markdown changes were saved. Refresh the caches after reconnecting the database.", { error: error.message });
+  }
+}
+
+async function requireNode(eng: IndexEngine, id: string): Promise<void> {
+  if (!(await eng.getNode(id)))
     throw new OpError(`concept not in index: ${id} (run \`okb index\`?)`, "not_found");
 }
 
@@ -397,13 +414,13 @@ const reviewCfg = (c: OkbConfig) => ({
 
 const queueFor = async (ctx: OpContext, limit?: number): Promise<ReviewItem[]> => {
   const cfg = reviewCfg(ctx.config());
-  const eng = ctx.engine();
-  const rows = eng.listReviewRows();
+  const eng = await ctx.engine();
+  const rows = await eng.listReviewRows();
   const now = new Date();
   const overdue = cfg.weights.overdueClaim > 0
     ? await overdueClaimDates(ctx.bundle, rows.filter((row) => row.type === CLAIM_TYPE && row.status !== "deprecated").map(({ id }) => id), now)
     : undefined;
-  return reviewQueue(rows, eng.listEdges(), now, {
+  return reviewQueue(rows, await eng.listEdges(), now, {
     ...cfg,
     queueSize: limit ?? cfg.queueSize,
   }, overdue);
@@ -417,7 +434,7 @@ async function resolveReviewTarget(ctx: OpContext, raw: string): Promise<string>
     const n = Number(raw);
     if (n >= 1 && n <= q.length) return q[n - 1]!.id;
   }
-  requireNode(ctx.engine(), raw);
+  await requireNode(await ctx.engine(), raw);
   return raw;
 }
 
@@ -436,11 +453,11 @@ const profileOf = (ctx: OpContext, p: Record<string, unknown>): RetrievalProfile
  * queries must be embedded in the documents' own space, so the store's
  * (provider, model) wins over whatever is currently configured.
  */
-function hybridArms(ctx: OpContext): HybridArms {
-  const arms: HybridArms = { engine: ctx.engine() };
-  if (!ctx.hasVectors()) return arms;
-  const store = ctx.vectors();
-  const meta = store.meta();
+async function hybridArms(ctx: OpContext): Promise<HybridArms> {
+  const arms: HybridArms = { engine: await ctx.engine() };
+  if (!(await ctx.hasVectors())) return arms;
+  const store = await ctx.vectors();
+  const meta = await store.meta();
   if (!meta) return arms;
   try {
     const emb = gatewayEmbedder(ctx.config().ai ?? {}, { provider: meta.provider, model: meta.model });
@@ -479,8 +496,8 @@ async function maybeRerank(
 }
 
 /** A vector store that exists but couldn't serve recall deserves a warning. */
-const warnVectorSkip = (ctx: OpContext, reason: string | null): void => {
-  if (reason !== null && ctx.hasVectors()) log.warn("vector arm skipped", { reason });
+const warnVectorSkip = async (ctx: OpContext, reason: string | null): Promise<void> => {
+  if (reason !== null && await ctx.hasVectors()) log.warn("vector arm skipped", { reason });
 };
 
 /**
@@ -495,7 +512,7 @@ function autoTagger(ctx: OpContext, wanted: boolean): ClipOptions["suggestTags"]
   }
   return async (article) => {
     try {
-      const vocabulary = ctx.hasIndex() ? ctx.engine().listTags() : [];
+      const vocabulary = await ctx.hasIndex() ? await (await ctx.engine()).listTags() : [];
       return await suggestTags(article, vocabulary, (m) =>
         createGateway(ctx.config().ai ?? {}).chat(m),
       );
@@ -519,7 +536,7 @@ async function runAsk(
     p.question as string,
     {
       bundle: ctx.bundle,
-      arms: hybridArms(ctx),
+      arms: await hybridArms(ctx),
       chat: (messages) => gw.chat(messages, undefined, { signal }),
       synthesize: emit && ((messages) => gw.chat(messages, undefined, { signal, onDelta: (text) => emit("delta", { text }) })),
       signal,
@@ -529,7 +546,7 @@ async function runAsk(
     },
     profile,
   );
-  warnVectorSkip(ctx, r.vectorSkipped);
+  await warnVectorSkip(ctx, r.vectorSkipped);
   if (!signal?.aborted) recordCitedNotes(ctx, r.citations.map(({ id }) => id));
   emit?.("answer", { answer: r.answer, citations: r.citations });
   return r;
@@ -562,9 +579,9 @@ async function pullFeeds(ctx: OpContext, urls: string[], limit?: number): Promis
   const results: RssPullResult[] = [];
   for (const url of urls) {
     try {
-      const r = await writing(() =>
+      const r = await writing(async () =>
         pullFeed(ctx.bundle, url, {
-          resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined,
+          resources: await ctx.hasIndex() ? await (await ctx.engine()).listResources() : undefined,
           limit,
           stripParams: ctx.config().clip?.stripParams,
         }),
@@ -593,7 +610,7 @@ async function suggestFor(ctx: OpContext, id: string, limit?: number): Promise<L
       body: view.body,
       tags: fmTags(view.frontmatter.tags),
     },
-    ctx.engine(),
+    await ctx.engine(),
     limit,
   );
 }
@@ -624,7 +641,7 @@ async function computationWrite<T extends { id: string }>(ctx: OpContext, action
   // The portable receipt is committed. Refresh local metadata without an embedding request.
   try {
     await withIndexWrite(ctx.bundle, async () => {
-      if (ctx.hasIndex()) await updateIndexFor(ctx.bundle, result.id, ctx.engine());
+      if (await ctx.hasIndex()) await updateIndexFor(ctx.bundle, result.id, await ctx.engine());
     });
   } catch { log.warn("The computation was saved, but the local index needs to be rebuilt."); }
   return result;
@@ -640,8 +657,8 @@ async function refreshPrivateImportIndex(ctx: OpContext, ids: string[]): Promise
   if (ids.length === 0) return;
   try {
     await withIndexWrite(ctx.bundle, async () => {
-      if (!ctx.hasIndex()) return;
-      const engine = ctx.engine();
+      if (!(await ctx.hasIndex())) return;
+      const engine = await ctx.engine();
       for (const id of ids) await updateIndexFor(ctx.bundle, id, engine);
     });
   } catch {
@@ -751,12 +768,12 @@ export const operations: readonly Operation[] = [
       const keywordOnly = p["keyword-only"] === true;
       const { hits, vectorSkipped } = await hybridRetrieve(
         [query],
-        keywordOnly ? { engine: ctx.engine() } : hybridArms(ctx),
+        keywordOnly ? { engine: await ctx.engine() } : await hybridArms(ctx),
         profile,
         (p.limit as number | undefined) ?? 20,
         true,
       );
-      warnVectorSkip(ctx, vectorSkipped);
+      await warnVectorSkip(ctx, vectorSkipped);
       return keywordOnly ? hits : maybeRerank(ctx, query, hits, profile);
     },
     render: (r) => {
@@ -803,7 +820,7 @@ export const operations: readonly Operation[] = [
       const plan = createChatgptPlan();
       const result = await askBrain(p.question as string, {
         bundle: ctx.bundle,
-        arms: { engine: ctx.engine() },
+        arms: { engine: await ctx.engine() },
         includePrivate: p["include-private"] === true,
         chat: async (messages) => ({
           ...(await plan.complete(messages, p.model as string | undefined)),
@@ -1066,9 +1083,9 @@ export const operations: readonly Operation[] = [
     ],
     handler: async (ctx, p) => {
       const id = p.id as string;
-      const eng = ctx.engine();
-      requireNode(eng, id);
-      const { out, in: cited } = eng.edgesOf(id);
+      const eng = await ctx.engine();
+      await requireNode(eng, id);
+      const { out, in: cited } = await eng.edgesOf(id);
       const dirOf = (n: Neighbor): Dir | undefined =>
         n.depth !== 1
           ? undefined
@@ -1077,9 +1094,10 @@ export const operations: readonly Operation[] = [
               ? "both"
               : "out"
             : "in";
-      return eng
-        .neighbors(id, (p.depth as number | undefined) ?? 1)
-        .map((n): TitledNeighbor => ({ ...n, title: eng.getNode(n.id)?.title ?? "", dir: dirOf(n) }));
+      const neighbors = await eng.neighbors(id, (p.depth as number | undefined) ?? 1);
+      return Promise.all(neighbors.map(async (n): Promise<TitledNeighbor> => ({
+        ...n, title: (await eng.getNode(n.id))?.title ?? "", dir: dirOf(n),
+      })));
     },
     render: (r) => {
       const ns = r as TitledNeighbor[];
@@ -1109,7 +1127,7 @@ export const operations: readonly Operation[] = [
       if (source && !MAP_SOURCES.includes(source)) throw new OpError("Unknown source filter.", "bad_params");
       if (since && (!/^\d{4}-\d{2}-\d{2}$/.test(since) || !Number.isFinite(Date.parse(since)) || new Date(since).toISOString().slice(0, 10) !== since))
         throw new OpError("Choose a valid start date.", "bad_params");
-      return focusedMap(ctx.bundle, ctx.engine(), { id: id?.trim(), query: query?.trim(), source, since, includePrivate: p["include-private"] === true });
+      return focusedMap(ctx.bundle, await ctx.engine(), { id: id?.trim(), query: query?.trim(), source, since, includePrivate: p["include-private"] === true });
     },
     render(result) {
       const map = result as Awaited<ReturnType<typeof focusedMap>>;
@@ -1130,23 +1148,23 @@ export const operations: readonly Operation[] = [
       { name: "max-depth", type: "int", description: "hop limit for the search (default 10)" },
     ],
     handler: async (ctx, p) => {
-      const eng = ctx.engine();
+      const eng = await ctx.engine();
       const [from, to] = [p.from as string, p.to as string];
-      requireNode(eng, from);
-      requireNode(eng, to);
-      const edges = eng.listEdges();
+      await requireNode(eng, from);
+      await requireNode(eng, to);
+      const edges = await eng.listEdges();
       const ids = shortestPath(edges, from, to, (p["max-depth"] as number | undefined) ?? 10);
       if (!ids) return null;
       const fwd = new Set(edges.map((e) => JSON.stringify([e.src, e.dst])));
       const has = (a: string, b: string) => fwd.has(JSON.stringify([a, b]));
-      return ids.map((id, i): PathHop => {
-        const hop: PathHop = { id, title: eng.getNode(id)?.title ?? "" };
+      return Promise.all(ids.map(async (id, i): Promise<PathHop> => {
+        const hop: PathHop = { id, title: (await eng.getNode(id))?.title ?? "" };
         if (i > 0) {
           const prev = ids[i - 1]!;
           hop.dir = has(prev, id) ? (has(id, prev) ? "both" : "out") : "in";
         }
         return hop;
-      });
+      }));
     },
     render: (r) => {
       const hops = r as PathHop[] | null;
@@ -1164,11 +1182,9 @@ export const operations: readonly Operation[] = [
     scope: "read",
     params: [],
     handler: async (ctx) => {
-      const eng = ctx.engine();
-      return orphans(eng.listNodeIds(), eng.listEdges()).map((id) => ({
-        id,
-        title: eng.getNode(id)!.title,
-      }));
+      const eng = await ctx.engine();
+      const ids = orphans(await eng.listNodeIds(), await eng.listEdges());
+      return Promise.all(ids.map(async (id) => ({ id, title: (await eng.getNode(id))?.title ?? "" })));
     },
     render: (r) => {
       const os = r as { id: string; title: string }[];
@@ -1183,8 +1199,8 @@ export const operations: readonly Operation[] = [
     scope: "read",
     params: [],
     handler: async (ctx) => {
-      const eng = ctx.engine();
-      return computeStats(eng.listReviewRows(), eng.listEdges(), eng.tagCounts(), new Date());
+      const eng = await ctx.engine();
+      return computeStats(await eng.listReviewRows(), await eng.listEdges(), await eng.tagCounts(), new Date());
     },
     render: (r) => {
       const s = r as BrainStats;
@@ -1528,8 +1544,40 @@ export const operations: readonly Operation[] = [
     summary: "(Re)index the bundle incrementally (unchanged files skipped)",
     scope: "admin",
     params: [],
-    handler: (ctx) => withIndexWrite(ctx.bundle, () => buildIndex(ctx.bundle, ctx.engine(true))),
+    handler: (ctx) => withIndexWrite(ctx.bundle, async () => buildIndex(ctx.bundle, await ctx.engine(true))),
     render: renderStats,
+  },
+  {
+    name: "cache_settings",
+    cliName: "cache-settings",
+    summary: "Choose SQLite or a local PostgreSQL and pgvector cache for this brain",
+    scope: "admin",
+    params: [
+      { name: "backend", type: "string", positional: true, description: "sqlite or postgres (omit to show current setting)" },
+      { name: "connection-env", type: "string", description: "environment variable containing the PostgreSQL connection URL" },
+      { name: "connection", type: "string", description: "PostgreSQL connection URL (prefer --connection-env in the CLI)" },
+    ],
+    handler: async (ctx, p) => {
+      const backend = p.backend;
+      const name = p["connection-env"] as string | undefined;
+      if (backend === undefined || backend === "sqlite") {
+        if (name !== undefined || p.connection !== undefined)
+          throw new OpError("Connection credentials require the postgres backend.", "bad_params");
+        if (backend === "sqlite") await setCacheSettings(ctx.bundle, null);
+      } else if (backend === "postgres") {
+        if (name !== undefined && (p.connection !== undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)))
+          throw new OpError("Use one connection URL or a valid environment variable name.", "bad_params");
+        const connection = name === undefined ? p.connection as string | undefined : process.env[name];
+        if (!connection) throw new OpError("Supply a PostgreSQL connection URL.", "bad_params");
+        try { await setCacheSettings(ctx.bundle, connection); }
+        catch (error) {
+          if (error instanceof TypeError) throw new OpError(error.message, "bad_params");
+          throw error;
+        }
+      } else throw new OpError("Choose sqlite or postgres.", "bad_params");
+      return { backend: readCacheSettings(ctx.bundle)?.connection ? "postgres" : "sqlite" };
+    },
+    render: (result) => `Cache backend: ${(result as { backend: string }).backend}`,
   },
   {
     name: "create_directory_log",
@@ -1574,7 +1622,7 @@ export const operations: readonly Operation[] = [
       if (!ctx.brain) return true;
       const mount = resolveBrain(ctx.brain);
       return mount.path === ctx.bundle && !mount.readonly;
-    }),
+    }, localBundleWatchBackend),
     render: (r) => {
       const status = r as BundleWatchStatus;
       return status.error ?? (status.stats ? `watch stopped; last refresh ${renderStats(status.stats)}` : "watch stopped");
@@ -1595,10 +1643,13 @@ export const operations: readonly Operation[] = [
           "rebuild wipes the derived index; pass --confirm-destructive to proceed",
           "refused",
         );
-      return withIndexWrite(ctx.bundle, () => {
-        const eng = ctx.engine(true);
-        eng.wipe();
-        return buildIndex(ctx.bundle, eng);
+      return withIndexWrite(ctx.bundle, async () => {
+        const eng = await ctx.engine(true);
+        const rebuild = async (index: IndexEngine) => {
+          await index.wipe();
+          return buildIndex(ctx.bundle, index);
+        };
+        return eng.batch ? eng.batch(rebuild) : rebuild(eng);
       });
     },
     render: renderStats,
@@ -1619,7 +1670,7 @@ export const operations: readonly Operation[] = [
         provider: p.provider as string | undefined,
         model: p.model as string | undefined,
       });
-      return embedBundle(ctx.bundle, ctx.vectors(true), emb, {
+      return embedBundle(ctx.bundle, await ctx.vectors(true), emb, {
         includePrivate: p["include-private"] === true,
         limit: p.limit as number | undefined,
       });
@@ -1732,13 +1783,13 @@ export const operations: readonly Operation[] = [
         return q;
       }
       try {
-        const eng = ctx.engine();
-        const describe = (n: { id: string; title: string }): GarnishNote => ({
+        const eng = await ctx.engine();
+        const describe = async (n: { id: string; title: string }): Promise<GarnishNote> => ({
           ...n,
-          description: eng.getNode(n.id)?.description ?? "",
+          description: (await eng.getNode(n.id))?.description ?? "",
         });
-        const recent = pickRecent(eng.listReviewRows(), new Set(q.map((it) => it.id)), new Date());
-        const lines = await garnishQueue(q.map(describe), recent.map(describe), (m) =>
+        const recent = pickRecent(await eng.listReviewRows(), new Set(q.map((it) => it.id)), new Date());
+        const lines = await garnishQueue(await Promise.all(q.map(describe)), await Promise.all(recent.map(describe)), (m) =>
           createGateway(ctx.config().ai ?? {}).chat(m),
         );
         return q.map((it) => {
@@ -1775,7 +1826,7 @@ export const operations: readonly Operation[] = [
       const at = nowTimestamp();
       await writing(() => writeConcept(ctx.bundle, { id, verify: { by, at }, metadataOnly: true }));
       await reindex(ctx, [id]);
-      ctx.engine().clearSnooze(id);
+      await afterMarkdownWrite(async () => (await ctx.engine()).clearSnooze(id));
       return { id, verifiedBy: by, verifiedAt: at };
     },
     render: (r) => {
@@ -1799,7 +1850,7 @@ export const operations: readonly Operation[] = [
       const snoozeUntil = new Date(Date.now() + days * 86_400_000)
         .toISOString()
         .replace(/\.\d{3}Z$/, "Z");
-      ctx.engine().setSnooze(id, snoozeUntil);
+      await (await ctx.engine()).setSnooze(id, snoozeUntil);
       return { id, snoozeUntil };
     },
     render: (r) => {
@@ -1822,7 +1873,7 @@ export const operations: readonly Operation[] = [
     ],
     handler: async (ctx, p) => {
       const clip = ctx.config().clip;
-      const r = await writing(() =>
+      const r = await writing(async () =>
         clipUrl(
           ctx.bundle,
           {
@@ -1833,7 +1884,7 @@ export const operations: readonly Operation[] = [
             read: p.read as boolean | undefined,
           },
           {
-            resources: ctx.hasIndex() ? ctx.engine().listResources() : undefined,
+            resources: await ctx.hasIndex() ? await (await ctx.engine()).listResources() : undefined,
             suggestTags: autoTagger(ctx, p["auto-tag"] === true || clip?.autoTag === true),
             maxBodyBytes: clip?.maxBodyBytes,
             defaultTags: clip?.defaultTags,
@@ -2005,7 +2056,7 @@ export const operations: readonly Operation[] = [
       const r = await runEnrich(ctx.bundle, task, seeds, limits, {
         chat: async (messages) => (await gw.chat(messages)).text,
         actor: enrichActor(ctx),
-        suggestLinks: ctx.hasIndex() ? async (id) => await isPrivateConceptAt(ctx.bundle, id)
+        suggestLinks: await ctx.hasIndex() ? async (id) => await isPrivateConceptAt(ctx.bundle, id)
           ? [] : publicHits(ctx.bundle, await suggestFor(ctx, id)) : undefined,
         listConcepts: async () => {
           const out: { id: string; title: string }[] = [];
@@ -2035,9 +2086,7 @@ export const operations: readonly Operation[] = [
     scope: "read",
     params: [],
     handler: async (ctx) => {
-      const rows = ctx
-        .engine()
-        .listReviewRows()
+      const rows = (await (await ctx.engine()).listReviewRows())
         .filter((r) => r.inbox)
         .map(({ id, title, timestamp }) => ({ id, title, timestamp }));
       rows.sort((a, b) => {
@@ -2096,11 +2145,12 @@ export const operations: readonly Operation[] = [
         if (p.confirm === undefined) return await file();
         return await withIndexWrite(ctx.bundle, async () => {
           const result = await file();
-          if (ctx.hasIndex()) {
-            await updateIndexFor(ctx.bundle, result.destination, ctx.engine());
-            await updateIndexFor(ctx.bundle, result.id, ctx.engine());
+          if (await ctx.hasIndex()) {
+            const engine = await ctx.engine();
+            await updateIndexFor(ctx.bundle, result.destination, engine);
+            await updateIndexFor(ctx.bundle, result.id, engine);
           }
-          if (ctx.hasVectors()) ctx.vectors().remove(result.id);
+          if (await ctx.hasVectors()) await (await ctx.vectors()).remove(result.id);
           return result;
         });
       } catch (error) {
@@ -2132,15 +2182,13 @@ export const operations: readonly Operation[] = [
       const jobs: Job[] = [
         {
           name: "index",
-          run: async () => renderStats(await withIndexWrite(ctx.bundle, () => buildIndex(ctx.bundle, ctx.engine(true)))),
+          run: async () => renderStats(await withIndexWrite(ctx.bundle, async () => buildIndex(ctx.bundle, await ctx.engine(true)))),
         },
         {
           name: "embed",
-          skip: ctx.hasVectors()
-            ? undefined
-            : "no vector store — run `okb embed` once to opt in",
+          skip: async () => await ctx.hasVectors() ? undefined : "no vector store — run `okb embed` once to opt in",
           run: async () => {
-            const s = await embedBundle(ctx.bundle, ctx.vectors(), gatewayEmbedder(cfg.ai ?? {}));
+            const s = await embedBundle(ctx.bundle, await ctx.vectors(), gatewayEmbedder(cfg.ai ?? {}));
             return `embedded ${s.embedded}, skipped ${s.skipped}, removed ${s.removed}${s.pending > 0 ? `, ${s.pending} pending` : ""}`;
           },
         },
@@ -2364,10 +2412,12 @@ export const operations: readonly Operation[] = [
       }
       await regenerateIndexes(ctx.bundle, dir);
       if (!isPrivateConcept(id, view.frontmatter)) await appendLog(ctx.bundle, "Deletion", id, fmString(view.frontmatter.title) || id);
-      await withIndexWrite(ctx.bundle, () => {
-        if (ctx.hasIndex()) ctx.engine().removeNode(id);
+      await afterMarkdownWrite(async () => {
+        await withIndexWrite(ctx.bundle, async () => {
+          if (await ctx.hasIndex()) await (await ctx.engine()).removeNode(id);
+        });
+        if (await ctx.hasVectors()) await (await ctx.vectors()).remove(id);
       });
-      if (ctx.hasVectors()) ctx.vectors().remove(id);
       return { id, deleted: true };
     },
     render: (r) => `deleted ${(r as { id: string }).id}`,
@@ -2516,9 +2566,9 @@ export const operations: readonly Operation[] = [
       const guide = starter ? await createBrainStarter(ctx.bundle, starter) : undefined;
       if (guide && !guide.created)
         throw new OpError("Start with an empty brain folder that has no notes or conflicting files.", "bad_params");
-      if (guide) await withIndexWrite(ctx.bundle, async () => {
-        if (ctx.hasIndex()) await updateIndexFor(ctx.bundle, guide.id, ctx.engine());
-      });
+      if (guide) await afterMarkdownWrite(() => withIndexWrite(ctx.bundle, async () => {
+        if (await ctx.hasIndex()) await updateIndexFor(ctx.bundle, guide.id, await ctx.engine());
+      }));
       const starterOnly = guide && p["no-default-bundle"] === true && Object.keys(p).length === 2;
       const path = starterOnly ? null : saveConfig(cfg);
       // A brain starts life conformant: seed the root index.md (okf_version)

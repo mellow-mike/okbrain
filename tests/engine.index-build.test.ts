@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildIndex } from "../src/core/engine/index-build.ts";
+import { buildIndex, updateIndexFor } from "../src/core/engine/index-build.ts";
+import type { IndexEngine } from "../src/core/engine/interface.ts";
 import { defaultDbPath, openSqliteEngine } from "../src/core/engine/sqlite.ts";
 
 let root: string;
@@ -93,4 +94,30 @@ describe("defaultDbPath + on-disk engine", () => {
     expect(e2.getNode("alpha")?.title).toBe("Alpha Prime");
     e2.close();
   });
+});
+
+test("incremental indexing awaits async provenance lookups and edge writes", async () => {
+  const bundle = await mkdtemp(join(tmpdir(), "okb-index-async-"));
+  const sqlite = openSqliteEngine(":memory:");
+  const lookedUp: string[] = [];
+  let batches = 0;
+  const engine = {
+    ...sqlite,
+    async hasNode(id: string) { lookedUp.push(id); return sqlite.hasNode(id); },
+    async replaceEdgesFor(...params: Parameters<typeof sqlite.replaceEdgesFor>) { sqlite.replaceEdgesFor(...params); },
+  };
+  const batched: IndexEngine = { ...engine, async batch(work) { batches++; return work(engine); } };
+  try {
+    await mkdir(join(bundle, "notes"));
+    await writeFile(join(bundle, "anchor.md"), "---\ntype: note\ntitle: Anchor\n---\nAnchor\n");
+    await buildIndex(bundle, batched);
+    await writeFile(join(bundle, "notes", "source.md"), "---\ntype: note\ntitle: Source\nsources:\n  - id: anchor\n    resource: anchor.md\n---\nSource\n");
+    await updateIndexFor(bundle, "notes/source", batched);
+    expect(batches).toBe(2);
+    expect(lookedUp).toEqual(["notes/anchor", "anchor"]);
+    expect(sqlite.listEdges()).toEqual([{ src: "notes/source", dst: "anchor", rel: "cites" }]);
+  } finally {
+    sqlite.close();
+    await rm(bundle, { recursive: true, force: true });
+  }
 });

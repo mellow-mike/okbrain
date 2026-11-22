@@ -84,7 +84,7 @@ export function createBrowserPlan(options: Pick<PlanOptions, "path" | "fetch"> =
       const model = required(input.model, "Model", 150);
       const question = required(input.question, "Question", 8000);
       const includePrivate = input.includePrivate === true;
-      const context = await prepareLocalContext(question, ctx.bundle, { engine: ctx.engine() },
+      const context = await prepareLocalContext(question, ctx.bundle, { engine: await ctx.engine() },
         { ...PROFILES.balanced!, rerank: false }, includePrivate);
       for (const [id, preview] of previews) if (preview.expires <= Date.now()) previews.delete(id);
       if (previews.size >= 16) previews.delete(previews.keys().next().value!);

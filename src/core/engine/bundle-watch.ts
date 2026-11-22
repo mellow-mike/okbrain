@@ -5,6 +5,7 @@ import { log } from "../log.ts";
 import { listConcepts } from "../okf/bundle.ts";
 import { idToAbsPath } from "../okf/paths.ts";
 import { buildIndex, withIndexWrite, type IndexStats } from "./index-build.ts";
+import type { Awaitable, IndexEngine } from "./interface.ts";
 import { defaultDbPath, EngineError, openSqliteEngine } from "./sqlite.ts";
 
 const scanIntervalMs = 750;
@@ -17,6 +18,21 @@ export interface BundleWatchStatus {
   stats: IndexStats | null;
   error: string | null;
 }
+
+export interface BundleWatchBackend {
+  /** Stable, nonsecret cache selection for the current bundle. */
+  identity?(bundle: string): Awaitable<string>;
+  exists(bundle: string): Awaitable<boolean>;
+  open(bundle: string): Awaitable<{ engine: IndexEngine; close(): Awaitable<void> }>;
+}
+
+const sqliteBackend: BundleWatchBackend = {
+  exists: (bundle) => existsSync(defaultDbPath(bundle)),
+  open(bundle) {
+    const engine = openSqliteEngine(defaultDbPath(bundle));
+    return { engine, close: () => engine.close() };
+  },
+};
 
 /** Keep quiet scans to directory entries and timestamps, even for large files. */
 async function bundleSignature(bundle: string): Promise<string> {
@@ -36,7 +52,7 @@ async function bundleSignature(bundle: string): Promise<string> {
 export class BundleWatcher {
   readonly #source: string;
   readonly #bundle: string;
-  readonly #dbPath: string;
+  readonly #backend: BundleWatchBackend;
   readonly #canWrite: () => boolean;
   readonly #stopped = Promise.withResolvers<void>();
   #active = true;
@@ -44,17 +60,18 @@ export class BundleWatcher {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #run: Promise<void> | undefined;
   #indexSignature: string | null = null;
+  #cacheIdentity: string | undefined;
   #error: string | null = null;
   #lastIndexedAt: string | null = null;
   #stats: IndexStats | null = null;
 
-  constructor(bundle: string, canWrite: () => boolean = () => true) {
+  constructor(bundle: string, canWrite: () => boolean = () => true, backend: BundleWatchBackend = sqliteBackend) {
     this.#source = bundle;
     this.#canWrite = canWrite;
+    this.#backend = backend;
     try {
       this.#bundle = realpathSync(bundle);
       if (!canWrite() || !statSync(this.#bundle).isDirectory()) throw new Error("Choose a writable brain folder.");
-      this.#dbPath = defaultDbPath(this.#bundle);
     } catch (error) {
       throw new EngineError(`could not watch the brain folder: ${(error as Error).message}`);
     }
@@ -118,32 +135,38 @@ export class BundleWatcher {
       // Take the signature before building. A save that overlaps an index
       // pass remains visible as a change on the next scan.
       const signature = await bundleSignature(this.#bundle);
-      if (signature === this.#indexSignature && existsSync(this.#dbPath)) return;
+      const identity = await this.#backend.identity?.(this.#bundle);
+      if (signature === this.#indexSignature && identity === this.#cacheIdentity && await this.#backend.exists(this.#bundle)) return;
       this.#indexing = true;
       const stats = await withIndexWrite(this.#bundle, async () => {
         if (!this.#checkAccess()) return;
-        const engine = openSqliteEngine(this.#dbPath);
-        try { return await buildIndex(this.#bundle, engine); }
-        finally { engine.close(); }
+        const handle = await this.#backend.open(this.#bundle);
+        try {
+          if (this.#checkAccess()) return await buildIndex(this.#bundle, handle.engine);
+        } finally { await handle.close(); }
       });
       if (!stats || !this.#active) return;
       this.#indexSignature = signature;
+      this.#cacheIdentity = identity;
       this.#lastIndexedAt = new Date().toISOString();
       this.#stats = stats;
       this.#error = null;
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
+      // Even if the source is unchanged, recheck the entire index after a
+      // connection failure. The cache may have been restored while offline.
+      this.#indexSignature = null;
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
       // Atomic saves and concurrent writers are retried on the next scan.
       if (code !== "ENOENT" && code !== "ENOTDIR" && !code?.startsWith("SQLITE_BUSY") && !code?.startsWith("SQLITE_LOCKED"))
-        this.#report((error as Error).message);
+        this.#report(error instanceof Error ? error.message : String(error));
     } finally {
       this.#indexing = false;
     }
   }
 }
 
-export async function watchBundleInForeground(bundle: string, canWrite: () => boolean): Promise<BundleWatchStatus> {
-  const watcher = new BundleWatcher(bundle, canWrite);
+export async function watchBundleInForeground(bundle: string, canWrite: () => boolean, backend?: BundleWatchBackend): Promise<BundleWatchStatus> {
+  const watcher = new BundleWatcher(bundle, canWrite, backend);
   const onSignal = () => { void watcher.stop(); };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);

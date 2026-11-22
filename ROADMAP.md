@@ -552,11 +552,11 @@ Goal: the brain improves itself on a schedule.
 - [x] Tests: pure Brier/bucket/overdue math + CLI e2e (doctor-clean claims,
       single settlement, validation) (`tests/claims.test.ts`)
 
-### 5.4 Deliberately deferred
-- [!] `core/engine/postgres.ts` (pgvector) + rebuild-parity test — no
-      Postgres in the 3-OS CI matrix means it can't meet the "most
-      well-tested" bar; the engine interface stays the seam; revisit when a
-      bundle actually outgrows SQLite (decision 2026-07-20)
+### 5.4 Local cache choice and macOS app
+- [x] Optional local PostgreSQL and pgvector caches for keyword search,
+      graph, review, and embeddings. Select per brain from web and macOS
+      Settings or the CLI. SQLite stays the default across all three OSes.
+      A Linux integration job checks rebuild parity against real pgvector.
 - [x] Native desktop app over the local API. AppKit and WebKit provide the
       macOS window, folder selection, and both product workflows.
 
@@ -771,6 +771,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added per-brain local PostgreSQL and pgvector caches with
+  web and macOS settings, safe backend switching, and real rebuild parity.
 - 2026-11-22 — Added approved GitHub PR creation and offline email and calendar
   import. Enforced per-note privacy and path spelling, added local usage,
   shared the graph component, and added a local CSV computation attester.

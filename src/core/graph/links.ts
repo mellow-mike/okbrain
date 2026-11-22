@@ -94,11 +94,19 @@ export function resolvePathField(
   raw: string,
   known?: KnownConcepts,
 ): string | null {
-  const rel = resolveLinkTarget(srcId, raw);
-  if (rel === null || known === undefined || raw.startsWith("/") || raw.startsWith(".")) return rel;
-  const fromRoot = resolveLinkTarget("", raw);
-  return fromRoot !== null && fromRoot !== rel && !known.has(rel) && known.has(fromRoot)
-    ? fromRoot : rel;
+  const target = pathFieldCandidates(srcId, raw);
+  if (!target) return null;
+  const { relative, root } = target;
+  return root !== undefined && known !== undefined && !known.has(relative) && known.has(root) ? root : relative;
+}
+
+/** Candidate targets before checking which concepts exist in the index. */
+export function pathFieldCandidates(srcId: string, raw: string): { relative: string; root?: string } | null {
+  const relative = resolveLinkTarget(srcId, raw);
+  if (relative === null) return null;
+  if (raw.startsWith("/") || raw.startsWith(".")) return { relative };
+  const root = resolveLinkTarget("", raw);
+  return root !== null && root !== relative ? { relative, root } : { relative };
 }
 
 /**

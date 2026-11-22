@@ -34,6 +34,18 @@ In **Settings → Markdown indexes**, choose **OKF reference headings and relati
 
 In **Settings → Local note usage**, choose **Turn on local counts** for the current brain. Notes show the last 30 days of explicit opens and citations verified by Ask. A note’s internal sources also show their own local counts when recorded. These aggregate counts stay in per-user application data on this device. They survive an index rebuild and exclude MCP activity. **Turn off and clear counts** deletes the current brain’s counts. In the CLI, use `okb usage settings on` and read the `localUsage` field from `okb read <id> --json`.
 
+### Choose a search cache
+
+SQLite is ready to use with the app. To use a local PostgreSQL database, install pgvector in the database and give your database user permission to create its own schema. In **Settings → Search and graph cache → Change cache backend**, enter the connection URL and choose **Connect and use PostgreSQL**. Use a loopback address such as `127.0.0.1` or `[::1]` so searches and ChatGPT source previews stay on this computer. The database stores searchable note text, including private drafts, and graph data. It also stores any embeddings you choose to build. Use a database you trust.
+
+The app checks the database before saving the selection. A connection URL stays in private per-user application data. Each brain uses a separate schema. Under **Settings → Maintenance**, choose **Re-index** to populate search and graph. Run **Embed** if you use vector search. PostgreSQL and SQLite use different keyword indexes, so the order of search hits can differ. Markdown and YAML remain the source for either cache.
+
+Choose **Use SQLite** to switch back and remove the saved connection URL. Choose **Re-index** again to pick up any changes since you used SQLite. Old derived tables stay in your PostgreSQL database. Your database administrator can remove the brain’s cache schema.
+
+In the CLI, set a local environment variable containing the URL, then use `okb cache-settings postgres --connection-env OKB_CACHE_URL`. The commands `okb cache-settings` and `okb cache-settings sqlite` show the selection and switch to SQLite, respectively.
+
+### AI defaults
+
 Set **Default retrieval profile** on a named brain folder to choose how Search and Ask use that brain by default. Use **Use app default** to inherit the global retrieval setting. A profile selected for a specific search or answer takes precedence.
 
 In **AI defaults for this brain**, choose a chat provider and an embedding provider independently. You can set a model for either capability. **Use app default** inherits the provider configured for the app. Leave a model blank to inherit the app's model for that provider or use the selected provider's default. Command overrides and `OKB_*` environment settings take precedence. Provider keys stay in the app's per-user settings. A custom endpoint carries over only when it belongs to the selected provider.

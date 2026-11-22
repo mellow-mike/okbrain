@@ -23,11 +23,10 @@ import { RepositoryContextError } from "./core/coding/repository-context.ts";
 import { CodingTeamListener, type TeamStatus } from "./core/coding/team-listener.ts";
 import { BrainMountError } from "./core/brain-mounts.ts";
 import { ConfigError, listBrains, resolveBrain, UnknownBrainError } from "./core/config.ts";
-import { openLocalContext, type LocalContext } from "./core/context.ts";
+import { localBundleWatchBackend, openLocalContext, type LocalContext } from "./core/context.ts";
 import { BundleWatcher } from "./core/engine/bundle-watch.ts";
-import { defaultDbPath, EngineError } from "./core/engine/sqlite.ts";
+import { EngineError } from "./core/engine/sqlite.ts";
 import { SyncError } from "./core/sync.ts";
-import { defaultVectorsPath } from "./core/engine/vectors.ts";
 import { MAX_CONVERSATION_EXPORT_BYTES } from "./core/ingest/conversations.ts";
 import { createNotionSource, NotionSourceError, type NotionSource, type NotionSourceOptions } from "./core/ingest/notion-source.ts";
 import { isOfflineSourceKind, MAX_OFFLINE_FILE_BYTES, MAX_SOURCE_FILES, MAX_SOURCE_ROWS, MAX_SOURCE_UPLOAD_BYTES } from "./core/ingest/personal-sources.ts";
@@ -70,12 +69,21 @@ import guiCodingEvaluationJs from "./gui/coding-evaluation.js" with { type: "tex
 import guiGithubJs from "./gui/github.js" with { type: "text" };
 import guiNotionJs from "./gui/notion.js" with { type: "text" };
 import guiCodingCss from "./gui/coding.css" with { type: "text" };
-import guiCodingTeamHtml from "./gui/coding-team.html" with { type: "text" };
+import codingTeamHtmlAsset from "./gui/coding-team.html" with { type: "text" };
 import guiAccountsJs from "./gui/accounts.js" with { type: "text" };
 import guiFocusedMapJs from "./gui/focused-map.js" with { type: "text" };
-import guiIndexHtml from "./gui/index.html" with { type: "text" };
+import indexHtmlAsset from "./gui/index.html" with { type: "text" };
 import guiStyleCss from "./gui/style.css" with { type: "text" };
 
+// Bun's wildcard HTML declaration describes its HTML loader. The explicit
+// text loader used here returns the original asset even in compiled builds.
+function htmlAsset(asset: unknown): string {
+  if (typeof asset !== "string") throw new TypeError("Expected a bundled HTML text asset.");
+  return asset;
+}
+
+const guiCodingTeamHtml = htmlAsset(codingTeamHtmlAsset);
+const guiIndexHtml = htmlAsset(indexHtmlAsset);
 const JS = "application/javascript; charset=utf-8";
 const CSS = "text/css; charset=utf-8";
 
@@ -282,7 +290,7 @@ async function bundleWatchRequest(req: Request, url: URL, opts: ServeState, cors
     }
     const local = open(scope);
     try { checkOpCall(getOp("watch_index")!, local.ctx, {}); }
-    finally { local.close(); }
+    finally { await local.close(); }
     const name = scope.brain ?? opts.servedBrain;
     const canWrite = (): boolean => {
       if (!name) return true;
@@ -291,7 +299,7 @@ async function bundleWatchRequest(req: Request, url: URL, opts: ServeState, cors
     };
     if (!canWrite()) return json(403, { error: "The brain mount changed or is read-only." }, headers);
     if (prior?.status().active) return json(200, { result: prior.status() }, headers);
-    const watcher = new BundleWatcher(scope.bundle, canWrite);
+    const watcher = new BundleWatcher(scope.bundle, canWrite, localBundleWatchBackend);
     watches.set(scope.brain, watcher);
     return json(200, { result: watcher.status() }, headers);
   } catch (error) {
@@ -325,7 +333,7 @@ async function brainMountRequest(req: Request, url: URL, opts: ServeState, cors:
     try {
       return json(200, { result: runBrainMountChange(local.ctx, body as Record<string, unknown>) }, headers);
     } finally {
-      local.close();
+      await local.close();
     }
   } catch (error) {
     return json(error instanceof BrainMountError ? error.status : error instanceof UploadTooLarge ? 413 : errStatus(error), errBody(error), headers);
@@ -408,7 +416,7 @@ async function rssSettings(req: Request, url: URL, opts: ServeState, cors?: Hdrs
     } else if (req.method !== "GET") return json(405, { error: "Method not allowed." }, headers);
     const local = open(scopeOf(req, url, opts));
     try { return json(200, { result: runRssSettings(local.ctx, feeds) }, headers); }
-    finally { local.close(); }
+    finally { await local.close(); }
   } catch (error) {
     return json(error instanceof UploadTooLarge ? 413 : errStatus(error), errBody(error), headers);
   }
@@ -438,7 +446,7 @@ async function browserPlan(req: Request, path: string, plan: BrowserPlan, scope:
         try {
           const result = await (path === "preview" ? plan.preview(local.ctx, body) : plan.answer(local.ctx, body.id));
           return json(200, { result }, headers);
-        } finally { local.close(); }
+        } finally { await local.close(); }
       }
       default: return json(404, { error: "not found" }, headers);
     }
@@ -459,7 +467,7 @@ async function runJsonOp(
   } catch (e) {
     return json(errStatus(e), errBody(e), cors);
   } finally {
-    local.close();
+    await local.close();
   }
 }
 
@@ -481,7 +489,7 @@ function sse(local: LocalContext, request: Request,
           send("error", signal.aborted ? { error: "The answer took too long to complete." } : errBody(error));
         } finally {
           try { if (!disconnect.aborted) controller.close(); }
-          finally { local.close(); }
+          finally { await local.close(); }
         }
       })();
     },
@@ -499,7 +507,7 @@ async function askStream(req: Request, url: URL, scope: Scope, cors: Hdrs): Prom
   try {
     if (req.method === "POST") {
       if (req.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") {
-        local.close();
+        await local.close();
         return json(415, { error: "Send the question as JSON." }, cors);
       }
       const input = await readUpload(req, 64 * 1024, "The question is too large.");
@@ -517,7 +525,7 @@ async function askStream(req: Request, url: URL, scope: Scope, cors: Hdrs): Prom
     const params = checkOpCall(op, local.ctx, raw);
     return sse(local, req, (send, signal) => op.stream!(local.ctx, params, send, signal), cors);
   } catch (e) {
-    local.close();
+    await local.close();
     return json(e instanceof UploadTooLarge ? 413 : errStatus(e), errBody(e), cors);
   }
 }
@@ -536,7 +544,7 @@ async function clipNav(url: URL, scope: Scope): Promise<Response> {
   } catch (e) {
     return html(errStatus(e), clipPage(errBody(e).error, false));
   } finally {
-    local.close();
+    await local.close();
   }
 }
 
@@ -578,7 +586,7 @@ async function conversationUpload(req: Request, url: URL, scope: Scope, cors: Hd
   } catch (e) {
     return json(e instanceof UploadTooLarge ? 413 : errStatus(e), errBody(e), headers);
   } finally {
-    local.close();
+    await local.close();
   }
 }
 
@@ -630,7 +638,7 @@ async function sourceUpload(req: Request, url: URL, scope: Scope, opts: ServeSta
   } catch (error) {
     return json(error instanceof UploadTooLarge ? 413 : errStatus(error), errBody(error), headers);
   } finally {
-    local.close();
+    await local.close();
   }
 }
 
@@ -658,14 +666,24 @@ async function notionRequest(req: Request, action: string, scope: Scope, connect
     const status = error instanceof NotionSourceError ? error.status : error instanceof UploadTooLarge ? 413 : errStatus(error);
     return json(status, errBody(error), headers);
   } finally {
-    local.close();
+    await local.close();
   }
 }
 
 /** What the GUI needs to describe the server it talks to (no mount paths beyond the active bundle). */
-function status(scope: Scope, o: ServeState): unknown {
+async function status(scope: Scope, o: ServeState) {
   const local = open(scope);
   try {
+    let cacheBackend: ReturnType<LocalContext["cacheBackend"]> = "sqlite";
+    let cacheError: string | null = null;
+    let hasIndex = false;
+    let hasVectors = false;
+    try {
+      cacheBackend = local.cacheBackend();
+      [hasIndex, hasVectors] = await Promise.all([local.ctx.hasIndex(), local.ctx.hasVectors()]);
+    } catch (error) {
+      cacheError = error instanceof EngineError ? error.message : "Could not read the local cache status.";
+    }
     return {
       version: VERSION,
       okfVersion: OKF_VERSION,
@@ -674,13 +692,15 @@ function status(scope: Scope, o: ServeState): unknown {
       readonly: scope.readonly,
       isDefaultBundle: local.ctx.config().defaultBundle === scope.bundle,
       retrievalProfile: local.ctx.config().retrieval?.profile || "balanced",
-      hasIndex: existsSync(defaultDbPath(scope.bundle)),
-      hasVectors: existsSync(defaultVectorsPath(scope.bundle)),
+      cacheBackend,
+      cacheError,
+      hasIndex,
+      hasVectors,
       actor: local.ctx.actor(),
       port: o.port,
     };
   } finally {
-    local.close();
+    await local.close();
   }
 }
 
@@ -799,7 +819,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   if (!tokenMatches(presented, opts.token))
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
   const ownerFileAction = url.pathname.startsWith("/api/op/computation_") ||
-    ["/api/op/export_markdown", "/api/op/inbox_file", "/api/op/keep_private"].includes(url.pathname);
+    ["/api/op/export_markdown", "/api/op/inbox_file", "/api/op/keep_private", "/api/op/cache_settings"].includes(url.pathname);
   if (ownerFileAction) {
     if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
       return json(401, { error: "missing or invalid local app token" }, cors);
@@ -859,7 +879,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
 
   if (req.method === "GET") {
     if (url.pathname === "/api/ops") return json(200, { ops: opDescriptors() }, cors);
-    if (url.pathname === "/api/status") return json(200, status(scope, opts), cors);
+    if (url.pathname === "/api/status") return json(200, await status(scope, opts), { ...cors, "cache-control": "no-store" });
     if (url.pathname === "/api/bookmarklet")
       return json(200, { port: opts.port, bookmarklet: bookmarkletJs(opts.port, opts.token) }, cors);
     if (url.pathname === "/api/personal/sources/history")

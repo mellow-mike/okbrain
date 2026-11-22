@@ -412,9 +412,23 @@ describe("server routes for the GUI", () => {
   test("GET /api/status describes the served bundle", async () => {
     const r = await call("api/status");
     expect(r.status).toBe(200);
+    expect(r.headers.get("cache-control")).toBe("no-store");
     const s = (await r.json()) as Record<string, unknown>;
-    expect(s).toMatchObject({ version: VERSION, okfVersion: OKF_VERSION, bundle, brain: null, readonly: false, hasIndex: true, hasVectors: false, port: api.port });
+    expect(s).toMatchObject({ version: VERSION, okfVersion: OKF_VERSION, bundle, brain: null, readonly: false,
+      cacheBackend: "sqlite", cacheError: null, hasIndex: true, hasVectors: false, port: api.port });
     expect(typeof s.actor).toBe("string");
+  });
+
+  test("cache settings require the local app token and same-origin JSON", async () => {
+    const path = "api/op/cache_settings";
+    const input = { method: "POST", headers: { "content-type": "application/json" }, body: "{}" };
+    expect((await call(`${path}?token=${TOKEN}`, input, null)).status).toBe(401);
+    expect((await call(path, { ...input, headers: { ...input.headers, origin: "https://other.example" } })).status).toBe(403);
+    expect((await call(path, { ...input, headers: { "content-type": "text/plain" } })).status).toBe(415);
+    const result = await call(path, input);
+    expect(result.status).toBe(200);
+    expect(result.headers.get("cache-control")).toBe("no-store");
+    expect(await result.json()).toEqual({ result: { backend: "sqlite" } });
   });
 
   test("GET /api/brains lists mount names + policy, never paths; GET /api/bookmarklet embeds the token", async () => {

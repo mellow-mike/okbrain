@@ -5,7 +5,7 @@
 // shared tags. Suggestions always route through review — accepting is a
 // separate explicit write (`link_accept`), never an auto-insert.
 
-import type { Engine } from "../engine/interface.ts";
+import type { IndexEngine } from "../engine/interface.ts";
 import { extractTargets } from "./links.ts";
 
 export interface LinkSuggestion {
@@ -38,10 +38,10 @@ const queryWords = (c: SuggestInput): string[] =>
       .filter((w) => w.length >= 3 && !STOP.has(w)),
   )].slice(0, 8);
 
-export function suggestLinks(concept: SuggestInput, eng: Engine, limit = 5): LinkSuggestion[] {
+export async function suggestLinks(concept: SuggestInput, eng: IndexEngine, limit = 5): Promise<LinkSuggestion[]> {
   // Never suggest what's already connected (either direction) or the self.
   const excluded = new Set<string>([concept.id, ...extractTargets(concept.id, concept.body)]);
-  for (const id of eng.edgesOf(concept.id).in) excluded.add(id);
+  for (const id of (await eng.edgesOf(concept.id)).in) excluded.add(id);
 
   const scores = new Map<string, { title: string; score: number; reasons: Set<string> }>();
   const bump = (id: string, title: string, pts: number, reason: string): void => {
@@ -52,7 +52,7 @@ export function suggestLinks(concept: SuggestInput, eng: Engine, limit = 5): Lin
     cur.reasons.add(reason);
   };
 
-  for (const { id, title, sharedTags } of eng.listLinkCandidates(concept.tags)) {
+  for (const { id, title, sharedTags } of await eng.listLinkCandidates(concept.tags)) {
     if (excluded.has(id)) continue;
     const name = title.trim();
     if (name.length >= 3 && new RegExp(`\\b${escapeRe(name)}\\b`, "i").test(concept.body))
@@ -63,7 +63,7 @@ export function suggestLinks(concept: SuggestInput, eng: Engine, limit = 5): Lin
 
   const words = queryWords(concept);
   for (const w of words)
-    eng.search(w, FTS_K).forEach((h, i) =>
+    (await eng.search(w, FTS_K)).forEach((h, i) =>
       bump(h.id, h.title, (2 / words.length) * ((FTS_K - i) / FTS_K), "similar content"),
     );
 

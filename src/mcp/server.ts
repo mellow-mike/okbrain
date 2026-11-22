@@ -98,7 +98,7 @@ export function createMcpServer(opts: McpOptions): Server {
         isError: true,
       };
     } finally {
-      local.close();
+      await local.close();
     }
   });
   return server;

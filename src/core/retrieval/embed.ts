@@ -12,7 +12,7 @@ import type { AiOptions } from "../ai/gateway.ts";
 import { createGateway, resolveCall } from "../ai/gateway.ts";
 import { gatewayEnvironment } from "../ai/local-keys.ts";
 import type { AiSettings } from "../config.ts";
-import type { VectorStore } from "../engine/interface.ts";
+import type { IndexVectors } from "../engine/interface.ts";
 import { VecError } from "../engine/vectors.ts";
 import { listConcepts, readConceptPermissive } from "../okf/bundle.ts";
 import { fmString, type OkfDocument } from "../okf/document.ts";
@@ -92,15 +92,15 @@ function prepare(doc: OkfDocument): Omit<Job, "id" | "vectors"> {
 /** (Re)embed the bundle at `root` into `store`. Incremental; safe to re-run. */
 export async function embedBundle(
   root: string,
-  store: VectorStore,
+  store: IndexVectors,
   emb: Embedder,
   opts: EmbedOptions = {},
 ): Promise<EmbedStats> {
   const batchSize = opts.batchSize ?? 32;
   const ids = await listConcepts(root);
-  const meta = store.meta();
+  const meta = await store.meta();
   const needReset = meta === null || meta.provider !== emb.provider || meta.model !== emb.model;
-  const have = needReset ? new Map<string, string>() : store.embeddedHashes();
+  const have = needReset ? new Map<string, string>() : await store.embeddedHashes();
 
   // Drop concepts that vanished from the bundle (reset wipes everything anyway).
   let removed = 0;
@@ -108,7 +108,7 @@ export async function embedBundle(
     const current = new Set(ids);
     for (const id of have.keys())
       if (!current.has(id)) {
-        store.remove(id);
+        await store.remove(id, meta);
         removed++;
       }
   }
@@ -118,7 +118,7 @@ export async function embedBundle(
   for (const id of ids) {
     const { doc, parsed } = await readConceptPermissive(root, id);
     if (!opts.includePrivate && (!parsed || isPrivateConcept(id, doc.frontmatter))) {
-      if (have.has(id)) { store.remove(id); removed++; }
+      if (have.has(id)) { await store.remove(id, meta); removed++; }
       continue;
     }
     const p = prepare(doc);
@@ -131,14 +131,16 @@ export async function embedBundle(
   const run = jobs.slice(0, opts.limit ?? jobs.length);
 
   let dim = meta?.dim ?? null;
+  let activeKey = meta;
   let didReset = false;
   let embedded = 0;
   let storedChunks = 0;
-  const flush = (job: Job) => {
-    store.replace(
+  const flush = async (job: Job) => {
+    await store.replace(
       job.id,
       job.hash,
       job.chunks.map((c, i) => ({ ...c, vector: job.vectors[i]! })),
+      activeKey,
     );
     embedded++;
     storedChunks += job.chunks.length;
@@ -150,7 +152,9 @@ export async function embedBundle(
     const vectors = await emb.embed(batch.map((b) => b.input));
     const d = vectors[0]!.length;
     if (needReset && !didReset) {
-      store.reset({ provider: emb.provider, model: emb.model, dim: d });
+      const next = { provider: emb.provider, model: emb.model, dim: d };
+      await store.reset(next, meta);
+      activeKey = next;
       didReset = true;
       dim = d;
     } else if (d !== dim) {
@@ -160,16 +164,17 @@ export async function embedBundle(
     }
     batch.forEach((b, j) => b.job.vectors.push(vectors[j]!));
     for (const job of new Set(batch.map((b) => b.job)))
-      if (job.vectors.length === job.inputs.length) flush(job);
+      if (job.vectors.length === job.inputs.length) await flush(job);
   }
 
   // Nothing produced text this run: a pending reset still must invalidate the
   // old key (we never learned a dim, so back to the never-embedded state).
   if (needReset && !didReset && queue.length === 0) {
-    store.clear();
+    await store.clear(meta);
+    activeKey = null;
     didReset = true;
   }
-  for (const job of run) if (job.inputs.length === 0) flush(job);
+  for (const job of run) if (job.inputs.length === 0) await flush(job);
 
   return {
     embedded,
@@ -179,7 +184,7 @@ export async function embedBundle(
     pending: jobs.length - run.length,
     provider: emb.provider,
     model: emb.model,
-    dim: store.meta()?.dim ?? dim,
+    dim: (await store.meta())?.dim ?? dim,
     reset: needReset && didReset,
   };
 }
@@ -192,14 +197,14 @@ export async function embedBundle(
 export async function embedConcept(
   root: string,
   id: string,
-  store: VectorStore,
+  store: IndexVectors,
   emb: Embedder,
 ): Promise<boolean> {
-  const meta = store.meta();
+  const meta = await store.meta();
   if (meta === null || meta.provider !== emb.provider || meta.model !== emb.model) return false;
   const { doc } = await readConceptPermissive(root, id);
   const p = prepare(doc);
-  if (store.embeddedHashes().get(id) === p.hash) return false;
+  if ((await store.embeddedHashes()).get(id) === p.hash) return false;
   let vectors: number[][] = [];
   if (p.inputs.length > 0) {
     vectors = await emb.embed(p.inputs);
@@ -208,6 +213,6 @@ export async function embedConcept(
         `${emb.provider}/${emb.model} returned ${vectors[0]!.length}-dim vectors but the store holds ${meta.dim}-dim`,
       );
   }
-  store.replace(id, p.hash, p.chunks.map((c, i) => ({ ...c, vector: vectors[i]! })));
+  await store.replace(id, p.hash, p.chunks.map((c, i) => ({ ...c, vector: vectors[i]! })), meta);
   return true;
 }

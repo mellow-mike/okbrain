@@ -5,7 +5,7 @@
 // no store, unreachable provider, dimension drift — degrades to keyword-only
 // with a note, never an error. Deterministic given its inputs.
 
-import type { Engine, SearchExcerptPart, VectorStore } from "../engine/interface.ts";
+import type { IndexEngine, IndexVectors, SearchExcerptPart } from "../engine/interface.ts";
 import { relationalRanking } from "./relational.ts";
 import type { RetrievalProfile } from "./profiles.ts";
 
@@ -28,8 +28,8 @@ export interface HybridHit {
 }
 
 export interface HybridArms {
-  engine: Engine;
-  vectors?: VectorStore;
+  engine: IndexEngine;
+  vectors?: IndexVectors;
   /** Embed queries in the store's space; absent = keyword-only. */
   embed?(texts: string[]): Promise<number[][]>;
 }
@@ -72,14 +72,15 @@ export async function hybridRetrieve(
   };
 
   for (const q of queries) {
-    rankings.push(eng.search(q, profile.ftsK, keywordExcerpts).map((hit) => {
+    const matches = await eng.search(q, profile.ftsK, keywordExcerpts);
+    rankings.push(matches.map((hit) => {
       mark(hit.id, "keyword");
       if (hit.keywordExcerpt && !excerpts.has(hit.id)) excerpts.set(hit.id, hit.keywordExcerpt);
       return hit.id;
     }));
     // Relational arm (4.3): typed-edge recall for queries naming a relation;
     // deterministic, and a strict no-op for everything else.
-    const rel = relationalRanking(q, eng);
+    const rel = await relationalRanking(q, eng);
     if (rel !== null) rankings.push(rel.ranking.map((id) => (mark(id, "relational"), id)));
   }
 
@@ -91,7 +92,7 @@ export async function hybridRetrieve(
     try {
       for (const qvec of await arms.embed(queries)) {
         const ranking: string[] = []; // chunks → concepts: best (first) chunk wins
-        for (const hit of arms.vectors.search(qvec, profile.vecK))
+        for (const hit of await arms.vectors.search(qvec, profile.vecK))
           if (!ranking.includes(hit.nodeId)) {
             ranking.push(hit.nodeId);
             mark(hit.nodeId, "vector");
@@ -108,7 +109,7 @@ export async function hybridRetrieve(
 
   const expanded = new Map<string, number>();
   for (const [id, score] of ordered.slice(0, profile.expandTop)) {
-    const { out, in: cited } = eng.edgesOf(id);
+    const { out, in: cited } = await eng.edgesOf(id);
     for (const nb of new Set([...out, ...cited]))
       if (!fused.has(nb)) {
         expanded.set(nb, Math.max(expanded.get(nb) ?? 0, score * GRAPH_DAMP));
@@ -119,7 +120,7 @@ export async function hybridRetrieve(
   const hits: HybridHit[] = [];
   for (const [id, score] of [...ordered, ...expanded.entries()].sort(byScore)) {
     if (hits.length === limit) break;
-    const node = eng.getNode(id);
+    const node = await eng.getNode(id);
     if (!node) continue; // stale vector row; the next okb index/embed reconciles
     hits.push({
       id,

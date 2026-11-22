@@ -60,6 +60,35 @@ jobs:
           worker_image=$(docker image inspect --format '{{.Id}}' okbrain-coding-worker:ci)
           bun run packaging/coding-worker/smoke.ts "$worker_image"
 
+  postgres:
+    name: Linux PostgreSQL and pgvector
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
+        env:
+          POSTGRES_USER: okbrain_test
+          POSTGRES_DB: okbrain_test
+          POSTGRES_PASSWORD: disposable_fixture_only
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U okbrain_test -d okbrain_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: Install pgvector in a dedicated extension schema
+        run: docker exec '${{ job.services.postgres.id }}' psql -v ON_ERROR_STOP=1 -U okbrain_test -d okbrain_test -c "CREATE SCHEMA vector_fixture; CREATE EXTENSION vector WITH SCHEMA vector_fixture;"
+      - name: Test database parity through adapters and the CLI
+        env:
+          OKB_TEST_POSTGRES_URL: postgresql://okbrain_test:disposable_fixture_only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/okbrain_test
+        run: bun test tests/engine.postgres.test.ts tests/engine.postgres-vectors.test.ts tests/e2e.postgres.test.ts tests/retrieval.embed.test.ts
+
   mac-app:
     name: macOS app (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -54,9 +54,9 @@ const me = {
 };
 
 describe("suggestLinks", () => {
-  test("title mention ranks first with its reason; word boundaries respected", () => {
+  test("title mention ranks first with its reason; word boundaries respected", async () => {
     const e = fixture();
-    const ss = suggestLinks(me, e);
+    const ss = await suggestLinks(me, e);
     expect(ss[0]!.id).toBe("notes/graphs"); // mention + shared tag + similarity
     expect(ss[0]!.reasons).toContain('mentions "Graph Theory"');
     // "Log" must not match inside "catalog"; "Catalog" itself does match.
@@ -66,26 +66,26 @@ describe("suggestLinks", () => {
     e.close();
   });
 
-  test("already-connected concepts (both directions) and self are excluded", () => {
+  test("already-connected concepts (both directions) and self are excluded", async () => {
     const e = fixture();
-    const ids = suggestLinks(me, e).map((s) => s.id);
+    const ids = (await suggestLinks(me, e)).map((s) => s.id);
     expect(ids).not.toContain("notes/me");
     expect(ids).not.toContain("notes/linked"); // out-link in body
     expect(ids).not.toContain("notes/backlinker"); // inbound edge
     e.close();
   });
 
-  test("shared tags contribute with a reason; limit respected", () => {
+  test("shared tags contribute with a reason; limit respected", async () => {
     const e = fixture();
-    const ss = suggestLinks(me, e, 10);
+    const ss = await suggestLinks(me, e, 10);
     const tagged = ss.find((s) => s.id === "notes/tagged");
     expect(tagged).toBeDefined();
     expect(tagged!.reasons).toContain("shares tags: math");
-    expect(suggestLinks(me, e, 1).length).toBe(1);
+    expect(await suggestLinks(me, e, 1)).toHaveLength(1);
     e.close();
   });
 
-  test("reads candidate metadata in one pass and preserves shared-tag ordering", () => {
+  test("reads candidate metadata in one pass and preserves shared-tag ordering", async () => {
     const e = fixture();
     try {
       e.upsertNode(node("notes/many-tags", "Many Tags", {
@@ -94,10 +94,10 @@ describe("suggestLinks", () => {
       const getNode = spyOn(e, "getNode");
       const getTags = spyOn(e, "getTags");
       const input = { ...me, title: "", description: "", body: "" };
-      expect(suggestLinks({ ...input, tags: ["zeta", "ALPHA", "beta", "gamma", "alpha", "alpha"] }, e)).toEqual([
+      expect(await suggestLinks({ ...input, tags: ["zeta", "ALPHA", "beta", "gamma", "alpha", "alpha"] }, e)).toEqual([
         { id: "notes/many-tags", title: "Many Tags", score: 1.5, reasons: ["shares tags: alpha, beta, gamma"] },
       ]);
-      expect(suggestLinks({ ...input, tags: [] }, e)).toEqual([]);
+      expect(await suggestLinks({ ...input, tags: [] }, e)).toEqual([]);
       expect(getNode).not.toHaveBeenCalled();
       expect(getTags).not.toHaveBeenCalled();
     } finally {

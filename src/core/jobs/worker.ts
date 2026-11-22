@@ -65,7 +65,7 @@ export function acquireJobsLock(bundle: string): () => void {
 export interface Job {
   name: string;
   /** Human reason to skip (returned, not run) — e.g. "no vector store". */
-  skip?: string;
+  skip?: string | (() => Promise<string | undefined>);
   run(): Promise<string>;
 }
 
@@ -95,17 +95,18 @@ export async function runJobs(bundle: string, jobs: Job[]): Promise<JobResult[]>
   const results: JobResult[] = [];
   try {
     for (const job of jobs) {
-      if (job.skip !== undefined) {
-        results.push({ name: job.name, ok: true, detail: job.skip, skipped: true, ms: 0 });
-        continue;
-      }
       if (stopping) {
         results.push({ name: job.name, ok: false, detail: "skipped: shutting down", skipped: true, ms: 0 });
         continue;
       }
-      log.info(`job ${job.name}…`);
       const t0 = Date.now();
       try {
+        const skip = typeof job.skip === "function" ? await job.skip() : job.skip;
+        if (skip !== undefined) {
+          results.push({ name: job.name, ok: true, detail: skip, skipped: true, ms: 0 });
+          continue;
+        }
+        log.info(`job ${job.name}…`);
         const detail = await job.run();
         results.push({ name: job.name, ok: true, detail, skipped: false, ms: Date.now() - t0 });
       } catch (e) {

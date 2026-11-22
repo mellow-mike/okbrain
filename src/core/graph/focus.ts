@@ -1,4 +1,4 @@
-import type { EdgeRecord, Engine, NodeRecord } from "../engine/interface.ts";
+import type { EdgeRecord, IndexEngine, NodeRecord } from "../engine/interface.ts";
 import { isPrivateConceptAt } from "../okf/privacy.ts";
 
 const SEARCH_LIMIT = 100;
@@ -23,15 +23,15 @@ function sourceOf(node: NodeRecord): Exclude<SourceFilter, "all"> {
   return /^https?:\/\//i.test(node.resource ?? "") ? "web" : "notes";
 }
 
-export async function focusedMap(bundle: string, engine: Engine, options: FocusOptions) {
-  const candidates = options.id ? [{ id: options.id }] : engine.search(options.query ?? "", SEARCH_LIMIT);
+export async function focusedMap(bundle: string, engine: IndexEngine, options: FocusOptions) {
+  const candidates = options.id ? [{ id: options.id }] : await engine.search(options.query ?? "", SEARCH_LIMIT);
   let bounded = candidates.length === SEARCH_LIMIT;
   const cache = new Map<string, Promise<{ node: NodeRecord; private: boolean } | null>>();
   function visibleNode(id: string) {
     let result = cache.get(id);
     if (!result) {
       result = (async () => {
-        const node = engine.getNode(id);
+        const node = await engine.getNode(id);
         if (!node || (options.source && options.source !== "all" && options.source !== sourceOf(node))) return null;
         if (options.since && (!node.timestamp || Date.parse(node.timestamp) < Date.parse(options.since))) return null;
         const privateNote = await isPrivateConceptAt(bundle, id);
@@ -54,7 +54,7 @@ export async function focusedMap(bundle: string, engine: Engine, options: FocusO
   for (const root of selected) add(root, true);
   const edges = new Map<string, EdgeRecord>();
   for (const { node: { id } } of selected) {
-    const { out, in: incoming } = engine.focusEdges(id, LINKS_PER_DIRECTION + 1);
+    const { out, in: incoming } = await engine.focusEdges(id, LINKS_PER_DIRECTION + 1);
     if (out.length > LINKS_PER_DIRECTION || incoming.length > LINKS_PER_DIRECTION) bounded = true;
     for (const edge of [...out.slice(0, LINKS_PER_DIRECTION), ...incoming.slice(0, LINKS_PER_DIRECTION)]) {
       if (edge.src === edge.dst) continue;

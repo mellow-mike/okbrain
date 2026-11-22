@@ -820,6 +820,7 @@ account and coding commands that operate independently of a selected brain.
 | `okb brains` | read (localOnly) | List configured brain mounts |
 | `okb serve [--open]` / `okb mcp` / `okb bookmarklet` | admin (localOnly) | Local GUI+API, MCP server, clip bookmarklet |
 | `okb export-viz` | read | Self-contained graph HTML with optional embedded fonts and explicit consent for private notes |
+| `okb cache-settings [sqlite\|postgres]` | admin | Choose per-brain SQLite or local PostgreSQL and pgvector caches |
 | `okb version` / `--version` | — | okbrain's version |
 
 Global flags: `--json` everywhere, `--bundle <path>`, `--brain <name>`
@@ -1020,15 +1021,19 @@ CI and the release workflow pin the Bun version (a floating
 in `packaging/`; artifacts stay unsigned until org certificates exist (hook
 points documented in `packaging/README.md`).
 
-### Scale path (opt-in, behind the same interfaces)
-More files / faster search → swap engine to **Postgres + pgvector** (ops
-unchanged; verify with a rebuild-parity test) — **deliberately deferred**:
-without Postgres in the 3-OS CI matrix it cannot meet the "most well-tested"
-bar, and no bundle has outgrown SQLite (decision 2026-07-20). Heavier
-background work → promote the single worker to a real queue. Multiple/team
-brains → **shipped** as multi-brain mounts (see §Surfaces). Single-user
-stays the default. Switching engines = point at the new engine +
-`okb rebuild`.
+### Local search and graph caches
+
+SQLite is the default. An owner can select PostgreSQL with pgvector for a
+physical brain folder from Settings or `okb cache-settings`. Each brain gets
+an isolated schema, and the connection URL stays in per-user application
+data. The PostgreSQL connection uses loopback to preserve local retrieval.
+The index includes private draft text for local browsing. The existing
+context and export rules continue to control when that text is shared.
+
+Run Index after switching caches and Embed if you use vector search.
+Markdown and YAML remain authoritative. A dedicated Linux CI job checks both
+caches against the same bundle and exercises PostgreSQL with installed
+pgvector. The three-OS suite uses SQLite.
 
 ---
 

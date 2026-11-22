@@ -2200,6 +2200,38 @@ function mountNoteUsageSettings(panel) {
   void update();
 }
 
+function mountCacheSettings(panel) {
+  var form = panel.querySelector('form');
+  var restore = panel.querySelector('[data-cache-sqlite]');
+  var message = panel.querySelector('[role="status"]');
+  var active = panel.querySelector('[data-cache-backend]');
+  function show(backend) {
+    active.textContent = backend === 'postgres' ? 'PostgreSQL with pgvector' : 'SQLite';
+    if (restore) restore.hidden = backend !== 'postgres';
+  }
+  show(STATUS?.cacheBackend);
+  if (!form) return;
+  var connect = form.querySelector('button');
+  var input = form.elements.connection;
+  async function save(backend, connection) {
+    connect.disabled = restore.disabled = true;
+    message.textContent = backend === 'postgres' ? 'Checking the local database…' : 'Switching to SQLite…';
+    try {
+      var state = await api('cache_settings', { backend: backend, connection: connection });
+      input.value = '';
+      show(state.backend);
+      message.textContent = 'Cache selection saved. Use Re-index to refresh search and graph. Run Embed if you use vector search.';
+      await refreshStatus();
+    } catch (error) { message.textContent = error.message; }
+    finally { connect.disabled = restore.disabled = false; }
+  }
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    void save('postgres', input.value);
+  });
+  restore.addEventListener('click', function () { void save('sqlite'); });
+}
+
 async function renderSettings(_arg, seq) {
   var st = STATUS || {};
   var mcpArgs = st.brain ? ['--brain', st.brain, 'mcp'] : ['--bundle', st.bundle || '<bundle>', 'mcp'];
@@ -2210,7 +2242,8 @@ async function renderSettings(_arg, seq) {
     '<dt>okbrain</dt><dd>' + esc(st.version || '?') + ' · writes OKF ' + esc(st.okfVersion || '?') + '</dd>' +
     '<dt>Bundle</dt><dd><code>' + esc(st.bundle || '?') + '</code>' + (st.brain ? ' (brain <strong>' + esc(st.brain) + '</strong>)' : '') +
     (st.readonly ? ' <span class="chip warn">read-only</span>' : '') + '</dd>' +
-    '<dt>Caches</dt><dd>' + (st.hasIndex ? 'index ✓' : 'no index') + ' · ' + (st.hasVectors ? 'vectors ✓' : 'no vectors') + '</dd>' +
+    '<dt>Caches</dt><dd>' + (st.cacheError ? 'unavailable' :
+      (st.hasIndex ? 'index ✓' : 'no index') + ' · ' + (st.hasVectors ? 'vectors ✓' : 'no vectors')) + '</dd>' +
     '<dt>Retrieval profile</dt><dd>' + esc(st.retrievalProfile || 'balanced') + '</dd>' +
     '<dt>Port</dt><dd>' + esc(st.port || '?') + ' (127.0.0.1 only)</dd></dl>' +
     '<section id="brain-mount-settings" class="stack"></section>' +
@@ -2221,6 +2254,14 @@ async function renderSettings(_arg, seq) {
       '<p class="muted">Count opens and verified Ask citations for this brain on this device. The last 30 days of counts appear on notes.</p>' +
       '<div class="row"><button data-usage-enable type="button" hidden>Turn on local counts</button>' +
       '<button data-usage-disable type="button" hidden>Turn off and clear counts</button></div><div role="status"></div></section>') +
+    '<section id="cache-settings" class="stack"><h3>Search and graph cache</h3>' +
+    '<p>Active backend <strong data-cache-backend></strong></p>' + (st.readonly ? '' :
+      '<details><summary>Change cache backend</summary><p class="muted">Connect to PostgreSQL with pgvector on this computer. The database stores searchable note text, including private drafts, along with graph data and any embeddings you build. Use a database you trust.</p>' +
+      '<form class="stack"><label class="field"><span>Local PostgreSQL connection URL</span>' +
+      '<input type="password" name="connection" maxlength="4096" autocomplete="off" spellcheck="false" required></label>' +
+      '<div class="row"><button type="submit">Connect and use PostgreSQL</button>' +
+      '<button data-cache-sqlite type="button" hidden>Use SQLite</button></div></form></details>') +
+    '<p role="status">' + esc(st.cacheError || '') + '</p></section>' +
     '<h3>Identity</h3><form id="actf" class="row">' +
     '<label class="field" style="flex:1"><span>Actor (generated.by / verified.by on your writes)</span>' +
     '<input id="act-in" value="' + esc(st.actor || '') + '" placeholder="human:alice"></label>' +
@@ -2305,6 +2346,7 @@ async function renderSettings(_arg, seq) {
   var show = setHtml;
   var usagePanel = document.getElementById('note-usage-settings');
   if (usagePanel) mountNoteUsageSettings(usagePanel);
+  mountCacheSettings(document.getElementById('cache-settings'));
   showBookmarklet();
   mountBundleWatch(document.getElementById('bundle-watch'), Boolean(st.readonly), seq);
   renderBrainMounts(document.getElementById('brain-mount-settings'), Boolean(st.readonly), seq);

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApiServer } from "../src/api.ts";
 import { loadConfig, saveConfig } from "../src/core/config.ts";
-import type { BundleWatchStatus } from "../src/core/engine/bundle-watch.ts";
+import { BundleWatcher, type BundleWatchStatus } from "../src/core/engine/bundle-watch.ts";
+import { openSqliteEngine } from "../src/core/engine/sqlite.ts";
 import { okb } from "./helpers.ts";
 
 const token = "test-local-bundle-watch-token";
@@ -33,6 +34,58 @@ const watchStatus = async (response: Response): Promise<BundleWatchStatus | null
   expect(response.status).toBe(200);
   return (await response.json() as { result: BundleWatchStatus | null }).result;
 };
+
+test("the watcher reconciles changed or recovered backends and releases each handle", async () => {
+  const bundle = await mkdtemp(join(tmpdir(), "okb-watch-backend-"));
+  await writeFile(join(bundle, "note.md"), article("Remote cache note", "remotewatchtoken"));
+  const engine = openSqliteEngine(":memory:");
+  let closed = 0;
+  let available = false;
+  let identity = "first";
+  let disconnected = false;
+  const watcher = new BundleWatcher(bundle, () => true, {
+    async identity() { return identity; },
+    async exists() {
+      if (disconnected) throw new Error("Cache disconnected.");
+      return available;
+    },
+    async open() {
+      if (disconnected) throw new Error("Cache disconnected.");
+      return { engine, async close() { available = true; closed++; } };
+    },
+  });
+  try {
+    const initial = await until(async () => watcher.status(), (value) => value.stats?.indexed === 1);
+    expect(initial.stats?.indexed).toBe(1);
+    expect(closed).toBe(1);
+    engine.wipe();
+    available = false;
+    await until(async () => closed, (value) => value === 2);
+    expect(closed).toBe(2);
+    expect(engine.search("remotewatchtoken").map(({ id }) => id)).toEqual(["note"]);
+
+    // The selected backend already has an index, but lacks the current note.
+    engine.wipe();
+    identity = "second";
+    await until(async () => closed, (value) => value === 3);
+    expect(closed).toBe(3);
+    expect(engine.getNode("note")?.title).toBe("Remote cache note");
+
+    disconnected = true;
+    const outage = await until(async () => watcher.status(), (value) => value.error !== null);
+    expect(outage.error).toBe("Cache disconnected.");
+    engine.wipe();
+    disconnected = false;
+    const recovered = await until(async () => watcher.status(), (value) => value.error === null);
+    expect(recovered.stats?.indexed).toBe(1);
+    expect(closed).toBe(4);
+    expect(engine.getNode("note")?.title).toBe("Remote cache note");
+  } finally {
+    await watcher.stop();
+    engine.close();
+    await rm(bundle, { recursive: true, force: true });
+  }
+}, 10_000);
 
 test("the local watcher reconciles external folder moves, edits, and deletes", async () => {
   const bundle = await mkdtemp(join(tmpdir(), "okb-watch-api-"));

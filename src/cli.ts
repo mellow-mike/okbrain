@@ -229,7 +229,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     }
     throw e;
   } finally {
-    local?.close();
+    await local?.close();
   }
 }
 

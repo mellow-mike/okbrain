@@ -5,7 +5,7 @@
 // not guessed from grammar: inbound then outbound neighbors, deduped — the
 // arm recalls candidates, fusion ranks them.
 
-import type { Engine } from "../engine/interface.ts";
+import type { IndexEngine } from "../engine/interface.ts";
 import { REL_VOCAB } from "../graph/typed-edges.ts";
 
 /** Question scaffolding stripped before the anchor search (FTS is AND-based). */
@@ -21,7 +21,7 @@ export interface RelationalMatch {
   anchor: string;
 }
 
-export function relationalRanking(query: string, eng: Engine): RelationalMatch | null {
+export async function relationalRanking(query: string, eng: IndexEngine): Promise<RelationalMatch | null> {
   const padded = ` ${query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
   let hit: { phrase: string; rel: string } | undefined;
   for (const v of REL_VOCAB)
@@ -35,10 +35,10 @@ export function relationalRanking(query: string, eng: Engine): RelationalMatch |
     .filter((t) => t !== "" && !STOP.has(t))
     .join(" ");
   if (rest === "") return null;
-  const anchor = eng.search(rest, 1)[0];
+  const [anchor] = await eng.search(rest, 1);
   if (anchor === undefined) return null;
 
-  const edges = eng.listEdges().filter((e) => e.rel === hit.rel);
+  const edges = (await eng.listEdges()).filter((e) => e.rel === hit.rel);
   const ranking = [
     ...new Set([
       ...edges.filter((e) => e.dst === anchor.id).map((e) => e.src),

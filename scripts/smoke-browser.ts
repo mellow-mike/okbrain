@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { chromium, type Browser, type Page } from "playwright";
 import { createApiServer } from "../src/api.ts";
 import { loadConfig } from "../src/core/config.ts";
+import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/core/engine/cache-settings.ts";
 
 const root = await mkdtemp(join(tmpdir(), "okbrain-browser-smoke-"));
 process.env.XDG_CONFIG_HOME = join(root, "config");
@@ -13,6 +14,7 @@ process.env.XDG_DATA_HOME = join(root, "data");
 process.env.APPDATA = join(root, "config");
 process.env.LOCALAPPDATA = join(root, "data");
 const bundle = join(root, "brain");
+const postgresFixture = process.env.OKB_SMOKE_CACHE_URL;
 await mkdir(bundle);
 const server = createApiServer({ bundle, port: 0 });
 const finishAnswer = Promise.withResolvers<void>();
@@ -152,6 +154,34 @@ try {
   await page.getByRole("link", { name: "Ask with ChatGPT", exact: true }).click();
   await page.getByText("Connect an eligible account to continue.").waitFor();
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
+  const cacheSettings = page.locator("#cache-settings");
+  await cacheSettings.getByText("SQLite", { exact: true }).waitFor();
+  await cacheSettings.getByText("Change cache backend", { exact: true }).click();
+  const cacheConnection = cacheSettings.getByLabel("Local PostgreSQL connection URL", { exact: true });
+  assert.equal(await cacheConnection.getAttribute("type"), "password");
+  await cacheConnection.fill("postgresql://user:browser-fixture-secret@example.invalid/brain");
+  await cacheSettings.getByRole("button", { name: "Connect and use PostgreSQL" }).click();
+  await cacheSettings.getByRole("status").getByText(/loopback address/).waitFor();
+  assert.doesNotMatch(await cacheSettings.getByRole("status").innerText(), /browser-fixture-secret/);
+  await cacheSettings.getByText("SQLite", { exact: true }).waitFor();
+  if (postgresFixture) {
+    await cacheConnection.fill(postgresFixture);
+    await cacheSettings.getByRole("button", { name: "Connect and use PostgreSQL" }).click();
+    await cacheSettings.getByText("PostgreSQL with pgvector", { exact: true }).waitFor();
+    assert.equal(await cacheConnection.inputValue(), "");
+    const indexed = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/index");
+    await page.getByRole("button", { name: "Re-index", exact: true }).click();
+    assert.equal((await indexed).status(), 200);
+    await nav.getByRole("link", { name: "Search", exact: true }).click();
+    await page.getByRole("searchbox", { name: "Search notes", exact: true }).fill("orchid");
+    await page.getByRole("searchbox", { name: "Search notes", exact: true }).press("Enter");
+    await page.locator("#sout mark", { hasText: "orchid" }).first().waitFor();
+    await nav.getByRole("link", { name: "Settings", exact: true }).click();
+    await cacheSettings.getByText("Change cache backend", { exact: true }).click();
+    await cacheSettings.getByRole("button", { name: "Use SQLite", exact: true }).click();
+    await cacheSettings.getByText("SQLite", { exact: true }).waitFor();
+  }
+  await cacheSettings.getByText("Change cache backend", { exact: true }).click();
   await page.getByRole("button", { name: "Turn on local counts" }).click();
   await page.getByText("Counting local usage.", { exact: true }).waitFor();
   await page.evaluate((id) => { location.hash = "#concept/" + encodeURIComponent(id); }, answerSource);
@@ -395,5 +425,11 @@ try {
   await chatFixture.stop(true);
   await browser?.close();
   await server.stop();
+  const namespace = postgresFixture ? readCacheSettings(bundle)?.namespace : null;
+  if (postgresFixture && namespace) {
+    const client = createCacheClient(postgresFixture);
+    try { await client`DROP SCHEMA IF EXISTS ${client(namespace)} CASCADE`; }
+    finally { await closeCacheClient(client); }
+  }
   await rm(root, { recursive: true, force: true });
 }

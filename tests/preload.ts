@@ -14,7 +14,7 @@ process.env.APPDATA = join(dir, "roaming"); // windows configDir
 process.env.LOCALAPPDATA = join(dir, "local"); // windows dataDir
 
 for (const key of Object.keys(process.env))
-  if (key.startsWith("OKB_")) delete process.env[key];
+  if (key.startsWith("OKB_") && key !== "OKB_TEST_POSTGRES_URL") delete process.env[key];
 for (const key of [
   "ANTHROPIC_API_KEY",
   "OPENAI_API_KEY",
