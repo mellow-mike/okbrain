@@ -4,29 +4,31 @@
 [![Platforms: macOS, Linux, Windows](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-4c6ef5?style=flat)](.github/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-4c6ef5?style=flat)](LICENSE)
 
-A local-first second brain and a foundation for durable coding workflows.
+A local-first second brain and a review workspace for recoverable coding requests.
 
 Your knowledge lives in a portable Markdown and YAML bundle compatible with
 [Open Knowledge Format v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format).
 Capture notes from the web and AI conversations, map how they relate, and ask
 questions with sources. Use a local model, a provider API key, or an eligible
-ChatGPT plan. The CLI, local web app, and MCP server share the same knowledge
-store. You can rebuild search and the graph from the files.
+ChatGPT plan. The macOS app, local web app, CLI, and MCP server share the same
+knowledge store. You can rebuild search and the graph from the files.
 
-In the local web app, open **Sources** to preview a ChatGPT or Claude export
-and import conversations as private drafts. You can start with a note or
-import and search your knowledge before setting up a model.
+Start on **Home** with a note, or open **Sources** to preview and import
+exports as private drafts. Search, review, and build focused maps offline.
+When using a ChatGPT plan, review the excerpts in **Ask with ChatGPT** before
+sending them.
 
-For coding, attach files or preview budgeted excerpts from specific projects
-in a Git repository. Start a local Pi Durable session, inspect its context and
-token usage, and resume with the same request ID after an interruption.
+Open **Coding** to register a permitted workspace, preview source excerpts,
+send a Pi Durable request, and inspect, resume, or review its result. The
+VS Code and Cursor extension previews saved editor files and opens run
+results for review. Connect a GitHub remote from Coding to review repository
+activity and hand off accepted work.
 See the [personal guide](docs/PERSONAL.md) and [coding guide](docs/CODING.md).
 
 > [!NOTE]
-> Pre-1.0 and not yet published to a package registry, so installing means a
-> one-command build from source (or `bun run package` for an offline archive).
-> The [roadmap](ROADMAP.md) tracks the personal product and the enterprise
-> coding path. CI runs on macOS, Linux, and Windows.
+> Download the macOS app and editor extension from a successful [CI run](https://github.com/mellow-mike/okbrain/actions/workflows/ci.yml).
+> Use **File → Open Brain Folder** in the app and **Extensions → Install from VSIX** in the editor.
+> [Packaging](packaging/README.md) covers local installation and builds. The [roadmap](ROADMAP.md) tracks release and deployment verification.
 
 ## Why
 
@@ -43,10 +45,9 @@ to it. okbrain inverts that: the markdown *is* the database.
   any other OKF tool. `okb upgrade` migrates older bundles.
 - **Local knowledge.** Notes, the graph, keyword search, and conversation
   imports work offline. Choose when a hosted model receives your context.
-- **One operations contract.** The CLI (`okb`), local web app (`okb serve`),
-  and MCP server (`okb mcp`) share the knowledge operations. The browser can
-  preview and import conversation files you select. Account sign-in, imports
-  by filesystem path, and coding sessions run from the CLI.
+- **Shared knowledge operations.** The CLI, macOS app, local web app, and
+  MCP server share the knowledge operations. Local app routes handle selected
+  file uploads, account consent, and coding sessions.
 - **Hybrid retrieval.** Keyword (FTS5/BM25) + semantic vectors (sqlite-vec) +
   graph expansion + typed-edge relational recall, fused into one ranking.
   `okb ask` answers with citations post-verified against your actual notes.

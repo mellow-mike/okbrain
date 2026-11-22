@@ -12,8 +12,29 @@ permissions:
   contents: write
 
 jobs:
+  mac-app:
+    name: Package macOS app (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    strategy:
+      matrix:
+        os: [macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun run package:mac --smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okbrain-${{ matrix.os }}
+          path: dist/okbrain-*-macos-*.zip
+          if-no-files-found: error
+
   release:
     runs-on: ubuntu-latest
+    needs: mac-app
     steps:
       - uses: actions/checkout@v4
 
@@ -34,11 +55,26 @@ jobs:
       - name: Build release archives
         run: bun run scripts/package-release.ts ${{ github.ref_name }}
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: okbrain-macos-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun run package:ide
+      - name: Checksum the apps and editor extension
+        working-directory: dist
+        run: sha256sum okbrain-*-macos-*.zip okbrain-coding.vsix >> SHA256SUMS.txt
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.vsix
             dist/SHA256SUMS.txt
           generate_release_notes: true

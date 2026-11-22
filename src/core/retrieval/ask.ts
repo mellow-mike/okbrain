@@ -96,7 +96,7 @@ export async function packContext(
 }
 
 /** Ids cited in the answer, in order of first appearance, verified against `packed`. */
-export function extractCitations(answer: string, packed: HybridHit[]): Citation[] {
+export function extractCitations(answer: string, packed: Citation[]): Citation[] {
   const known = new Map(packed.map((h) => [h.id, h.title]));
   const out: Citation[] = [];
   for (const m of answer.matchAll(/\[([^\][\n]+)\]/g)) {
@@ -116,8 +116,40 @@ export async function askBrain(
     ...(profile.multiQuery > 0 ? await queryVariants(question, profile.multiQuery, deps.chat) : []),
   ];
   const { hits, vectorSkipped } = await hybridRetrieve(queries, deps.arms, profile, profile.vecK);
-  const base = { profile: profile.name, vectorSkipped };
-  if (hits.length === 0)
+  const pool = deps.rerank && hits.length ? await deps.rerank(question, hits) : hits;
+  const { blocks, packed } = await packContext(deps.bundle, pool, profile.budgetChars);
+  return answerFromContext(question, { blocks, context: packed.map(citationOf), profile: profile.name, vectorSkipped }, deps);
+}
+
+function citationOf({ id, title }: Citation): Citation { return { id, title }; }
+
+export interface PreparedContext {
+  blocks: string[];
+  context: Citation[];
+  profile: string;
+  vectorSkipped: string | null;
+}
+
+export async function prepareLocalContext(
+  question: string,
+  bundle: string,
+  arms: Pick<HybridArms, "engine">,
+  profile: RetrievalProfile,
+  include: (hit: HybridHit) => boolean,
+): Promise<PreparedContext> {
+  const { hits, vectorSkipped } = await hybridRetrieve([question], arms, profile, profile.vecK);
+  const { blocks, packed } = await packContext(bundle, hits.filter(include), profile.budgetChars);
+  return { blocks, context: packed.map(citationOf), profile: profile.name, vectorSkipped };
+}
+
+export async function answerFromContext(
+  question: string,
+  prepared: PreparedContext,
+  deps: Pick<AskDeps, "chat" | "onContext">,
+): Promise<AskResult> {
+  const { blocks, context, profile, vectorSkipped } = prepared;
+  const base = { profile, vectorSkipped };
+  if (context.length === 0)
     return {
       ...base,
       answer: "No relevant concepts found in the brain — try `okb search`, or add notes first.",
@@ -127,9 +159,7 @@ export async function askBrain(
       model: null,
     };
 
-  const pool = deps.rerank ? await deps.rerank(question, hits) : hits;
-  const { blocks, packed } = await packContext(deps.bundle, pool, profile.budgetChars);
-  deps.onContext?.(packed.map(({ id, title }) => ({ id, title })));
+  deps.onContext?.(context);
   const { text, provider, model } = await deps.chat([
     { role: "system", content: SYNTH_SYSTEM },
     { role: "user", content: `Concepts:\n\n${blocks.join("\n\n")}\n\nQuestion: ${question}` },
@@ -137,8 +167,8 @@ export async function askBrain(
   return {
     ...base,
     answer: text,
-    citations: extractCitations(text, packed),
-    context: packed.map(({ id, title }) => ({ id, title })),
+    citations: extractCitations(text, context),
+    context,
     provider,
     model,
   };

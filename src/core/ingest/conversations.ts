@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
@@ -254,6 +254,7 @@ async function importExport(
   await checkDestination(root, dir);
   const rows = parseExport(await read());
   const seen = new Set<string>();
+  const stamp = { kind: provider, at: new Date().toISOString(), run: randomUUID() };
   try {
     for (const [index, row] of rows.entries()) {
       const conversation = parseRow(provider, row);
@@ -285,6 +286,7 @@ async function importExport(
           status: "draft",
           body: renderTranscript(messages),
           actor: actor ?? TOOL_ACTOR,
+          extra: { source_import: stamp },
           sources: [{
             id: "export",
             resource: `${provider}-export:conversation`,

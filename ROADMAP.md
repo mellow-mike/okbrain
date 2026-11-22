@@ -22,15 +22,18 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Reduce graph reads during link suggestions and incremental provenance refresh.
 - [x] Add browser onboarding and a Sources view for local ChatGPT and Claude
   exports, with selected-file preview and private draft import.
-- [ ] Make the first capture, search, and review flow discoverable from a fresh
-  install. Test with keyboard navigation, a narrow viewport, and offline use.
-- [ ] Add per-source import history and incremental reconciliation with review.
-  Prioritize browser bookmarks and Markdown and Notion exports next, followed
-  by read-only live connections with provider-supported consent and scopes.
-- [ ] Add browser account management and source visibility for hosted answers,
-  with explicit account, model, and sign-out controls.
-- [ ] Add focused maps for questions and projects, with filtering and graph
-  explanations that remain usable on large bundles.
+- [x] Make first capture, local search, and review discoverable from an empty
+  brain. Verified keyboard navigation at 375 px with outbound browser requests blocked.
+- [x] Add per-source history and reviewed reconciliation for browser
+  bookmarks, Markdown, and Notion exports. Preserve local edits in prior drafts.
+- [x] Add a live, read-only Notion connection limited to the pages a user shares
+  and explicitly previews. Support offline snapshot import and disconnect.
+- [x] Add browser ChatGPT account management with account selection, model
+  selection, sign-out, and exact source preview before sending a question.
+- [x] Add in-app provider key management and local model endpoint settings.
+- [x] Add bounded focused maps with source, privacy, and date filters and
+  explanations of direct relationships.
+- [x] Package the personal and coding interfaces in a native macOS app.
 
 ### Stage 8 — Enterprise coding
 
@@ -43,16 +46,21 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   recover from the stored snapshot.
 - [x] Expose local request status, active context estimates, Pi Durable history
   compaction, and recorded provider usage including cache counters.
-- [ ] Benchmark context quality, preview latency, and tokens per accepted result
-  against explicit attachments on large-repository tasks. Add versioned project
-  profiles, rebuildable symbol and dependency indexes, and measured prefix reuse.
+- [x] Add versioned project profiles, a rebuildable worktree-aware symbol and
+  dependency index, selection explanations, and stable Pi provider affinity.
+- [x] Compare explicit attachments, scoped lexical previews, and indexed
+  previews in a pinned synthetic monorepo with latency, evidence, and simulated
+  token and cache measurements.
+- [ ] Measure retrieval and live provider usage on representative monorepos with
+  independent human review of citations and outcomes.
 - [ ] Add tenant/project authorization, isolated workers, per-project
   credentials, and team run status and cancellation.
 - [ ] Verify failure and replay semantics in deployment, with audit events,
   retention, and change review and approvals.
+- [x] Add explicitly previewed, independent Pi Durable package reviews with
+  task-owned child conversations, combined usage, and a human-reviewed handoff.
 - [ ] Add approved execution and repository integration after the control
-  plane and worker boundaries are verified. Evaluate scoped child conversations
-  for independent packages with combined usage and a human-reviewed handoff.
+  plane and worker boundaries are verified.
 
 Stages 0–6 and the logs below are historical records.
 
@@ -525,9 +533,8 @@ Goal: the brain improves itself on a schedule.
       Postgres in the 3-OS CI matrix means it can't meet the "most
       well-tested" bar; the engine interface stays the seam; revisit when a
       bundle actually outgrows SQLite (decision 2026-07-20)
-- [!] Tauri/Electron desktop wrapper — the GUI is already cross-platform
-      via `okb serve`, and a wrapper adds the repo's heaviest dependency
-      for chrome; revisit on real demand (decision 2026-07-20)
+- [x] Native desktop app over the local API. AppKit and WebKit provide the
+      macOS window, folder selection, and both product workflows.
 
 ---
 

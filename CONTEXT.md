@@ -19,11 +19,13 @@ human review. Source context can be attached explicitly or selected from
 tracked files under caller-chosen Git project directories. Selection reports
 file and line ranges, an estimated excerpt budget, scan limits, and a digest
 of the selected bytes. Admission checks the digest and saves the exact
-selection. Recovery reads the saved input. The local CLI reports Pi Durable
+selection. Recovery reads the saved input. The app and CLI report Pi Durable
 status, active context estimates, and recorded provider and cache usage.
 Compaction reduces active context while preserving the original transcript.
-Team identities, worker isolation, approvals, repository credentials, and
-governance belong to the enterprise control plane on the roadmap.
+The project control plane scopes credentials, members, worker runs, and
+review decisions to registered projects. Independent package review uses Pi
+Durable child conversations with explicit package previews and combined usage.
+GitHub activity and compare handoff use a bound project remote.
 
 ---
 
@@ -70,15 +72,15 @@ governance belong to the enterprise control plane on the roadmap.
 Five layers, each with one responsibility:
 
 ```
- Surfaces (thin):   CLI        GUI (local web)        MCP server
+ Surfaces (thin):   CLI        macOS and web          MCP server
                       └──────────────┴──────────────────┘
  Ops contract:        core/operations.ts  (read/write/admin + trust)
                       ┌──────────┬──────────────┬──────────────┐
  Store (canonical):   OKF-compatible bundle (Markdown + YAML) │
  Engine (derived):    SQLite + sqlite-vec + FTS5 + graph  ◄────┘ rebuildable
  AI gateway:          embed | chat | rerank   (local | API)
- ChatGPT plan:        per-user sign-in + Responses API (CLI only)
- Coding:              Pi Durable 1.0 + private SQLite (CLI only)
+ ChatGPT plan:        per-user sign-in + reviewed source excerpts + Responses API
+ Coding:              Pi Durable 1.0 + private SQLite + editor integrations
  Skills + jobs:       fat markdown + thin resolver + cron worker
 ```
 
@@ -584,11 +586,16 @@ SQLite transaction serializes refresh token rotation. Disconnect attempts
 revocation before clearing the grant. Commands that manage the account use
 per-user storage and are independent of the selected bundle.
 
-`okb ask-plan` uses local FTS and graph expansion, packs the retrieved context
-with the normal citation pipeline, and invokes the Responses API with the
-selected ChatGPT plan. Inference succeeds when the stream completes. Embedding,
+`okb ask-plan` and the browser plan preview use local FTS and graph expansion.
+They pack context with the same citation pipeline and use the selected
+ChatGPT plan for the Responses API. Inference succeeds when the stream completes. Embedding,
 reranking, and API-key usage keep their existing routes. See the [personal
 guide](docs/PERSONAL.md) for account and privacy behavior.
+
+The local app uses dedicated header-authenticated routes for account consent and
+answer preview. Confirmation sends the short-lived reviewed snapshot under the
+selected account and model. Private drafts require explicit inclusion in that
+preview. Secrets and account actions stay outside generic operation discovery.
 
 ### Gateway (`core/ai/gateway.ts` + `recipes.ts`)
 One interface, three capabilities: `chat(messages)`, `embed(texts)`,
@@ -599,8 +606,8 @@ cover every recipe (openai-compatible / anthropic / gemini):
   `llama3.2` chat, `nomic-embed-text` embed.
 - **API:** Anthropic / OpenAI / Gemini / OpenRouter for chat; OpenAI / Voyage /
   Gemini for embeddings; Voyage for rerank (the only rerank recipe in v1).
-  Keys come only from env vars (`ANTHROPIC_API_KEY`, …) — never stored in
-  config; a missing key fails naming the exact var.
+  Keys come from environment variables (`ANTHROPIC_API_KEY`, …) or the
+  per-user provider credential database. Environment variables take precedence.
 - **Resolution (per capability, per call):** per-call override →
   `OKB_CHAT_/EMBED_/RERANK_PROVIDER|MODEL|BASE_URL` (generic
   `OKB_AI_PROVIDER` only wins capabilities it has) → `config.json` → key
@@ -802,7 +809,9 @@ over the registry, trusted like the CLI but defended like a network surface:
   never mount paths, per the 5.2 decision), `GET /api/bookmarklet`, and
   `POST /api/conversations/upload`. The upload accepts browser-selected JSON
   bytes, checks the write policy, and binds confirmation to the bytes,
-  provider, and active brain. The path-based import stays CLI-only.
+  provider, and active brain. Additional source routes accept file and folder
+  selections, and account, provider key, and coding routes keep sensitive
+  settings out of generic operation discovery.
 - **Brain scoping:** a request may name a configured mount with the
   `x-okb-brain` header (or `?brain=` for SSE); the request then runs against
   that bundle with its read-only policy, so the GUI's brain switcher never
@@ -872,10 +881,11 @@ Views:
   (`index`, `embed`, `doctor`, `export_viz`, confirm-gated `rebuild`, `jobs`
   with a job subset, `upgrade` preview + run), MCP setup snippets, the
   bookmarklet.
-Deliberately not a rich editor: the bundle is plain markdown and external
-editors remain first-class. Cross-platform free (it's a web app); an
-optional Tauri wrapper later gives a native desktop app over the same
-local API.
+The bundle remains plain Markdown and external editors can edit it directly.
+The AppKit macOS app embeds the same interface from its bundled loopback
+runtime. Native menus open brain or coding workspace folders and pass external
+links to the system browser. The VS Code and Cursor extension uses the loopback
+coding API to display previews and run reviews in editor tabs.
 
 ### Look & feel (the design system)
 The okbrain design system (`docs/context/REFERENCES.md` R5) is the source of

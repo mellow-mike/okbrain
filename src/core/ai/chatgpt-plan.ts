@@ -59,15 +59,16 @@ export interface ChatgptPlan {
   connect(account?: string): Promise<ChatgptPlanStatus>;
   status(): Promise<ChatgptPlanStatus>;
   use(account: string): Promise<ChatgptPlanStatus>;
-  disconnect(): Promise<{ revoked: boolean }>;
-  models(): Promise<PlanModel[]>;
-  complete(messages: ChatMessage[], model?: string): Promise<ChatgptPlanAnswer>;
+  disconnect(account?: string): Promise<{ revoked: boolean }>;
+  models(account?: string): Promise<PlanModel[]>;
+  complete(messages: ChatMessage[], model?: string, account?: string): Promise<ChatgptPlanAnswer>;
 }
 
-interface PlanOptions {
+export interface PlanOptions {
   path?: string;
   fetch?: typeof fetch;
   authorize?: (url: string) => void | Promise<void>;
+  signal?: AbortSignal;
 }
 
 function store(path: string): Database {
@@ -140,6 +141,7 @@ async function authorization(
   state: State,
   profile: Profile | undefined,
   open: NonNullable<PlanOptions["authorize"]>,
+  signal?: AbortSignal,
 ): Promise<{ code: string; clientId: string; verifier: string; nonce: string; redirectUri: string }> {
   const verifier = randomProof();
   const nonce = randomProof();
@@ -184,11 +186,15 @@ async function authorization(
     code_challenge: createHash("sha256").update(verifier).digest("base64url"),
   }).toString();
   const timer = setTimeout(() => callback.reject(new AiError("ChatGPT sign-in timed out")), 180_000);
+  const abort = () => callback.reject(new AiError("ChatGPT sign-in was cancelled"));
+  signal?.addEventListener("abort", abort, { once: true });
   try {
+    if (signal?.aborted) throw new AiError("ChatGPT sign-in was cancelled");
     await open(url.toString());
     return { ...(await callback.promise), verifier, nonce, redirectUri };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
     void server.stop();
   }
 }
@@ -262,7 +268,7 @@ export function createChatgptPlan(options: PlanOptions = {}): ChatgptPlan {
   async function json(response: Response): Promise<Json> {
     if (!response.ok) {
       if (response.status === 401 || response.status === 403)
-        throw new AiError("ChatGPT plan access was denied. Run `okb chatgpt connect` for the selected account.");
+        throw new AiError("ChatGPT plan access was denied. Reconnect the selected account.");
       if (response.status === 429) throw new AiError(`ChatGPT plan limit reached. Check ${CHATGPT_USAGE}`);
       throw new AiError(`ChatGPT plan request failed (HTTP ${response.status})`);
     }
@@ -279,11 +285,13 @@ export function createChatgptPlan(options: PlanOptions = {}): ChatgptPlan {
     }));
   }
 
-  const disconnected = () => new AiError("Connect a ChatGPT plan with `okb chatgpt connect` first");
+  const disconnected = () => new AiError("Connect a ChatGPT plan from Accounts or `okb chatgpt connect` first");
 
-  async function access(): Promise<string> {
+  async function access(account?: string): Promise<string> {
     if (!existsSync(path)) throw disconnected();
     const current = (state: State) => {
+      if (account !== undefined && state.active !== account)
+        throw new AiError("The active ChatGPT account changed. Preview sources again.");
       const profile = profileOf(state);
       if (!profile?.grant) throw disconnected();
       if (!profile.grant.scopes.includes(PLAN_SCOPE))
@@ -331,7 +339,7 @@ export function createChatgptPlan(options: PlanOptions = {}): ChatgptPlan {
       return withState(path, true, async (state) => {
         const label = account ?? (state.active || "default");
         const prior = profileOf(state, label);
-        const { code, clientId, verifier, nonce, redirectUri } = await authorization(state, prior, open);
+        const { code, clientId, verifier, nonce, redirectUri } = await authorization(state, prior, open, options.signal);
         const data = await token({
           grant_type: "authorization_code", client_id: clientId, code, code_verifier: verifier,
           redirect_uri: redirectUri,
@@ -351,6 +359,7 @@ export function createChatgptPlan(options: PlanOptions = {}): ChatgptPlan {
         const grant = parseGrant(data);
         if (!grant.scopes.includes(PLAN_SCOPE))
           throw new AiError(`ChatGPT sign-in did not grant plan usage. Check ${CHATGPT_USAGE}`);
+        if (options.signal?.aborted) throw new AiError("ChatGPT sign-in was cancelled");
         const entry = state.profiles.find(([name]) => name === label);
         const profile = { clientId, identity, grant };
         if (entry) entry[1] = profile;
@@ -364,9 +373,11 @@ export function createChatgptPlan(options: PlanOptions = {}): ChatgptPlan {
       state.active = account;
       return summarize(state);
     }),
-    async disconnect() {
+    async disconnect(account) {
       if (!existsSync(path)) return { revoked: true };
       return withState(path, true, async (state) => {
+        if (account !== undefined && state.active !== account)
+          throw new AiError("The active ChatGPT account changed. Select the account to sign out.");
         const profile = profileOf(state);
         if (!profile?.grant) return { revoked: true };
         let revoked = false;
@@ -389,9 +400,9 @@ export function createChatgptPlan(options: PlanOptions = {}): ChatgptPlan {
         return { revoked };
       });
     },
-    models: async () => models(await access()),
-    async complete(messages, model) {
-      const accessToken = await access();
+    models: async (account) => models(await access(account)),
+    async complete(messages, model, account) {
+      const accessToken = await access(account);
       const selected = model ?? (await models(accessToken))[0]?.slug;
       if (!selected) throw new AiError("No text models are available for the selected ChatGPT plan");
       const response = await request(`${API}/responses`, {

@@ -11,6 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { corsHeaders, createApiServer, hostAllowed, type ApiServer } from "../src/api.ts";
 import { loadConfig, saveConfig } from "../src/core/config.ts";
+import { createGateway } from "../src/core/ai/gateway.ts";
+import type { focusedMap } from "../src/core/graph/focus.ts";
 import { OKF_VERSION } from "../src/core/okf/indexmd.ts";
 import { operations } from "../src/core/operations.ts";
 import { VERSION } from "../src/core/version.ts";
@@ -146,13 +148,15 @@ describe("request guards", () => {
     expect(page).toContain(`window.OKB_TOKEN = "${TOKEN}"`);
     for (const link of [
       "#home", "#browse", "#graph", "#search", "#ask", "#review", "#inbox",
-      "#add", "#sources", "#edit", "#claims", "#stats", "#settings",
+      "#add", "#sources", "#edit", "#claims", "#stats", "#settings", "#accounts", "#map", "#coding",
     ])
       expect(page).toContain(`href="${link}"`);
   });
 
   test("the GUI JS wires every non-localOnly op in the registry to a surface", async () => {
-    const appJs = await (await fetch(base + "gui/app.js")).text();
+    const page = await (await fetch(base)).text();
+    const assets = [...page.matchAll(/<script src="(\/gui\/[^"/]+\.js)"/g)].map(([, asset]) => asset!);
+    const appJs = (await Promise.all(assets.map(async (asset) => (await fetch(new URL(asset, base))).text()))).join("\n");
     // Derived from the registry, so a new network-facing op cannot ship without a GUI home.
     for (const op of operations.filter((o) => !o.localOnly && o.name !== "ask"))
       expect(appJs).toContain(`'${op.name}'`);
@@ -161,6 +165,54 @@ describe("request guards", () => {
     // localOnly ops have dedicated routes or documented terminal recipes instead.
     for (const needle of ["/api/status", "/api/brains", "/api/bookmarklet", "okb mcp"])
       expect(appJs).toContain(needle);
+  });
+
+  test("focused maps explain real links and filter private drafts before return", async () => {
+    const secret = "db_only/plan-secret";
+    await post("write_concept", { id: secret, type: "note", title: "Private alpha", description: "A private note", body: "Private databases." });
+    await post("write_concept", { id: "notes/focus", type: "note", title: "Database plan", description: "Project datastore",
+      body: `Read [Alpha](/notes/alpha.md) and [draft](/${secret}.md).` });
+    const map = async (params: Record<string, unknown>) => {
+      const response = await post("focused_map", params);
+      return (await response.json() as { result: ReturnType<typeof focusedMap> }).result;
+    };
+    try {
+      const basic = await map({ id: "notes/focus" });
+      expect(basic.nodes.map((item: { id: string }) => item.id)).toEqual(["notes/focus", "notes/alpha"]);
+      expect(basic.edges).toContainEqual({ src: "notes/focus", dst: "notes/alpha", rel: null });
+      expect(JSON.stringify(basic)).not.toContain(secret);
+      expect((await map({ id: "notes/focus", "include-private": true })).nodes.some((node: { id: string; private: boolean }) => node.id === secret && node.private)).toBe(true);
+      expect((await map({ id: "notes/focus", source: "web" })).nodes).toEqual([]);
+      expect((await map({ id: "notes/focus", since: "2999-01-01" })).nodes).toEqual([]);
+      expect((await map({ query: "databases" })).nodes.some((node: { id: string; root: boolean }) => node.id === "notes/alpha" && node.root)).toBe(true);
+      expect((await post("focused_map", { id: "notes/focus", since: "2026-02-30" })).status).toBe(400);
+    } finally {
+      await rm(join(bundle, `${secret}.md`), { force: true });
+      await rm(join(bundle, "notes", "focus.md"), { force: true });
+      await post("index", {});
+    }
+  });
+
+  test("browser provider keys flow into gateway calls without returning credential text", async () => {
+    const key = "local-test-provider-key";
+    const edit = (value: string | null) => call("api/provider-keys", { method: "POST", body: JSON.stringify({ provider: "openai", key: value }) });
+    const inference = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+      expect(request.headers.get("authorization")).toBe(`Bearer ${key}`);
+      return Response.json({ choices: [{ message: { content: "Provider response" } }] });
+    } });
+    try {
+      expect((await fetch(`${base}api/provider-keys?token=${TOKEN}`)).status).toBe(401);
+      const setup = await edit(key);
+      expect(setup.status).toBe(200);
+      const serialized = await setup.text();
+      expect(serialized).not.toContain(key);
+      expect(JSON.parse(serialized).result).toContainEqual({ provider: "openai", saved: true, environment: false });
+      const gateway = createGateway({ provider: "openai", baseUrl: `http://127.0.0.1:${inference.port}` });
+      expect((await gateway.chat([{ role: "user", content: "Summarize" }])).text).toBe("Provider response");
+    } finally {
+      inference.stop(true);
+      expect((await edit(null)).status).toBe(200);
+    }
   });
 
   test("GUI assets served tokenless with correct content types", async () => {

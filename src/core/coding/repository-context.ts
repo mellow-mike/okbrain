@@ -1,17 +1,19 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
+import { maxProfileProjects, maxProfileTokens, validateCodingProjectProfile, type CodingProjectProfile } from "./project-profile.ts";
+import { dependencyResolver, fileStructure, indexRepository, type RepositoryFileStructure } from "./repository-index.ts";
 
 const defaultTokenBudget = 4096;
-const maxTokenBudget = 16384;
+const maxTokenBudget = maxProfileTokens;
 const maxTrackedPaths = 20000;
 const maxGitOutputBytes = 4 * 1024 * 1024;
 const maxScannedFiles = 256;
 const maxFileBytes = 64 * 1024;
 const maxExcerptBytes = 4 * 1024;
 const maxSelectedFiles = 12;
-const maxProjects = 8;
+const maxProjects = maxProfileProjects;
 const maxQueryBytes = 1024;
 
 const excludedDirectories = new Set([
@@ -32,7 +34,8 @@ export class RepositoryContextError extends Error {}
 
 export interface RepositoryContextOptions {
   workspace: string;
-  projects: string[];
+  projects?: string[];
+  profile?: CodingProjectProfile;
   query: string;
   tokenBudget?: number;
 }
@@ -62,12 +65,16 @@ export interface RepositoryContextManifest {
     selectedFiles: boolean;
     tokenBudget: boolean;
   };
-  files: Array<Omit<RepositoryContextExcerpt, "content"> & { sha256: string }>;
+  files: Array<Omit<RepositoryContextExcerpt, "content"> & { sha256: string; reason?: string }>;
+  profile?: Pick<CodingProjectProfile, "name" | "version" | "sharedProjects" | "exclude"> & { id: string };
+  workspaceRevision?: string;
+  index?: { indexedFiles: number; limited: boolean; expandedFiles: number };
 }
 
 export interface RepositoryContextSelection {
   manifest: RepositoryContextManifest;
   excerpts: RepositoryContextExcerpt[];
+  guidance?: string;
 }
 
 function portablePath(path: string): string {
@@ -94,7 +101,7 @@ async function projectScopes(workspace: string, projects: string[]): Promise<str
   return [...scopes].sort();
 }
 
-function excludedPath(path: string): boolean {
+export function excludedPath(path: string): boolean {
   const parts = path.toLowerCase().split("/");
   const file = parts.pop()!;
   return parts.some((part) => excludedDirectories.has(part))
@@ -105,13 +112,31 @@ function excludedPath(path: string): boolean {
     || /\.(?:min|generated|bundle)\.[^.]+$/u.test(file);
 }
 
-async function readGitIndex(workspace: string, projects: string[]): Promise<{ bytes: Buffer; limited: boolean }> {
+function gitEnvironment() {
   const env = { ...process.env };
   for (const name of ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[name];
+  return env;
+}
+
+async function readRevision(workspace: string): Promise<string | undefined> {
+  const child = Bun.spawn(["git", "rev-parse", "--verify", "--quiet", "HEAD"], {
+    cwd: workspace, env: gitEnvironment(), stdout: "pipe", stderr: "ignore",
+  });
+  const timeout = setTimeout(() => child.kill(), 10000);
+  try {
+    const [status, output] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+    const revision = output.trim();
+    if (status === 0 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(revision)) return revision;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readGitIndex(workspace: string, projects: string[]): Promise<{ bytes: Buffer; limited: boolean }> {
   let child;
   try {
     child = Bun.spawn(["git", "-c", "core.fsmonitor=false", "--literal-pathspecs", "ls-files", "--cached", "--stage", "-z", "--", ...projects], {
-      cwd: workspace, env, stdout: "pipe", stderr: "ignore",
+      cwd: workspace, env: gitEnvironment(), stdout: "pipe", stderr: "ignore",
     });
   } catch (error) {
     throw new RepositoryContextError("Could not start Git to list tracked workspace files.", { cause: error });
@@ -161,9 +186,15 @@ interface Candidate {
   path: string;
   pathTerms: Set<string>;
   groupOrder: number;
+  group: string;
+  shared: boolean;
 }
 
-function listCandidates(bytes: Buffer, projects: string[], pattern: RegExp): { candidates: Candidate[]; trackedPaths: number; limited: boolean } {
+function directoryOf(path: string, scopes: string[]): string | undefined {
+  return scopes.findLast((scope) => scope === "." || path.startsWith(`${scope}/`));
+}
+
+function listCandidates(bytes: Buffer, projects: string[], pattern: RegExp, sharedProjects: string[], exclude: string[]): { candidates: Candidate[]; trackedPaths: number; limited: boolean } {
   const candidates: Candidate[] = [];
   const groupCounts = new Map<string, number>();
   let trackedPaths = 0;
@@ -186,8 +217,10 @@ function listCandidates(bytes: Buffer, projects: string[], pattern: RegExp): { c
     } catch {
       continue;
     }
-    if (invalidPathCharacters.test(path) || path.split("/").some((part) => part === "" || part === "." || part === "..") || excludedPath(path)) continue;
-    const project = projects.findLast((scope) => scope === "." || path.startsWith(`${scope}/`));
+    if (invalidPathCharacters.test(path) || path.split("/").some((part) => part === "" || part === "." || part === "..") || excludedPath(path)
+      || exclude.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) continue;
+    const direct = directoryOf(path, projects);
+    const project = direct ?? directoryOf(path, sharedProjects);
     if (project === undefined) continue;
     const projectPath = project === "." ? path : path.slice(project.length + 1);
     const slash = projectPath.indexOf("/");
@@ -196,7 +229,7 @@ function listCandidates(bytes: Buffer, projects: string[], pattern: RegExp): { c
     const key = `${pathTerms.size}\0${project}\0${group}`;
     const groupOrder = groupCounts.get(key) ?? 0;
     groupCounts.set(key, groupOrder + 1);
-    candidates.push({ path, pathTerms, groupOrder });
+    candidates.push({ path, pathTerms, groupOrder, group: `${project}\0${group}`, shared: direct === undefined });
   }
   // Give equally relevant candidates from different project subdirectories a first pass.
   candidates.sort((a, b) => b.pathTerms.size - a.pathTerms.size || a.groupOrder - b.groupOrder || comparePath(a.path, b.path));
@@ -207,16 +240,29 @@ function comparePath(a: string, b: string): number {
   return a < b ? -1 : a === b ? 0 : 1;
 }
 
-async function readTrackedText(workspace: string, path: string): Promise<{ lines: string[]; limited: boolean } | undefined> {
+function fingerprint(info: BigIntStats): string {
+  return [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join(":");
+}
+
+async function worktreeStamp(workspace: string, path: string): Promise<string | undefined> {
+  const candidate = join(workspace, path);
+  try {
+    if (await realpath(candidate) !== candidate) return;
+    const info = await stat(candidate, { bigint: true });
+    if (info.isFile()) return fingerprint(info);
+  } catch { /* Vanished, unreadable, or substituted path. */ }
+}
+
+async function readTrackedText(workspace: string, path: string): Promise<{ lines: string[]; limited: boolean; stamp: string } | undefined> {
   const candidate = join(workspace, path);
   try {
     // Compare the canonical path to exclude both leaf and ancestor symlinks.
     if (await realpath(candidate) !== candidate) return;
     const file = await open(candidate, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
-      const info = await file.stat();
+      const info = await file.stat({ bigint: true });
       if (!info.isFile()) return;
-      const buffer = Buffer.alloc(Math.min(info.size, maxFileBytes) + 1);
+      const buffer = Buffer.alloc(Math.min(Number(info.size), maxFileBytes) + 1);
       let offset = 0;
       while (offset < buffer.length) {
         const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset);
@@ -224,8 +270,8 @@ async function readTrackedText(workspace: string, path: string): Promise<{ lines
         offset += bytesRead;
       }
       if (await realpath(candidate) !== candidate) return;
-      const current = await stat(candidate);
-      if (current.dev !== info.dev || current.ino !== info.ino || current.size !== info.size || current.mtimeMs !== info.mtimeMs) return;
+      const stamp = fingerprint(info);
+      if (fingerprint(await stat(candidate, { bigint: true })) !== stamp) return;
       const limited = offset > maxFileBytes;
       // Discard any partial line so the line range always identifies complete lines.
       const end = limited ? buffer.lastIndexOf(10, maxFileBytes - 1) + 1 : offset;
@@ -233,7 +279,7 @@ async function readTrackedText(workspace: string, path: string): Promise<{ lines
       if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/u.test(body)) return;
       const lines = body.split(/\r?\n/u);
       if (lines.at(-1) === "") lines.pop();
-      return { lines, limited };
+      return { lines, limited, stamp };
     } finally {
       await file.close();
     }
@@ -248,6 +294,8 @@ interface Match {
   lines: string[];
   center: number;
   score: number;
+  reason?: string;
+  dependencyOf?: string;
 }
 
 function findMatch(candidate: Candidate, lines: string[], pattern: RegExp): Match | undefined {
@@ -267,6 +315,77 @@ function findMatch(candidate: Candidate, lines: string[], pattern: RegExp): Matc
   // Distinct query terms drive ranking, with a preference for concentrated matches.
   const score = terms.size * 4 + bestLineTerms * 2 + candidate.pathTerms.size;
   return { path: candidate.path, lines, center, score };
+}
+
+type TrackedText = NonNullable<Awaited<ReturnType<typeof readTrackedText>>>;
+
+interface QueryHints {
+  identifiers: Set<string>;
+  paths: Set<string>;
+}
+
+function matchesPath(path: string, hints: QueryHints): boolean {
+  return hints.paths.has(path.toLowerCase());
+}
+
+function matchedSymbol(file: RepositoryFileStructure | undefined, hints: QueryHints) {
+  return file?.symbols.find(({ name }) => hints.identifiers.has(name.toLowerCase()));
+}
+
+function profileMatch(candidate: Candidate, source: TrackedText, pattern: RegExp, hints: QueryHints, saved: RepositoryFileStructure | undefined): Match | undefined {
+  if (!source.lines.length) return;
+  const lexical = findMatch(candidate, source.lines, pattern);
+  const symbol = matchedSymbol(saved?.stamp === source.stamp ? saved : fileStructure(candidate.path, source), hints);
+  const exactPath = matchesPath(candidate.path, hints);
+  if (!exactPath && !symbol) return lexical && { ...lexical, reason: "Path or source text matches the query" };
+  return {
+    path: candidate.path, lines: source.lines, center: symbol?.line ?? lexical?.center ?? 0,
+    score: (lexical?.score ?? 0) + (exactPath ? 400 : 200),
+    reason: exactPath ? "Exact workspace path" : `Declares ${symbol!.name}`,
+  };
+}
+
+function compareMatches(a: Match, b: Match): number {
+  return b.score - a.score || comparePath(a.path, b.path);
+}
+
+function indexPaths(candidates: Candidate[]): string[] {
+  const counts = new Map<string, number>();
+  return [...candidates].sort((a, b) => comparePath(a.path, b.path)).map(({ path, group }) => {
+    const order = counts.get(group) ?? 0;
+    counts.set(group, order + 1);
+    return { path, order };
+  }).sort((a, b) => a.order - b.order || comparePath(a.path, b.path)).map(({ path }) => path);
+}
+
+async function expandDependencies(workspace: string, primary: Match[], candidates: Candidate[], sources: Map<string, TrackedText>,
+  index: ReadonlyMap<string, RepositoryFileStructure>): Promise<{ matches: Match[]; fileBytes: boolean }> {
+  const seen = new Set(primary.map((match) => match.path));
+  const resolver = dependencyResolver(index, new Set(candidates.map(({ path }) => path)));
+  const matches: Match[] = [];
+  let fileBytes = false;
+  for (const parent of primary.slice(0, 4)) {
+    const source = sources.get(parent.path)!;
+    const stored = index.get(parent.path);
+    const structure = stored?.stamp === source.stamp ? stored : fileStructure(parent.path, source);
+    let expanded = 0;
+    for (const imported of structure.imports) {
+      const path = resolver(parent.path, imported);
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      const dependency = sources.get(path) ?? await readTrackedText(workspace, path);
+      if (!dependency?.lines.length) continue;
+      fileBytes ||= dependency.limited;
+      matches.push({
+        path, lines: dependency.lines, center: 0, score: Math.max(0, parent.score - 1),
+        reason: `Direct import from ${parent.path}`, dependencyOf: parent.path,
+      });
+      expanded++;
+      if (matches.length === 6) return { matches, fileBytes };
+      if (expanded === 2) break;
+    }
+  }
+  return { matches, fileBytes };
 }
 
 function excerptAt(match: Match, byteLimit: number): RepositoryContextExcerpt | undefined {
@@ -303,7 +422,16 @@ function sha256(text: string): string {
 /** Select bounded source excerpts for local inspection or a confirmed coding request. */
 export async function selectRepositoryContext(options: RepositoryContextOptions): Promise<RepositoryContextSelection> {
   const query = options.query.trim();
-  const tokenBudget = options.tokenBudget ?? defaultTokenBudget;
+  let profile: CodingProjectProfile | undefined;
+  if (options.profile !== undefined) {
+    if (options.projects !== undefined) throw new RepositoryContextError("Choose explicit project directories or a project profile.");
+    try {
+      profile = validateCodingProjectProfile(options.profile);
+    } catch (error) {
+      throw new RepositoryContextError((error as Error).message, { cause: error });
+    }
+  }
+  const tokenBudget = options.tokenBudget ?? profile?.tokenBudget ?? defaultTokenBudget;
   if (!Number.isInteger(tokenBudget) || tokenBudget < 1 || tokenBudget > maxTokenBudget) {
     throw new RepositoryContextError(`Choose a whole repository context token budget from 1 to ${maxTokenBudget}.`);
   }
@@ -320,14 +448,31 @@ export async function selectRepositoryContext(options: RepositoryContextOptions)
   if (!workspace || !(await stat(workspace).catch(() => undefined))?.isDirectory()) {
     throw new RepositoryContextError("Choose an existing coding workspace directory.");
   }
-  const projects = await projectScopes(workspace, options.projects);
-  const listing = await readGitIndex(workspace, projects);
-  const { candidates, trackedPaths, limited } = listCandidates(listing.bytes, projects, pattern);
-  const toScan = candidates.slice(0, maxScannedFiles);
+  const projects = await projectScopes(workspace, profile?.projects ?? options.projects ?? []);
+  const sharedProjects = profile?.sharedProjects?.length ? await projectScopes(workspace, profile.sharedProjects) : [];
+  const listing = await readGitIndex(workspace, [...new Set([...projects, ...sharedProjects])]);
+  const { candidates, trackedPaths, limited } = listCandidates(listing.bytes, projects, pattern, sharedProjects, profile?.exclude ?? []);
+  const workspaceRevision = profile ? await readRevision(workspace) : undefined;
+  const index = profile ? await indexRepository({
+    workspace, revision: createHash("sha256").update(workspaceRevision ?? "unborn").update(listing.bytes).digest("hex"),
+    paths: indexPaths(candidates), stamp: (path) => worktreeStamp(workspace, path), read: (path) => readTrackedText(workspace, path),
+  }) : undefined;
+  const hints: QueryHints = {
+    identifiers: new Set(query.toLowerCase().match(/[\p{L}_$][\p{L}\p{N}_$]*/gu)?.filter((term) => !stopWords.has(term))),
+    paths: new Set(query.toLowerCase().split(/\s+/u).map((term) => term.replaceAll("\\", "/").replace(/^\.\//u, "").replace(/:\d+(?::\d+)?$/u, ""))),
+  };
+  const eligible = candidates.filter(({ shared }) => !shared);
+  if (index) {
+    const rank = (path: string) => matchesPath(path, hints) ? 2 : matchedSymbol(index.files.get(path), hints) ? 1 : 0;
+    // Stable sort keeps the lexical path and group ordering among equal ranks.
+    eligible.sort((a, b) => rank(b.path) - rank(a.path));
+  }
+  const toScan = eligible.slice(0, maxScannedFiles);
   const matches: Match[] = [];
+  const sources = new Map<string, TrackedText>();
   const limitsReached = {
     trackedPaths: listing.limited || limited,
-    scannedFiles: candidates.length > toScan.length,
+    scannedFiles: eligible.length > toScan.length,
     fileBytes: false,
     selectedFiles: false,
     tokenBudget: false,
@@ -336,14 +481,25 @@ export async function selectRepositoryContext(options: RepositoryContextOptions)
     const source = await readTrackedText(workspace, candidate.path);
     if (!source) continue;
     limitsReached.fileBytes ||= source.limited;
-    const match = findMatch(candidate, source.lines, pattern);
-    if (match) matches.push(match);
+    const match = index ? profileMatch(candidate, source, pattern, hints, index.files.get(candidate.path)) : findMatch(candidate, source.lines, pattern);
+    if (!match) continue;
+    if (index) sources.set(candidate.path, source);
+    matches.push(match);
   }
-  matches.sort((a, b) => b.score - a.score || comparePath(a.path, b.path));
+  matches.sort(compareMatches);
+  const expanded = index ? await expandDependencies(workspace, matches, candidates, sources, index.files) : undefined;
+  if (expanded) {
+    matches.push(...expanded.matches);
+    matches.sort(compareMatches);
+    limitsReached.fileBytes ||= expanded.fileBytes;
+  }
 
   const excerpts: RepositoryContextExcerpt[] = [];
+  const reasons = new Map<string, string>();
+  const selected = new Set<string>();
   let contextBytes = 2; // Empty JSON array.
   for (const match of matches) {
+    if (match.dependencyOf && !selected.has(match.dependencyOf)) continue;
     if (excerpts.length === maxSelectedFiles) {
       limitsReached.selectedFiles = true;
       break;
@@ -358,14 +514,27 @@ export async function selectRepositoryContext(options: RepositoryContextOptions)
     const excerpt = preferredBytes <= remaining ? preferred : excerptAt(match, remaining);
     if (!excerpt) continue;
     excerpts.push(excerpt);
+    selected.add(match.path);
+    if (match.reason) reasons.set(match.path, match.reason);
     contextBytes += serializedBytes(excerpt) + comma;
   }
 
-  const files = excerpts.map(({ path, startLine, endLine, content }) => ({ path, startLine, endLine, sha256: sha256(content) }));
+  const files = excerpts.map(({ path, startLine, endLine, content }) => {
+    const reason = reasons.get(path);
+    return { path, startLine, endLine, sha256: sha256(content), ...(reason ? { reason } : {}) };
+  });
+  const profileReceipt = profile && {
+    version: profile.version, name: profile.name, id: sha256(JSON.stringify(profile)),
+    ...(sharedProjects.length ? { sharedProjects } : {}), ...(profile.exclude ? { exclude: profile.exclude } : {}),
+  };
   const manifest: RepositoryContextManifest = {
-    id: sha256(JSON.stringify([1, projects, query, tokenBudget, files])), projects, query, tokenBudget,
+    id: sha256(JSON.stringify(profileReceipt
+      ? [2, workspaceRevision, projects, query, tokenBudget, files, profileReceipt.id]
+      : [1, projects, query, tokenBudget, files])), projects, query, tokenBudget,
     estimatedTokens: Math.ceil(contextBytes / 2), contextBytes, trackedPaths, candidateFiles: candidates.length,
     scannedFiles: toScan.length, matchedFiles: matches.length, limitsReached, files,
+    ...(profileReceipt ? { profile: profileReceipt } : {}), ...(workspaceRevision ? { workspaceRevision } : {}),
+    ...(index ? { index: { indexedFiles: index.files.size, limited: index.limited, expandedFiles: expanded?.matches.length ?? 0 } } : {}),
   };
-  return { manifest, excerpts };
+  return { manifest, excerpts, ...(profile?.guidance ? { guidance: profile.guidance } : {}) };
 }

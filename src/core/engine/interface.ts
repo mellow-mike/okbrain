@@ -146,6 +146,8 @@ export interface Engine {
   listEdges(): EdgeRecord[];
   /** One concept's resolved links (`out`) and backlinks (`in`), sorted. */
   edgesOf(id: string): { out: string[]; in: string[] };
+  /** Direct resolved links in each direction with an independent bound. */
+  focusEdges(id: string, limit: number): { out: EdgeRecord[]; in: EdgeRecord[] };
   /** Keyword search (BM25) over title/body/tags. */
   search(query: string, limit?: number): SearchHit[];
   /** Undirected neighborhood (links + backlinks) out to `depth` hops. */

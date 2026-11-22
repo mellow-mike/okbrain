@@ -6,11 +6,35 @@ declare module "*/index.html" {
   const text: string;
   export default text;
 }
+declare module "*/coding-team.html" {
+  const text: string;
+  export default text;
+}
 declare module "*.css" {
   const text: string;
   export default text;
 }
 declare module "*/app.js" {
+  const text: string;
+  export default text;
+}
+declare module "*/coding.js" {
+  const text: string;
+  export default text;
+}
+declare module "*/github.js" {
+  const text: string;
+  export default text;
+}
+declare module "*/notion.js" {
+  const text: string;
+  export default text;
+}
+declare module "*/accounts.js" {
+  const text: string;
+  export default text;
+}
+declare module "*/focused-map.js" {
   const text: string;
   export default text;
 }

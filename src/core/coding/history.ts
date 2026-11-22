@@ -110,7 +110,7 @@ function blockedRequest(model: Model<Api>, errorMessage: string) {
   return stream;
 }
 
-export function budgetedModels(models: Models, budget: CodingBudget): Models {
+export function budgetedModels(models: Models, budget: CodingBudget, sessionId: string): Models {
   const streamSimple: Models["streamSimple"] = (model, context, options) => {
     const messages = outboundMessages(context.messages);
     // Durable's beforeRequest hooks are fail-soft. Enforce the budget at the provider boundary,
@@ -118,6 +118,8 @@ export function budgetedModels(models: Models, budget: CodingBudget): Models {
     if (estimateOutboundTokens(messages) <= budget.limitTokens) {
       return models.streamSimple(model, { ...context, messages }, {
         ...options,
+        // Preserve provider affinity across harness openings, scoped to this transcript.
+        sessionId,
         maxTokens: Math.min(options?.maxTokens ?? budget.maxOutputTokens, budget.maxOutputTokens),
       });
     }

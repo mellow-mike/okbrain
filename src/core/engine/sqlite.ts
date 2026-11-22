@@ -300,6 +300,15 @@ export function openSqliteEngine(dbPath: string): Engine {
       };
     }),
 
+    focusEdges: fresh((id, limit) => ({
+      out: db.query<EdgeRecord, [string, number]>(
+        "SELECT e.* FROM edges e JOIN nodes n ON n.id = e.dst WHERE e.src = ? ORDER BY e.dst LIMIT ?",
+      ).all(id, limit),
+      in: db.query<EdgeRecord, [string, number]>(
+        "SELECT e.* FROM edges e JOIN nodes n ON n.id = e.src WHERE e.dst = ? ORDER BY e.src LIMIT ?",
+      ).all(id, limit),
+    })),
+
     search: fresh((query, limit = 20) => {
       const expr = toMatchExpr(query);
       if (expr === "") return [];

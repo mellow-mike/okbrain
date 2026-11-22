@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import type { AiOptions } from "../ai/gateway.ts";
 import { createGateway, resolveCall } from "../ai/gateway.ts";
+import { gatewayEnvironment } from "../ai/local-keys.ts";
 import type { AiSettings } from "../config.ts";
 import type { VectorStore } from "../engine/interface.ts";
 import { VecError } from "../engine/vectors.ts";
@@ -26,8 +27,9 @@ export interface Embedder {
 
 /** Resolve the configured embed provider/model once and wrap the gateway. */
 export function gatewayEmbedder(ai: AiSettings, opts: AiOptions = {}): Embedder {
-  const r = resolveCall("embed", ai, process.env, opts);
-  const gw = createGateway(ai);
+  const env = gatewayEnvironment();
+  const r = resolveCall("embed", ai, env, opts);
+  const gw = createGateway(ai, env);
   return {
     provider: r.provider,
     model: r.model,

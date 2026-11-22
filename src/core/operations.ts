@@ -12,9 +12,12 @@ import { createApiServer } from "../api.ts";
 import { runMcpHttp, runMcpStdio } from "../mcp/server.ts";
 import { AiError, createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
 import { CHATGPT_USAGE, createChatgptPlan, type ChatgptPlanStatus } from "./ai/chatgpt-plan.ts";
+import { gatewayEnvironment } from "./ai/local-keys.ts";
+import { focusedMap, MAP_SOURCES } from "./graph/focus.ts";
 import { openInBrowser } from "./browser.ts";
 import type { CodingSessionResult, CodingSessionStatusResult } from "./coding/durable.ts";
-import type { RepositoryContextManifest, RepositoryContextSelection } from "./coding/repository-context.ts";
+import { CodingProjectProfileError, parseCodingProjectProfile } from "./coding/project-profile.ts";
+import type { RepositoryContextManifest, RepositoryContextSelection, RepositoryContextOptions } from "./coding/repository-context.ts";
 import { listBrains, loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { calibration, CLAIM_TYPE, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
@@ -35,6 +38,11 @@ import {
 } from "./ingest/conversations.ts";
 import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
+import type { NotionSource } from "./ingest/notion-source.ts";
+import {
+  importPersonalSource, isSourceKind, sourceHistory,
+  type SourceUploadFile, type SourceUploadResult,
+} from "./ingest/personal-sources.ts";
 import { FeedError, pullFeed, type RssPullResult } from "./ingest/rss.ts";
 import { defaultLimits, runEnrich, type EnrichResult } from "./ingest/web.ts";
 import { listConcepts, readConceptPermissive } from "./okf/bundle.ts";
@@ -69,7 +77,7 @@ import { PROFILES, ProfileError, resolveProfile, type RetrievalProfile } from ".
 import { rerankConfigured, rerankHits } from "./retrieval/rerank.ts";
 import { garnishQueue, pickRecent, type GarnishNote } from "./review/garnish.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
-import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken } from "./serve-token.ts";
+import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken, publishDesktopAddress } from "./serve-token.ts";
 import { computeStats, type BrainStats } from "./stats.ts";
 import { JobLockError, runJobs, type Job, type JobResult } from "./jobs/worker.ts";
 import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
@@ -159,6 +167,7 @@ const codingSessionParams: ParamSpec[] = [
 ];
 const repositorySelectionParams: ParamSpec[] = [
   { name: "projects", type: "string", description: "comma-separated workspace-relative project directories, or . for the workspace" },
+  { name: "profile-json", type: "string", description: "versioned coding project profile as JSON, instead of --projects" },
   { name: "query", type: "string", description: "paths or keywords to look for in tracked source" },
   { name: "context-tokens", type: "int", description: "estimated token budget for repository excerpts (default 4096)" },
 ];
@@ -167,26 +176,39 @@ function codingSessionParamsFrom(p: Record<string, unknown>) {
   return { workspace: p.workspace as string, session: p.session as string, provider: p.provider as string, model: p.model as string };
 }
 
-function repositorySelectionFrom(p: Record<string, unknown>) {
-  return {
-    projects: (p.projects as string).split(",").map((project) => project.trim()),
-    query: p.query as string,
-    tokenBudget: p["context-tokens"] as number | undefined,
-  };
+function repositorySelectionFrom(p: Record<string, unknown>): Omit<RepositoryContextOptions, "workspace"> {
+  if ((p.projects === undefined) === (p["profile-json"] === undefined)) {
+    throw new OpError("Choose either --projects or --profile-json.", "bad_params");
+  }
+  try {
+    return {
+      projects: (p.projects as string | undefined)?.split(",").map((project) => project.trim()),
+      profile: p["profile-json"] === undefined ? undefined : parseCodingProjectProfile(p["profile-json"] as string),
+      query: p.query as string,
+      tokenBudget: p["context-tokens"] as number | undefined,
+    };
+  } catch (error) {
+    if (error instanceof CodingProjectProfileError) throw new OpError(error.message, "bad_params");
+    throw error;
+  }
 }
 
-function renderRepositoryContext(manifest: RepositoryContextManifest, excerpts?: RepositoryContextSelection["excerpts"]): string {
+function renderRepositoryContext(manifest: RepositoryContextManifest, excerpts?: RepositoryContextSelection["excerpts"], guidance?: string): string {
   const limits = Object.entries(manifest.limitsReached).filter(([, reached]) => reached).map(([name]) => ({
     trackedPaths: "tracked path cap", scannedFiles: "scan cap", fileBytes: "per-file read cap", selectedFiles: "excerpt cap", tokenBudget: "token budget",
   })[name]);
   const lines = [
     `Context ID ${manifest.id}`,
     `Projects ${manifest.projects.join(", ")}`,
+    ...(manifest.profile ? [`Profile ${manifest.profile.name} (v${manifest.profile.version})`] : []),
+    ...(manifest.profile?.sharedProjects?.length ? [`Permitted dependencies ${manifest.profile.sharedProjects.join(", ")}`] : []),
+    ...(manifest.index ? [`Indexed ${manifest.index.indexedFiles} files, with ${manifest.index.expandedFiles} candidate imports${manifest.index.limited ? " (index cap reached)" : ""}.`] : []),
     `${manifest.estimatedTokens}/${manifest.tokenBudget} estimated excerpt tokens. Scanned ${manifest.scannedFiles} of ${manifest.candidateFiles} eligible files.`,
-    ...manifest.files.map(({ path, startLine, endLine }) => `${path}:${startLine}-${endLine}`),
+    ...manifest.files.map(({ path, startLine, endLine, reason }) => `${path}:${startLine}-${endLine}${reason ? ` (${reason})` : ""}`),
   ];
   if (!manifest.files.length) lines.push("No excerpts selected.");
   if (limits.length) lines.push(`Limits reached: ${limits.join(", ")}. Narrow the scope or query to improve coverage.`);
+  if (guidance) lines.push("\n--- Profile guidance ---", guidance);
   for (const excerpt of excerpts ?? []) lines.push(`\n--- ${excerpt.path}:${excerpt.startLine}-${excerpt.endLine} ---`, excerpt.content);
   return stripVTControlCharacters(lines.join("\n"));
 }
@@ -321,7 +343,7 @@ const requireActor = (v: unknown): string => {
 /** The enrichment agent's actor: `okb-enrich/<chat model>` (§7 producer/version). */
 function enrichActor(ctx: OpContext): string {
   try {
-    return `okb-enrich/${resolveCall("chat", ctx.config().ai ?? {}, process.env).model.replace(/\s+/g, "-")}`;
+    return `okb-enrich/${resolveCall("chat", ctx.config().ai ?? {}, gatewayEnvironment()).model.replace(/\s+/g, "-")}`;
   } catch (e) {
     if (e instanceof AiError) return "okb-enrich/unknown";
     throw e;
@@ -550,13 +572,13 @@ async function writing<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function refreshConversationIndex(ctx: OpContext, ids: string[]): Promise<void> {
+async function refreshPrivateImportIndex(ctx: OpContext, ids: string[]): Promise<void> {
   if (ids.length === 0 || !ctx.hasIndex()) return;
   try {
     const engine = ctx.engine();
     for (const id of ids) await updateIndexFor(ctx.bundle, id, engine);
   } catch {
-    log.warn("Conversation drafts were saved. Run `okb index` to refresh the keyword and graph index.");
+    log.warn("Private drafts were saved. Rebuild search to refresh the keyword and graph index.");
   }
 }
 
@@ -577,8 +599,44 @@ export async function runConversationUpload(
   if (preview !== null && preview !== receipt)
     throw new OpError("The file, provider, or brain changed. Preview this import again.", "bad_params");
   const result = await writing(() => importConversationUpload(ctx.bundle, raw, { provider, dryRun: preview === null }));
-  await refreshConversationIndex(ctx, result.imported);
+  await refreshPrivateImportIndex(ctx, result.imported);
   return { ...result, preview: receipt };
+}
+
+/** Browser-only import accepts selected bytes and never reads caller-supplied host paths. */
+export async function runPersonalSourceUpload(
+  ctx: OpContext,
+  kind: unknown,
+  preview: string | null,
+  read: () => Promise<{ name: string; files: SourceUploadFile[]; selected: number[] }>,
+): Promise<SourceUploadResult> {
+  checkOpScope({ name: "personal source import", scope: "write" }, ctx);
+  if (!isSourceKind(kind) || kind === "notion-live")
+    throw new OpError("Choose browser bookmarks, Markdown, or a Notion export.", "bad_params");
+  const { name, files, selected } = await read();
+  const result = await writing(() => importPersonalSource(
+    ctx.bundle, kind, name, files, preview === null ? undefined : { preview, selected },
+  ));
+  await refreshPrivateImportIndex(ctx, result.imported);
+  return result;
+}
+
+/** The connector is available only to the trusted local browser adapter. */
+export async function runNotionSource(ctx: OpContext, connector: NotionSource, action: string, input: Record<string, unknown>) {
+  if (!ctx.trusted) throw new OpError("Notion connections require the local browser.", "untrusted");
+  checkOpScope({ name: "Notion connection", scope: action === "status" ? "read" : "write" }, ctx);
+  switch (action) {
+    case "status": return connector.status();
+    case "connect": return connector.connect(input);
+    case "disconnect": return connector.disconnect();
+    case "preview": return writing(() => connector.preview(ctx.bundle, input));
+    case "import": {
+      const outcome = await writing(() => connector.commit(ctx.bundle, input.previewId));
+      await refreshPrivateImportIndex(ctx, outcome.imported);
+      return outcome;
+    }
+    default: throw new OpError("Notion action not found.", "not_found");
+  }
 }
 
 export const operations: readonly Operation[] = [
@@ -591,18 +649,20 @@ export const operations: readonly Operation[] = [
       { name: "query", type: "string", required: true, positional: true, description: "search terms" },
       { name: "limit", type: "int", description: "maximum hits (default 20)" },
       { name: "profile", type: "string", description: "retrieval profile: lean|balanced|max (default balanced)" },
+      { name: "keyword-only", type: "boolean", description: "use the local keyword index without provider calls" },
     ],
     handler: async (ctx, p) => {
       const profile = profileOf(ctx, p);
       const query = p.query as string;
+      const keywordOnly = p["keyword-only"] === true;
       const { hits, vectorSkipped } = await hybridRetrieve(
         [query],
-        hybridArms(ctx),
+        keywordOnly ? { engine: ctx.engine() } : hybridArms(ctx),
         profile,
         (p.limit as number | undefined) ?? 20,
       );
       warnVectorSkip(ctx, vectorSkipped);
-      return maybeRerank(ctx, query, hits, profile);
+      return keywordOnly ? hits : maybeRerank(ctx, query, hits, profile);
     },
     render: (r) => {
       const hits = r as HybridHit[];
@@ -714,22 +774,22 @@ export const operations: readonly Operation[] = [
     bundleIndependent: true,
     params: [
       codingWorkspace,
-      ...repositorySelectionParams.map((param) => param.type === "string" ? { ...param, required: true } : param),
+      ...repositorySelectionParams.map((param) => param.name === "query" ? { ...param, required: true } : param),
       { name: "show-content", type: "boolean", description: "include the excerpt text in the preview" },
     ],
     handler: async (_ctx, p) => {
       const { selectRepositoryContext, RepositoryContextError } = await import("./coding/repository-context.ts");
       try {
-        const { manifest, excerpts } = await selectRepositoryContext({ workspace: p.workspace as string, ...repositorySelectionFrom(p) });
-        return p["show-content"] ? { manifest, excerpts } : { manifest };
+        const selection = await selectRepositoryContext({ workspace: p.workspace as string, ...repositorySelectionFrom(p) });
+        return p["show-content"] ? selection : { manifest: selection.manifest };
       } catch (error) {
         if (error instanceof RepositoryContextError) throw new OpError(error.message, "refused");
         throw error;
       }
     },
     render: (r) => {
-      const { manifest, excerpts } = r as { manifest: RepositoryContextManifest; excerpts?: RepositoryContextSelection["excerpts"] };
-      return renderRepositoryContext(manifest, excerpts);
+      const { manifest, excerpts, guidance } = r as Partial<RepositoryContextSelection> & Pick<RepositoryContextSelection, "manifest">;
+      return renderRepositoryContext(manifest, excerpts, guidance);
     },
   },
   {
@@ -748,11 +808,13 @@ export const operations: readonly Operation[] = [
       { name: "context-id", type: "string", description: "ID issued by `okb code context` for the same selection" },
     ],
     handler: async (_ctx, p) => {
-      const usesRepository = p.projects !== undefined || p.query !== undefined || p["context-tokens"] !== undefined || p["context-id"] !== undefined;
+      const usesRepository = p.projects !== undefined || p["profile-json"] !== undefined || p.query !== undefined || p["context-tokens"] !== undefined || p["context-id"] !== undefined;
       if (p.prompt === undefined && (p.files !== undefined || usesRepository))
         throw new OpError("Use source selection flags with a new request prompt.", "bad_params");
-      if (usesRepository && (p.projects === undefined || p.query === undefined || p["context-id"] === undefined))
-        throw new OpError("Use --projects, --query, and --context-id together. Get the ID from `okb code context`.", "bad_params");
+      if (usesRepository && ((p.projects === undefined && p["profile-json"] === undefined) || p.query === undefined || p["context-id"] === undefined))
+        throw new OpError(p["profile-json"] === undefined
+          ? "Use --projects, --query, and --context-id together. Get the ID from `okb code context`."
+          : "Use --profile-json, --query, and --context-id together. Get the ID from `okb code context`.", "bad_params");
       if (usesRepository && p.files !== undefined)
         throw new OpError("Choose either --files or a previewed repository context.", "bad_params");
       const { CodingError, runCodingSession } = await import("./coding/durable.ts");
@@ -914,6 +976,36 @@ export const operations: readonly Operation[] = [
       return ns
         .map((n) => `${n.depth} ${n.dir ? DIR_MARK[n.dir] : " "} ${n.id} — ${n.title}`)
         .join("\n");
+    },
+  },
+  {
+    name: "focused_map",
+    cliName: "map",
+    summary: "Map direct links around a concept or a local keyword query",
+    scope: "read",
+    params: [
+      { name: "query", type: "string", positional: true, description: "local keyword query" },
+      { name: "id", type: "string", description: "concept ID to focus instead of searching" },
+      { name: "source", type: "string", description: "all|notes|web|imports" },
+      { name: "since", type: "string", description: "include notes changed on or after this date (YYYY-MM-DD)" },
+      { name: "include-private", type: "boolean", description: "include private draft nodes and their relationships" },
+    ],
+    handler: async (ctx, p) => {
+      const { id, query, since } = p as { id?: string; query?: string; since?: string };
+      if (Boolean(id?.trim()) === Boolean(query?.trim()) || (query?.length ?? 0) > 1000)
+        throw new OpError("Choose one concept ID or a query up to 1,000 characters.", "bad_params");
+      const source = p.source as typeof MAP_SOURCES[number] | undefined;
+      if (source && !MAP_SOURCES.includes(source)) throw new OpError("Unknown source filter.", "bad_params");
+      if (since && (!/^\d{4}-\d{2}-\d{2}$/.test(since) || !Number.isFinite(Date.parse(since)) || new Date(since).toISOString().slice(0, 10) !== since))
+        throw new OpError("Choose a valid start date.", "bad_params");
+      return focusedMap(ctx.engine(), { id: id?.trim(), query: query?.trim(), source, since, includePrivate: p["include-private"] === true });
+    },
+    render(result) {
+      const map = result as ReturnType<typeof focusedMap>;
+      return [...map.nodes.map((node) => `${node.id} — ${node.title}`),
+        ...map.edges.map((edge) => `${edge.src} → ${edge.dst}${edge.rel ? ` (${edge.rel})` : ""}`),
+        ...(map.bounded ? ["Map limited. Narrow the query or focus on one concept."] : []),
+      ].join("\n") || "(no matching notes)";
     },
   },
   {
@@ -1172,7 +1264,7 @@ export const operations: readonly Operation[] = [
         path: p.path as string,
         dryRun: p["dry-run"] === true,
       }));
-      await refreshConversationIndex(ctx, result.imported);
+      await refreshPrivateImportIndex(ctx, result.imported);
       return result;
     },
     render: (r) => {
@@ -1183,6 +1275,19 @@ export const operations: readonly Operation[] = [
         ...skipped.map(({ row, id, reason }) => `skipped row ${row}${id ? ` (${id})` : ""} — ${reason}`),
         `${imported.length} imported, ${planned.length} planned, ${skipped.length} skipped`,
       ].join("\n");
+    },
+  },
+  {
+    name: "personal_source_history",
+    cliName: "source history",
+    summary: "Show import runs for personal sources in this brain",
+    scope: "read",
+    localOnly: true,
+    params: [],
+    handler: (ctx) => writing(() => sourceHistory(ctx.bundle)),
+    render: (result) => {
+      const history = result as Awaited<ReturnType<typeof sourceHistory>>;
+      return history.map(({ source, at, count }) => `${at ?? "Date unavailable"}  ${source}  ${count} drafts`).join("\n") || "(no imports yet)";
     },
   },
   {
@@ -1949,8 +2054,10 @@ export const operations: readonly Operation[] = [
     params: [
       { name: "provider", type: "string", description: "chat provider: anthropic|openai|gemini|openrouter|ollama|llamacpp|lmstudio|local" },
       { name: "model", type: "string", description: "chat model (default: the provider's default)" },
+      { name: "base-url", type: "string", description: "override the chat endpoint (empty clears the override)" },
       { name: "embed-provider", type: "string", description: "embedding provider: openai|voyage|gemini|ollama|llamacpp|lmstudio|local" },
       { name: "embed-model", type: "string", description: "embedding model" },
+      { name: "embed-base-url", type: "string", description: "override the embedding endpoint (empty clears the override)" },
       { name: "retrieval-profile", type: "string", description: "default retrieval profile: lean|balanced|max" },
       { name: "actor", type: "string", description: "who your writes are attributed to, e.g. human:alice (default human:<os user>)" },
       { name: "no-default-bundle", type: "boolean", description: "don't change which bundle okb uses by default" },
@@ -1961,10 +2068,29 @@ export const operations: readonly Operation[] = [
       const cfg = loadConfig();
       if (p.actor !== undefined) cfg.actor = requireActor(p.actor);
       const ai: AiSettings = { ...cfg.ai };
-      if (p.provider !== undefined) ai.provider = local(p.provider);
+      if (p.provider !== undefined && local(p.provider) !== ai.provider) {
+        ai.provider = local(p.provider);
+        delete ai.model;
+        delete ai.baseUrl;
+      }
       if (p.model !== undefined) ai.model = p.model as string;
-      if (p["embed-provider"] !== undefined) ai.embedProvider = local(p["embed-provider"]);
+      if (p["embed-provider"] !== undefined && local(p["embed-provider"]) !== ai.embedProvider) {
+        ai.embedProvider = local(p["embed-provider"]);
+        delete ai.embedModel;
+        delete ai.embedBaseUrl;
+      }
       if (p["embed-model"] !== undefined) ai.embedModel = p["embed-model"] as string;
+      for (const [param, field] of [["base-url", "baseUrl"], ["embed-base-url", "embedBaseUrl"]] as const) {
+        if (p[param] === undefined) continue;
+        const value = (p[param] as string).trim();
+        if (!value) { delete ai[field]; continue; }
+        let url: URL;
+        try { url = new URL(value); }
+        catch { throw new OpError("Enter an HTTP or HTTPS model endpoint URL.", "bad_params"); }
+        if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.hash || url.search)
+          throw new OpError("Use an HTTP or HTTPS endpoint without credentials, a query, or a fragment.", "bad_params");
+        ai[field] = url.href.replace(/\/$/, "");
+      }
       if (p["retrieval-profile"] !== undefined) {
         if (!PROFILES[p["retrieval-profile"] as string])
           throw new OpError(
@@ -1984,8 +2110,9 @@ export const operations: readonly Operation[] = [
           );
 
       // Persist what detection picked, so the choice is explicit from now on.
-      const chat = resolveCall("chat", ai, process.env);
-      const embed = resolveCall("embed", ai, process.env);
+      const env = gatewayEnvironment();
+      const chat = resolveCall("chat", ai, env);
+      const embed = resolveCall("embed", ai, env);
       ai.provider ??= chat.provider;
       ai.embedProvider ??= embed.provider;
       cfg.ai = ai;
@@ -2035,16 +2162,22 @@ export const operations: readonly Operation[] = [
     params: [
       { name: "port", type: "int", description: `port on 127.0.0.1 (default ${DEFAULT_PORT})` },
       { name: "open", type: "boolean", description: "open the GUI in your browser (also config serve.open)" },
+      { name: "desktop", type: "boolean", description: "use a private ephemeral port and report readiness to the desktop app" },
     ],
     handler: async (ctx, p) => {
       const { url } = createApiServer({
         bundle: ctx.bundle,
-        port: p.port as number | undefined,
+        port: p.desktop ? 0 : p.port as number | undefined,
         readonly: ctx.readonly === true,
       });
       log.info(`serving ${ctx.bundle} at ${url} — Ctrl-C to stop`);
       log.info("clip from the browser: `okb bookmarklet`");
-      if (p.open === true || ctx.config().serve?.open === true) openInBrowser(url);
+      if (p.desktop) {
+        try { publishDesktopAddress(url); }
+        catch { log.warn("Could not publish the local desktop address for editor integrations"); }
+        process.stdout.write(`${url}\n`);
+      }
+      else if (p.open === true || ctx.config().serve?.open === true) openInBrowser(url);
       return new Promise(() => {}); // lives until interrupted
     },
     render: () => "",

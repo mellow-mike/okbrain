@@ -2,7 +2,7 @@
 // no framework — served as-is by api.ts and embedded into the compiled
 // binary via Bun text imports. Every data access goes through /api/op/* (the
 // ops contract) or one of the small server routes (status, brain mounts,
-// bookmarklet, conversation upload); this file is presentation only. Rendering helpers shared
+// bookmarklet, personal source uploads); this file is presentation only. Rendering helpers shared
 // with the static viewer come from render.js (window.okbRender); theme,
 // motion and the graph palette from the design system's okb.js (window.Okb).
 
@@ -190,8 +190,10 @@ document.addEventListener('keydown', function (e) {
 // ---- router -------------------------------------------------------------
 
 var routes = {
+  coding: (arg, seq) => window.okbCoding.mount(view, arg, () => stale(seq), STATUS?.readonly === true),
   home: renderHome, browse: renderBrowse, concept: renderConcept, edit: renderEdit,
   editor: renderEdit, graph: renderGraph, search: renderSearch, ask: renderAsk,
+  accounts: renderAccounts, 'ask-plan': renderPlanAsk, map: renderFocusedMap,
   add: renderAdd, sources: renderSources, review: renderReview, inbox: renderInbox, claims: renderClaims,
   stats: renderStats, settings: renderSettings,
 };
@@ -231,7 +233,7 @@ function route() {
     repaint = null;
     document.querySelectorAll('#nav > a').forEach(function (a) { // not the wordmark's link
       var target = a.getAttribute('data-nav') || a.getAttribute('href').slice(1);
-      var active = target === name || (name === 'editor' && target === 'edit');
+      var active = target === name || (name === 'editor' && target === 'edit') || (name === 'ask-plan' && target === 'ask');
       a.classList.toggle('active', active);
       if (active) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');
@@ -242,6 +244,10 @@ function route() {
   }, shared);
 }
 window.addEventListener('hashchange', route);
+document.querySelector('.skip-link').addEventListener('click', function (event) {
+  event.preventDefault();
+  view.focus();
+});
 
 // ---- shared panels ------------------------------------------------------
 
@@ -307,8 +313,9 @@ async function renderHome(_arg, seq) {
   view.innerHTML =
     '<div class="stack wide"><h2 class="display">' + esc(name) + '</h2>' +
     '<div id="h-index"></div><div id="h-tiles"></div>' +
-    (readonly ? '' : '<form id="h-cap" class="row"><input id="h-cap-text" style="flex:1" aria-label="Quick note" placeholder="Capture a thought…">' +
-    '<button class="primary">Capture</button><span id="h-cap-msg" class="muted" role="status"></span></form>') +
+    (readonly ? '' : '<form id="h-cap" class="card stack"><label class="field"><span>Quick note</span>' +
+    '<textarea rows="2" id="h-cap-text" placeholder="Capture a thought…" required></textarea></label>' +
+    '<div class="row"><button class="primary">Capture</button><span id="h-cap-msg" class="muted" role="status"></span></div></form>') +
     '<div class="split"><div><h3>Worth another look</h3><div id="h-review" class="list"></div></div>' +
     '<div><h3>Inbox</h3><div id="h-inbox" class="list"></div></div>' +
     '<div><h3>Recently changed</h3><div id="h-recent"></div></div></div>' +
@@ -321,9 +328,9 @@ async function renderHome(_arg, seq) {
       '<div class="notice">This read-only brain has no local search index. <a href="#browse">Browse its notes</a>.</div>';
     else document.getElementById('h-index').innerHTML =
       '<section class="card start-panel" aria-labelledby="h-start"><h3 id="h-start">Get started</h3>' +
-      '<p>Capture a quick note or import conversations you want to keep. Enable search to find them in this brain.</p>' +
-      '<div class="row"><a href="#sources">Import conversations</a>' +
-      '<button id="h-build" class="primary small" type="button">Enable search</button></div><div id="h-build-out" role="status"></div></section>';
+      '<p>Capture a quick note or import a source. Build the local index to search, map, and review your notes offline.</p>' +
+      '<div class="row"><a href="#sources">Import a source</a>' +
+      '<button id="h-build" class="primary small" type="button">Enable search and review</button></div><div id="h-build-out" role="status"></div></section>';
   }
   if (document.getElementById('h-build')) {
     document.getElementById('h-build').addEventListener('click', async function () {
@@ -332,7 +339,14 @@ async function renderHome(_arg, seq) {
       try {
         await appWork(api('index', {}));
         await refreshStatus();
-        if (!stale(seq)) route();
+        if (!stale(seq)) {
+          await route();
+          var summary = document.getElementById('h-index');
+          if (summary) {
+            summary.innerHTML = '<p role="status">Local index ready. <a href="#search">Search notes</a> · <a href="#review">Open review queue</a></p>';
+            summary.querySelector('a').focus();
+          }
+        }
       } catch (e) {
         if (!stale(seq)) setHtml('h-build-out', errorBox(e));
         this.disabled = false;
@@ -346,15 +360,19 @@ async function renderHome(_arg, seq) {
     var text = document.getElementById('h-cap-text').value.trim();
     if (!text) return;
     var msg = document.getElementById('h-cap-msg');
+    var submit = capture.querySelector('button');
+    submit.disabled = true;
     Okb.working(msg, 'capturing');
     try {
       var r = await api('capture', { text: text });
       if (stale(seq)) return;
       document.getElementById('h-cap-text').value = '';
-      msg.innerHTML = 'captured ' + conceptLink(r.id);
+      msg.innerHTML = 'Note saved. ' + conceptLink(r.id, 'Open saved note') + ' · <a href="#inbox">Open inbox</a>';
+      msg.querySelector('a').focus();
       loadInboxPreview();
       loadTiles();
     } catch (err) { msg.innerHTML = errorBox(err); }
+    finally { submit.disabled = false; }
   });
 
   async function loadTiles() {
@@ -960,21 +978,23 @@ async function renderGraph(focusId, seq) {
 function renderSearch(initialQ) {
   view.innerHTML =
     '<div class="stack"><h2>Search</h2>' +
-    '<form id="sf" class="row">' +
-    '<input id="sq" style="flex:1" placeholder="keyword + vector search…" autofocus>' +
-    '<select id="sp"><option value="">balanced</option><option>lean</option><option>max</option></select>' +
-    '<button class="primary">Search</button></form>' +
-    '<div id="sout" class="list"></div></div>';
+    '<form id="sf" class="stack">' +
+    '<label class="field"><span>Search notes</span><input id="sq" type="search" placeholder="Search by keyword…" required></label>' +
+    '<div class="row"><button class="primary">Search</button>' +
+    '<label><input id="s-semantic" type="checkbox"> Use configured semantic retrieval</label></div></form>' +
+    '<div id="sout" class="list" aria-live="polite"></div></div>';
   var out = document.getElementById('sout');
   var qEl = document.getElementById('sq');
   document.getElementById('sf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var q = qEl.value.trim();
     if (!q) return;
+    if (STATUS && !STATUS.hasIndex) {
+      out.innerHTML = 'Build a local index from <a href="#home">Home</a> to search this brain.';
+      return;
+    }
     Okb.working(out, 'searching');
-    var params = { query: q };
-    var p = document.getElementById('sp').value;
-    if (p) params.profile = p;
+    var params = { query: q, 'keyword-only': !document.getElementById('s-semantic').checked };
     try {
       var hits = await api('search', params);
       out.innerHTML = hits.length
@@ -986,7 +1006,7 @@ function renderSearch(initialQ) {
               (h.snippet ? '<div class="muted">' + esc(h.snippet.slice(0, 240)) + '…</div>' : '') +
               '<div class="row"><a href="' + conceptHref(h.id) + '"><button class="small">Open</button></a>' +
               '<a href="' + editHref(h.id) + '"><button class="small">Edit</button></a>' +
-              '<a href="' + graphHref(h.id) + '"><button class="small">Graph</button></a></div></div>';
+              '<a href="' + mapHref(h.id) + '">Focused map</a></div></div>';
           }).join('')
         : '<div class="empty">No hits.</div>';
       Okb.enter(out);
@@ -1006,6 +1026,7 @@ function citationLinks(citations) {
 function renderAsk() {
   view.innerHTML =
     '<div class="stack"><h2>Ask your brain</h2>' +
+    '<p><a href="#ask-plan">Ask with a ChatGPT plan</a></p>' +
     '<form id="askf" class="row">' +
     '<input id="askq" style="flex:1" placeholder="What do my notes say about…" autofocus>' +
     '<select id="askp"><option value="">balanced</option><option>lean</option><option>max</option></select>' +
@@ -1240,6 +1261,218 @@ async function uploadConversations(file, provider, preview) {
   return body.result;
 }
 
+async function uploadSourceFiles(files, folder, kind, name, confirmation) {
+  var requestHeaders = headers();
+  var form = new FormData();
+  form.set('name', name);
+  form.set('paths', JSON.stringify(files.map(function (file) {
+    return folder ? file.webkitRelativePath.split('/').slice(1).join('/') || file.name : file.name;
+  })));
+  for (var file of files) form.append('files', file, file.name);
+  if (confirmation) {
+    requestHeaders['x-okb-preview'] = confirmation.preview;
+    form.set('selected', JSON.stringify(confirmation.selected));
+  }
+  var res = await fetch('/api/personal/sources/upload?kind=' + encodeURIComponent(kind), {
+    method: 'POST', headers: requestHeaders, body: form,
+  });
+  if (res.status === 413) throw new Error('Choose a selection up to 24 MiB.');
+  var body = await res.json();
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body.result;
+}
+
+var SOURCE_LABELS = { bookmarks: 'Browser bookmarks', markdown: 'Markdown library', notion: 'Notion workspace' };
+
+function sourceFilesPanel(name, readonly) {
+  return '<section class="card source-panel" aria-labelledby="source-files"><h3 id="source-files">Bookmarks and Markdown</h3>' +
+    '<p>Preview a bookmarks HTML file, Markdown notes, or files from an extracted Notion Markdown &amp; CSV export. ' +
+    'The selected items become private drafts in <strong>' + esc(name) + '</strong>.</p>' +
+    (readonly ? '<p class="notice">Choose a writable brain to import files.</p>' :
+    '<form id="source-files-form" class="source-panel"><div class="grid">' +
+    '<label class="field"><span>File format</span><select id="source-kind">' +
+    '<option value="bookmarks">Browser bookmarks (HTML)</option><option value="markdown">Markdown</option><option value="notion">Notion export</option></select></label>' +
+    '<label class="field"><span>Source name</span><input id="source-name" maxlength="80" value="Browser bookmarks" required></label></div>' +
+    '<p class="muted" id="source-name-guide">Use the same source name next time to see what changed.</p>' +
+    '<label class="field"><span>Export files</span><input id="source-pick-files" type="file" accept=".html,.htm,text/html"></label>' +
+    '<label class="field" id="source-folder-picker" hidden><span>Or choose the extracted folder</span>' +
+    '<input id="source-pick-folder" type="file" webkitdirectory multiple></label>' +
+    '<div class="row"><button class="primary" id="source-files-preview">Preview files</button></div>' +
+    '<div id="source-files-status" role="status"></div></form><div id="source-files-result" class="source-panel"></div>') +
+    '</section>';
+}
+
+function setupSourceFiles(seq, brain, onImport) {
+  var form = document.getElementById('source-files-form');
+  var name = document.getElementById('source-name');
+  var kind = document.getElementById('source-kind');
+  var filesInput = document.getElementById('source-pick-files');
+  var folderInput = document.getElementById('source-pick-folder');
+  var folderPicker = document.getElementById('source-folder-picker');
+  var status = document.getElementById('source-files-status');
+  var result = document.getElementById('source-files-result');
+  var previewButton = document.getElementById('source-files-preview');
+  var preview = null;
+  var busy = false;
+
+  function clear() {
+    preview = null;
+    status.textContent = '';
+    result.innerHTML = '';
+  }
+
+  function updateFormat() {
+    var bookmarks = kind.value === 'bookmarks';
+    filesInput.accept = bookmarks ? '.html,.htm,text/html' : '.md,.markdown,text/markdown';
+    filesInput.multiple = !bookmarks;
+    folderPicker.hidden = bookmarks || !('webkitdirectory' in folderInput);
+    filesInput.value = folderInput.value = '';
+    clear();
+  }
+
+  function reviewRows(rows) {
+    var chosen = rows.filter(function (row) { return row.status === 'new' || row.status === 'changed'; });
+    var other = rows.filter(function (row) { return row.status === 'unchanged' || row.status === 'skipped'; });
+    var content = '';
+    if (chosen.length) {
+      content += '<fieldset class="source-choices"><legend>Choose drafts to import</legend>' +
+        '<div class="row"><button type="button" id="source-select-all">Select all</button>' +
+        '<button type="button" id="source-select-none">Clear selection</button></div>' +
+        '<ul class="source-rows source-checklist">' + chosen.map(function (row) {
+          return '<li><label class="source-choice"><input type="checkbox" value="' + row.row + '" ' +
+            (row.status === 'new' ? 'checked' : '') + '><span><strong>' + esc(row.title) + '</strong>' +
+            '<span class="muted source-entry-detail">' + esc(row.status === 'changed' ? 'New version · ' : 'New · ') + esc(row.path) + '</span>' +
+            (row.excerpt ? '<span class="source-entry-detail">' + esc(row.excerpt) + '</span>' : '') + '</span></label>' +
+            (row.previous ? '<span class="source-previous">' + conceptLink(row.previous, 'Open earlier draft') + '</span>' : '') + '</li>';
+        }).join('') + '</ul></fieldset><div class="row"><button type="button" class="primary" id="source-files-confirm">Import selected drafts</button>' +
+        '<span role="status" id="source-chosen-count" class="muted"></span></div>';
+    }
+    if (other.length) {
+      content += '<details' + (chosen.length ? '' : ' open') + '><summary>Already imported and skipped (' + other.length + ')</summary>' +
+        '<ul class="source-rows">' + other.map(function (row) {
+          return '<li>' + (row.id ? conceptLink(row.id, row.title) : esc(row.title || row.path)) +
+            '<span class="muted"> · ' + esc(row.reason || 'This version is already saved.') + '</span></li>';
+        }).join('') + '</ul></details>';
+    }
+    result.innerHTML = content;
+    if (!chosen.length) return;
+    var checkboxes = Array.from(result.querySelectorAll('input[type=checkbox]'));
+    var confirmButton = document.getElementById('source-files-confirm');
+    function selection() {
+      return checkboxes.filter(function (input) { return input.checked; }).map(function (input) { return Number(input.value); });
+    }
+    function updateCount() {
+      var count = selection().length;
+      confirmButton.disabled = !count;
+      document.getElementById('source-chosen-count').textContent = count + ' selected';
+    }
+    function chooseAll(checked) {
+      checkboxes.forEach(function (input) { input.checked = checked; });
+      updateCount();
+    }
+    result.querySelector('fieldset').addEventListener('change', updateCount);
+    document.getElementById('source-select-all').addEventListener('click', function () { chooseAll(true); });
+    document.getElementById('source-select-none').addEventListener('click', function () { chooseAll(false); });
+    confirmButton.addEventListener('click', function () { run(selection()); });
+    updateCount();
+    result.querySelector('legend').setAttribute('tabindex', '-1');
+    result.querySelector('legend').focus();
+  }
+
+  async function run(selected) {
+    var folder = folderInput.files.length > 0;
+    var files = Array.from(folder ? folderInput.files : filesInput.files);
+    if (busy || stale(seq) || brain !== BRAIN || (selected && !preview)) return;
+    if (!files.length || files.length > 500) {
+      status.innerHTML = errorBox('Choose between 1 and 500 export files.');
+      return;
+    }
+    if (files.reduce(function (size, file) { return size + file.size; }, 0) > 24 * 1024 * 1024) {
+      status.innerHTML = errorBox('Choose a selection up to 24 MiB.');
+      return;
+    }
+    var confirmation = selected ? { preview: preview, selected: selected } : null;
+    clear();
+    busy = true;
+    filesInput.disabled = folderInput.disabled = name.disabled = kind.disabled = previewButton.disabled = true;
+    Okb.working(status, selected ? 'saving private drafts' : 'reading local files');
+    try {
+      var response = await uploadSourceFiles(files, folder, kind.value, name.value, confirmation);
+      if (stale(seq) || brain !== BRAIN) return;
+      if (selected) {
+        var saved = response.rows.filter(function (row) { return row.status === 'imported'; });
+        status.textContent = saved.length + (saved.length === 1 ? ' private draft saved.' : ' private drafts saved.');
+        result.innerHTML = '<ul class="source-rows">' + saved.map(function (row) {
+          return '<li>' + conceptLink(row.id, row.title) + '</li>';
+        }).join('') + '</ul>';
+        if (saved.length && STATUS && !STATUS.hasIndex) result.insertAdjacentHTML('beforeend',
+          '<p><a href="#home">Enable search on Home</a> to find text in these drafts.</p>');
+        onImport();
+      } else {
+        preview = response.preview;
+        status.textContent = response.rows.length + (response.rows.length === 1 ? ' item reviewed.' : ' items reviewed.') +
+          ' Changed items are saved as separate drafts when selected.';
+        reviewRows(response.rows);
+      }
+    } catch (error) {
+      if (!stale(seq) && brain === BRAIN) status.innerHTML = errorBox(error);
+    } finally {
+      busy = false;
+      filesInput.disabled = folderInput.disabled = name.disabled = kind.disabled = previewButton.disabled = false;
+    }
+  }
+
+  filesInput.addEventListener('change', function () { folderInput.value = ''; clear(); });
+  folderInput.addEventListener('change', function () { filesInput.value = ''; clear(); });
+  kind.addEventListener('change', function () {
+    if (Object.values(SOURCE_LABELS).includes(name.value)) name.value = SOURCE_LABELS[kind.value];
+    updateFormat();
+  });
+  name.addEventListener('input', clear);
+  form.addEventListener('submit', function (event) { event.preventDefault(); run(null); });
+  return function (item) {
+    if (busy) return;
+    kind.value = item.kind;
+    name.value = item.source;
+    updateFormat();
+    filesInput.focus();
+  };
+}
+
+async function showSourceHistory(seq, brain, repeat) {
+  var area = document.getElementById('source-history');
+  try {
+    var response = await get('/api/personal/sources/history');
+    if (stale(seq) || brain !== BRAIN || !area) return;
+    var groups = new Map();
+    for (var item of response.result) {
+      var key = JSON.stringify([item.kind, item.source]);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+    var sources = Array.from(groups.values());
+    area.innerHTML = sources.length ? sources.map(function (runs, index) {
+      var source = runs[0];
+      return '<details><summary>' + esc(source.source) + ' <span class="muted">· ' +
+        runs.length + (runs.length === 1 ? ' import' : ' imports') + '</span></summary>' +
+        (repeat ? '<button class="ghost" type="button" data-source-repeat="' + index + '">Import from this source again</button>' : '') +
+        '<ul class="source-rows">' + runs.map(function (run) {
+          return '<li><strong>' + (run.at ? esc(new Date(run.at).toLocaleString()) : 'Earlier imports') + '</strong>' +
+            ' <span class="muted">· ' + run.count + (run.count === 1 ? ' draft' : ' drafts') + '</span>' +
+            '<ul class="source-rows">' + run.notes.map(function (note) {
+              return '<li>' + conceptLink(note.id, note.title) + '</li>';
+            }).join('') + '</ul>' +
+            (run.count > run.notes.length ? '<span class="muted">Showing ' + run.notes.length + ' of ' + run.count + ' drafts.</span>' : '') + '</li>';
+        }).join('') + '</ul></details>';
+    }).join('') : '<p class="muted">Successful imports will appear here.</p>';
+    if (repeat) area.querySelectorAll('[data-source-repeat]').forEach(function (button) {
+      button.addEventListener('click', function () { repeat(sources[Number(button.dataset.sourceRepeat)][0]); });
+    });
+  } catch (error) {
+    if (!stale(seq) && brain === BRAIN && area) area.innerHTML = errorBox(error);
+  }
+}
+
 function renderSources(_arg, seq) {
   var brain = BRAIN;
   var name = STATUS ? (STATUS.brain || basename(STATUS.bundle)) : 'the selected brain';
@@ -1259,13 +1492,20 @@ function renderSources(_arg, seq) {
     '<button id="source-confirm" class="primary" type="button" hidden>Import drafts</button></div>' +
     '<div id="source-status" role="status"></div><div id="source-result" class="source-panel"></div></form>') +
     '<a href="#browse/conversation">Browse conversation drafts</a></section>' +
+    sourceFilesPanel(name, readonly) +
+    '<section class="card source-panel" id="source-notion"></section>' +
+    '<section class="card source-panel" aria-labelledby="source-history-title"><h3 id="source-history-title">Import history</h3>' +
+    '<div class="source-panel" id="source-history" aria-live="polite">Loading import history…</div></section>' +
     '<section class="card source-panel" aria-labelledby="source-web"><h3 id="source-web">Web pages and feeds</h3>' +
     '<p>Save a page to your inbox, install the browser bookmarklet, or pull an RSS feed.</p><a href="#add">Open capture tools</a></section>' +
     '<section class="card source-panel" aria-labelledby="source-ai"><h3 id="source-ai">AI accounts</h3>' +
-    '<p>For answers that use an eligible ChatGPT plan, run <code>okb chatgpt connect</code> in a terminal. ' +
-    'After you approve plan usage in your browser, run <code>okb ask-plan</code> with your question.</p>' +
-    '<p>The web app’s Ask screen uses your configured API provider or local model.</p><a href="#settings">Open AI settings</a></section></div>';
-  if (readonly) return;
+    '<p>Connect an eligible ChatGPT plan for hosted answers, or configure an API provider or local model.</p>' +
+    '<div class="source-links"><a href="#accounts">Manage ChatGPT accounts</a><a href="#settings">Open AI settings</a></div></section></div>';
+  var repeatNotion = window.okbNotion.mount(document.getElementById('source-notion'), { readonly: readonly, headers: headers, onImport: refreshHistory });
+  if (readonly) {
+    showSourceHistory(seq, brain);
+    return;
+  }
 
   var form = document.getElementById('source-form');
   var fileInput = document.getElementById('source-file');
@@ -1276,6 +1516,21 @@ function renderSources(_arg, seq) {
   var result = document.getElementById('source-result');
   var receipt = null;
   var busy = false;
+
+  var repeatFiles = setupSourceFiles(seq, brain, refreshHistory);
+  function refreshHistory() {
+    showSourceHistory(seq, brain, function (item) {
+      if (item.kind === 'chatgpt' || item.kind === 'claude') {
+        if (busy) return;
+        providerInput.value = item.kind;
+        fileInput.value = '';
+        clearPreview();
+        fileInput.focus();
+      } else if (item.kind === 'notion-live') repeatNotion(item.source);
+      else repeatFiles(item);
+    });
+  }
+  refreshHistory();
 
   function clearPreview() {
     receipt = null;
@@ -1325,6 +1580,7 @@ function renderSources(_arg, seq) {
       }
       if (commit) {
         form.reset();
+        refreshHistory();
         if (count > 0 && STATUS && !STATUS.hasIndex)
           result.insertAdjacentHTML('beforeend', '<p><a href="#home">Enable search on Home</a> to find text in these drafts.</p>');
       } else if (count > 0) {
@@ -1514,17 +1770,19 @@ async function renderSettings() {
     '<label class="field" style="flex:1"><span>Actor (generated.by / verified.by on your writes)</span>' +
     '<input id="act-in" value="' + esc(st.actor || '') + '" placeholder="human:alice"></label>' +
     '<button>Save</button></form><div id="act-out"></div>' +
-    '<h3>AI providers (persisted by okb init)</h3>' +
+    '<h3>AI providers</h3>' +
     '<form id="setf" class="stack"><div class="grid">' +
     field('provider', 'Chat provider', '', 'anthropic | openai | gemini | openrouter | local') +
     field('model', 'Chat model', '', 'provider default') +
+    field('base-url', 'Chat endpoint (optional)', '', 'provider default') +
     field('embed-provider', 'Embed provider', '', 'openai | voyage | gemini | local') +
     field('embed-model', 'Embed model', '', 'provider default') +
+    field('embed-base-url', 'Embedding endpoint (optional)', '', 'provider default') +
     '</div><div class="row"><label class="field"><span>Retrieval profile</span>' +
     '<select id="ed-retrieval-profile"><option value="">(keep)</option>' +
     '<option>lean</option><option>balanced</option><option>max</option></select></label>' +
     '<button>Save</button></div></form>' +
-    '<div id="set-out"></div><p class="muted">API keys are read from environment variables only (ANTHROPIC_API_KEY, OPENAI_API_KEY, …); a local provider needs none.</p>' +
+    '<div id="set-out"></div><p class="muted">A local provider needs no API key.</p><section id="provider-keys" class="stack"></section>' +
     '<h3>Sync (git)</h3><div class="row">' +
     '<button id="sync-status">Status</button><button id="sync-run">Sync now</button></div>' +
     '<div id="sync-out"></div>' +
@@ -1556,6 +1814,7 @@ async function renderSettings() {
 
   var show = setHtml;
   showBookmarklet();
+  renderProviderKeys(document.getElementById('provider-keys'), Boolean(st.readonly));
 
   document.getElementById('actf').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -1571,7 +1830,7 @@ async function renderSettings() {
   document.getElementById('setf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var params = { 'no-default-bundle': true };
-    ['provider', 'model', 'embed-provider', 'embed-model', 'retrieval-profile'].forEach(function (n) {
+    ['provider', 'model', 'base-url', 'embed-provider', 'embed-model', 'embed-base-url', 'retrieval-profile'].forEach(function (n) {
       var v = document.getElementById('ed-' + n).value.trim();
       if (v) params[n] = v;
     });

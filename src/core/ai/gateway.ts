@@ -6,6 +6,7 @@
 // Nothing above this file may talk to a provider directly.
 
 import type { AiSettings } from "../config.ts";
+import { gatewayEnvironment } from "./local-keys.ts";
 import {
   AiError,
   chatCall,
@@ -113,7 +114,7 @@ export function resolveCall(
 function requireKey(r: ResolvedCall): void {
   if (r.recipe.kind === "api" && !r.apiKey)
     throw new AiError(
-      `provider ${r.provider} needs ${r.apiKeyEnv} set (or pick a local provider: okb init --provider local)`,
+      `provider ${r.provider} needs an API key in Settings or in ${r.apiKeyEnv} (or choose a local provider)`,
     );
 }
 
@@ -141,7 +142,7 @@ export interface Gateway {
   rerank(query: string, documents: string[], opts?: AiOptions): Promise<RerankResult>;
 }
 
-export function createGateway(settings: AiSettings = {}, env: Env = process.env): Gateway {
+export function createGateway(settings: AiSettings = {}, env: Env = gatewayEnvironment()): Gateway {
   return {
     async chat(messages, opts) {
       const r = resolveCall("chat", settings, env, opts);

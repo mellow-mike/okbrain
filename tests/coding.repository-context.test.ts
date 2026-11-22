@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { parseCodingProjectProfile, type CodingProjectProfile } from "../src/core/coding/project-profile.ts";
 import { selectRepositoryContext } from "../src/core/coding/repository-context.ts";
 
 let workspace: string;
@@ -131,4 +132,69 @@ test.skipIf(process.platform === "win32")("does not follow tracked symlinks or s
   const options = { workspace, projects: ["project"], query: "needle" };
   expect((await selectRepositoryContext(options)).excerpts).toEqual([]);
   await expect(selectRepositoryContext({ ...options, projects: ["project/swapped"] })).rejects.toThrow("without symlinks");
+});
+
+test("indexes exact symbols beyond the preview scan and invalidates a worktree edit", async () => {
+  for (let index = 0; index < 258; index++) {
+    await write(`apps/admin/lib/case-${String(index).padStart(3, "0")}.ts`, "export const fixture = 'unrelated';\n");
+  }
+  const path = "apps/admin/lib/target.ts";
+  await write(path, "export function resolveTenant() {}\n");
+  git("add", "--all");
+  git("-c", "user.email=repo@example.test", "-c", "user.name=Test Repository", "commit", "--quiet", "-m", "Fixture");
+  const options = { workspace, query: "resolveTenant" };
+  expect((await selectRepositoryContext({ ...options, projects: ["apps/admin"] })).excerpts).toEqual([]);
+
+  const profile: CodingProjectProfile = { version: 1, name: "Admin", projects: ["apps/admin"], tokenBudget: 200 };
+  const before = await selectRepositoryContext({ ...options, profile });
+  expect(before.manifest.workspaceRevision).toMatch(/^[0-9a-f]{40,64}$/u);
+  expect(before.manifest).toMatchObject({
+    tokenBudget: 200,
+    index: { indexedFiles: 259, limited: false, expandedFiles: 0 },
+    files: [{ path, reason: "Declares resolveTenant" }],
+  });
+  expect(await selectRepositoryContext({ ...options, profile })).toEqual(before);
+  await write(path, "export function refreshTenant() {}\n");
+  expect((await selectRepositoryContext({ ...options, profile })).excerpts).toEqual([]);
+  const changed = await selectRepositoryContext({ ...options, query: "refreshTenant", profile });
+  expect(changed.manifest.files).toMatchObject([{ path, reason: "Declares refreshTenant" }]);
+  expect(changed.manifest.workspaceRevision).toBe(before.manifest.workspaceRevision);
+  git("add", "--all");
+  git("-c", "user.email=repo@example.test", "-c", "user.name=Test Repository", "commit", "--quiet", "-m", "Change fixture");
+  const committed = await selectRepositoryContext({ ...options, query: "refreshTenant", profile });
+  expect(committed.manifest.workspaceRevision).not.toBe(changed.manifest.workspaceRevision);
+  expect(committed.manifest.id).not.toBe(changed.manifest.id);
+});
+
+test("expands only direct imports inside a profile's selected and permitted roots", async () => {
+  const router = "apps/web/src/router.ts";
+  const dependency = "packages/contracts/src/index.ts";
+  await write(router, [
+    'import { schema } from "@test/contracts";',
+    'import { ignored } from "../../../packages/contracts/src/excluded.js";',
+    'import { outside } from "../../../packages/outside/index.js";',
+    "export function refreshSession() { return schema; }",
+  ].join("\n"));
+  await write("packages/contracts/package.json", '{"name":"@test/contracts","exports":{".":{"import":"./src/index.ts"}}}');
+  await write(dependency, 'export { ownSchema as schema } from "./nested.ts";\n');
+  await write("packages/contracts/src/nested.ts", "export const ownSchema = 1;\n");
+  await write("packages/contracts/src/excluded.ts", "export const ignored = 2;\n");
+  await write("packages/contracts/src/decoy.ts", "export function refreshSession() {}\n");
+  await write("packages/outside/index.ts", "export const outside = 3;\n");
+  git("add", "--all");
+
+  const profile = parseCodingProjectProfile(JSON.stringify({
+    version: 1, name: " Web ", projects: ["apps\\web/"], sharedProjects: ["packages/contracts"],
+    exclude: ["packages/contracts/src/excluded.ts"], guidance: "Check schema behavior before drafting changes.",
+  }));
+  const selection = await selectRepositoryContext({ workspace, profile, query: `${router}:4` });
+  expect(selection.guidance).toBe(profile.guidance!);
+  expect(selection.manifest.profile).toMatchObject({ version: 1, name: "Web", sharedProjects: ["packages/contracts"] });
+  expect(selection.manifest.files).toMatchObject([{ path: router, reason: "Exact workspace path" }, { path: dependency, reason: `Direct import from ${router}` }]);
+  expect(JSON.stringify(selection.manifest)).not.toContain(profile.guidance!);
+  const changed = await selectRepositoryContext({ workspace, profile: { ...profile, guidance: "Different reviewed guidance" }, query: `${router}:4` });
+  expect(changed.manifest.files).toEqual(selection.manifest.files);
+  expect(changed.manifest.id).not.toBe(selection.manifest.id);
+  expect(() => parseCodingProjectProfile('{"version":2,"projects":["."]}')).toThrow("version 1");
+  expect(() => parseCodingProjectProfile('{"version":1,"name":"Broken","projects":["../outside"]}')).toThrow("workspace-relative");
 });

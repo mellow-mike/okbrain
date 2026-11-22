@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { runCli } from "../src/cli.ts";
+import { createApiServer } from "../src/api.ts";
+import type { BrowserPlan } from "../src/core/ai/browser-plan.ts";
 import { createChatgptPlan } from "../src/core/ai/chatgpt-plan.ts";
 import { writeConcept } from "../src/core/okf/write.ts";
 import { getOp } from "../src/core/operations.ts";
@@ -24,6 +26,7 @@ async function fakeProvider(path: string) {
   let refreshes = 0;
   let responseMode: "completed" | "partial" | "limited" = "completed";
   let revoked = false;
+  let onAnswer = (body: unknown) => expect(body).toEqual({ model: "visible", input, stream: true, store: false });
   const requests: { path: string; method: string }[] = [];
   const transport = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const request = url instanceof Request ? new Request(url, init) : new Request(String(url), init);
@@ -67,7 +70,7 @@ async function fakeProvider(path: string) {
       { visibility: "list", slug: "visible", display_name: "Visible" },
     ] });
     expect(route.pathname).toBe("/v1/responses");
-    expect(await request.json()).toEqual({ model: "visible", input, stream: true, store: false });
+    onAnswer(await request.json());
     const end = responseMode === "limited"
       ? { type: "response.failed", response: { error: { code: "subscription_sharing_usage_limit_exceeded" } } }
       : { type: "response.completed" };
@@ -77,7 +80,7 @@ async function fakeProvider(path: string) {
       headers: { "Content-Type": "text/event-stream" },
     });
   };
-  const plan = createChatgptPlan({ path, fetch: transport as typeof fetch, async authorize(url) {
+  async function authorize(url: string) {
     pending = new URL(url);
     const q = pending.searchParams;
     expect(pending.origin).toBe("https://auth.openai.com");
@@ -92,9 +95,11 @@ async function fakeProvider(path: string) {
     callback.searchParams.set("state", q.get("state")!);
     if (q.get("client_id") === clientId) callback.searchParams.delete("client_id");
     expect((await fetch(callback)).status).toBe(200);
-  } });
+  }
+  const plan = createChatgptPlan({ path, fetch: transport as typeof fetch, authorize });
   return {
-    plan, requests, transport,
+    plan, requests, transport, authorize,
+    inspectAnswer: (check: typeof onAnswer) => { onAnswer = check; },
     client: (id: string) => { clientId = id; },
     authorizedClient: () => pending.searchParams.get("client_id"),
     revoked: () => revoked,
@@ -107,6 +112,66 @@ async function fakeProvider(path: string) {
 }
 
 describe("ChatGPT plan", () => {
+  test("browser consent uses a local callback and submits only reviewed sources once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "okb-browser-chatgpt-"));
+    const path = join(root, "accounts.db");
+    const provider = await fakeProvider(path);
+    const token = "browser-consent-token";
+    const server = createApiServer({ bundle: root, port: 0, token, chatgpt: { path, fetch: provider.transport as typeof fetch } });
+    type Action = "status" | "connect" | "sign-in" | "models" | "preview" | "answer" | "disconnect";
+    type Output<A extends Action> = Awaited<ReturnType<BrowserPlan[A extends "sign-in" ? "signIn" : A]>>;
+    const call = async <A extends Action>(action: A, data?: Record<string, unknown>): Promise<Output<A>> => {
+      const response = await fetch(`${server.url}api/plan/${action}`, {
+        method: data === undefined ? "GET" : "POST", headers: { "x-okb-token": token },
+        body: data === undefined ? undefined : JSON.stringify(data),
+      });
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const body = await response.json() as { error?: string; result: Output<A> };
+      if (!response.ok) throw new Error(body.error);
+      return body.result;
+    };
+    try {
+      expect((await fetch(`${server.url}api/plan/status?token=${token}`)).status).toBe(401);
+      expect((await call("status")).connected).toBe(false);
+      const connection = await call("connect", { account: "personal" });
+      await provider.authorize(connection.url);
+      let state;
+      for (let i = 0; i < 200; i++) {
+        state = await call("sign-in", { id: connection.id });
+        if (state.state !== "pending") break;
+        await Bun.sleep(10);
+      }
+      expect(state?.state).toBe("done");
+      expect((await call("status")).account).toBe("personal");
+      expect(await call("models", { account: "personal" })).toEqual([{ slug: "visible", name: "Visible" }]);
+      for (const [id, body] of [["notes/published", "databases public-snapshot"], ["db_only/private", "databases secret-snapshot"]])
+        await writeConcept(root, { id: id!, type: "note", title: body!, description: "databases", body: body! });
+      expect(await runCli(["--bundle", root, "index"], { out() {}, err() {} })).toBe(0);
+      const input = { account: "personal", model: "visible", question: "databases" };
+      const preview = await call("preview", input);
+      expect(preview.sources.map((source: { id: string }) => source.id)).toEqual(["notes/published"]);
+      expect(preview.sources[0]?.text).toContain("public-snapshot");
+      const withPrivate = await call("preview", { ...input, includePrivate: true });
+      expect(withPrivate.sources.map((source: { id: string }) => source.id)).toContain("db_only/private");
+      expect(provider.requests.filter(({ path }) => path === "/v1/responses")).toHaveLength(0);
+      await writeConcept(root, { id: "notes/published", type: "note", title: "Changed", description: "databases", body: "databases newer-snapshot" });
+      provider.inspectAnswer((body) => {
+        const json = JSON.stringify(body);
+        expect(json).toContain("public-snapshot");
+        expect(json).not.toContain("secret-snapshot");
+        expect(json).not.toContain("newer-snapshot");
+      });
+      const results = await Promise.all([call("answer", { id: preview.id }), call("answer", { id: preview.id })]);
+      expect(results[0]?.answer).toBe("An answer");
+      expect(results[1]).toEqual(results[0]);
+      expect(provider.requests.filter(({ path }) => path === "/v1/responses")).toHaveLength(1);
+      expect(await call("disconnect", { account: "personal" })).toEqual({ revoked: true });
+      expect((await call("status")).connected).toBe(false);
+    } finally {
+      server.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   test("connects, refreshes once, completes SSE, and revokes from a fresh process instance", async () => {
     const root = await mkdtemp(join(tmpdir(), "okb-chatgpt-"));
     try {

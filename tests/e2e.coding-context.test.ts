@@ -71,6 +71,28 @@ test("preview, recoverable repository receipt, and CLI status share one confirme
     expect(saved.code, saved.stderr).toBe(0);
     expect(JSON.parse(saved.stdout)).toMatchObject({ pendingRequestIds: [], request: { status: "done", repositoryContext: manifest } });
     expect(saved.stdout).not.toContain("'original'");
+
+    await writeFile(source, "export const refreshSession = 'profiled';\n");
+    const profile = { version: 1, name: "Auth", projects: ["packages/auth"], guidance: "Cite the session source." } as const;
+    const profileArguments = ["--workspace", workspace, "--profile-json", JSON.stringify(profile), "--query", "refreshSession"];
+    const hiddenGuide = await cli("code", "context", ...profileArguments, "--json");
+    expect(hiddenGuide.code, hiddenGuide.stderr).toBe(0);
+    expect(hiddenGuide.stdout).not.toContain(profile.guidance);
+    const shownGuide = await cli("code", "context", ...profileArguments, "--show-content", "--json");
+    expect(shownGuide.code, shownGuide.stderr).toBe(0);
+    const profiled = JSON.parse(shownGuide.stdout) as RepositoryContextSelection;
+    expect(profiled.guidance).toBe(profile.guidance);
+    expect(profiled.manifest.profile).toMatchObject({ version: 1, name: "Auth" });
+    const repository = { profile: { ...profile, projects: [...profile.projects] }, query: "refreshSession", id: profiled.manifest.id };
+    const profiledRequest = { ...session, requestId: "profiled-review", prompt: "Review the updated source", repository };
+    await expect(runCodingSession({ ...profiledRequest, repository: { ...repository, profile: { ...repository.profile, guidance: "New guidance" } } }, { stateDir, models }))
+      .rejects.toThrow("Repository context changed");
+    faux.setResponses([(input) => {
+      const message = input.messages.findLast((candidate) => candidate.role === "user");
+      expect(message?.content).toBe(JSON.stringify({ guidance: profile.guidance, task: profiledRequest.prompt, excerpts: profiled.excerpts }));
+      return fauxAssistantMessage("Updated source reviewed.");
+    }]);
+    expect(await runCodingSession(profiledRequest, { stateDir, models })).toMatchObject({ status: "done", repositoryContext: profiled.manifest });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

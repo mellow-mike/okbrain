@@ -6,10 +6,12 @@
 <title>okbrain</title>
 <link rel="stylesheet" href="/gui/tokens.css">
 <link rel="stylesheet" href="/gui/style.css">
+<link rel="stylesheet" href="/gui/coding.css">
 <script src="/gui/okb.js"></script>
 <script>Okb.theme.restore();</script>
 </head>
 <body class="app">
+<a class="skip-link" href="#view">Skip to content</a>
 <nav id="nav" aria-label="okbrain">
   <div class="brand"><a href="#home"><strong>okbrain</strong></a><span id="nav-brain"></span></div>
   <select id="brain" title="brain mount" hidden></select>
@@ -20,6 +22,7 @@
   <a href="#graph">Graph</a>
   <a href="#search">Search</a>
   <a href="#ask">Ask</a>
+  <a href="#map">Focused map</a>
   <div class="group">Work</div>
   <a href="#review">Review</a>
   <a href="#inbox">Inbox</a>
@@ -27,9 +30,11 @@
   <a href="#sources">Sources</a>
   <a href="#edit" data-nav="edit">New concept</a>
   <a href="#claims">Claims</a>
+  <a href="#coding">Coding</a>
   <div class="group">System</div>
   <a href="#stats">Stats</a>
   <a href="#settings">Settings</a>
+  <a href="#accounts">Accounts</a>
   <div class="foot">
     <button id="theme" title="toggle light/dark" type="button"></button>
     <div id="nav-status"></div>
@@ -41,6 +46,11 @@
 <script src="/gui/marked.js"></script>
 <script src="/gui/safe-markdown.js"></script>
 <script src="/gui/render.js"></script>
+<script src="/gui/github.js"></script>
+<script src="/gui/notion.js"></script>
+<script src="/gui/coding.js"></script>
+<script src="/gui/accounts.js"></script>
+<script src="/gui/focused-map.js"></script>
 <script src="/gui/app.js"></script>
 </body>
 </html>

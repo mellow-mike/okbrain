@@ -222,4 +222,8 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
   }
 }
 
-if (import.meta.main) process.exit(await runCli(process.argv.slice(2)));
+if (import.meta.main) {
+  const args = process.argv.slice(2);
+  const { projectWorkerArg, runProjectWorker } = await import("./core/coding/project-worker.ts");
+  process.exit(args.length === 1 && args[0] === projectWorkerArg ? await runProjectWorker() : await runCli(args));
+}

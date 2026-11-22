@@ -4,7 +4,7 @@
 // the bookmarklet by `okb bookmarklet`.
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { configDir, type Platform } from "./config.ts";
 
@@ -18,6 +18,20 @@ export function hostAllowed(host: string | null, port: number): boolean {
 
 export function serveTokenPath(p?: Platform): string {
   return join(configDir(p), "serve-token");
+}
+
+/** Publish the current desktop web address for same-user editor integrations. */
+export function publishDesktopAddress(url: string): void {
+  const directory = configDir();
+  mkdirSync(directory, { recursive: true });
+  const temporary = join(directory, `desktop-${randomBytes(8).toString("hex")}.tmp`);
+  try {
+    writeFileSync(temporary, `${url}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    renameSync(temporary, join(directory, "desktop-url"));
+  } catch (error) {
+    try { unlinkSync(temporary); } catch { /* temp file may not have been created */ }
+    throw error;
+  }
 }
 
 /** Read the install's serve token, minting (0600) and persisting it on first use. */

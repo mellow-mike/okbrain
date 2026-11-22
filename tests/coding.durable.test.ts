@@ -37,14 +37,16 @@ function provider(limits: Omit<FauxModelDefinition, "id"> = {}) {
 test("persists a coding conversation and its answer across separate harness openings", async () => {
   const { models, faux } = provider();
   const requests: TranscriptContext[] = [];
+  let sessionAffinity: string | undefined;
   const sessionDirectory = join(stateDir, `session-${options.session}`);
   if (process.platform !== "win32") {
     await mkdir(sessionDirectory, { recursive: true });
     await chmod(sessionDirectory, 0o755);
   }
   await writeFile(join(workspace, "example.ts"), "export const count = 1;\n");
-  faux.setResponses([(input) => {
+  faux.setResponses([(input, stream) => {
     requests.push(input);
+    sessionAffinity = stream?.sessionId;
     return fauxAssistantMessage("The constant is defined in example.ts.");
   }]);
   const result = await runCodingSession({ ...options, prompt: "Review this file", files: ["example.ts"] }, { stateDir, models });
@@ -56,6 +58,7 @@ test("persists a coding conversation and its answer across separate harness open
     stopReason: "stop",
     usage: { input: expect.any(Number), output: expect.any(Number), totalTokens: expect.any(Number) },
   });
+  expect(sessionAffinity).toMatch(/^[0-9a-f]{64}$/u);
   if (process.platform !== "win32") expect((await stat(sessionDirectory)).mode & 0o777).toBe(0o700);
   const messages = requests[0]?.messages ?? [];
   expect(getCurrentTools(messages)).toEqual([]);
@@ -70,12 +73,15 @@ test("persists a coding conversation and its answer across separate harness open
   expect(await runCodingSession({ ...options, files: ["example.ts"] }, { stateDir, models })).toEqual(result);
   expect(faux.state.callCount).toBe(1);
 
-  faux.setResponses([(input) => {
+  faux.setResponses([(input, stream) => {
     expect(input.messages.some((message) => message.role === "assistant")).toBe(true);
+    expect(stream?.sessionId).toBe(sessionAffinity);
     return fauxAssistantMessage("A follow-up answer.");
   }]);
   expect(await runCodingSession({ ...options, requestId: "follow-up", prompt: "What next?" }, { stateDir, models }))
-    .toMatchObject({ status: "done", text: "A follow-up answer." });
+    .toMatchObject({ status: "done", text: "A follow-up answer.", usage: { cacheRead: expect.any(Number) } });
+  const status = await getCodingSessionStatus({ ...options, requestId: "follow-up" }, { stateDir, models });
+  expect(status.request?.usage?.cacheRead ?? 0).toBeGreaterThan(0);
 
   await expect(runCodingSession({ ...options, workspace: testDirectory }, { stateDir, models }))
     .rejects.toThrow("different workspace or model");

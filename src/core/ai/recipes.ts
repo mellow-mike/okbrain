@@ -82,6 +82,7 @@ async function post(
   try {
     res = await fetch(url, {
       method: "POST",
+      redirect: "error",
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
@@ -91,8 +92,12 @@ async function post(
       `request to ${url} failed: ${(e as Error).message} (is the provider running/reachable?)`,
     );
   }
-  if (!res.ok)
-    throw new AiError(`${url} → HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) {
+    let message = await res.text();
+    for (const secret of [headers.authorization?.replace(/^Bearer /, ""), headers["x-api-key"], headers["x-goog-api-key"]])
+      if (secret) message = message.replaceAll(secret, "[redacted]");
+    throw new AiError(`${url} → HTTP ${res.status}: ${message.slice(0, 300)}`);
+  }
   return (await res.json()) as Record<string, unknown>;
 }
 

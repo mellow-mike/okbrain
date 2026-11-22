@@ -12,13 +12,23 @@
 // touch an operations.ts binding at module top level (ESM cycle).
 
 import { existsSync } from "node:fs";
+import { BrowserPlanInputError, createBrowserPlan, type BrowserPlan } from "./core/ai/browser-plan.ts";
+import type { PlanOptions } from "./core/ai/chatgpt-plan.ts";
+import { providerKeyStatus, setProviderKey } from "./core/ai/local-keys.ts";
 import { AiError } from "./core/ai/gateway.ts";
+import { CodingError } from "./core/coding/durable.ts";
+import { CodingProjectProfileError } from "./core/coding/project-profile.ts";
+import { CodingProjectControl, ProjectControlError, type ProjectControlOptions } from "./core/coding/project-control.ts";
+import { RepositoryContextError } from "./core/coding/repository-context.ts";
+import { CodingTeamListener, type TeamStatus } from "./core/coding/team-listener.ts";
 import { ConfigError, listBrains, resolveBrain } from "./core/config.ts";
 import { openLocalContext, type LocalContext } from "./core/context.ts";
 import { defaultDbPath, EngineError } from "./core/engine/sqlite.ts";
 import { SyncError } from "./core/sync.ts";
 import { defaultVectorsPath } from "./core/engine/vectors.ts";
 import { MAX_CONVERSATION_EXPORT_BYTES } from "./core/ingest/conversations.ts";
+import { createNotionSource, NotionSourceError, type NotionSource, type NotionSourceOptions } from "./core/ingest/notion-source.ts";
+import { MAX_SOURCE_FILES, MAX_SOURCE_UPLOAD_BYTES } from "./core/ingest/personal-sources.ts";
 import { OKF_VERSION } from "./core/okf/indexmd.ts";
 import {
   checkOpCall,
@@ -26,7 +36,9 @@ import {
   OpError,
   operations,
   runConversationUpload,
+  runNotionSource,
   runOp,
+  runPersonalSourceUpload,
   type Operation,
 } from "./core/operations.ts";
 import {
@@ -44,6 +56,13 @@ import renderJs from "./core/viz/render.js" with { type: "text" };
 import safeMarkdownJs from "./core/viz/safe-markdown.js" with { type: "text" };
 import tokensCss from "./core/viz/tokens.css" with { type: "text" };
 import guiAppJs from "./gui/app.js" with { type: "text" };
+import guiCodingJs from "./gui/coding.js" with { type: "text" };
+import guiGithubJs from "./gui/github.js" with { type: "text" };
+import guiNotionJs from "./gui/notion.js" with { type: "text" };
+import guiCodingCss from "./gui/coding.css" with { type: "text" };
+import guiCodingTeamHtml from "./gui/coding-team.html" with { type: "text" };
+import guiAccountsJs from "./gui/accounts.js" with { type: "text" };
+import guiFocusedMapJs from "./gui/focused-map.js" with { type: "text" };
 import literataItalic from "./gui/fonts/Literata-Italic-VF.woff2" with { type: "file" };
 import literata from "./gui/fonts/Literata-VF.woff2" with { type: "file" };
 import recursiveMono from "./gui/fonts/RecursiveMono-VF.woff2" with { type: "file" };
@@ -62,6 +81,12 @@ const WOFF2 = "font/woff2";
  */
 const GUI_ASSETS: Record<string, [string | Blob, string]> = {
   "/gui/app.js": [guiAppJs, JS],
+  "/gui/coding.js": [guiCodingJs, JS],
+  "/gui/github.js": [guiGithubJs, JS],
+  "/gui/notion.js": [guiNotionJs, JS],
+  "/gui/coding.css": [guiCodingCss, CSS],
+  "/gui/accounts.js": [guiAccountsJs, JS],
+  "/gui/focused-map.js": [guiFocusedMapJs, JS],
   "/gui/style.css": [guiStyleCss, CSS],
   "/gui/tokens.css": [tokensCss, CSS],
   "/gui/okb.js": [okbJs, JS],
@@ -83,6 +108,9 @@ export interface ApiOptions {
   token?: string;
   /** Serving a read-only brain mount: write/admin ops are refused per request. */
   readonly?: boolean;
+  chatgpt?: Pick<PlanOptions, "path" | "fetch">;
+  coding?: ProjectControlOptions;
+  notion?: NotionSourceOptions;
 }
 
 export interface ApiServer {
@@ -130,7 +158,7 @@ const json = (status: number, body: unknown, headers: Hdrs = {}): Response =>
 const html = (status: number, body: string): Response =>
   new Response(body, {
     status,
-    headers: { "content-type": "text/html; charset=utf-8", ...GUARD },
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...GUARD },
   });
 
 const esc = (s: string): string =>
@@ -174,10 +202,15 @@ const opDescriptors = (): unknown =>
     .map(({ name, summary, scope, params }) => ({ name, summary, scope, params }));
 
 interface ServeState {
+  coding?: () => CodingProjectControl;
+  notion?: NotionSource;
+  team?: CodingTeamListener;
+  projectTokensOnly?: boolean;
   bundle: string;
   port: number;
   token: string;
   readonly: boolean;
+  plan?: BrowserPlan;
 }
 
 /** The bundle a request addresses: the served one, or a named brain mount. */
@@ -196,6 +229,58 @@ function scopeOf(req: Request, url: URL, o: ServeState): Scope {
 }
 
 const open = (s: Scope): LocalContext => openLocalContext(s.bundle, true, s.readonly);
+
+async function providerKeys(req: Request, scope: Scope, cors: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  try {
+    if (req.method === "POST") {
+      if (scope.readonly) return json(403, { error: "Open Settings from a writable brain to change provider keys." }, headers);
+      const raw = await readUpload(req, 6 * 1024, "Provider setup request is too large.");
+      const body: unknown = JSON.parse(raw.toString("utf8"));
+      if (body === null || typeof body !== "object" || Array.isArray(body)) throw new TypeError("Expected a JSON object.");
+      const { provider, key } = body as Record<string, unknown>;
+      setProviderKey(provider, key);
+    } else if (req.method !== "GET") return json(405, { error: "Method not allowed." }, headers);
+    return json(200, { result: providerKeyStatus() }, headers);
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof SyntaxError || error instanceof UploadTooLarge)
+      return json(400, errBody(error), headers);
+    return json(409, { error: "Could not use the local provider credential store." }, headers);
+  }
+}
+
+async function browserPlan(req: Request, path: string, plan: BrowserPlan, scope: Scope, cors: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  try {
+    if (req.method === "GET" && path === "status") return json(200, { result: await plan.status() }, headers);
+    if (req.method !== "POST") return json(404, { error: "not found" }, headers);
+    if (scope.readonly && ["connect", "use", "disconnect"].includes(path))
+      return json(403, { error: "Open Accounts from a writable brain to manage the local connection." }, headers);
+    const encoded = req.body ? (await readUpload(req, 36_000, "Plan request is too large.")).toString("utf8") : "";
+    let raw: unknown;
+    try { raw = JSON.parse(encoded || "{}"); } catch { throw new BrowserPlanInputError("Expected a JSON request."); }
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new BrowserPlanInputError("Expected a JSON object.");
+    const body = raw as Record<string, unknown>;
+    switch (path) {
+      case "connect": return json(200, { result: await plan.connect(body.account) }, headers);
+      case "sign-in": return json(200, { result: plan.signIn(body.id, body.cancel === true) }, headers);
+      case "use": return json(200, { result: await plan.use(body.account) }, headers);
+      case "disconnect": return json(200, { result: await plan.disconnect(body.account) }, headers);
+      case "models": return json(200, { result: await plan.models(body.account) }, headers);
+      case "preview":
+      case "answer": {
+        const local = open(scope);
+        try {
+          const result = await (path === "preview" ? plan.preview(local.ctx, body) : plan.answer(local.ctx, body.id));
+          return json(200, { result }, headers);
+        } finally { local.close(); }
+      }
+      default: return json(404, { error: "not found" }, headers);
+    }
+  } catch (error) {
+    return json(error instanceof UploadTooLarge ? 413 : error instanceof BrowserPlanInputError ? 400 : errStatus(error), errBody(error), headers);
+  }
+}
 
 async function runJsonOp(
   op: Operation,
@@ -269,15 +354,13 @@ async function clipNav(url: URL, scope: Scope): Promise<Response> {
   }
 }
 
-class ConversationUploadTooLarge extends Error {
-  constructor() { super("Choose a conversations JSON file up to 128 MiB."); }
-}
+class UploadTooLarge extends Error {}
 
-async function readConversationUpload(req: Request): Promise<Uint8Array> {
-  if (Number(req.headers.get("content-length")) > MAX_CONVERSATION_EXPORT_BYTES)
-    throw new ConversationUploadTooLarge();
+async function readUpload(req: Request, maxBytes: number, message: string): Promise<Buffer> {
+  if (Number(req.headers.get("content-length")) > maxBytes)
+    throw new UploadTooLarge(message);
   const reader = req.body?.getReader();
-  if (!reader) throw new OpError("Choose an extracted conversations JSON file.", "bad_params");
+  if (!reader) throw new OpError("Choose a file to upload.", "bad_params");
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
@@ -285,9 +368,9 @@ async function readConversationUpload(req: Request): Promise<Uint8Array> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_CONVERSATION_EXPORT_BYTES) {
+      if (size > maxBytes) {
         await reader.cancel().catch(() => {});
-        throw new ConversationUploadTooLarge();
+        throw new UploadTooLarge(message);
       }
       chunks.push(value);
     }
@@ -304,10 +387,81 @@ async function conversationUpload(req: Request, url: URL, scope: Scope, cors: Hd
   const local = open(scope);
   try {
     const result = await runConversationUpload(local.ctx, url.searchParams.get("provider"), req.headers.get("x-okb-preview"),
-      () => readConversationUpload(req));
+      () => readUpload(req, MAX_CONVERSATION_EXPORT_BYTES, "Choose a conversations JSON file up to 128 MiB."));
     return json(200, { result }, headers);
   } catch (e) {
-    return json(e instanceof ConversationUploadTooLarge ? 413 : errStatus(e), errBody(e), headers);
+    return json(e instanceof UploadTooLarge ? 413 : errStatus(e), errBody(e), headers);
+  } finally {
+    local.close();
+  }
+}
+
+async function sourceUpload(req: Request, url: URL, scope: Scope, cors: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  const contentType = req.headers.get("content-type") ?? "";
+  if (contentType.split(";")[0]?.trim().toLowerCase() !== "multipart/form-data")
+    return json(415, { error: "Choose bookmark or Markdown export files." }, headers);
+  const local = open(scope);
+  try {
+    const result = await runPersonalSourceUpload(
+      local.ctx, url.searchParams.get("kind"), req.headers.get("x-okb-preview"),
+      async () => {
+        const tooLarge = "Choose a selection up to 24 MiB.";
+        const raw = await readUpload(req, MAX_SOURCE_UPLOAD_BYTES + 2 * 1024 * 1024, tooLarge);
+        let form: Awaited<ReturnType<Response["formData"]>>;
+        let paths: unknown;
+        let selected: unknown;
+        try {
+          form = await new Response(raw, { headers: { "content-type": contentType } }).formData();
+          paths = JSON.parse(String(form.get("paths") ?? "null"));
+          selected = JSON.parse(String(form.get("selected") ?? "[]"));
+        } catch {
+          throw new OpError("The source upload is invalid. Choose the files again.", "bad_params");
+        }
+        const name = form.get("name");
+        const uploads = form.getAll("files");
+        if (typeof name !== "string" || !Array.isArray(paths) || !uploads.length || uploads.length > MAX_SOURCE_FILES ||
+            paths.length !== uploads.length || !paths.every((path) => typeof path === "string") ||
+            !uploads.every((file) => typeof file !== "string") ||
+            !Array.isArray(selected) || selected.length > 2000 || !selected.every((row) => Number.isSafeInteger(row)))
+          throw new OpError("The source upload is invalid. Choose the files again.", "bad_params");
+        if (uploads.reduce((size, file) => size + file.size, 0) > MAX_SOURCE_UPLOAD_BYTES)
+          throw new UploadTooLarge(tooLarge);
+        const files = await Promise.all(uploads.map(async (file, index) => ({ path: paths[index] as string, text: await file.text() })));
+        return { name, files, selected };
+      },
+    );
+    return json(200, { result }, headers);
+  } catch (error) {
+    return json(error instanceof UploadTooLarge ? 413 : errStatus(error), errBody(error), headers);
+  } finally {
+    local.close();
+  }
+}
+
+async function notionRequest(req: Request, action: string, scope: Scope, connector: NotionSource, cors: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (req.method !== (action === "status" ? "GET" : "POST"))
+    return json(405, { error: "Method not allowed." }, headers);
+  const local = open(scope);
+  try {
+    let body: Record<string, unknown> = {};
+    if (req.method === "POST") {
+      if (req.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json")
+        return json(415, { error: "Send a JSON object." }, headers);
+      const raw = await readUpload(req, 16 * 1024, "Notion request exceeds 16 KiB.");
+      try {
+        const value: unknown = JSON.parse(raw.toString("utf8"));
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+        body = value as Record<string, unknown>;
+      } catch {
+        return json(400, { error: "Send a JSON object." }, headers);
+      }
+    }
+    return json(200, { result: await runNotionSource(local.ctx, connector, action, body) }, headers);
+  } catch (error) {
+    const status = error instanceof NotionSourceError ? error.status : error instanceof UploadTooLarge ? 413 : errStatus(error);
+    return json(status, errBody(error), headers);
   } finally {
     local.close();
   }
@@ -333,6 +487,92 @@ function status(scope: Scope, o: ServeState): unknown {
   }
 }
 
+async function codingRequest(req: Request, url: URL, opts: ServeState, cors: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (req.headers.has("origin") && !cors["access-control-allow-origin"])
+    return json(403, { error: "Coding requests must come from the local app." }, headers);
+  const bearer = /^Bearer (\S+)$/i.exec(req.headers.get("authorization") ?? "")?.[1] ?? null;
+  const owner = !opts.projectTokensOnly && tokenMatches(req.headers.get("x-okb-token") ?? bearer, opts.token);
+  if (!owner && !/^okbp_[a-zA-Z0-9_-]{43}$/.test(bearer ?? ""))
+    return json(401, { error: "A valid coding project or local okbrain token is required." }, headers);
+  if (req.method !== "GET" && req.method !== "POST") return json(405, { error: "Method not allowed." }, headers);
+  try {
+    // Coding state is separate from bundles. When the browser chose a brain
+    // mount, still respect its read-only policy before writing local state.
+    const readonly = opts.readonly || (owner && scopeOf(req, url, opts).readonly);
+    let body: Record<string, unknown> = {};
+    if (req.method === "POST") {
+      if (req.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json")
+        return json(415, { error: "Send a JSON object." }, headers);
+      const data = await readUpload(req, 128 * 1024, "Coding request body exceeds 128 KiB.");
+      try {
+        const parsed: unknown = JSON.parse(data.toString("utf8"));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+        body = parsed as Record<string, unknown>;
+      } catch {
+        return json(400, { error: "Send a JSON object." }, headers);
+      }
+    }
+    const path = url.pathname.slice("/api/coding".length);
+    if (path === "/team" && opts.team) {
+      if (!owner) return json(403, { error: "Only the local operator can manage the team listener." }, headers);
+      if (req.method === "GET") return json(200, { result: opts.team.status }, headers);
+      if (readonly) return json(403, { error: "This server is attached to a read-only brain mount." }, headers);
+      const result = await opts.team.change(body, (request, state) => codingTeamRequest(request, state, opts));
+      return json(200, { result }, headers);
+    }
+    const result = await opts.coding!().dispatch(req.method, path, body, owner, bearer, readonly);
+    return json(200, { result }, headers);
+  } catch (error) {
+    if (error instanceof ProjectControlError) return json(error.status, errBody(error), headers);
+    if (error instanceof UploadTooLarge) return json(413, errBody(error), headers);
+    if (error instanceof CodingError || error instanceof RepositoryContextError) return json(409, errBody(error), headers);
+    if (error instanceof CodingProjectProfileError) return json(400, errBody(error), headers);
+    if (error instanceof ConfigError) return json(400, errBody(error), headers);
+    return json(500, { error: "Coding project data could not be opened or updated." }, headers);
+  }
+}
+
+const teamAssets = new Set([
+  "/gui/coding.js", "/gui/github.js", "/gui/coding.css", "/gui/tokens.css", "/gui/style.css", "/gui/render.js",
+  "/gui/fonts/RecursiveSans-VF.woff2", "/gui/fonts/RecursiveMono-VF.woff2",
+  "/gui/fonts/Literata-VF.woff2", "/gui/fonts/Literata-Italic-VF.woff2",
+]);
+
+async function codingTeamRequest(req: Request, team: TeamStatus, local: ServeState): Promise<Response> {
+  const url = new URL(req.url);
+  if (!hostAllowed(req.headers.get("host"), team.port))
+    return json(403, { error: "Invalid team workspace host." });
+  const origin = req.headers.get("origin");
+  const headers = origin && origin === team.publicOrigin ? {
+    "access-control-allow-origin": origin,
+    "access-control-allow-headers": "authorization, content-type",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    vary: "origin",
+  } : corsHeaders(origin, team.port);
+  const guards = {
+    ...GUARD,
+    "content-security-policy": "default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+    "referrer-policy": "no-referrer",
+    "cache-control": "no-store",
+  };
+  if (req.method === "GET" && url.pathname === "/") return new Response(guiCodingTeamHtml, {
+    headers: { ...guards, "content-type": "text/html; charset=utf-8" },
+  });
+  if (req.method === "GET" && teamAssets.has(url.pathname)) {
+    const asset = GUI_ASSETS[url.pathname];
+    if (asset) return new Response(asset[0], { headers: { ...guards, "content-type": asset[1] } });
+  }
+  if (url.pathname.startsWith("/api/coding/")) {
+    if (req.method === "OPTIONS") return new Response(null, { status: headers ? 204 : 403, headers });
+    return codingRequest(req, url, {
+      bundle: local.bundle, port: team.port, token: "", readonly: local.readonly,
+      coding: local.coding, projectTokensOnly: true,
+    }, headers ?? {});
+  }
+  return json(404, { error: "Not found." }, guards);
+}
+
 export async function handleRequest(req: Request, opts: ServeState): Promise<Response> {
   const url = new URL(req.url);
   if (!hostAllowed(req.headers.get("host"), opts.port))
@@ -353,12 +593,20 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     if (url.pathname === "/favicon.ico") return new Response(null, { status: 204 });
   }
 
+  if (url.pathname.startsWith("/api/coding/") && opts.coding) return codingRequest(req, url, opts, cors ?? {});
+
   const presented =
     req.headers.get("x-okb-token") ??
     req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ??
     url.searchParams.get("token");
   if (!tokenMatches(presented, opts.token))
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
+  if (url.pathname.startsWith("/api/personal/sources/")) {
+    if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+      return json(401, { error: "missing or invalid local app token" }, cors);
+    if (req.headers.has("origin") && !cors)
+      return json(403, { error: "Source actions must come from the local app." });
+  }
 
   let scope: Scope;
   try {
@@ -366,6 +614,17 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   } catch (e) {
     if (!(e instanceof ConfigError)) throw e;
     return json(400, { error: e.message }, cors);
+  }
+
+  const notion = /^\/api\/personal\/sources\/notion\/(status|connect|disconnect|preview|import)$/.exec(url.pathname);
+  if (notion && opts.notion) return notionRequest(req, notion[1]!, scope, opts.notion, cors ?? {});
+
+  if ((url.pathname.startsWith("/api/plan/") && opts.plan) || url.pathname === "/api/provider-keys") {
+    if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+      return json(401, { error: "missing or invalid local app token" }, cors);
+    if (req.headers.has("origin") && !cors) return json(403, { error: "Requests must come from the local app." });
+    if (url.pathname === "/api/provider-keys") return providerKeys(req, scope, cors ?? {});
+    return browserPlan(req, url.pathname.slice("/api/plan/".length), opts.plan!, scope, cors ?? {});
   }
 
   if (req.method === "GET") {
@@ -387,6 +646,8 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
       }
     if (url.pathname === "/api/bookmarklet")
       return json(200, { port: opts.port, bookmarklet: bookmarkletJs(opts.port, opts.token) }, cors);
+    if (url.pathname === "/api/personal/sources/history")
+      return runJsonOp(getOp("personal_source_history")!, scope, {}, { ...cors, "cache-control": "no-store" });
     if (url.pathname === "/api/ask/stream") return askStream(url, scope, cors ?? {});
     if (url.pathname === "/clip") return clipNav(url, scope);
   }
@@ -394,6 +655,8 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   const m = /^\/api\/op\/([a-z_]+)$/.exec(url.pathname);
   if (req.method === "POST" && url.pathname === "/api/conversations/upload")
     return conversationUpload(req, url, scope, cors ?? {});
+  if (req.method === "POST" && url.pathname === "/api/personal/sources/upload")
+    return sourceUpload(req, url, scope, cors ?? {});
   if (m && req.method === "POST") {
     const op = operations.find((o) => o.name === m[1] && !o.localOnly);
     if (!op) return json(404, { error: `unknown op: ${m[1]}` }, cors);
@@ -414,14 +677,24 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
 
 export function createApiServer(opts: ApiOptions): ApiServer {
   const token = opts.token ?? ensureServeToken();
+  const plan = createBrowserPlan(opts.chatgpt);
+  const notion = createNotionSource(opts.notion);
+  const team = new CodingTeamListener();
   const { bundle, readonly = false } = opts;
   const wanted = opts.port ?? DEFAULT_PORT;
+  let controller: CodingProjectControl | undefined;
+  const coding = () => controller ??= new CodingProjectControl(opts.coding);
   let server: Bun.Server<undefined>;
   try {
     server = Bun.serve({
       hostname: "127.0.0.1",
       port: wanted,
-      fetch: (req) => handleRequest(req, { bundle, port: server.port!, token, readonly }),
+      fetch(req) {
+        const path = new URL(req.url).pathname;
+        if (path === "/api/plan/answer") server.timeout(req, 150);
+        if (path.startsWith("/api/coding/")) server.timeout(req, 65);
+        return handleRequest(req, { bundle, port: server.port!, token, readonly, plan, coding, team, notion });
+      },
     });
   } catch (e) {
     if ((e as { code?: string }).code === "EADDRINUSE")
@@ -435,6 +708,12 @@ export function createApiServer(opts: ApiOptions): ApiServer {
     url: `http://127.0.0.1:${port}/`,
     port,
     token,
-    stop: () => server.stop(true),
+    stop() {
+      plan.close();
+      notion.close();
+      void server.stop(true);
+      void team.stop().catch(() => {});
+      void controller?.close().catch(() => {});
+    },
   };
 }
