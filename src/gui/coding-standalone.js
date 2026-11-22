@@ -11,7 +11,7 @@
   const statusLabel = (status) => statusLabels[status] || status || 'Saved';
 
   async function mount(parent, { coding, readonly, detached, defaultModels, entries, field, previewContents,
-    report, sessionUsage, usageText, showTaskProgress, taskProgressPanel, mountContextReset }) {
+    report, sessionUsage, usageText, contextSummary, showTaskProgress, taskProgressPanel, mountContextReset }) {
     const header = parent.querySelector('header');
     header.innerHTML = '<div class="row coding-project-links"><a href="#coding">Project workspace</a></div>' +
       '<h2 class="display">Standalone sessions</h2><p class="muted">Open sessions from this app or the CLI.</p>';
@@ -287,9 +287,8 @@
         (answer ? '<pre data-answer></pre>' : '') +
         (request?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
         (request?.approvedSourceLookup ? '<p class="muted">Approved source lookup enabled.</p>' : '') +
-        (pi ? '<p class="muted">Request usage · ' + esc(usageText(request?.usage)) + '</p><p class="muted">' +
-          esc(pi.context.estimatedTokens.toLocaleString()) + ' active context tokens' +
-          (pi.context.historyCompacted ? ' · Older turns compacted' : '') + '</p>' + sessionUsage(pi) : '') +
+        (pi ? '<p class="muted">Request usage · ' + esc(usageText(request?.usage)) + '</p>' +
+          contextSummary(pi.context) + sessionUsage(pi) : '') +
         (savedPrompt || savedSource ? '<details data-saved-task><summary>Saved task and source</summary>' +
           (savedPrompt ? '<pre data-saved-prompt></pre>' : '') +
           (savedSource ? '<div class="coding-preview stack" data-saved-source></div>' : '') + '</details>' :

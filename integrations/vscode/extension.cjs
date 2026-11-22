@@ -390,6 +390,18 @@ async function resetOwnerContext(connection, project, session, isCurrent) {
   await vscode.window.showInformationMessage(`Started fresh context for ${session}. Saved runs remain in Run history.`);
 }
 
+function contextBudgetLines(context) {
+  const lines = [
+    ['Estimated active context', context?.estimatedTokens, 0],
+    ['Input token cap', context?.limitTokens, 1],
+    ['Output reserve', context?.maxOutputTokens, 1],
+    ['Model window', context?.modelWindowTokens, 1],
+  ].flatMap(([label, value, minimum]) => Number.isSafeInteger(value) && value >= minimum
+    ? [`${label}: ${value.toLocaleString()} tokens`] : []);
+  if (context?.historyCompacted === true) lines.push('Earlier turns are compacted. Saved requests remain in Run history.');
+  return lines.length ? ['Session context budget', ...lines] : [];
+}
+
 async function inspectRun(connection, project, selected) {
   const current = ++inspection;
   const team = connection.mode === 'team';
@@ -402,6 +414,7 @@ async function inspectRun(connection, project, selected) {
   if (!isCurrent()) return;
   const receipt = pi?.request?.receipt;
   const progress = taskProgressLines(taskProgress ?? pi?.request?.taskProgress, run.status === 'running');
+  const budget = contextBudgetLines(pi?.context);
   const contents = [
     project.title, ...(team ? [`Team workspace: ${connection.url.origin}`] : []),
     `Session: ${run.session}`, `Request: ${run.id}`, `Status: ${run.status}`,
@@ -413,6 +426,7 @@ async function inspectRun(connection, project, selected) {
       liveAnswer.truncated ? 'Response in progress. Preview limit reached.' : 'Response in progress.', liveAnswer.text] : []),
     ...(receipt?.text ? ['', 'Pi response', receipt.text] : []),
     ...(receipt?.reason ? ['', receipt.reason] : []),
+    ...(budget.length ? ['', ...budget] : []),
     ...(pi?.usage ? ['', 'Recorded session usage', JSON.stringify(pi.usage, null, 2)] : []),
   ].join('\n');
   if (team) await showReadOnlyText('Team coding run', contents, isCurrent);

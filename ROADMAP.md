@@ -59,6 +59,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   recover from the stored snapshot.
 - [x] Expose local request status, active context estimates, Pi Durable history
   compaction, and recorded provider usage including cache counters.
+- [x] Show the session input limit, output allowance, and model window alongside
+  the active context estimate in the apps and editor inspection.
 - [x] Start fresh Pi context in idle sessions from the Mac app, web app, and
   editor. Preserve earlier requests, source snapshots, and review decisions.
 - [x] Carry an optional owner-authored handoff into fresh Pi context from the
@@ -811,9 +813,10 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 
+Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Made Pi context limits visible in the Mac app, web app, and editor.
 - 2026-11-22 — Added optional reviewed handoffs to Pi context resets in the
   Mac and web apps and the VS Code and Cursor extension.
-Newest first. One line per session: what changed + what's next.
 - 2026-11-22 — Added explicit team listener startup persistence, bind recovery,
   and reserved-port isolation across okbrain server restarts.
 - 2026-11-22 — Added owner-confirmed Pi context reset with durable replay and

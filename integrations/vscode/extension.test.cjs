@@ -27,7 +27,7 @@ function activateExtension(vscode, connection, options = {}) {
   module.exports.activate({ subscriptions: [], secrets: options.secrets ?? { onDidChange() {} } });
 }
 
-test('editor review opens approved source in a read-only document only on request', async () => {
+test('editor inspection shows the context budget and opens approved source only on request', async () => {
   const project = { id: 'fixture', title: 'Project fixture' };
   const runs = [
     { id: 'active', session: 'main', status: 'running', admitted: true },
@@ -41,6 +41,7 @@ test('editor review opens approved source in a read-only document only on reques
   let openSource = false;
   let availableActions;
   let lastDocument;
+  let savedContext = { estimatedTokens: 1050, limitTokens: 2400, maxOutputTokens: 400, modelWindowTokens: 3200, historyCompacted: true };
   let sourceReads = 0;
   let provideSource;
   const commands = new Map();
@@ -48,7 +49,8 @@ test('editor review opens approved source in a read-only document only on reques
     projects: [project],
     async api(path, identity) {
       if (path === '/projects/fixture/runs') return runs;
-      if (path === '/projects/fixture/inspect') return { run: runs.find((run) => run.id === identity.requestId) };
+      if (path === '/projects/fixture/inspect') return { run: runs.find((run) => run.id === identity.requestId),
+        ...(identity.requestId === 'saved' ? { pi: { context: savedContext, usage: { models: {} } } } : {}) };
       assert.equal(path, '/projects/fixture/source-inspect');
       assert.equal(identity.session, 'main');
       assert.equal(identity.requestId, 'saved');
@@ -88,11 +90,30 @@ test('editor review opens approved source in a read-only document only on reques
 
   await inspect();
   assert.ok(!availableActions.includes('View saved request source'));
+  assert.doesNotMatch(lastDocument.text, /Session context budget/);
   selectedRun = 'saved';
   await inspect();
   assert.ok(availableActions.includes('View saved request source'));
   assert.equal(sourceReads, 0);
   assert.ok(!lastDocument.text.includes(source.prompt));
+  assert.ok(lastDocument.text.includes([
+    'Session context budget',
+    `Estimated active context: ${(1050).toLocaleString()} tokens`,
+    `Input token cap: ${(2400).toLocaleString()} tokens`,
+    `Output reserve: ${(400).toLocaleString()} tokens`,
+    `Model window: ${(3200).toLocaleString()} tokens`,
+    'Earlier turns are compacted. Saved requests remain in Run history.',
+    '', 'Recorded session usage',
+  ].join('\n')));
+
+  savedContext = { estimatedTokens: 0, limitTokens: '2400', maxOutputTokens: -1, modelWindowTokens: 3200.5, historyCompacted: 'true' };
+  await inspect();
+  assert.ok(lastDocument.text.includes(`Estimated active context: ${(0).toLocaleString()} tokens`));
+  assert.doesNotMatch(lastDocument.text, /Input token cap|Output reserve|Model window|Older turns|Earlier turns/);
+  savedContext = { estimatedTokens: 12, limitTokens: 400 };
+  await inspect();
+  assert.ok(lastDocument.text.includes(`Estimated active context: ${(12).toLocaleString()} tokens\nInput token cap: ${(400).toLocaleString()} tokens`));
+  assert.doesNotMatch(lastDocument.text, /Output reserve|Model window/);
 
   openSource = true;
   await inspect();

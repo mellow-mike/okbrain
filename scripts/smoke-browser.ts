@@ -26,7 +26,9 @@ const standaloneModels = createModels();
 const standaloneFaux = fauxProvider({ provider: "openai", models: [{ id: "browser-coding-fixture" }] });
 standaloneModels.setProvider(standaloneFaux.provider);
 const projectModels = createModels();
-const projectFaux = fauxProvider({ provider: "openai", models: [{ id: "browser-project-fixture" }] });
+const projectFaux = fauxProvider({
+  provider: "openai", models: [{ id: "browser-project-fixture", contextWindow: 65_536, maxTokens: 4_096 }],
+});
 projectModels.setProvider(projectFaux.provider);
 projectModels.setProvider(googleProvider());
 const branchBefore = "export const sourceMarker = 'approved browser source';\n";
@@ -78,7 +80,7 @@ async function selectGraphNote(page: Page, id: string) {
 
 try {
   browser = await chromium.launch({ executablePath: process.env.OKB_SMOKE_CHROMIUM || undefined });
-  const page = await browser.newPage({ viewport: { width: 375, height: 700 }, reducedMotion: "reduce" });
+  const page = await browser.newPage({ viewport: { width: 375, height: 700 }, reducedMotion: "reduce", locale: "en-US" });
   page.setDefaultTimeout(8000);
   const origin = new URL(server.url).origin;
   const errors: string[] = [];
@@ -898,9 +900,36 @@ try {
   await runCodingSession({
     ...standaloneIdentity, requestId: "cli-complete", prompt: "Saved CLI task.", files: ["browser.ts"],
   }, { stateDir: standaloneState, models: standaloneModels });
+  function waitForBudgetInspection(path: string, requestId: string) {
+    return page.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding" + path + "/inspect" &&
+      response.request().postDataJSON().requestId === requestId);
+  }
+  async function verifyContextBudget(estimatedTokens: number, expectedLimits: string, compacted = false) {
+    assert.ok(Number.isSafeInteger(estimatedTokens) && estimatedTokens >= 0);
+    const budget = page.locator("[data-context-budget]");
+    const estimate = `Estimated active context · ${estimatedTokens.toLocaleString("en-US")} tokens` +
+      (compacted ? " · Older turns compacted" : "");
+    await budget.getByText(estimate, { exact: true }).waitFor();
+    await budget.getByText(expectedLimits, { exact: true }).waitFor();
+    assert.equal(await budget.getByText(/^Request usage ·/).count(), 0);
+    assert.equal(await page.locator(".coding-result").getByText(/^Request usage ·/).isVisible(), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  }
+  const standaloneBudget = waitForBudgetInspection("/standalone", "cli-complete");
   await page.getByRole("link", { name: "Standalone sessions", exact: true }).click();
   await page.getByRole("heading", { name: "Standalone sessions", exact: true }).waitFor();
   await page.getByText("Saved CLI answer.", { exact: true }).waitFor();
+  const savedContext = (await (await standaloneBudget).json()).result.pi.context;
+  await verifyContextBudget(savedContext.estimatedTokens,
+    "Input limit 32,768 tokens · Output reserve 8,192 tokens · Model window 128,000 tokens");
+  await page.route("**/api/coding/standalone/inspect", async (route) => {
+    const response = await route.fetch();
+    const payload = await response.json();
+    payload.result.pi.context = { estimatedTokens: 0, historyCompacted: true };
+    await route.fulfill({ response, json: payload });
+  }, { times: 1 });
+  await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
+  await verifyContextBudget(0, "Model context budget unavailable", true);
   assert.equal(await page.getByRole("combobox", { name: "Saved session" }).inputValue(), "existing-cli");
   assert.equal(await page.getByRole("combobox", { name: "Model", exact: true }).isDisabled(), true);
   await page.getByText("Saved task and source", { exact: true }).click();
@@ -1224,6 +1253,11 @@ try {
   const projectResponse = page.locator(".coding-activity [data-answer]");
   await projectResponse.waitFor();
   assert.equal(await projectResponse.textContent(), projectAnswer);
+  const projectBudget = waitForBudgetInspection(projectPath, "project-task-progress");
+  await page.locator(".coding-activity").getByRole("button", { name: "Refresh", exact: true }).click();
+  const projectContext = (await (await projectBudget).json()).result.pi.context;
+  await verifyContextBudget(projectContext.estimatedTokens,
+    "Input limit 32,768 tokens · Output reserve 4,096 tokens · Model window 65,536 tokens");
   const reviewPatch = page.getByRole("button", { name: "Review proposed patch", exact: true });
   assert.equal(await reviewPatch.count(), 0);
   const acceptResult = page.getByRole("button", { name: "Accept result", exact: true });

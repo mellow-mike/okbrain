@@ -181,7 +181,9 @@ okb code status --workspace ./my-project --session auth-review --request-id auth
   --provider openai --model gpt-5-mini --json
 ```
 
-`code status` reads the session without calling a provider. It shows pending request IDs, estimated active context, model-window and output limits, and usage recorded by Pi Durable. With a request ID it also reports that request's state, saved source manifest, and any recorded response usage. In **Run history**, open **Session usage** under any saved request to see model totals and the portions from the main and child conversations. The panel shows provider-reported token categories, reasoning within output, an estimated USD cost when available, and any tracked tool usage. It includes failed and cancelled attempts when Pi saved their usage. An interrupted provider attempt may incur usage that the local process never recorded.
+**Run history** in the Mac and web apps and run inspection in VS Code and Cursor show the session’s estimated active context, input limit, output allowance, and model window. These figures describe what can fit in a request. Open **Session usage** in the apps to see provider-reported totals for the session and for its main and child conversations. The panel shows input, output, and cache tokens, reasoning within output, estimated USD cost when available, and any tracked tool usage. It includes failed and cancelled attempts when Pi saved their usage. An interrupted provider attempt may incur usage that the local process never recorded.
+
+`code status` reads the same session data without calling a provider. With a request ID it also reports that request's state, saved source manifest, and any recorded response usage.
 
 Pi receives an opaque session ID so providers can reuse a stable prefix across follow-ups. Provider support, cache lifetime, and history compaction affect the observed counts.
 

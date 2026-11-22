@@ -83,6 +83,23 @@
     ].join(' · ');
   }
 
+  function contextSummary(context) {
+    const tokens = (value) => value.toLocaleString() + ' tokens';
+    const positiveLimit = (value) => Number.isSafeInteger(value) && value > 0;
+    const estimate = context?.estimatedTokens;
+    const estimated = Number.isSafeInteger(estimate) && estimate >= 0 ? tokens(estimate) : 'unavailable';
+    const limits = [
+      ['Input limit', context?.limitTokens],
+      ['Output reserve', context?.maxOutputTokens],
+      ['Model window', context?.modelWindowTokens],
+    ];
+    const budget = limits.some(([, value]) => positiveLimit(value))
+      ? limits.map(([label, value]) => label + ' ' + (positiveLimit(value) ? tokens(value) : 'unavailable')).join(' · ')
+      : 'Model context budget unavailable';
+    return '<div class="muted" data-context-budget><p>Estimated active context · ' + esc(estimated) +
+      (context?.historyCompacted === true ? ' · Older turns compacted' : '') + '</p><p>' + esc(budget) + '</p></div>';
+  }
+
   function sessionCounters(usage) {
     const counters = [usage.totalTokens.toLocaleString() + ' total tokens', usageText(usage)];
     if (usage.reasoning !== undefined) counters.push(usage.reasoning.toLocaleString() + ' reasoning within output');
@@ -832,9 +849,7 @@
         (row.reviewer ? '<p class="muted">Reviewed by ' + esc(row.reviewer) + ' · ' + esc(time(row.reviewed)) + '</p>' : '') +
         (error ? '<div class="notice">' + esc(error) + '</div>' : '') +
         (result.admissionMissing ? '<p class="muted">Pi did not save this request. Resume will make this ID available for resubmission.</p>' : '') +
-        (pi ? '<p class="muted">Request usage · ' + esc(usageText(pi.request?.usage)) + '</p><p class="muted">' +
-          esc(pi.context.estimatedTokens.toLocaleString()) + ' active context tokens' +
-          (pi.context.historyCompacted ? ' · Older turns compacted' : '') + '</p>' : '') +
+        (pi ? '<p class="muted">Request usage · ' + esc(usageText(pi.request?.usage)) + '</p>' + contextSummary(pi.context) : '') +
         (pi?.request?.approvedSourceLookup ? '<p class="muted">Approved source lookup enabled for this request.</p>' : '') +
         (receipt?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
         taskProgressPanel +
@@ -1479,7 +1494,7 @@
     if (!teamMode && arg === 'standalone') {
       projectsEl.remove();
       await window.okbCodingStandalone.mount(page, {
-        coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, report, sessionUsage, usageText,
+        coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, report, sessionUsage, usageText, contextSummary,
         showTaskProgress, taskProgressPanel, mountContextReset,
       });
       return;

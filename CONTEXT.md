@@ -22,9 +22,9 @@ of the selected bytes. Admission checks the digest and saves the exact
 selection. Recovery reads the saved input. When the operator opts in, Pi can
 look up bounded line ranges in the current request's saved selection. OpenAI,
 Anthropic, and Google Gemini use Pi's model catalogs and explicit credentials.
-The app and CLI report Pi Durable status, active context estimates, and
-recorded usage. Run history shows usage for the selected request and the full
-session, including main and child conversation totals.
+The app, editor, and CLI report the active context estimate and model limits
+from Pi session status. Run history shows recorded usage for the selected
+request and the full session, including main and child conversation totals.
 Run inspection projects Pi Durable's live task graph to bounded counts for
 the selected request and its descendants. The control plane forwards those
 counts through the worker pipe and the authenticated inspection route.
