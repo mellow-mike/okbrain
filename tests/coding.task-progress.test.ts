@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
@@ -25,7 +25,7 @@ test("worker task progress copies only bounded known labels and counters", () =>
 });
 
 test("Pi restores the selected saved model task and reports the approved lookup round without its contents", async () => {
-  const root = await mkdtemp(join(tmpdir(), "okb-task-progress-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "okb-task-progress-")));
   const workspace = join(root, "workspace");
   await mkdir(workspace);
   const models = createModels();
