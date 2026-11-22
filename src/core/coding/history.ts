@@ -41,7 +41,7 @@ function estimateOutboundTokens(messages: readonly Message[]): number {
 }
 
 export function estimateCodingContext(messages: readonly Message[]): number {
-  return estimateOutboundTokens(outboundMessages(messages));
+  return estimateOutboundTokens(outboundCodingMessages(messages));
 }
 
 export function newRequestFits(content: string, instructions: string, budget: CodingBudget): boolean {
@@ -86,7 +86,7 @@ export function codingHistory(budget: CodingBudget | undefined) {
   });
 }
 
-function outboundMessages(messages: readonly Message[]): Message[] {
+export function outboundCodingMessages(messages: readonly Message[]): Message[] {
   return messages.map((message) => {
     if (message.role !== "user" || typeof message.content !== "string" || !message.content.includes('"repositoryContext":')) return message;
     try {
@@ -114,7 +114,7 @@ function blockedRequest(model: Model<Api>, errorMessage: string) {
 
 export function budgetedModels(models: Models, budget: CodingBudget, sessionId: string): Models {
   const streamSimple: Models["streamSimple"] = (model, context, options) => {
-    const messages = outboundMessages(context.messages);
+    const messages = outboundCodingMessages(context.messages);
     const toolRounds = getCurrentTools(messages).some(({ name }) => name === approvedSourceToolName)
       ? messages.slice(messages.findLastIndex(({ role }) => role === "user") + 1).filter((message) =>
         message.role === "assistant" && message.content.some((part) => part.type === "toolCall" && part.name === approvedSourceToolName)).length

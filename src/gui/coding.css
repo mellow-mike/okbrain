@@ -26,7 +26,10 @@
 .coding-panel [hidden] { display: none !important; }
 /* Keep adjacent actions from rewrapping between pointer down and up. */
 .coding-panel [data-context-controls] button:hover:not(:disabled),
+.coding-panel [data-branch-actions] button:hover:not(:disabled),
 .coding-panel [data-run-copy-actions] button:hover:not(:disabled) { font-weight: 560; }
+.coding-branch-history { max-height: 24rem; overflow: auto; min-width: 0; }
+.coding-branch-history pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .coding-form { padding-top: var(--space-4); }
 .coding-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr)); }
 .coding-panel input, .coding-panel select { min-width: 0; }

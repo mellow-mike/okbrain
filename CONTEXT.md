@@ -51,6 +51,22 @@ handoff whose exact text is bound to the revision and becomes the first user
 message in the fresh context. The reset uses no provider calls. Older requests
 remain in the transcript for inspection and review. Retrying the same approved
 revision reads its reset receipt and leaves any later context intact.
+Local owners can create a native Pi alternative review branch from the latest
+accepted ordinary answer in an idle project transcript. The operator reviews
+the visible provider-bound history, including inherited source and tool
+messages. The app discloses provider-managed reasoning or signatures when
+present. Branch creation binds the exact parent answer, active history, and
+agent to the approval. The Pi fork and its recovery receipt commit together
+without a provider call. The project catalog records the pending approval so
+the owner can finish creation after an interruption.
+New branch requests bind a fresh scoped source preview and the current branch
+history digest. They have their own request and review records and their own
+Pi usage totals. The project admits work through the original transcript
+lease and treats the parent and branches as a single retention and deletion
+unit. Authorized project members can inspect and review branch runs. Branches
+cover ordinary file and repository reviews. Independent package reviews,
+evaluations, manual context maintenance, and patch or GitHub publication use
+regular project sessions.
 The project control plane scopes credentials, members, worker runs, and
 review decisions to registered projects. Owners can save named task, query,
 and repository profile presets in the project catalog. Project members can

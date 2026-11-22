@@ -11,9 +11,9 @@ import {
   ApprovedPatchError, approvedPatchBytes, approvedPatchFiles, approvedPatchState, patchDigest, withPreparedPatch, type PatchFileReceipt,
 } from "./approved-patch.ts";
 import {
-  cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, compactCodingContext,
+  cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, compactCodingContext, createCodingBranch,
   getCodingSessionStatus, getSavedCodingRequestInput, hasCodingCredential, listCodingModels, parseCodingHandoff,
-  previewCodingAttachments, previewCodingContextCompaction, previewCodingContextReset, requireNoPendingCodingContextCompaction,
+  previewCodingAttachments, previewCodingBranch, previewCodingBranchContext, previewCodingContextCompaction, previewCodingContextReset, requireNoPendingCodingContextCompaction,
   resetCodingContext, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions,
 } from "./durable.ts";
@@ -47,6 +47,10 @@ type RunRow = {
   admitted: number; created: string; updated: string; error: string | null;
   review: "accepted" | "changes_requested" | null; reviewer: string | null; reviewed: string | null;
 };
+type BranchRow = {
+  session: string; parent_session: string; parent_request: string; version: string;
+  status: "pending" | "ready"; created: string;
+};
 type PatchRow = {
   preview_id: string; diff_hash: string; files: string; status: "prepared" | "applied"; applied: string | null;
 };
@@ -65,7 +69,7 @@ type Running = {
   cancel: AbortController;
   promise: Promise<void>;
   stop?: () => void;
-  progress?: { requestId: string; answer?: CodingLiveAnswer; tasks?: CodingTaskProgress };
+  progress?: { session: string; requestId: string; answer?: CodingLiveAnswer; tasks?: CodingTaskProgress };
 };
 
 export class ProjectControlError extends Error {
@@ -91,6 +95,8 @@ export function teamListenConfiguration(port: unknown, publicOrigin: unknown, al
 }
 
 const sessionPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const branchSessionPattern = /^alt-[a-f0-9]{60}$/u;
+const branchVersionPattern = /^[a-f0-9]{64}$/u;
 const requestPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const presetPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const maxProjectPresets = 24;
@@ -274,6 +280,12 @@ export class CodingProjectControl {
           PRIMARY KEY (project, session, id)
         );
         CREATE INDEX IF NOT EXISTS runs_project_updated ON runs(project, updated DESC);
+        CREATE TABLE IF NOT EXISTS conversation_branches(
+          project TEXT NOT NULL REFERENCES projects(id), session TEXT NOT NULL,
+          parent_session TEXT NOT NULL, parent_request TEXT NOT NULL, version TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending','ready')), created TEXT NOT NULL,
+          PRIMARY KEY(project, session), UNIQUE(project, parent_session, parent_request)
+        );
         CREATE TABLE IF NOT EXISTS audit(
           seq INTEGER PRIMARY KEY, project TEXT NOT NULL REFERENCES projects(id), kind TEXT NOT NULL,
           actor TEXT NOT NULL, session TEXT, request_id TEXT, at TEXT NOT NULL
@@ -411,7 +423,10 @@ export class CodingProjectControl {
   }
 
   #runView({ signature: _signature, ...row }: RunRow) {
-    return { ...row, admitted: Boolean(row.admitted) };
+    const branch = this.#branch(row.project, row.session);
+    return { ...row, admitted: Boolean(row.admitted),
+      ...(branch ? { branch: { session: branch.parent_session, requestId: branch.parent_request } } : {}),
+    };
   }
 
   #projectView(row: ProjectRow, actor: Actor) {
@@ -536,6 +551,9 @@ export class CodingProjectControl {
     const source = sourceOptions(project, body);
     const workspace = await this.#workspace(project);
     const evaluation = parseEvaluation(body.evaluation, JSON.parse(project.scopes));
+    const branchSession = typeof body.session === "string" && branchSessionPattern.test(body.session) ? body.session : undefined;
+    const branchContext = branchSession
+      ? await this.#branchSendPreview(project, branchSession, actor, Boolean(source.packages || evaluation || body.measurePreview)) : undefined;
     const binding = pinnedEvaluationBinding(evaluation, typeof body.prompt === "string" ? body.prompt : undefined, source, body.approvedSourceLookup === true);
     if (binding) await verifyPinnedEvaluationWorkspace(workspace);
     const measuredFrom = binding ? performance.now() : started;
@@ -550,7 +568,7 @@ export class CodingProjectControl {
       const id = "manifest" in result ? result.manifest.id : result.id;
       this.#evaluations.preview(project.id, actor.id, id, milliseconds, binding);
     }
-    return result;
+    return { ...result, ...(branchContext ? { branchContext } : {}) };
   }
 
   #runParts(body: Json) {
@@ -562,10 +580,119 @@ export class CodingProjectControl {
   }
 
   #session<T extends { session: string }>(project: ProjectRow, run: T) {
+    const branch = this.#branch(project.id, run.session);
+    if (branch?.status === "pending") throw new ProjectControlError("Finish creating the approved alternative branch before using it.", 409);
+    if (!branch && branchSessionPattern.test(run.session) &&
+      !this.#get("SELECT 1 FROM runs WHERE project = ? AND session = ? LIMIT 1", project.id, run.session))
+      throw new ProjectControlError("This alternative branch is unavailable. Select a saved branch in Run history.", 404);
     return {
       ...run, workspace: project.workspace, provider: project.provider, model: project.model,
       thinkingLevel: project.thinking ?? undefined,
+      ...(branch ? { branch: { parentSession: branch.parent_session, id: branch.version } } : {}),
     };
+  }
+
+  #branch(project: string, session: string) {
+    if (!branchSessionPattern.test(session)) return null;
+    return this.#get<BranchRow>("SELECT * FROM conversation_branches WHERE project = ? AND session = ?", project, session);
+  }
+
+  #physicalSession(project: string, session: string) {
+    return this.#branch(project, session)?.parent_session ?? session;
+  }
+
+  #sessionKey(project: string, session: string) {
+    return `${project}/${this.#physicalSession(project, session)}`;
+  }
+
+  #sessionDeleting(project: string, session: string) {
+    return this.#get("SELECT 1 FROM session_deletions WHERE project = ? AND session = ?", project, this.#physicalSession(project, session));
+  }
+
+  #unfinishedRun(project: string, session: string, exceptRequest?: string) {
+    return this.#get<{ id: string }>(`SELECT runs.id FROM runs
+      LEFT JOIN conversation_branches b ON b.project = runs.project AND b.session = runs.session
+      WHERE runs.project = ? AND COALESCE(b.parent_session, runs.session) = ?
+        AND runs.status IN ('running', 'interrupted') AND NOT (runs.session = ? AND runs.id = COALESCE(?, '')) LIMIT 1`,
+      project, this.#physicalSession(project, session), session, exceptRequest ?? null);
+  }
+
+  #conversationBranchView(branch: BranchRow) {
+    return {
+      session: branch.parent_session, requestId: branch.parent_request, branchSession: branch.session,
+      status: branch.status, createdAt: branch.created,
+      ...(branch.status === "pending" ? { previewId: branch.version } : {}),
+    };
+  }
+
+  #requireBranchIdle(project: ProjectRow, session: string) {
+    if (this.#active.has(this.#sessionKey(project.id, session)) || this.#unfinishedRun(project.id, session))
+      throw new ProjectControlError("Finish, resume, or cancel active work in this transcript before branching or previewing branch context.", 409);
+    if (this.#sessionDeleting(project.id, session)) throw new ProjectControlError("This transcript is being deleted.", 409);
+  }
+
+  async #branchSendPreview(project: ProjectRow, session: string, actor: Actor, unsupported: boolean) {
+    this.#requireOwner(actor);
+    const identity = this.#session(project, { session });
+    if (!identity.branch) return;
+    if (unsupported) throw new ProjectControlError("Choose an ordinary files or repository review for an alternative branch.", 409);
+    this.#requireBranchIdle(project, session);
+    const { version, estimatedTokens, activeEntries, history, providerContinuity } = await previewCodingBranchContext(identity, this.#dependencies(project, actor));
+    return { id: version, estimatedTokens, inheritedEntries: activeEntries, history, providerContinuity };
+  }
+
+  async #changeBranch(project: ProjectRow, body: Json, actor: Actor, preview: boolean, canWrite: () => boolean) {
+    this.#requireOwner(actor);
+    const run = this.#runParts(body);
+    const authorize = () => {
+      if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to create an alternative branch.", 403);
+    };
+    authorize();
+    const row = this.#readRun(project.id, run.session, run.requestId);
+    const prior = this.#get<BranchRow>(`SELECT * FROM conversation_branches
+      WHERE project = ? AND parent_session = ? AND parent_request = ?`, project.id, run.session, run.requestId);
+    const requireAcceptedParent = () => {
+      if (this.#branch(project.id, run.session) || row.status !== "done" || row.review !== "accepted")
+        throw new ProjectControlError("Accept a completed result in the parent session before creating an alternative branch.", 409);
+    };
+    if (preview || !prior) requireAcceptedParent();
+    const identity = this.#session(project, run);
+    const dependencies = this.#dependencies(project, actor);
+    if (preview) {
+      if (prior) throw new ProjectControlError("This result already has an alternative branch. Open it from Run history.", 409);
+      this.#requireBranchIdle(project, run.session);
+      const { version, estimatedTokens, activeEntries, history, providerContinuity } = await previewCodingBranch(identity, run.requestId, dependencies);
+      return {
+        ...run, branchSession: `alt-${version.slice(0, 60)}`, previewId: version, provider: project.provider, model: project.model,
+        estimatedTokens, inheritedEntries: activeEntries, history, providerContinuity,
+      };
+    }
+
+    const previewId = field(body, "previewId", 64);
+    if (!branchVersionPattern.test(previewId) || (prior && prior.version !== previewId))
+      throw new ProjectControlError("Preview the inherited context before creating the branch.", 409);
+    const branchSession = `alt-${previewId.slice(0, 60)}`;
+    if (prior?.status === "ready") return { ...run, branchSession, created: true, replayed: true };
+    this.#requireBranchIdle(project, run.session);
+    const approve = () => {
+      authorize();
+      requireAcceptedParent();
+      if (prior) return;
+      this.#db.transaction(() => {
+        if (this.#branch(project.id, branchSession) || this.#get("SELECT 1 FROM runs WHERE project = ? AND session = ? LIMIT 1", project.id, branchSession))
+          throw new ProjectControlError("The alternative branch name is already in use.", 409);
+        this.#write(`INSERT INTO conversation_branches(project, session, parent_session, parent_request, version, status, created)
+          VALUES (?, ?, ?, ?, ?, 'pending', ?)`, project.id, branchSession, run.session, run.requestId, previewId, now());
+        this.#audit(project.id, "alternative_branch_approved", actor.id, run.session, run.requestId);
+      })();
+    };
+    const receipt = await createCodingBranch(identity, run.requestId, previewId, dependencies, approve);
+    if (!this.#branch(project.id, branchSession)) throw new ProjectControlError("The saved branch approval could not be found.", 409);
+    this.#db.transaction(() => {
+      this.#write("UPDATE conversation_branches SET status = 'ready' WHERE project = ? AND session = ?", project.id, branchSession);
+      this.#audit(project.id, "alternative_branch_created", actor.id, run.session, run.requestId);
+    })();
+    return { ...run, branchSession, created: true, ...(receipt.replayed ? { replayed: true } : {}) };
   }
 
   #dependencies(project: ProjectRow, actor: Actor): CodingDependencies & { workspaceBinding: string } {
@@ -597,10 +724,10 @@ export class CodingProjectControl {
   }
 
   #schedule(project: ProjectRow, run: CodingSessionOptions, actor: Actor) {
-    const key = `${project.id}/${run.session}`;
+    const key = this.#sessionKey(project.id, run.session);
     const cancel = new AbortController();
     const dependencies = this.#dependencies(project, actor);
-    const progress: NonNullable<Running["progress"]> = { requestId: run.requestId };
+    const progress: NonNullable<Running["progress"]> = { session: run.session, requestId: run.requestId };
     const admitted = () => this.#auditAdmitted(project.id, run, actor);
     const liveAnswer = (answer: CodingLiveAnswer | undefined) => { progress.answer = answer; };
     const taskProgress = (tasks: CodingTaskProgress | undefined) => { progress.tasks = tasks; };
@@ -638,15 +765,18 @@ export class CodingProjectControl {
 
   #canSchedule(project: ProjectRow, run: { session: string; requestId: string }) {
     if (this.#closing || this.#active.size >= 4) throw new ProjectControlError("The server is busy. Try again after a run finishes.", 409);
-    if (this.#active.has(`${project.id}/${run.session}`))
+    if (this.#active.has(this.#sessionKey(project.id, run.session)))
       throw new ProjectControlError("Another request in this session is currently running.", 409);
-    if (this.#get("SELECT session FROM session_deletions WHERE project = ? AND session = ?", project.id, run.session))
+    if (this.#sessionDeleting(project.id, run.session))
       throw new ProjectControlError("Finish deleting this session before starting another request.", 409);
   }
 
-  async #start(project: ProjectRow, body: Json, actor: Actor) {
+  async #start(project: ProjectRow, body: Json, actor: Actor, canWrite: () => boolean) {
     const run = this.#runParts(body);
     this.#checkExpiredRequest(project.id, run.session, run.requestId);
+    const identity = this.#session(project, run);
+    const branch = identity.branch;
+    if (branch) this.#requireOwner(actor);
     const prompt = field(body, "prompt", 16384);
     if (body.approved !== true) throw new ProjectControlError("Review the preview and confirm the content to send.");
     const previewId = field(body, "previewId", 128);
@@ -658,8 +788,15 @@ export class CodingProjectControl {
       throw new ProjectControlError("Choose explicit files or repository excerpts to allow approved source lookup.");
     const capabilities = approvedSourceLookup ? { approvedSourceLookup: true as const } : {};
     const evaluation = parseEvaluation(body.evaluation, JSON.parse(project.scopes));
+    if (branch && (evaluation || selection.packages))
+      throw new ProjectControlError("Choose an ordinary files or repository review for an alternative branch.", 409);
+    const branchContextId = branch ? field(body, "branchContextId", 64) : undefined;
+    if (branchContextId !== undefined && !branchVersionPattern.test(branchContextId))
+      throw new ProjectControlError("Preview and approve the current alternative branch context before sending.", 409);
     const binding = pinnedEvaluationBinding(evaluation, prompt, selection, approvedSourceLookup);
-    const signature = digest(JSON.stringify({ prompt, previewId, selection, ...(evaluation ? { evaluation } : {}), ...capabilities }));
+    const signature = digest(JSON.stringify({ prompt, previewId, selection, ...(evaluation ? { evaluation } : {}), ...capabilities,
+      ...(branchContextId ? { branchContextId } : {}),
+    }));
     const workspace = await this.#workspace(project);
     const prior = this.#get<RunRow>("SELECT * FROM runs WHERE project = ? AND session = ? AND id = ?", project.id, run.session, run.requestId);
     if (prior && prior.status !== "failed") {
@@ -670,18 +807,19 @@ export class CodingProjectControl {
     if (!hasCodingCredential(project.provider, this.#dependencies(project, actor)))
       throw new ProjectControlError("Add a provider API key for this project before sending requests.", 409);
     this.#canSchedule(project, run);
-    const blocking = this.#get<{ id: string }>(
-      "SELECT id FROM runs WHERE project = ? AND session = ? AND status = 'interrupted' AND id <> ? LIMIT 1", project.id, run.session, run.requestId,
-    );
+    const blocking = this.#unfinishedRun(project.id, run.session, run.requestId);
     if (blocking) throw new ProjectControlError(`Resume or cancel interrupted request ${blocking.id} before starting another in this session.`, 409);
     if (binding) {
       if (this.#get("SELECT 1 FROM runs WHERE project = ? AND session = ? AND id <> ? LIMIT 1", project.id, run.session, run.requestId))
         throw new ProjectControlError("Use a fresh session for each pinned evaluation trial.", 409);
       await verifyPinnedEvaluationWorkspace(workspace);
     }
-    const identity = this.#session(project, run);
     const { stateDir, models, workspaceBinding } = this.#dependencies(project, actor);
-    await requireNoPendingCodingContextCompaction(identity, { stateDir, models, workspaceBinding, allowEnvKey: false });
+    if (branch) {
+      if ((await previewCodingBranchContext(identity, this.#dependencies(project, actor))).version !== branchContextId)
+        throw new ProjectControlError("The branch context changed. Preview it again before sending.", 409);
+      if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to send from this branch.", 403);
+    } else await requireNoPendingCodingContextCompaction(identity, { stateDir, models, workspaceBinding, allowEnvKey: false });
     this.#db.transaction(() => {
       if (prior) {
         this.#write("UPDATE runs SET status = 'running', signature = ?, actor = ?, updated = ?, error = NULL WHERE project = ? AND session = ? AND id = ?",
@@ -700,6 +838,7 @@ export class CodingProjectControl {
     })();
     this.#schedule(project, {
       ...identity, prompt, ...capabilities,
+      ...(branch ? { branch: { ...branch, contextVersion: branchContextId } } : {}),
       ...(selection.packages ? { packageReviews: { packages: selection.packages, id: previewId } } : selection.repository
         ? { repository: { ...selection.repository, id: previewId } }
         : { files: selection.files, filePreviewId: previewId, allowedAttachmentScopes: JSON.parse(project.scopes) as string[] }),
@@ -707,15 +846,15 @@ export class CodingProjectControl {
     return this.#runView(this.#readRun(project.id, run.session, run.requestId));
   }
 
-  async #inspect(project: ProjectRow, body: Json, actor: Actor) {
+  async #inspect(project: ProjectRow, body: Json, actor: Actor, canWrite: () => boolean = () => false) {
     const run = this.#runParts(body);
     const row = this.#readRun(project.id, run.session, run.requestId);
-    if (this.#get("SELECT session FROM session_deletions WHERE project = ? AND session = ?", project.id, run.session))
+    if (this.#sessionDeleting(project.id, run.session))
       throw new ProjectControlError("This transcript is being deleted.", 409);
     const value = this.#runView(row);
-    const active = this.#active.get(`${project.id}/${run.session}`);
+    const active = this.#active.get(this.#sessionKey(project.id, run.session));
     if (active || (row.status !== "interrupted" && !row.admitted)) {
-      const progress = row.status === "running" && active?.progress?.requestId === run.requestId
+      const progress = row.status === "running" && active?.progress?.session === run.session && active.progress.requestId === run.requestId
         && !active.cancel.signal.aborted ? active.progress : undefined;
       return {
         run: value,
@@ -735,7 +874,23 @@ export class CodingProjectControl {
         inspected = this.#runView(this.#readRun(project.id, run.session, run.requestId));
       }
       const report = codingRunReport(pi, { requestId: run.requestId, status: inspected.status, projectId: project.id, review: inspected.review });
-      return { run: inspected, pi, report };
+      let alternativeBranchEligible = false;
+      let alternativeBranchReason: string | undefined;
+      if (actor.owner && canWrite() && !inspected.branch && inspected.review === "accepted" && pi.request?.receipt?.status === "done" &&
+        !pi.request.receipt.packageReviews && !this.#unfinishedRun(project.id, run.session) && !this.#get(
+          "SELECT 1 FROM conversation_branches WHERE project = ? AND parent_session = ? AND parent_request = ?", project.id, run.session, run.requestId,
+        )) {
+        try {
+          await previewCodingBranch(this.#session(project, run), run.requestId, this.#dependencies(project, actor));
+          alternativeBranchEligible = canWrite();
+        } catch (error) {
+          if (!(error instanceof CodingError)) throw error;
+          alternativeBranchReason = error.message;
+        }
+      }
+      return { run: inspected, pi, report, ...(alternativeBranchEligible ? { alternativeBranchEligible } : {}),
+        ...(alternativeBranchReason ? { alternativeBranchReason } : {}),
+      };
     } catch (error) {
       if (row.status === "interrupted" && !row.admitted && error instanceof CodingError && error.message.startsWith("No "))
         return { run: value, admissionMissing: true };
@@ -746,9 +901,9 @@ export class CodingProjectControl {
   async #sourceInspect(project: ProjectRow, body: Json, actor: Actor) {
     const run = this.#runParts(body);
     const row = this.#readRun(project.id, run.session, run.requestId);
-    if (this.#get("SELECT session FROM session_deletions WHERE project = ? AND session = ?", project.id, run.session))
+    if (this.#sessionDeleting(project.id, run.session))
       throw new ProjectControlError("This transcript is being deleted.", 409);
-    if (row.status === "running" || this.#active.has(`${project.id}/${run.session}`))
+    if (row.status === "running" || this.#active.has(this.#sessionKey(project.id, run.session)))
       throw new ProjectControlError("Wait for the active request in this session before opening saved source.", 409);
     // Pi can save its admission before the catalog receives the worker event.
     if (!row.admitted && row.status !== "interrupted") return null;
@@ -757,14 +912,14 @@ export class CodingProjectControl {
 
   async #changeContext(project: ProjectRow, body: Json, actor: Actor, compact: boolean, preview: boolean, canWrite: () => boolean) {
     const session = field(body, "session", 64);
+    if (this.#branch(project.id, session)) throw new ProjectControlError("Manual context changes are available in the parent session.", 409);
     const authorize = () => {
       if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to change the session context.", 403);
     };
     authorize();
-    if (this.#active.has(`${project.id}/${session}`) || this.#get(
-      "SELECT 1 FROM runs WHERE project = ? AND session = ? AND status IN ('running', 'interrupted') LIMIT 1", project.id, session,
-    )) throw new ProjectControlError("Finish, resume, or cancel active work in this session before changing its context.", 409);
-    if (this.#get("SELECT 1 FROM session_deletions WHERE project = ? AND session = ?", project.id, session))
+    if (this.#active.has(this.#sessionKey(project.id, session)) || this.#unfinishedRun(project.id, session))
+      throw new ProjectControlError("Finish, resume, or cancel active work in this session before changing its context.", 409);
+    if (this.#sessionDeleting(project.id, session))
       throw new ProjectControlError("This session is being deleted.", 409);
     const identity = this.#session(project, { session });
     const { stateDir, models, workspaceBinding } = this.#dependencies(project, actor);
@@ -801,7 +956,7 @@ export class CodingProjectControl {
       throw new ProjectControlError("An independent project member can evaluate a finished run. An existing evaluation belongs to its reviewer.", 403);
     if (attempt.status !== "done" && attempt.status !== "unanswered")
       throw new ProjectControlError("Wait for the run to finish before opening its evaluation.", 409);
-    if (this.#active.has(`${project.id}/${run.session}`))
+    if (this.#active.has(this.#sessionKey(project.id, run.session)))
       throw new ProjectControlError("Wait for the active request in this session before opening the evaluation.", 409);
     if (this.#get("SELECT session FROM session_deletions WHERE project = ? AND session = ?", project.id, run.session))
       throw new ProjectControlError("This session is being deleted.", 409);
@@ -824,17 +979,20 @@ export class CodingProjectControl {
 
   async #resume(project: ProjectRow, body: Json, actor: Actor) {
     const run = this.#runParts(body);
+    if (this.#branch(project.id, run.session)) this.#requireOwner(actor);
     const inspected = await this.#inspect(project, body, actor);
     if (inspected.run.status !== "interrupted") return inspected.run;
     if (inspected.admissionMissing) {
       this.#setRun(project.id, run, actor, "failed", "The server stopped before this request was admitted. Preview and submit it again with the same request ID.");
       return this.#runView(this.#readRun(project.id, run.session, run.requestId));
     }
-    if (inspected.pi?.context.compactionPending)
+    if ("pi" in inspected && inspected.pi?.context.compactionPending)
       throw new ProjectControlError("Recover the pending context compaction before resuming work in this session.", 409);
     if (!hasCodingCredential(project.provider, this.#dependencies(project, actor)))
       throw new ProjectControlError("Add a provider API key for this project before resuming requests.", 409);
     this.#canSchedule(project, run);
+    if (this.#unfinishedRun(project.id, run.session, run.requestId))
+      throw new ProjectControlError("Resume or cancel the other pending request in this transcript first.", 409);
     this.#setRun(project.id, run, actor, "running");
     this.#schedule(project, this.#session(project, run), actor);
     return this.#runView(this.#readRun(project.id, run.session, run.requestId));
@@ -842,10 +1000,12 @@ export class CodingProjectControl {
 
   async #cancel(project: ProjectRow, body: Json, actor: Actor) {
     const run = this.#runParts(body);
+    if (this.#branch(project.id, run.session)) this.#requireOwner(actor);
     const row = this.#readRun(project.id, run.session, run.requestId);
     if (row.status === "running") {
-      const active = this.#active.get(`${project.id}/${run.session}`);
-      if (!active) throw new ProjectControlError("The running session could not be found. Refresh run status.", 409);
+      const active = this.#active.get(this.#sessionKey(project.id, run.session));
+      if (!active || active.progress?.session !== run.session || active.progress.requestId !== run.requestId)
+        throw new ProjectControlError("The running session could not be found. Refresh run status.", 409);
       if (!active.cancel.signal.aborted) {
         this.#audit(project.id, "cancel_requested", actor.id, run.session, run.requestId);
         active.cancel.abort();
@@ -890,6 +1050,7 @@ export class CodingProjectControl {
   }
 
   #acceptedPatchRun(project: ProjectRow, run: { session: string; requestId: string }) {
+    if (this.#branch(project.id, run.session)) throw new ProjectControlError("Use alternative branches for review. Apply changes from an accepted parent session run.", 409);
     const row = this.#readRun(project.id, run.session, run.requestId);
     if (row.status !== "done" || row.review !== "accepted")
       throw new ProjectControlError("Accept the finished result before reviewing a patch.", 409);
@@ -902,7 +1063,7 @@ export class CodingProjectControl {
     this.#acceptedPatchRun(project, run);
     if (this.#get("SELECT session FROM session_deletions WHERE project = ? AND session = ?", project.id, run.session))
       throw new ProjectControlError("This transcript is being deleted.", 409);
-    if (this.#active.has(`${project.id}/${run.session}`))
+    if (this.#active.has(this.#sessionKey(project.id, run.session)))
       throw new ProjectControlError("Wait for the active request in this session before reviewing a proposed patch.", 409);
     const saved = await getCodingSessionStatus({ ...this.#session(project, run), includeReceipt: true }, this.#dependencies(project, actor));
     const receipt = saved.request?.receipt;
@@ -969,8 +1130,11 @@ export class CodingProjectControl {
   #finishDeletion(project: string, session: string, actor: string, automatic: boolean) {
     this.#db.transaction(() => {
       if (automatic) this.#write(`INSERT OR IGNORE INTO expired_requests(project, session, id)
-        SELECT project, session, id FROM runs WHERE project = ? AND session = ?`, project, session);
-      this.#write("DELETE FROM runs WHERE project = ? AND session = ?", project, session);
+        SELECT project, session, id FROM runs WHERE project = ? AND (session = ? OR session IN
+          (SELECT session FROM conversation_branches WHERE project = ? AND parent_session = ?))`, project, session, project, session);
+      this.#write(`DELETE FROM runs WHERE project = ? AND (session = ? OR session IN
+        (SELECT session FROM conversation_branches WHERE project = ? AND parent_session = ?))`, project, session, project, session);
+      this.#write("DELETE FROM conversation_branches WHERE project = ? AND parent_session = ?", project, session);
       this.#write("DELETE FROM session_deletions WHERE project = ? AND session = ?", project, session);
       this.#audit(project, automatic ? "session_expired" : "session_deleted", actor, session);
     })();
@@ -1001,26 +1165,29 @@ export class CodingProjectControl {
     const session = field(body, "session", 64);
     if (!sessionPattern.test(session) || body.confirm !== session)
       throw new ProjectControlError("Type the session name to confirm transcript deletion.");
+    if (this.#branch(project.id, session)) throw new ProjectControlError("Delete the parent transcript to remove it and its alternative branches.", 409);
     await this.#removeSession(project.id, session, actor.id, false);
     return { session, deleted: true };
   }
 
   #retentionCandidates(project: string | null, session: string | null = null) {
     return this.#all<{ project: string; session: string }>(`
-      SELECT runs.project, runs.session FROM runs
+      SELECT runs.project, COALESCE(b.parent_session, runs.session) AS session FROM runs
       JOIN transcript_retention ON transcript_retention.project = runs.project
+      LEFT JOIN conversation_branches b ON b.project = runs.project AND b.session = runs.session
       LEFT JOIN coding_evaluations ON coding_evaluations.project = runs.project
         AND coding_evaluations.session = runs.session AND coding_evaluations.request_id = runs.id
-      WHERE (? IS NULL OR runs.project = ?) AND (? IS NULL OR runs.session = ?)
-        AND NOT EXISTS (SELECT 1 FROM applied_patches
-          WHERE applied_patches.project = runs.project AND applied_patches.session = runs.session
-            AND applied_patches.status = 'prepared')
-      GROUP BY runs.project, runs.session
+      WHERE (? IS NULL OR runs.project = ?) AND (? IS NULL OR COALESCE(b.parent_session, runs.session) = ?)
+      GROUP BY runs.project, COALESCE(b.parent_session, runs.session)
       HAVING MAX(runs.status IN ('running', 'interrupted')) = 0
         AND MAX(julianday(MAX(runs.updated, COALESCE(runs.reviewed, runs.updated), COALESCE(coding_evaluations.reviewed, runs.updated))))
           <= julianday(?) - transcript_retention.days
-      ORDER BY MAX(runs.updated), runs.project, runs.session LIMIT ?
-    `, project, project, session, session, now(), retentionBatchSize);
+        AND NOT EXISTS (SELECT 1 FROM applied_patches p WHERE p.project = runs.project AND p.status = 'prepared'
+          AND p.session = COALESCE(b.parent_session, runs.session))
+        AND NOT EXISTS (SELECT 1 FROM conversation_branches recent WHERE recent.project = runs.project
+          AND recent.parent_session = COALESCE(b.parent_session, runs.session) AND julianday(recent.created) > julianday(?) - transcript_retention.days)
+      ORDER BY MAX(runs.updated), runs.project, session LIMIT ?
+    `, project, project, session, session, now(), now(), retentionBatchSize);
   }
 
   async #expireTranscripts(projectId: string | null) {
@@ -1434,7 +1601,7 @@ export class CodingProjectControl {
   #withSession<T>(project: ProjectRow, body: Json, action: () => Promise<T>): Promise<T> {
     const session = field(body, "session", 64);
     if (!sessionPattern.test(session)) throw new ProjectControlError("Enter a valid lowercase session name.");
-    const key = `${project.id}/${session}`;
+    const key = this.#sessionKey(project.id, session);
     const result = (this.#gates.get(key) ?? Promise.resolve()).then(action);
     const gate = result.then(() => {}, () => {});
     this.#gates.set(key, gate);
@@ -1475,8 +1642,11 @@ export class CodingProjectControl {
     const action = match[2];
     if (action === "retention" && (method === "GET" || method === "POST")) return this.#retention(project, method, body, actor);
     if (action === "presets" && (method === "GET" || method === "POST")) return this.#presets(project, method, body, actor);
-    if (action && method === "POST" && (githubPullActions.includes(action) || githubBranchActions.includes(action)))
+    if (action && method === "POST" && (githubPullActions.includes(action) || githubBranchActions.includes(action))) {
+      if (typeof body.session === "string" && this.#branch(project.id, body.session))
+        throw new ProjectControlError("Publish changes from an accepted parent session run.", 409);
       return this.#withSession(project, body, () => this.#github(project, action, method, body, actor));
+    }
     if (action?.startsWith("github-")) return this.#github(project, action, method, body, actor);
     if (method === "GET") {
       if (action === "evaluation-rubric") return pinnedEvaluationRubric;
@@ -1484,13 +1654,21 @@ export class CodingProjectControl {
       if (action === "runs") return this.#all<RunRow>("SELECT * FROM runs WHERE project = ? ORDER BY updated DESC LIMIT 200", project.id).map((row) => this.#runView(row));
       if (action === "audit") return this.#all<AuditRow>("SELECT kind, actor, session, request_id, at FROM audit WHERE project = ? ORDER BY seq DESC LIMIT 200", project.id);
       if (action === "members") return this.#members(project, method, body, actor);
+      if (action === "branches") {
+        this.#requireOwner(actor);
+        return this.#all<BranchRow>("SELECT * FROM conversation_branches WHERE project = ? ORDER BY created DESC LIMIT 200", project.id)
+          .map((branch) => this.#conversationBranchView(branch));
+      }
     }
     if (method === "POST") {
-      if (action === "preview") return this.#preview(project, body, actor);
+      if (action === "preview") return typeof body.session === "string" && branchSessionPattern.test(body.session)
+        ? this.#withSession(project, body, () => this.#preview(project, body, actor)) : this.#preview(project, body, actor);
+      if (action === "branches-preview" || action === "branches")
+        return this.#withSession(project, body, () => this.#changeBranch(project, body, actor, action === "branches-preview", canWrite));
       if (action === "evaluation-inspect" || action === "evaluation-review")
         return this.#withSession(project, body, () => this.#evaluate(project, body, actor, action === "evaluation-review"));
-      if (action === "run") return this.#withSession(project, body, () => this.#start(project, body, actor));
-      if (action === "inspect") return this.#withSession(project, body, () => this.#inspect(project, body, actor));
+      if (action === "run") return this.#withSession(project, body, () => this.#start(project, body, actor, canWrite));
+      if (action === "inspect") return this.#withSession(project, body, () => this.#inspect(project, body, actor, canWrite));
       if (action === "source-inspect") return this.#withSession(project, body, () => this.#sourceInspect(project, body, actor));
       if (action === "reset-context-preview" || action === "reset-context" || action === "compact-context-preview" || action === "compact-context") {
         this.#requireOwner(actor);

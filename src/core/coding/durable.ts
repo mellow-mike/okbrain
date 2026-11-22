@@ -19,6 +19,11 @@ import { dataDir } from "../config.ts";
 import { ensureExtensionCapableSqlite } from "../engine/custom-sqlite.ts";
 import { approvedSourceLookupEnabled, approvedSourceTool } from "./approved-source-tool.ts";
 import {
+  ConversationBranchError, forkConversationBranch, previewConversationBranch, previewConversationBranchAdmission,
+  readConversationBranch, verifyConversationBranchAdmission,
+  type CodingBranchSession,
+} from "./conversation-branch.ts";
+import {
   budgetedModels, codingBudget, codingHistory, compactionPolicy, contextBudgetError, estimateCodingContext, newRequestFits,
   type CodingBudget,
 } from "./history.ts";
@@ -82,6 +87,8 @@ export interface CodingSessionOptions {
   provider: string;
   model: string;
   thinkingLevel?: ModelThinkingLevel;
+  /** A project catalog binding to a fork within its parent transcript. */
+  branch?: { parentSession: string; id: string; contextVersion?: string };
 }
 
 export type CodingSessionResult = { session: string; requestId: string; repositoryContext?: RepositoryContextManifest; packageReviews?: ChildReview[] } & (
@@ -89,7 +96,7 @@ export type CodingSessionResult = { session: string; requestId: string; reposito
   | { status: "unanswered"; reason: string }
 );
 
-export type CodingSessionIdentity = Pick<CodingSessionOptions, "workspace" | "session" | "provider" | "model" | "thinkingLevel">;
+export type CodingSessionIdentity = Pick<CodingSessionOptions, "workspace" | "session" | "provider" | "model" | "thinkingLevel" | "branch">;
 
 export type CodingSessionStatusOptions = CodingSessionIdentity & {
   requestId?: string;
@@ -171,6 +178,11 @@ function validateSessionName(name: string) {
 
 function validateOptions(options: CodingSessionStatusOptions): CodingProvider {
   validateSessionName(options.session);
+  if (options.branch) {
+    validateSessionName(options.branch.parentSession);
+    if (options.branch.parentSession === options.session || !contextVersionPattern.test(options.branch.id))
+      throw new CodingError("The alternative branch binding is invalid.");
+  }
   if (options.requestId !== undefined && !requestIdPattern.test(options.requestId)) {
     throw new CodingError("Use a request ID of 1–128 letters, digits, dots, underscores or hyphens, starting with a letter or digit.");
   }
@@ -369,6 +381,7 @@ export function hasCodingCredential(provider: CodingProvider, dependencies: Codi
 type StandaloneState = Pick<CodingDependencies, "stateDir">;
 const codingStateRoot = ({ stateDir }: StandaloneState) => stateDir ?? join(dataDir(), "coding");
 const sessionDirectoryName = (name: string) => `session-${name}`;
+const transcriptPath = (state: string, name: string) => join(state, sessionDirectoryName(name), "transcript.sqlite");
 const sqliteFiles = (path: string) => ["", "-wal", "-shm", "-journal"].map((suffix) => path + suffix);
 const sessionMissing = (name: string) => new CodingSessionMissingError(`No coding session ${name} exists.`);
 
@@ -454,6 +467,7 @@ async function withCodingSession<T>(
     workspace: string; provider: CodingProvider;
     budget: CodingBudget | undefined; history: ReturnType<typeof codingHistory>;
     sourceTool: ReturnType<typeof approvedSourceTool>;
+    parent?: CodingBranchSession;
   }) => Promise<T>,
   leasedStorage?: SqliteStorage,
 ): Promise<T> {
@@ -469,16 +483,18 @@ async function withCodingSession<T>(
     throw new CodingError("The selected model does not support this reasoning level.");
   const budget = model ? codingBudget(model) : undefined;
   const history = codingHistory(budget);
+  const physicalSession = options.branch?.parentSession ?? options.session;
   const affinityDirectory = join(dependencies.stateBinding ?? codingStateRoot(dependencies), sessionDirectoryName(options.session));
   const affinity = createHash("sha256").update(JSON.stringify([workspace, affinityDirectory, provider, options.model])).digest("hex");
 
   const openHarness = async (storage: SqliteStorage) => {
     let harness: Harness | undefined;
     try {
+      let conversationId = ROOT_CONVERSATION_ID;
       const registry = createRegistry();
       const sourceTool = approvedSourceTool(async (id, toolContext) => {
         const submission = await storage.submission(id, toolContext);
-        if (submission?.conversationId === ROOT_CONVERSATION_ID && submission.type === "input" && submission.status === "placed")
+        if (submission?.conversationId === conversationId && submission.type === "input" && submission.status === "placed")
           return savedUserContent(storage, submission, toolContext);
       });
       registry.install(history);
@@ -489,7 +505,17 @@ async function withCodingSession<T>(
         registry,
         settings: { compaction: budget ? compactionPolicy(budget) : { backgroundTokens: 0 } },
       }, context);
-      const root = await harness.conversation(ROOT_CONVERSATION_ID, context);
+      let root = await harness.conversation(ROOT_CONVERSATION_ID, context);
+      let parent: CodingBranchSession | undefined;
+      if (options.branch) {
+        if (!root) throw sessionMissing(options.branch.parentSession);
+        parent = { root, harness, storage, session: physicalSession, transcript: transcriptPath(codingStateRoot(dependencies), physicalSession) };
+        const receipt = await readConversationBranch(parent, options.branch.id);
+        if (!receipt) throw new CodingError("No saved alternative branch exists in this transcript.");
+        conversationId = receipt.conversationId;
+        root = await harness.conversation(conversationId, context);
+        if (!root) throw new CodingError("No saved alternative branch conversation exists.");
+      }
       if (root) {
         const agent = await root.agent(context);
         if (agent.cwd !== workspace || agent.model?.provider !== provider || agent.model.modelId !== options.model) {
@@ -498,15 +524,16 @@ async function withCodingSession<T>(
         if (options.thinkingLevel !== undefined && agent.thinkingLevel !== options.thinkingLevel)
           throw new CodingError(`Coding session ${options.session} uses a different reasoning level.`);
       }
-      return await use({ harness, storage, root, workspace, provider, budget, history, sourceTool });
+      return await use({ harness, storage, root, workspace, provider, budget, history, sourceTool, parent });
     } finally {
       if (harness) await harness.close(context);
     }
   };
   const operation = leasedStorage === undefined
-    ? withCodingStorage(options.session, dependencies, create, openHarness)
+    ? withCodingStorage(physicalSession, dependencies, create && !options.branch, openHarness)
     : openHarness(leasedStorage);
   return operation.catch((error: unknown) => {
+    if (error instanceof ConversationBranchError) throw new CodingError(error.message, { cause: error });
     if (error instanceof CodingError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name)))
       throw error;
     throw new CodingError(`Could not open Pi Durable session ${options.session}.`, { cause: error });
@@ -532,6 +559,34 @@ function withSavedContextSession<T>(
   return withCodingStorage(options, dependencies, false, async (storage) => {
     const identity = await standaloneIdentity(options, storage);
     return open(identity, { ...dependencies, workspaceBinding: identity.workspace }, storage);
+  });
+}
+
+export function previewCodingBranch(options: CodingSessionIdentity, requestId: string, dependencies: CodingDependencies) {
+  return withSavedContextSession(options, dependencies, (saved) => previewConversationBranch({
+    ...saved, transcript: transcriptPath(codingStateRoot(dependencies), saved.session),
+  }, requestId));
+}
+
+export async function createCodingBranch(
+  options: CodingSessionIdentity, requestId: string, version: string, dependencies: CodingDependencies, authorize: () => void,
+) {
+  try {
+    return await withSavedContextSession(options, dependencies, (saved) => forkConversationBranch({
+      ...saved, transcript: transcriptPath(codingStateRoot(dependencies), saved.session),
+    }, requestId, version, () => authorizeContextChange(authorize)));
+  } catch (error) {
+    if (error instanceof ContextChangeAuthorizationError) throw error.cause;
+    throw error;
+  }
+}
+
+export function previewCodingBranchContext(options: CodingSessionIdentity, dependencies: CodingDependencies) {
+  const branch = options.branch;
+  if (!branch) throw new CodingError("Select an alternative branch before previewing branch context.");
+  return withCodingSession(options, dependencies, false, async ({ parent }) => {
+    if (!parent) throw new CodingError("The alternative branch parent could not be opened.");
+    return previewConversationBranchAdmission(parent, branch.id);
   });
 }
 
@@ -690,7 +745,7 @@ export async function requireNoPendingCodingContextCompaction(options: CodingSes
     throw new CodingError("The authorized workspace path changed since this project was registered.");
   }
   try {
-    await withCodingStorage(options.session, dependencies, false, async (storage) => {
+    await withCodingStorage(options.branch?.parentSession ?? options.session, dependencies, false, async (storage) => {
       if (!await storage.conversation(ROOT_CONVERSATION_ID, context)) return;
       const saved = await standaloneIdentity(options.session, storage);
       const workspace = dependencies.workspaceBinding ?? await canonicalWorkspace(options.workspace);
@@ -945,6 +1000,34 @@ async function savedAnswer(storage: SqliteStorage, submission: SubmissionRecord)
   return answer;
 }
 
+function addCodingUsage(total: Usage, usage: Usage) {
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) total[key] += usage[key];
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) total.cost[key] += usage.cost[key];
+  for (const key of ["reasoning", "cacheWrite1h"] as const) {
+    if (usage[key] !== undefined) total[key] = (total[key] ?? 0) + usage[key];
+  }
+}
+
+async function codingConversationUsage(harness: Harness, storage: SqliteStorage, root: Conversation, includeChildren: boolean) {
+  const own = await harness.snapshot(UsageDoc, root.id, context) ?? { models: {}, tools: {} };
+  if (!includeChildren) return { own, combined: own };
+  const combined = structuredClone(own);
+  let cursor: Cursor | undefined;
+  do {
+    const page = await storage.scanConversations({ ownerConversationId: root.id }, 64, cursor, context);
+    for (const child of page.items) {
+      const usage = await harness.snapshot(UsageDoc, child.id, context);
+      if (!usage) continue;
+      for (const bucket of ["models", "tools"] as const) for (const [key, value] of Object.entries(usage[bucket])) {
+        if (Object.hasOwn(combined[bucket], key)) addCodingUsage(combined[bucket][key]!, value);
+        else combined[bucket][key] = structuredClone(value);
+      }
+    }
+    cursor = page.next;
+  } while (cursor);
+  return { own, combined };
+}
+
 async function requestUsage(storage: SqliteStorage, submission: SubmissionRecord, final: Usage, lookup: boolean): Promise<Usage> {
   if (!lookup || submission.entry === undefined || submission.answer === undefined) return final;
   const query = { conversationId: submission.conversationId, minEntryId: submission.entry, maxEntryId: submission.answer };
@@ -956,10 +1039,7 @@ async function requestUsage(storage: SqliteStorage, submission: SubmissionRecord
       if (entry.id === submission.answer || !AssistantEntry.is(entry)) continue;
       const answer = entry.model?.[0];
       if (answer?.role !== "assistant") continue;
-      const { usage } = answer;
-      for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) totals[key] += usage[key];
-      for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) totals.cost[key] += usage.cost[key];
-      if (usage.reasoning !== undefined) totals.reasoning = (totals.reasoning ?? 0) + usage.reasoning;
+      addCodingUsage(totals, answer.usage);
     }
     cursor = page.next;
   } while (cursor);
@@ -996,10 +1076,11 @@ export async function runCodingSession(
   dependencies: CodingDependencies = {},
 ): Promise<CodingSessionResult> {
   const hasNewInput = options.prompt !== undefined || dependencies.preparedInput !== undefined;
-  return withCodingSession(options, dependencies, hasNewInput, async ({ harness, storage, root, workspace, provider, budget, history, sourceTool }) => {
+  return withCodingSession(options, dependencies, hasNewInput, async ({ harness, storage, root, workspace, provider, budget, history, sourceTool, parent }) => {
     const identity = { session: options.session, requestId: options.requestId };
-    const existing = await storage.submissionByRequest(ROOT_CONVERSATION_ID, options.requestId, context);
-    const packageTask = await packageReviewTask(harness, options.requestId, context);
+    const target = root?.id ?? ROOT_CONVERSATION_ID;
+    const existing = await storage.submissionByRequest(target, options.requestId, context);
+    const packageTask = options.branch ? undefined : await packageReviewTask(harness, options.requestId, context);
     if (dependencies.requireNewRequest && (existing || packageTask)) {
       throw new CodingError("This request ID is already saved. Choose it in Run history to inspect or resume it.");
     }
@@ -1016,6 +1097,9 @@ export async function runCodingSession(
     }
     const inspection = await harness.inspect(context);
     requireNoPendingCompaction(inspection);
+    if (!packageTask && (inspection.submissions.some(({ conversationId }) => conversationId !== target) ||
+      inspection.tasks.some(({ record }) => record.conversationId !== target)))
+      throw new CodingSessionBusyError("Resume or cancel work in the other conversation before continuing in this transcript.");
     if (!budget) throw new CodingError(`Pi 1.0 does not list model ${options.model} for ${provider}.`);
     if (!hasCodingCredential(provider, dependencies)) {
       throw new CodingError(dependencies.allowEnvKey === false
@@ -1027,10 +1111,19 @@ export async function runCodingSession(
     dependencies.signal?.throwIfAborted();
     let packageParts: ReturnType<typeof confirmedPackageReviewParts> | undefined;
     if (!existing && !packageTask && hasNewInput) {
-      const pending = packageReviewIds(inspection)[0] ?? inspection.submissions.find(({ conversationId }) => conversationId === ROOT_CONVERSATION_ID)?.requestId;
+      const pending = packageReviewIds(inspection)[0] ?? inspection.submissions.find(({ conversationId }) => conversationId === target)?.requestId;
       if (pending) throw new CodingError(`Resume pending request ${pending} before starting another request in this session.`);
+      if (options.branch) {
+        const { id, contextVersion } = options.branch;
+        if (!parent || !contextVersion || !contextVersionPattern.test(contextVersion))
+          throw new CodingError("Preview and approve the current alternative branch context before sending.");
+        await verifyConversationBranchAdmission(parent, id, contextVersion);
+      }
       const input = dependencies.preparedInput ?? await prepareCodingInput(options, workspace);
-      if (input.kind === "package-review") packageParts = input.parts;
+      if (input.kind === "package-review") {
+        if (options.branch) throw new CodingError("Choose files or repository excerpts for an alternative branch request.");
+        packageParts = input.parts;
+      }
       else content = input.content;
       if ([...(content === undefined ? [] : [content]), ...(packageParts?.map((part) => part.content) ?? [])]
         .some((input) => !newRequestFits(input, instructions, budget))) {
@@ -1133,7 +1226,7 @@ export async function cancelCodingRequest(
 ): Promise<CodingSessionResult> {
   return withCodingSession(options, dependencies, false, async ({ harness, storage, root }) => {
     const identity = { session: options.session, requestId: options.requestId };
-    const packageTask = await packageReviewTask(harness, options.requestId, context);
+    const packageTask = options.branch ? undefined : await packageReviewTask(harness, options.requestId, context);
     if (packageTask) {
       const task = await harness.getTask(packageTask, context);
       if (task?.state.status === "terminal") return { ...identity, ...packageReviewReceipt(task.state.outcome) };
@@ -1162,7 +1255,7 @@ export async function getSavedCodingRequestInput(
   try {
     return await withCodingSession(options, dependencies, false, async ({ harness, storage, root }) => {
       if (!root) return null;
-      const taskId = await packageReviewTask(harness, options.requestId, context);
+      const taskId = options.branch ? undefined : await packageReviewTask(harness, options.requestId, context);
       if (taskId) return savedPackageSource((await harness.getTask(taskId, context))?.input, options.requestId);
       const submission = await storage.submissionByRequest(root.id, options.requestId, context);
       if (!submission || submission.type !== "input") return null;
@@ -1190,15 +1283,16 @@ export async function getCodingSessionStatus(
     if (!root) throw new CodingError(`No coding session ${options.session} exists.`);
     const inspection = await harness.inspect(context);
     const view = await root.context(context);
+    const { own, combined } = await codingConversationUsage(harness, storage, root, !options.branch);
     const result: CodingSessionStatusResult = {
       session: options.session,
       provider,
       model: options.model,
       pendingRequestIds: [...inspection.submissions.flatMap((submission) =>
-        submission.conversationId === ROOT_CONVERSATION_ID && submission.type === "input" && submission.requestId ? [submission.requestId] : []),
-        ...packageReviewIds(inspection)],
-      usage: await harness.usage(context),
-      rootUsage: await harness.snapshot(UsageDoc, root.id, context) ?? { models: {}, tools: {} },
+        submission.conversationId === root.id && submission.type === "input" && submission.requestId ? [submission.requestId] : []),
+        ...(options.branch ? [] : packageReviewIds(inspection))],
+      usage: combined,
+      rootUsage: own,
       context: {
         ...budget,
         estimatedTokens: estimateCodingContext(view.messages),
@@ -1207,7 +1301,7 @@ export async function getCodingSessionStatus(
       },
     };
     if (options.requestId !== undefined) {
-      const taskId = await packageReviewTask(harness, options.requestId, context);
+      const taskId = options.branch ? undefined : await packageReviewTask(harness, options.requestId, context);
       if (taskId) {
         const task = await harness.getTask(taskId, context);
         const identity = { session: options.session, requestId: options.requestId };

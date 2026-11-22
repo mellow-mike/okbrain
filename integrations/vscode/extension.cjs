@@ -109,7 +109,13 @@ function openWeb(connection, project, run, section) {
   const folder = vscode.workspace.workspaceFolders?.find((item) => item.uri.scheme === 'file');
   target.hash = project ? `coding/${encodeURIComponent(project.id)}` : folder
     ? `coding/${encodeURIComponent(`workspace=${folder.uri.fsPath}`)}` : 'coding';
-  if (project && run) target.hash += `/${section}/${encodeURIComponent(run.session)}/${encodeURIComponent(run.id)}`;
+  if (project && run) {
+    if (section === 'alternative-branch') {
+      target.hash += `?${new URLSearchParams({ session: run.session, request: run.id })}`;
+    } else {
+      target.hash += `/${section}/${encodeURIComponent(run.session)}/${encodeURIComponent(run.id)}`;
+    }
+  }
   return vscode.env.openExternal(vscode.Uri.parse(target.toString()));
 }
 
@@ -439,7 +445,8 @@ async function inspectRun(connection, project, selected) {
   const folders = () => JSON.stringify(localWorkspaceFolders().map(({ uri }) => uri.fsPath));
   const startingFolders = folders();
   const identity = { session: selected.session, requestId: selected.id };
-  const { run, pi, admissionMissing, liveAnswer, taskProgress, report } = await connection.api(pathFor(project, 'inspect'), identity);
+  const { run, pi, admissionMissing, liveAnswer, taskProgress, report, alternativeBranchEligible } =
+    await connection.api(pathFor(project, 'inspect'), identity);
   if (!isCurrent()) return;
   const receipt = pi?.request?.receipt;
   const progress = taskProgressLines(taskProgress ?? pi?.request?.taskProgress, run.status === 'running');
@@ -467,19 +474,22 @@ async function inspectRun(connection, project, selected) {
   const sameInspection = () => isCurrent() && trustedEditor() && inspectedWorkspace === workspaceRevision &&
     startingFolders === folders() && inspectedEditor === editorRevision && startingEditor === vscode.window.activeTextEditor;
   const idle = run.admitted && run.status !== 'running' && run.status !== 'interrupted' && pi?.pendingRequestIds?.length === 0;
-  const canChangeContext = () => !team && idle && sameInspection();
+  const canChangeContext = () => !team && !run.branch && idle && sameInspection();
   const compactionPending = pi?.context?.compactionPending === true;
+  const sameRun = run.session === identity.session && run.id === identity.requestId;
   const canCopyReport = !admissionMissing && run.status !== 'running' &&
     (run.admitted === true || pi?.request?.requestId === identity.requestId) &&
-    run.session === identity.session && run.id === identity.requestId &&
+    sameRun &&
     report?.version === 1 && report.projectId === project.id && report.session === identity.session &&
     report.request?.requestId === identity.requestId && report.runStatus === run.status;
+  const canOpenAlternative = !team && alternativeBranchEligible === true && sameRun &&
+    run.status === 'done' && run.review === 'accepted';
   const choices = [{ label: 'Refresh', action: 'refresh' }, { label: 'Open in okbrain', action: 'open' }];
   if (run.status !== 'running' && (run.admitted || pi?.request || (run.status === 'interrupted' && !admissionMissing)))
     choices.push({ label: 'View saved request source', action: 'source-inspect' });
   if (canCopyReport && sameInspection()) choices.push({ label: 'Copy run report', action: 'copy-report' });
-  if (run.status === 'running' || run.status === 'interrupted') choices.push({ label: 'Cancel request', action: 'cancel' });
-  if (run.status === 'interrupted') choices.push({ label: 'Resume from saved context', action: 'resume' });
+  if ((!team || !run.branch) && (run.status === 'running' || run.status === 'interrupted')) choices.push({ label: 'Cancel request', action: 'cancel' });
+  if ((!team || !run.branch) && run.status === 'interrupted') choices.push({ label: 'Resume from saved context', action: 'resume' });
   if (run.status === 'done') choices.push(
     { label: 'Accept result', action: 'review', decision: 'accepted' },
     { label: 'Request changes', action: 'review', decision: 'changes_requested' });
@@ -487,13 +497,18 @@ async function inspectRun(connection, project, selected) {
     if (!compactionPending) choices.push({ label: 'Start fresh context', action: 'reset-context' });
     choices.push({ label: 'Compact context locally', action: 'compact-context' });
   }
-  if (!team && run.status === 'done' && run.review === 'accepted')
+  if (!team && !run.branch && run.status === 'done' && run.review === 'accepted')
     choices.push({ label: 'Review proposed patch in okbrain', action: 'patch' });
-  if (!team && run.review === 'accepted') choices.push({ label: 'Prepare GitHub pull request in okbrain', action: 'github' });
+  if (canOpenAlternative && sameInspection()) choices.push({ label: 'Preview alternative branch in okbrain', action: 'alternative-branch' });
+  if (!team && !run.branch && run.review === 'accepted') choices.push({ label: 'Prepare GitHub pull request in okbrain', action: 'github' });
   const action = await vscode.window.showQuickPick(choices, { placeHolder: 'Choose a run action', ignoreFocusOut: true });
   if (!action || !isCurrent() || (team && !await connection.isBound())) return;
   if (action.action === 'open') return openWeb(connection, project);
   if (action.action === 'patch' || action.action === 'github') return openWeb(connection, project, run, action.action);
+  if (action.action === 'alternative-branch') {
+    if (canOpenAlternative && sameInspection()) return openWeb(connection, project, run, action.action);
+    return;
+  }
   if (action.action === 'refresh') return inspectRun(connection, project, run);
   if (action.action === 'source-inspect') return showSavedRequestSource(connection, project, identity, isCurrent);
   if (action.action === 'copy-report') {

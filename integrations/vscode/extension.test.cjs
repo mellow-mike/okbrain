@@ -16,6 +16,7 @@ function activateExtension(vscode, connection, options = {}) {
   runInNewContext(readFileSync(file, 'utf8'), {
     module,
     URL,
+    URLSearchParams,
     Buffer,
     require(id) {
       if (id === 'vscode') return vscode;
@@ -275,6 +276,75 @@ test('editor sends the accepted request to patch review without calling another 
   assert.equal(opened[1], `${url.href}#coding/${project.id}/github/${accepted.session}/${accepted.id}`);
 });
 
+test('editor opens the exact eligible alternative branch source run in the owner app', async () => {
+  const project = { id: 'e2bb15ce-a12d-4630-8d72-bbbdbb986ba8', title: 'Project fixture' };
+  const earlier = { id: 'earlier', session: 'earlier_session', status: 'done', review: 'accepted' };
+  const selected = { id: 'review.2-retry', session: 'second_session', status: 'done', review: 'accepted' };
+  const url = new URL('http://127.0.0.1:6522/');
+  const label = 'Preview alternative branch in okbrain';
+  const commands = new Map();
+  const calls = [];
+  const opened = [];
+  let workspaceChanged;
+  let selection;
+  let inspected = selected;
+  let eligible = false;
+  let leaveWorkspace = false;
+  const vscode = {
+    Uri: { parse: (href) => new URL(href) },
+    commands: { registerCommand: (name, run) => commands.set(name, run) },
+    env: { openExternal: async (target) => { opened.push(target.href); return true; } },
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      onDidChangeWorkspaceFolders(listener) { workspaceChanged = listener; },
+      registerTextDocumentContentProvider() {},
+      async openTextDocument(input) { return input; },
+    },
+    window: {
+      async showTextDocument() {},
+      async showQuickPick(choices, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return choices.find((choice) => choice.label === selected.id);
+        selection = choices.find((choice) => choice.label === label);
+        if (leaveWorkspace) workspaceChanged();
+        return selection;
+      },
+      async showErrorMessage(message) { throw new Error(message); },
+    },
+  };
+  activateExtension(vscode, {
+    url,
+    projects: [project],
+    async api(path, identity) {
+      calls.push(path);
+      if (path === `/projects/${project.id}/runs`) return [earlier, selected];
+      assert.equal(path, `/projects/${project.id}/inspect`);
+      assert.equal(identity.session, selected.session);
+      assert.equal(identity.requestId, selected.id);
+      return { run: inspected, alternativeBranchEligible: eligible };
+    },
+  });
+  const inspect = commands.get('okbrain.runs');
+
+  await inspect();
+  assert.equal(selection, undefined);
+  eligible = true;
+  inspected = earlier;
+  await inspect();
+  assert.equal(selection, undefined);
+  inspected = selected;
+  leaveWorkspace = true;
+  await inspect();
+  assert.equal(selection.label, label);
+  assert.deepEqual(opened, []);
+
+  leaveWorkspace = false;
+  calls.length = 0;
+  await inspect();
+  assert.deepEqual(calls, [`/projects/${project.id}/runs`, `/projects/${project.id}/inspect`]);
+  assert.deepEqual(opened, [`${url.href}#coding/${project.id}?session=${selected.session}&request=${selected.id}`]);
+});
+
 test('editor previews a matching preset, requires approval, and retries exactly one stable request', async () => {
   const root = await mkdtemp(join(tmpdir(), 'okbrain-editor-preset-'));
   try {
@@ -524,7 +594,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
         return { id: data.requestId, status: 'running' };
       }
       if (action === 'runs') return [done, interrupted, active];
-      if (action === 'inspect') return { run: selectedRun, ...(selectedRun === done ? { report: savedTeamReport } : {}),
+      if (action === 'inspect') return { run: selectedRun, ...(selectedRun === done ? { report: savedTeamReport, alternativeBranchEligible: true } : {}),
         pi: { pendingRequestIds: [], request: { receipt: { text: 'Shared result.' } } } };
       if (action === 'source-inspect') return { prompt: 'Saved shared task.', groups: [{ files: [{ path: 'core/sample.ts', text: '<literal source>' }] }] };
       if (action === 'cancel' || action === 'resume') return selectedRun;
@@ -591,6 +661,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   await invoke('teamRuns');
   assert.ok(availableActions.includes('Request changes'));
   assert.ok(!availableActions.includes('Review proposed patch in okbrain'));
+  assert.ok(!availableActions.includes('Preview alternative branch in okbrain'));
   assert.ok(!availableActions.includes('Prepare GitHub pull request in okbrain'));
   assert.ok(!availableActions.includes('Start fresh context'));
   assert.ok(!availableActions.includes('Compact context locally'));

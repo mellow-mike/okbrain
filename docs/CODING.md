@@ -192,6 +192,19 @@ Pi uses a short recap of older active turns and keeps recent turns verbatim. The
 
 If local compaction was interrupted, reopen the saved run and choose **Compact context locally** again. Review the same session and choose **Finish compaction** in the app or **Resume Compaction** in the editor before sending another request. These controls require the local owner on a writable mount. [Pi Durable compaction](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md#compaction)
 
+### Branch for an alternative review
+
+On a writable mount, the local owner can branch from the latest saved answer in an idle project session after accepting that ordinary run. This gives you a separate conversation for comparing an alternative while retaining the original result and review.
+
+1. Open the accepted result in **Run history** and choose **Preview alternative branch**. In VS Code or Cursor, choose **Preview alternative branch in okbrain** to open that exact run in the local Coding workspace.
+2. Check the provider and model and read **Inherited context**. The preview shows the visible text that can accompany the next provider request, including instructions, prior tasks and approved source, answers, and tool calls and results. When the app indicates provider-managed reasoning or signatures, those records can accompany the visible history. Check **Create a separate session with this inherited context**, then choose **Create alternative branch**. Creation takes place locally without a provider request.
+3. Choose **Use branch session**, enter a new task, and choose **Preview source**. Review the new scoped selection and **Context already in this branch**, then approve sending both with the task. Every new send requires a fresh source preview and approval bound to the current branch context. Later work in the parent stays in its own conversation.
+4. Inspect the branch result, its own provider usage, and its review decision in **Run history**. Authorized project members can inspect and review branch runs. The local owner uses the app to submit or continue branch work.
+
+Return to **Alternative review branches** in **Run history** to reopen a branch. If creation was interrupted, choose **Finish creating branch** to recover the saved approval or finish creating the same branch while the approved parent context is current. Branch request recovery uses the saved Pi admission.
+
+The parent and its branches share one transcript, so work in any of them can occupy the same session lease. Retention and deletion apply to the whole transcript. Branches support ordinary file and repository reviews. Use a regular project session for independent package reviews, evaluations, manual context reset or compaction, patch application, and GitHub publication. [Pi Durable conversation forks](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md#more-conversations-and-forks)
+
 ## Inspect context and usage
 
 ```sh
@@ -211,7 +224,7 @@ The local input cap is 32,768 estimated tokens, reduced for smaller model window
 
 ## Runtime and storage
 
-okbrain pins Pi Durable, Pi AI, and Chord at `1.0.0`. It opens `Harness` with the portable `SqliteStorage` and a Bun SQLite adapter. Each session maps to a root conversation with a fixed workspace and model. `Conversation.submit()` admits input under a request ID, and `Submission.wait()` drives generation or recovery. Pi uses the prompt, selected text, and active history. When approved, the source lookup tool reads only the current request’s stored selection and can replay after an interruption. Applying edits, running commands, and making Git changes are operator actions. [Pi Durable announcement](https://earendil.com/posts/pi-durable/) · [Pi Durable package documentation](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md)
+okbrain pins Pi Durable, Pi AI, and Chord at `1.0.0`. It opens `Harness` with the portable `SqliteStorage` and a Bun SQLite adapter. Each transcript has a root conversation with a fixed workspace and model. Alternative review branches use Pi’s native `Conversation.fork()` within that transcript. `Conversation.submit()` admits input under a request ID, and `Submission.wait()` drives generation or recovery. Pi uses the prompt, selected text, and active history. When approved, the source lookup tool reads only the current request’s stored selection and can replay after an interruption. Applying edits, running commands, and making Git changes are operator actions. [Pi Durable announcement](https://earendil.com/posts/pi-durable/) · [Pi Durable package documentation](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md)
 
 Sessions live under `$XDG_DATA_HOME/okbrain/coding` on Linux and macOS, defaulting to `~/.local/share/okbrain/coding`. On Windows they live under `%LOCALAPPDATA%\okbrain\coding`, defaulting to `AppData\Local\okbrain\coding` in the user profile. Each `session-<name>` directory holds an SQLite transcript and an ownership database. A SQLite lock allows one invocation per session and releases on process exit. Keep the session directory on a local filesystem.
 
@@ -238,9 +251,9 @@ bun run packaging/coding-worker/smoke.ts "$OKB_CODING_WORKER_IMAGE"
 
 ### Limit transcript retention
 
-In **Project settings → Transcript retention**, set the number of days to keep inactive sessions. Leave the field blank to keep transcripts until you delete them. Saving a limit checks sessions in the selected project immediately. The Coding server also checks at startup and hourly, processing up to 24 expired sessions per check. Activity includes the latest run status, review, or patch application. A running or interrupted request or a pending approved patch protects its entire session.
+In **Project settings → Transcript retention**, set the number of days to keep inactive sessions. Leave the field blank to keep transcripts until you delete them. Saving a limit checks sessions in the selected project immediately. The Coding server also checks at startup and hourly, processing up to 24 expired sessions per check. Activity includes run status, review, patch application, and activity in any alternative review branch. A running or interrupted request or a pending approved patch protects the entire transcript.
 
-Expiry removes the session directory and its catalog records through the same recoverable deletion ledger as manual deletion. Metadata for the audit and expired request IDs remains. An expired ID returns an explicit expiration error when retried. If a service uses backups, apply the deployment's retention policy to backup copies separately.
+Expiry removes the parent session, its alternative branches, and their catalog records through the same recoverable deletion ledger as manual deletion. Delete the parent session to remove the transcript yourself. Metadata for the audit and expired request IDs remains. An expired ID returns an explicit expiration error when retried. If a service uses backups, apply the deployment's retention policy to backup copies separately.
 
 ## Apply a reviewed patch locally
 

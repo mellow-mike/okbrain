@@ -130,3 +130,130 @@ test("project transcript retention protects unfinished work and refuses replay o
     await rm(root, { recursive: true, force: true });
   }
 }, 10_000);
+
+test("retention uses alternative branch activity and expires the shared transcript as a unit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "okb-branch-retention-"));
+  const workspace = join(root, "workspace");
+  const stateDir = join(root, "state");
+  const token = "local-alternative-branch-retention";
+  const model = "branch-retention-test";
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: model }] });
+  models.setProvider(faux.provider);
+  type Run = { id: string; session: string; status: string };
+  type Branch = { branchSession: string; status: string };
+  let server: ApiServer | undefined;
+
+  const open = () => {
+    server = createApiServer({ bundle: workspace, port: 0, token, coding: { stateDir, models } });
+  };
+  const close = async () => {
+    await server?.stop();
+    server = undefined;
+  };
+  const request = (path: string, data?: object) => fetch(new URL("api/coding" + path, server!.url), {
+    method: data ? "POST" : "GET",
+    headers: { "x-okb-token": token, ...(data ? { "content-type": "application/json" } : {}) },
+    body: data ? JSON.stringify(data) : undefined,
+  });
+  const call = async <T>(path: string, data?: object) => {
+    const response = await request(path, data);
+    const body = await response.json() as { result: T; error?: string };
+    if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+    return body.result;
+  };
+  function withCatalog(use: (database: Database) => void) {
+    ensureExtensionCapableSqlite();
+    using database = new Database(join(stateDir, "projects.sqlite"));
+    use(database);
+  }
+
+  try {
+    await mkdir(workspace);
+    await writeFile(join(workspace, "app.ts"), "export const fixture = true;\n");
+    open();
+    const project = await call<{ id: string }>("/projects", { workspace, provider: "openai", model, title: "Alternative retention" });
+    const path = `/projects/${project.id}`;
+    const source = { source: "files", files: ["app.ts"] };
+    const task = { ...source, prompt: "Review the supplied source.", approved: true };
+    const transcript = (session: string) => join(stateDir, `project-${project.id}`, `session-${session}`, "transcript.sqlite");
+    const runs = () => call<Run[]>(path + "/runs");
+    const branches = () => call<Branch[]>(path + "/branches");
+    const sweep = (days: number | null) => call<{ removed: number }>(path + "/retention", { days });
+    async function finish(identity: { session: string; requestId: string }) {
+      const preview = await call<{ id: string; branchContext?: { id: string } }>(path + "/preview", { ...source, session: identity.session });
+      faux.setResponses([fauxAssistantMessage("Reviewed source.")]);
+      await call(path + "/run", { ...task, ...identity, previewId: preview.id, branchContextId: preview.branchContext?.id });
+      const deadline = Date.now() + 3500;
+      while (Date.now() < deadline) {
+        if ((await runs()).some((run) => run.session === identity.session && run.id === identity.requestId && run.status === "done"))
+          return;
+        await Bun.sleep(20);
+      }
+      throw new Error("Timed out waiting for the retention fixture run.");
+    }
+    async function branchFrom(identity: { session: string; requestId: string }) {
+      await finish(identity);
+      await call(path + "/review", { ...identity, decision: "accepted" });
+      const { previewId } = await call<{ previewId: string }>(path + "/branches-preview", identity);
+      return (await call<{ branchSession: string }>(path + "/branches", { ...identity, previewId })).branchSession;
+    }
+
+    const parent = { session: "parent", requestId: "root-review" };
+    const emptyParent = { session: "parent-empty", requestId: "empty-root-review" };
+    const branch = { session: await branchFrom(parent), requestId: "alternative-review" };
+    const emptyBranch = await branchFrom(emptyParent);
+    await finish(branch);
+    await close();
+
+    withCatalog((db) => {
+      db.exec("UPDATE runs SET updated = '2020-01-01T00:00:00.000Z', reviewed = '2020-01-01T00:00:00.000Z' WHERE session IN ('parent', 'parent-empty')");
+      db.exec("UPDATE conversation_branches SET created = '2020-01-01T00:00:00.000Z' WHERE parent_session = 'parent'");
+    });
+    open();
+    // Only the branch's new run protects the first root. The second root only
+    // has the recent creation receipt of a ready branch with no runs.
+    expect(await sweep(30)).toMatchObject({ removed: 0 });
+    expect(await Bun.file(transcript(parent.session)).exists()).toBe(true);
+    expect(await Bun.file(transcript(emptyParent.session)).exists()).toBe(true);
+    expect(await branches()).toContainEqual(expect.objectContaining({ branchSession: emptyBranch, status: "ready" }));
+    expect((await runs()).some((run) => run.session === emptyBranch)).toBe(false);
+    await sweep(null);
+    await close();
+
+    withCatalog((db) => {
+      using ageBranch = db.prepare("UPDATE runs SET updated = '2020-01-01T00:00:00.000Z', status = 'interrupted' WHERE session = ?");
+      ageBranch.run(branch.session);
+      db.exec("UPDATE conversation_branches SET created = '2020-01-01T00:00:00.000Z' WHERE parent_session = 'parent-empty'");
+    });
+    open();
+    expect(await sweep(30)).toMatchObject({ removed: 1 });
+    expect(await Bun.file(transcript(parent.session)).exists()).toBe(true);
+    expect(await Bun.file(transcript(emptyParent.session)).exists()).toBe(false);
+    expect((await request(path + "/inspect", emptyParent)).status).toBe(410);
+    expect((await request(path + "/preview", { ...source, session: emptyBranch })).status).toBe(404);
+    expect(await branches()).toEqual([expect.objectContaining({ branchSession: branch.session, status: "ready" })]);
+    expect(await runs()).toContainEqual(expect.objectContaining({ session: branch.session, status: "interrupted" }));
+    await sweep(null);
+    await close();
+
+    withCatalog((db) => {
+      using finishBranch = db.prepare("UPDATE runs SET status = 'done' WHERE session = ?");
+      finishBranch.run(branch.session);
+    });
+    open();
+    expect(await sweep(30)).toMatchObject({ removed: 1 });
+    expect(await Bun.file(transcript(parent.session)).exists()).toBe(false);
+    expect(await runs()).toEqual([]);
+    expect(await branches()).toEqual([]);
+    for (const identity of [parent, branch]) {
+      expect((await request(path + "/inspect", identity)).status).toBe(410);
+      expect((await request(path + "/run", { ...task, ...identity, previewId: "expired" })).status).toBe(410);
+    }
+    expect(await call(path + "/audit")).toContainEqual(expect.objectContaining({ kind: "session_expired", session: parent.session }));
+    expect(faux.state.callCount).toBe(3);
+  } finally {
+    await close();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 10_000);

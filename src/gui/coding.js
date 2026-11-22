@@ -62,6 +62,8 @@
   const taskProgressPanel = '<section data-task-progress hidden><h5></h5><ul class="plain"></ul></section>';
   const labelStatus = (run) => statuses[run.review || run.status] || run.status;
   const identity = (run) => ({ session: run.session, requestId: run.id });
+  const alternativeSessionName = /^alt-[a-f0-9]{60}$/u;
+  const branchVersionId = /^[a-f0-9]{64}$/u;
   const time = (iso) => new Date(iso).toLocaleString();
   const report = (node, error, message = '') => {
     node.className = error ? 'error coding-feedback' : 'coding-feedback';
@@ -508,7 +510,7 @@
     });
   }
 
-  function composer(parent, project, readonly, detached, selectRun, managePresets) {
+  function composer(parent, project, readonly, detached, selectRun, ownerWritable) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
     panel.className = 'coding-panel coding-composer stack';
@@ -542,6 +544,7 @@
       '<label class="row" data-approve hidden><input type="checkbox" name="approved"><span data-approve-text></span></label>' +
       '<div class="row"><button type="submit" class="primary" disabled>Send request</button><span class="muted">' + esc(project.model) +
       '</span></div><p class="muted" data-send-compaction-notice hidden>Finish local compaction in Run history before sending in this session.</p>' +
+      '<p class="muted" data-branch-notice hidden></p>' +
       '<div data-composer-feedback class="coding-feedback" role="status"></div></form>';
     parent.append(panel);
 
@@ -553,6 +556,7 @@
     const approve = form.querySelector('[data-approve]');
     const approveText = form.querySelector('[data-approve-text]');
     const compactionNotice = form.querySelector('[data-send-compaction-notice]');
+    const branchNotice = form.querySelector('[data-branch-notice]');
     const packageFields = Array.from(form.querySelectorAll('[data-package]'));
     const feedback = form.querySelector('[data-composer-feedback]');
     const evaluation = window.okbCodingEvaluation.composerOptions(form.querySelector('[data-evaluation-options]'), {
@@ -566,11 +570,13 @@
     let evaluationPrompt;
     const pendingCompactions = new Set();
     const draftPrompt = () => evaluationPrompt?.displayed === prompt.value ? evaluationPrompt.saved : prompt.value;
+    const onBranch = () => alternativeSessionName.test(session.value.trim());
+    const enrollment = form.querySelector('[data-enroll]');
 
     function updateSend() {
       const pending = pendingCompactions.has(session.value.trim());
       compactionNotice.hidden = !pending;
-      send.disabled = readonly || busy || project.credential === 'missing' || !preview || !approved.checked || pending;
+      send.disabled = readonly || busy || project.credential === 'missing' || !preview || !approved.checked || pending || (onBranch() && !ownerWritable);
     }
 
     function clearPreview() {
@@ -579,7 +585,7 @@
       previewEl.replaceChildren();
       approved.checked = false;
       approve.hidden = true;
-      previewButton.disabled = false;
+      previewButton.disabled = onBranch() && !ownerWritable;
       if (feedback.textContent === 'Reading selected source…') report(feedback);
       updateSend();
     }
@@ -607,7 +613,7 @@
     }
 
     mountRunPresets(form.querySelector('[data-run-presets]'), {
-      prefix, manage: managePresets, detached, inRepository: () => source.value === 'repository',
+      prefix, manage: ownerWritable, detached, inRepository: () => source.value === 'repository',
       readDraft: (name) => {
         const selection = sourceInput();
         if (!prompt.value.trim() || !selection.query.trim()) throw new Error('Enter a task and source query to save a preset.');
@@ -630,7 +636,7 @@
     });
 
     prompt.addEventListener('input', () => { evaluationPrompt = undefined; });
-    for (const input of [source, projects, tokenBudget, profile, files, session, requestId, prompt, approvedSourceLookup,
+    for (const input of [source, projects, tokenBudget, profile, files, requestId, prompt, approvedSourceLookup,
       form.elements.query, ...form.querySelectorAll('[data-package] input')])
       input.addEventListener('input', clearPreview);
     function updateSourceFields() {
@@ -641,9 +647,31 @@
       if (source.value === 'packages') approvedSourceLookup.checked = false;
     }
     source.addEventListener('change', updateSourceFields);
+    function updateBranchMode() {
+      const branch = onBranch();
+      if (branch) evaluationPrompt = undefined;
+      branchNotice.hidden = !branch;
+      branchNotice.textContent = ownerWritable
+        ? 'Review the branch’s current context with your new source before sending.'
+        : 'The project owner continues alternative review sessions from the local app.';
+      source.querySelector('option[value="packages"]').disabled = branch;
+      if (branch && source.value === 'packages') {
+        source.value = 'files';
+        files.value = '';
+        updateSourceFields();
+      }
+      enrollment.disabled = readonly || branch;
+      if (branch && enrollment.checked) {
+        enrollment.checked = false;
+        enrollment.dispatchEvent(new Event('change'));
+      }
+      clearPreview();
+    }
+    session.addEventListener('input', updateBranchMode);
     approved.addEventListener('change', updateSend);
 
     previewButton.addEventListener('click', async () => {
+      if (previewButton.disabled) return;
       clearPreview();
       const current = revision;
       const isCurrent = () => current === revision && !detached();
@@ -652,24 +680,30 @@
       feedback.textContent = 'Reading selected source…';
       try {
         const selection = sourceInput();
+        const branchSession = onBranch() ? session.value.trim() : undefined;
         const lookup = approvedSourceLookup.checked;
         if (lookup && selection.source === 'files' && !selection.files.length)
           throw new Error('Choose at least one file to allow approved source lookup.');
         const evaluationCase = evaluation.value();
         const pinned = evaluationCase?.series.startsWith('pinned-vite-');
         const result = await coding(prefix + '/preview', {
-          ...selection, ...(evaluationCase ? { measurePreview: true } : {}),
+          ...selection, ...(branchSession ? { session: branchSession } : {}), ...(evaluationCase ? { measurePreview: true } : {}),
           ...(pinned ? { evaluation: evaluationCase, prompt: draftPrompt(), ...(lookup ? { approvedSourceLookup: true } : {}) } : {}),
         });
         if (!isCurrent()) return;
+        const branchContext = branchSession ? result.branchContext : undefined;
+        if (branchSession && (!validBranchHistory(branchContext) || !branchVersionId.test(branchContext.id))) {
+          throw new Error('Could not review this branch’s current context. Preview source again.');
+        }
         previewContents(previewEl, result);
+        if (branchContext) previewEl.append(branchHistory(branchContext, 'Context already in this branch'));
         if (result.source === 'repository' && !result.excerpts.length) return;
         if (result.source === 'packages' && result.packages.some((part) => !part.excerpts.length)) return;
-        preview = { selection, lookup, id: result.manifest?.id || result.id };
+        preview = { selection, lookup, id: result.manifest?.id || result.id, branchContextId: branchContext?.id };
         const provider = project.providerLabel;
         approveText.textContent = result.source === 'packages'
           ? 'Approve sending the shared task and each package’s selected text to ' + provider + '.'
-          : 'Approve sending the task, selected text, and active session history to ' + provider + '.';
+          : 'Approve sending the task, selected text, and ' + (branchContext ? 'reviewed branch context' : 'active session history') + ' to ' + provider + '.';
         if (lookup) approveText.textContent += ' Allow lookups within this request’s selected text.';
         approve.hidden = false;
         approved.focus();
@@ -694,6 +728,7 @@
           ...preview.selection, approved: true, previewId: preview.id,
           prompt: draftPrompt(),
           session: session.value, requestId: requestId.value, evaluation: evaluation.value(),
+          ...(preview.branchContextId ? { branchContextId: preview.branchContextId } : {}),
           ...(preview.lookup ? { approvedSourceLookup: true } : {}),
         });
         if (detached()) return;
@@ -729,6 +764,8 @@
     panel.canLoadEvaluationCase = () => !readonly && panel.isConnected && !detached();
     panel.loadEvaluationCase = (saved, recipe) => {
       if (busy || !panel.canLoadEvaluationCase()) return false;
+      session.value = 'eval-' + crypto.randomUUID();
+      updateBranchMode();
       if (recipe) {
         const { study, task, strategy } = recipe;
         source.value = strategy === 'files' ? 'files' : 'repository';
@@ -746,12 +783,21 @@
       prompt.value = saved.prompt;
       // Textareas normalize line endings. Keep the saved prompt exact until the user edits it.
       evaluationPrompt = { saved: saved.prompt, displayed: prompt.value };
-      session.value = 'eval-' + crypto.randomUUID();
       requestId.value = crypto.randomUUID();
       approvedSourceLookup.checked = false;
       clearPreview();
       report(feedback, undefined, recipe ? 'Pinned evaluation case loaded. Preview source before sending.'
         : 'Evaluation case loaded. Preview source again before sending.');
+      prompt.focus();
+      return true;
+    };
+    panel.useBranchSession = (name) => {
+      if (busy || !ownerWritable || detached() || !alternativeSessionName.test(name)) return false;
+      session.value = name;
+      requestId.value = crypto.randomUUID();
+      approvedSourceLookup.checked = false;
+      updateBranchMode();
+      report(feedback, undefined, 'Alternative review branch selected. Preview source before sending.');
       prompt.focus();
       return true;
     };
@@ -950,14 +996,219 @@
     };
   }
 
-  function activity(parent, project, readonly, detached, reviewPatch, contextActions) {
+  function validBranchHistory(context) {
+    return Number.isSafeInteger(context?.inheritedEntries) && context.inheritedEntries >= 0 &&
+      Number.isSafeInteger(context.estimatedTokens) && context.estimatedTokens >= 0 && typeof context.providerContinuity === 'boolean' &&
+      Array.isArray(context.history) && context.history.every((entry) =>
+        typeof entry?.role === 'string' && typeof entry.text === 'string');
+  }
+
+  function branchHistory(context, label) {
+    const section = document.createElement('section');
+    section.className = 'stack';
+    section.innerHTML = '<h4></h4><p class="muted"></p><p class="muted" data-provider-continuity hidden>' +
+      'Provider-managed reasoning or signatures will accompany the visible history.</p>' +
+      '<div class="stack coding-branch-history" role="region" tabindex="0"></div>';
+    section.querySelector('h4').textContent = label;
+    section.querySelector('p').textContent = context.inheritedEntries.toLocaleString() +
+      (context.inheritedEntries === 1 ? ' saved entry' : ' saved entries') + ' · ' + context.estimatedTokens.toLocaleString() + ' estimated context tokens';
+    section.querySelector('[data-provider-continuity]').hidden = context.providerContinuity !== true;
+    const history = section.querySelector('.coding-branch-history');
+    history.setAttribute('aria-label', label);
+    for (const entry of context.history) {
+      const role = document.createElement('p');
+      role.className = 'muted';
+      role.textContent = entry.role;
+      const text = document.createElement('pre');
+      text.textContent = entry.text;
+      history.append(role, text);
+    }
+    return section;
+  }
+
+  function matchingBranchReceipt(result, { session, requestId, branchSession }) {
+    return result?.created === true && result.session === session && result.requestId === requestId && result.branchSession === branchSession;
+  }
+
+  function mountSavedBranches(panel, { prefix, detached, useBranch }) {
+    panel.innerHTML = '<summary>Alternative review branches</summary><div class="stack coding-form">' +
+      '<p class="muted">Continue these sessions from the local owner app. Team members can inspect and review their runs.</p>' +
+      '<ul class="stack plain"></ul><div class="coding-feedback" role="status"></div></div>';
+    const list = panel.querySelector('ul');
+    const feedback = panel.querySelector('[role="status"]');
+    let revision = 0;
+    async function refresh() {
+      if (!panel.open || detached()) return;
+      const current = ++revision;
+      report(feedback, undefined, 'Loading alternative sessions…');
+      try {
+        const rows = await coding(prefix + '/branches');
+        if (detached() || current !== revision) return;
+        list.replaceChildren();
+        for (const row of rows) {
+          if (!alternativeSessionName.test(row.branchSession) || (row.status !== 'ready' && row.status !== 'pending')) continue;
+          const item = document.createElement('li');
+          item.className = 'stack';
+          item.innerHTML = '<strong></strong><p class="muted"></p><div class="row"><button type="button">Use branch session</button></div>';
+          item.querySelector('strong').textContent = row.branchSession;
+          item.querySelector('p').textContent = 'From ' + row.session + ' · ' + row.requestId + (row.createdAt ? ' · ' + time(row.createdAt) : '');
+          const button = item.querySelector('button');
+          button.textContent = row.status === 'pending' ? 'Finish creating branch' : 'Use branch session';
+          button.disabled = row.status === 'pending' && !branchVersionId.test(row.previewId);
+          button.dataset.branchAlias = row.branchSession;
+          button.addEventListener('click', async () => {
+            if (detached() || button.disabled) return;
+            if (row.status !== 'pending') {
+              if (!useBranch(row.branchSession)) report(feedback, new Error('Wait for the current request to finish sending.'));
+              return;
+            }
+            const { session, requestId, previewId } = row;
+            button.disabled = true;
+            report(feedback, undefined, 'Finishing alternative branch…');
+            try {
+              const result = await coding(prefix + '/branches', { session, requestId, previewId });
+              if (!matchingBranchReceipt(result, row)) throw new Error('Could not verify the branch receipt. Reopen Alternative review branches.');
+              if (detached()) return;
+              await refresh();
+              list.querySelector('[data-branch-alias="' + row.branchSession + '"]')?.focus();
+            } catch (error) { if (!detached() && button.isConnected) report(feedback, error); }
+            finally { button.disabled = false; }
+          });
+          list.append(item);
+        }
+        report(feedback, undefined, list.childElementCount ? '' : 'No alternative review branches yet.');
+      } catch (error) {
+        if (!detached() && current === revision) report(feedback, error);
+      }
+    }
+    panel.addEventListener('toggle', refresh);
+    return refresh;
+  }
+
+  function mountBranchPreview(panel, { prefix, detached, useBranch, refreshBranches }) {
+    panel.innerHTML = '<div class="row"><button type="button" data-branch-start>Preview alternative branch</button></div>' +
+      '<div class="stack" data-branch-review hidden><p data-branch-scope></p><div data-branch-history></div>' +
+      '<label class="row"><input type="checkbox"> Create a separate session with this inherited context</label>' +
+      '<div class="row" data-branch-actions><button type="button" data-branch-create disabled>Create alternative branch</button>' +
+      '<button type="button" data-branch-cancel>Cancel branch preview</button></div></div>' +
+      '<div class="stack" data-branch-created hidden><p></p><div class="row"><button type="button">Use branch session</button></div></div>' +
+      '<div class="coding-feedback" role="status"></div>';
+    const start = panel.querySelector('[data-branch-start]');
+    const review = panel.querySelector('[data-branch-review]');
+    const scope = panel.querySelector('[data-branch-scope]');
+    const history = panel.querySelector('[data-branch-history]');
+    const approval = review.querySelector('input');
+    const create = panel.querySelector('[data-branch-create]');
+    const cancel = panel.querySelector('[data-branch-cancel]');
+    const created = panel.querySelector('[data-branch-created]');
+    const use = created.querySelector('button');
+    const feedback = panel.querySelector('[role="status"]');
+    let target = null;
+    let preview = null;
+    let receipt = null;
+    let revision = 0;
+    let busy = false;
+
+    function update() {
+      panel.hidden = !target;
+      start.parentElement.hidden = Boolean(preview || receipt);
+      start.disabled = approval.disabled = cancel.disabled = busy;
+      review.hidden = !preview;
+      created.hidden = !receipt;
+      create.disabled = busy || !preview || !approval.checked;
+    }
+    function clear() {
+      ++revision;
+      preview = receipt = null;
+      busy = false;
+      approval.checked = false;
+      history.replaceChildren();
+      update();
+      report(feedback);
+    }
+    const current = (attempt) => !detached() && panel.isConnected && attempt === revision;
+    start.addEventListener('click', async () => {
+      if (!target || busy || detached()) return;
+      const expected = target;
+      const attempt = ++revision;
+      busy = true;
+      update();
+      report(feedback, undefined, 'Reading inherited context…');
+      try {
+        const result = await coding(prefix + '/branches-preview', expected);
+        if (!current(attempt)) return;
+        if (!validBranchHistory(result) || result.session !== expected.session || result.requestId !== expected.requestId ||
+            !alternativeSessionName.test(result.branchSession) || !branchVersionId.test(result.previewId) ||
+            typeof result.provider !== 'string' || typeof result.model !== 'string') throw new Error('Could not verify the alternative branch preview.');
+        preview = result;
+        scope.textContent = 'Session ' + result.branchSession + ' branches from ' + result.session + ' · ' + result.requestId +
+          ' with ' + result.provider + ' / ' + result.model + '.';
+        history.replaceChildren(branchHistory(result, 'Inherited context'));
+        report(feedback);
+      } catch (error) {
+        if (current(attempt)) report(feedback, error);
+      } finally {
+        if (current(attempt)) {
+          busy = false;
+          update();
+          if (preview) approval.focus();
+        }
+      }
+    });
+    approval.addEventListener('change', update);
+    cancel.addEventListener('click', () => {
+      if (busy) return;
+      clear();
+      start.focus();
+    });
+    create.addEventListener('click', async () => {
+      if (create.disabled || detached()) return;
+      const approved = preview;
+      const { session, requestId, branchSession, previewId } = approved;
+      const attempt = ++revision;
+      busy = true;
+      update();
+      report(feedback, undefined, 'Creating alternative branch…');
+      try {
+        const result = await coding(prefix + '/branches', { session, requestId, previewId });
+        if (!matchingBranchReceipt(result, approved))
+          throw new Error('Could not verify the branch receipt. Check Alternative review branches in Run history.');
+        void refreshBranches();
+        if (!current(attempt)) return;
+        clear();
+        receipt = result;
+        created.querySelector('p').textContent = (result.replayed === true ? 'Alternative branch ready · ' : 'Alternative branch created · ') + branchSession;
+        update();
+        use.focus();
+      } catch (error) {
+        if (!current(attempt)) return;
+        clear();
+        report(feedback, error);
+        start.focus();
+      }
+    });
+    use.addEventListener('click', () => {
+      if (!receipt || detached()) return;
+      if (!useBranch(receipt.branchSession)) report(feedback, new Error('Wait for the current request to finish sending.'));
+    });
+    update();
+    return (row) => {
+      const next = row ? identity(row) : null;
+      if (next?.session === target?.session && next?.requestId === target?.requestId) return;
+      target = next;
+      clear();
+    };
+  }
+
+  function activity(parent, project, readonly, detached, { reviewPatch, ownerActions, initialRun }) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
     panel.className = 'coding-panel coding-activity stack';
     panel.innerHTML = '<div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh</button></div>' +
       '<div class="stack coding-runs" data-runs></div><div class="stack" data-inspect aria-live="polite"></div>' +
       '<section class="stack" data-saved-request-source hidden></section>' +
-      (contextActions && !readonly ? '<section class="stack" data-context-controls hidden></section>' : '') +
+      (ownerActions ? '<section class="stack" data-branch-preview hidden></section>' +
+        '<details data-saved-branches></details><section class="stack" data-context-controls hidden></section>' : '') +
       '<div class="coding-feedback" role="status"></div>';
     parent.append(panel);
     const list = panel.querySelector('[data-runs]');
@@ -966,9 +1217,14 @@
     const setSavedSourceRun = mountSavedSource(panel.querySelector('[data-saved-request-source]'), prefix, detached);
     const contextPanel = panel.querySelector('[data-context-controls]');
     const setContextSession = contextPanel ? mountContextControls(contextPanel, {
-      prefix, detached, provider: () => project.providerLabel, ...contextActions, refresh,
+      prefix, detached, provider: () => project.providerLabel, ...ownerActions, refresh,
     }) : null;
-    let selected = null;
+    const branchPanel = panel.querySelector('[data-branch-preview]');
+    const setBranchTarget = branchPanel ? mountBranchPreview(branchPanel, {
+      prefix, detached, useBranch: ownerActions.useBranch,
+      refreshBranches: mountSavedBranches(panel.querySelector('[data-saved-branches]'), { prefix, detached, useBranch: ownerActions.useBranch }),
+    }) : null;
+    let selected = initialRun || null;
     let timer;
     let generation = 0;
 
@@ -987,13 +1243,16 @@
       const pi = result.pi;
       const row = result.run;
       const compactionPending = pi?.context?.compactionPending === true;
-      if (pi) contextActions?.markCompactionPending(row.session, compactionPending);
-      setContextSession?.(idle && pi && !pi.pendingRequestIds.length ? row.session : null, compactionPending);
+      const branch = row.branch || alternativeSessionName.test(row.session);
+      if (pi && !branch) ownerActions?.markCompactionPending(row.session, compactionPending);
+      setContextSession?.(!branch && idle && pi && !pi.pendingRequestIds.length ? row.session : null, compactionPending);
+      setBranchTarget?.(!branch && result.alternativeBranchEligible === true ? row : null);
       const canViewSource = row.status !== 'running' &&
         (row.admitted || pi?.request || (row.status === 'interrupted' && !result.admissionMissing));
       setSavedSourceRun(canViewSource ? row : null);
       const receipt = pi?.request?.receipt;
       const error = row.error || receipt?.reason;
+      const branchReason = ownerActions && typeof result.alternativeBranchReason === 'string' ? result.alternativeBranchReason : '';
       const snippet = receipt?.repositoryContext?.files || pi?.request?.repositoryContext?.files || [];
       const progress = result.taskProgress ?? pi?.request?.taskProgress;
       const live = inspected.querySelector('[data-live-answer]');
@@ -1006,7 +1265,9 @@
       inspected.dataset.session = row.session;
       inspected.innerHTML = '<div class="coding-result stack"><h4>' + esc(row.id) + '</h4>' +
         '<p>' + esc(labelStatus(row)) + ' · ' + esc(row.session) + ' · ' + esc(row.actor) + '</p>' +
+        (row.branch ? '<p class="muted">Alternative to ' + esc(row.branch.session) + ' · ' + esc(row.branch.requestId) + '</p>' : '') +
         (row.reviewer ? '<p class="muted">Reviewed by ' + esc(row.reviewer) + ' · ' + esc(time(row.reviewed)) + '</p>' : '') +
+        (branchReason ? '<p class="muted">' + esc(branchReason) + '</p>' : '') +
         (error ? '<div class="notice">' + esc(error) + '</div>' : '') +
         (result.admissionMissing ? '<p class="muted">Pi did not save this request. Resume will make this ID available for resubmission.</p>' : '') +
         (pi ? '<p class="muted">Request usage · ' + esc(usageText(pi.request?.usage)) + '</p>' + contextSummary(pi.context) : '') +
@@ -1032,15 +1293,15 @@
         bar.before(disclosure(child.project + ' · ' + child.requestId, child.summary || child.reason || '', [usageText(child.usage), ...sources]));
       }
       if (readonly) return;
-      if (row.status === 'running') appendAction(bar, 'Cancel run', '/cancel', row);
-      if (row.status === 'interrupted') {
+      if ((!branch || ownerActions) && row.status === 'running') appendAction(bar, 'Cancel run', '/cancel', row);
+      if ((!branch || ownerActions) && row.status === 'interrupted') {
         appendAction(bar, 'Resume', '/resume', row);
         appendAction(bar, 'Cancel run', '/cancel', row);
       }
       if (row.status === 'done') {
         appendAction(bar, 'Accept result', '/review', row, { decision: 'accepted' });
         appendAction(bar, 'Request changes', '/review', row, { decision: 'changes_requested' });
-        if (row.review === 'accepted' && reviewPatch) {
+        if (!branch && row.review === 'accepted' && reviewPatch) {
           const patch = document.createElement('button');
           patch.type = 'button';
           patch.dataset.reviewPatch = '';
@@ -1099,12 +1360,15 @@
           selected = null;
           setSavedSourceRun(null);
           setContextSession?.(null);
+          setBranchTarget?.(null);
           inspected.replaceChildren();
+          if (focusResult) report(feedback, new Error('That request is no longer in Run history.'));
         }
         if (focusResult && target && current === generation) {
           const heading = inspected.querySelector('h4');
           heading?.setAttribute('tabindex', '-1');
-          heading?.focus();
+          const branchButton = initialRun === selected && !branchPanel?.hidden ? branchPanel?.querySelector('[data-branch-start]') : null;
+          (branchButton || heading)?.focus();
         }
         if (active && current === generation && !detached()) timer = setTimeout(refresh, 1200);
       } catch (error) {
@@ -1116,6 +1380,7 @@
       if (selected?.id !== row.id || selected.session !== row.session) {
         setSavedSourceRun(null);
         setContextSession?.(null);
+        setBranchTarget?.(null);
         inspected.replaceChildren();
       }
       selected = row;
@@ -1124,7 +1389,7 @@
     }
 
     panel.querySelector('[data-refresh]').addEventListener('click', () => refresh());
-    refresh();
+    refresh(Boolean(initialRun));
     return { refresh, selectRun };
   }
 
@@ -1145,6 +1410,7 @@
       '<div class="row"><button type="submit">Save retention policy</button></div></form><form class="stack" data-delete>' +
       field('Session to delete', '', 'text', 'name="session" maxlength="64" required') +
       field('Type the session name again', '', 'text', 'name="confirm" maxlength="64" required') +
+      '<p class="muted" data-branch-transcript hidden>Transcript deletion includes the original session and all of its alternative branches.</p>' +
       '<div class="row"><button type="submit" class="danger">Delete session and transcript</button></div></form>' +
       '<details data-audit><summary>Audit events</summary><ol class="coding-audit"></ol></details>' +
       '<div class="coding-feedback" role="status"></div></div>';
@@ -1157,6 +1423,8 @@
     const token = panel.querySelector('[data-token]');
     const audit = panel.querySelector('[data-audit]');
     const deleteSession = panel.querySelector('[data-delete]');
+    const deleteTranscript = deleteSession.querySelector('button');
+    const branchTranscript = deleteSession.querySelector('[data-branch-transcript]');
     const retention = panel.querySelector('[data-retention]');
     const saveRetention = retention.querySelector('button');
     const credential = panel.querySelector('[data-credential]');
@@ -1256,8 +1524,14 @@
         await loadMembers();
       } catch (error) { report(feedback, error); }
     });
+    deleteSession.elements.session.addEventListener('input', () => {
+      const branch = alternativeSessionName.test(deleteSession.elements.session.value.trim());
+      branchTranscript.hidden = !branch;
+      deleteTranscript.disabled = readonly || branch;
+    });
     deleteSession.addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (deleteTranscript.disabled) return;
       report(feedback);
       try {
         const result = await coding(prefix + '/delete-session', Object.fromEntries(new FormData(deleteSession)));
@@ -1496,7 +1770,8 @@
     async function loadRuns(target, intent) {
       const current = ++runsRevision;
       try {
-        const accepted = (await coding(prefix + '/runs')).filter((entry) => entry.status === 'done' && entry.review === 'accepted');
+        const accepted = (await coding(prefix + '/runs')).filter((entry) =>
+          entry.status === 'done' && entry.review === 'accepted' && !entry.branch && !alternativeSessionName.test(entry.session));
         if (detached() || !panel.open || current !== runsRevision) return false;
         const selected = target && intent === proposalRevision ? JSON.stringify(target) : run.value;
         run.replaceChildren(new Option(accepted.length ? 'Choose a result' : 'No accepted results', ''),
@@ -1666,7 +1941,13 @@
     if (isDetached()) return;
     const suggestedWorkspace = arg?.startsWith('workspace=') ? arg.slice('workspace='.length) : '';
     const actionRoute = /^([a-f0-9-]{36})\/(github|patch)\/([a-z0-9][a-z0-9_-]{0,63})\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})$/.exec(arg || '');
-    const projectId = actionRoute?.[1] || arg;
+    const runRoute = /^([a-f0-9-]{36})\?(.+)$/u.exec(arg || '');
+    const params = new URLSearchParams(runRoute?.[2]);
+    const requestedSession = params.get('session');
+    const requestedRun = params.get('request');
+    const initialRun = /^[a-z0-9][a-z0-9_-]{0,63}$/u.test(requestedSession || '') &&
+      /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(requestedRun || '') ? { session: requestedSession, id: requestedRun } : undefined;
+    const projectId = actionRoute?.[1] || runRoute?.[1] || arg;
     const project = projects.find((item) => item.id === projectId || (suggestedWorkspace && item.workspace === suggestedWorkspace)) ||
       (!arg ? projects[0] : null);
     projectsEl.innerHTML = !teamMode && projects.length ?
@@ -1696,9 +1977,14 @@
     grid.append(left, right);
     let openPatch;
     let composerPanel;
-    const runs = activity(right, project, readonly, isDetached, teamMode ? undefined : (row) => openPatch(row), teamMode || readonly ? undefined : {
-      clearConsent: (session) => clearComposerConsent(session),
-      markCompactionPending: (session, pending) => composerPanel.setCompactionPending(session, pending),
+    const runs = activity(right, project, readonly, isDetached, {
+      initialRun,
+      reviewPatch: teamMode ? undefined : (row) => openPatch(row),
+      ownerActions: teamMode || readonly ? undefined : {
+        clearConsent: (session) => clearComposerConsent(session),
+        markCompactionPending: (session, pending) => composerPanel.setCompactionPending(session, pending),
+        useBranch: (session) => composerPanel.useBranchSession(session),
+      },
     });
     const clearComposerConsent = composer(left, project, readonly, isDetached, runs.selectRun, !teamMode && !readonly);
     composerPanel = left.querySelector('.coding-composer');

@@ -154,12 +154,12 @@ export function launchProjectWorker(request: Request, signal: AbortSignal, callb
     }
     if (stopped) throw new ProjectWorkerInterrupted("The coding server stopped before launching the worker.");
     if (signal.aborted) throw new CodingError("The coding request was cancelled before admission.");
-    const plan = planDockerWorker(docker, stateDir, options.session);
+    const plan = planDockerWorker(docker, stateDir, options.branch?.parentSession ?? options.session);
     try {
       worker = launchPipe({
         stateDir: dockerWorkerStateDir, stateBinding: stateDir, workspaceBinding, preparedInput, apiKey,
         options: { session: options.session, requestId: options.requestId, workspace: options.workspace,
-          provider: options.provider, model: options.model, thinkingLevel: options.thinkingLevel },
+          provider: options.provider, model: options.model, thinkingLevel: options.thinkingLevel, branch: options.branch },
       }, signal, callbacks, plan);
     } catch (error) {
       if (error instanceof CodingError) throw error;

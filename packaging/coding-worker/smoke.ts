@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createModels, fauxAssistantMessage, fauxProvider, type Models } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
 import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,8 +16,8 @@ const bundle = join(root, "brain");
 const workspace = join(root, "work");
 const stateDir = join(root, "state");
 const token = "local-docker-smoke";
-const createServer = (image: string) => createApiServer({
-  bundle, port: 0, token, coding: { stateDir, workerImage: image, workerNetwork: isolation.network },
+const createServer = (image: string, models?: Models) => createApiServer({
+  bundle, port: 0, token, coding: models ? { stateDir, models } : { stateDir, workerImage: image, workerNetwork: isolation.network },
 });
 let server: ApiServer | undefined;
 
@@ -155,6 +156,39 @@ try {
   assert.equal(await Bun.file(transcript).exists(), true);
 
   await closeServer();
+  const branchPath = `/projects/${other.id}`;
+  const branchParent = { session: "branch-parent", requestId: "accepted" };
+  const testModels = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: model }] });
+  faux.setResponses([fauxAssistantMessage("Accepted parent response from the offline fixture.")]);
+  testModels.setProvider(faux.provider);
+  server = createServer(isolation.image, testModels);
+  const parentPreview = await call<{ id: string }>(branchPath + "/preview", selection);
+  await call(branchPath + "/run", { ...submission, ...branchParent, previewId: parentPreview.id });
+  assert.equal((await settled(branchPath, branchParent)).status, "done");
+  await call(branchPath + "/review", { ...branchParent, decision: "accepted" });
+  const fork = await call<{ branchSession: string; previewId: string }>(branchPath + "/branches-preview", branchParent);
+  await call(branchPath + "/branches", { ...branchParent, previewId: fork.previewId });
+  assert.equal(faux.state.callCount, 1);
+
+  // Only the real Docker worker continues the branch. It must find the
+  // native conversation inside the parent bind mount and admit saved source.
+  await closeServer();
+  server = createServer(isolation.image);
+  const branchRequest = { session: fork.branchSession, requestId: branchParent.requestId };
+  const branchPreview = await call<{ id: string; branchContext: { id: string } }>(branchPath + "/preview", { ...selection, session: fork.branchSession });
+  await call(branchPath + "/run", {
+    ...submission, ...branchRequest, previewId: branchPreview.id, branchContextId: branchPreview.branchContext.id,
+  });
+  const continued = await settled(branchPath, branchRequest);
+  assert.equal(continued.admitted, true);
+  assert.equal(continued.status, "unanswered");
+  const branchSaved = await call<Inspection>(branchPath + "/inspect", branchRequest);
+  assert.ok(branchSaved.pi.request.receipt);
+  assert.equal((await settled(branchPath, branchParent)).status, "done");
+  assert.equal(await Bun.file(join(stateDir, `project-${other.id}`, `session-${fork.branchSession}`, "transcript.sqlite")).exists(), false);
+
+  await closeServer();
   // Leave the catalog at an earlier crash boundary while keeping the worker's
   // settled SQLite receipt. Recovery must find that receipt in the backup.
   withCatalog((db) => {
@@ -184,6 +218,7 @@ try {
   assert.equal(replay.admitted, true);
   const restored = await call<Inspection>(path + "/inspect", offline, member.token);
   assert.deepEqual(restored.pi.request.receipt, saved.pi.request.receipt);
+  assert.deepEqual((await call<Inspection>(branchPath + "/inspect", branchRequest)).pi.request.receipt, branchSaved.pi.request.receipt);
   assert.equal(restored.pi.request.approvedSourceLookup, true);
   const evidence = await call<{ sources: { path: string; content: string }[] }>(path + "/evaluation-inspect", offline, member.token);
   assert.deepEqual(evidence.sources.map(({ path, content }) => ({ path, content })), [{ path: "app.ts", content: admittedSource }]);
@@ -239,7 +274,7 @@ try {
   const audit = await call<{ kind: string; session: string | null }[]>(path + "/audit");
   assert.ok(audit.some(({ kind, session }) => kind === "session_expired" && session === offline.session));
 
-  console.log("Docker Coding smoke passed. Verified offline worker isolation and admission, no fallback, scoped access, quiesced backup restoration, owner context maintenance, archived Pi receipts, and retention tombstones.");
+  console.log("Docker Coding smoke passed. Verified offline worker isolation and admission, scoped access, Pi branch recovery, quiesced backup restoration, owner context maintenance, archived receipts, and retention tombstones.");
 } finally {
   await closeServer();
   await rm(root, { recursive: true, force: true });
