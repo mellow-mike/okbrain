@@ -93,6 +93,10 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   task-owned child conversations, combined usage, and a human-reviewed handoff.
 - [x] Preview and apply owner-approved local patches to existing tracked files
   after accepting a result. Record approval and reconcile interrupted writes.
+- [x] Open exact patch proposals from accepted Pi responses in the Mac and web
+  review form and from VS Code and Cursor. Require preview and approval to apply.
+- [x] Apply approved patches with new files and publish them through the same
+  verified GitHub branch workflow while preserving the local Git index.
 - [x] Bind GitHub repositories, show activity, and prepare a GitHub browser
   comparison for accepted results.
 - [x] Preview and publish an owner-approved GitHub pull request from an accepted
@@ -793,6 +797,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Connected accepted Pi responses to patch review in the apps
+  and editor. Added files can go through local approval and GitHub publication.
 - 2026-11-22 — Added private GitHub sync credentials and owner-confirmed
   standalone Pi transcript deletion in the Mac and web apps.
 - 2026-11-22 — Added in-app Git identity and origin setup, a reviewable text

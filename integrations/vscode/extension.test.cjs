@@ -5,6 +5,21 @@ const { readFileSync } = require('node:fs');
 const { test } = require('node:test');
 const { runInNewContext } = require('node:vm');
 
+function activateExtension(vscode, connection) {
+  const file = require.resolve('./extension.cjs');
+  const module = { exports: {} };
+  runInNewContext(readFileSync(file, 'utf8'), {
+    module,
+    URL,
+    require(id) {
+      if (id === 'vscode') return vscode;
+      if (id === './connection.cjs') return { connect: async () => connection };
+      return require(id);
+    },
+  }, { filename: file });
+  module.exports.activate({ subscriptions: [] });
+}
+
 test('editor review opens approved source in a read-only document only on request', async () => {
   const project = { id: 'fixture', title: 'Project fixture' };
   const runs = [
@@ -61,17 +76,7 @@ test('editor review opens approved source in a read-only document only on reques
       async showErrorMessage(message) { throw new Error(message); },
     },
   };
-  const file = require.resolve('./extension.cjs');
-  const module = { exports: {} };
-  runInNewContext(readFileSync(file, 'utf8'), {
-    module,
-    require(id) {
-      if (id === 'vscode') return vscode;
-      if (id === './connection.cjs') return { connect: async () => connection };
-      return require(id);
-    },
-  }, { filename: file });
-  module.exports.activate({ subscriptions: [] });
+  activateExtension(vscode, connection);
   const inspect = commands.get('okbrain.runs');
 
   await inspect();
@@ -91,4 +96,73 @@ test('editor review opens approved source in a read-only document only on reques
   assert.ok(lastDocument.text.includes('Project guidance\nProject rules.'));
   assert.ok(lastDocument.text.includes('Package fixture\n\npackage/example.ts:3–9\n<source>&</source>'));
   assert.equal(provideSource(lastDocument.uri), '');
+});
+
+test('editor sends the accepted request to patch review without calling another API', async () => {
+  const project = { id: 'e2bb15ce-a12d-4630-8d72-bbbdbb986ba8', title: 'Project fixture' };
+  const runs = [
+    { id: 'review.1', session: 'main_branch', status: 'done' },
+    { id: 'review.2', session: 'main_branch', status: 'done', review: 'changes_requested' },
+    { id: 'review.3', session: 'branch-two', status: 'done', review: 'accepted' },
+  ];
+  const url = new URL('http://127.0.0.1:6522/');
+  const commands = new Map();
+  const opened = [];
+  const calls = [];
+  const patch = 'Review proposed patch in okbrain';
+  const github = 'Prepare GitHub pull request in okbrain';
+  let runId = runs[0].id;
+  let nextAction = patch;
+  let availableActions;
+  const vscode = {
+    Uri: { parse: (href) => new URL(href) },
+    commands: { registerCommand: (name, run) => commands.set(name, run) },
+    env: { openExternal: async (target) => { opened.push(target.href); return true; } },
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider() {},
+      async openTextDocument(input) { return input; },
+    },
+    window: {
+      async showTextDocument() {},
+      async showQuickPick(choices, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return choices.find((choice) => choice.label === runId);
+        availableActions = Array.from(choices, (choice) => choice.label);
+        return choices.find((choice) => choice.label === nextAction);
+      },
+      async showErrorMessage(message) { throw new Error(message); },
+    },
+  };
+  activateExtension(vscode, {
+    url,
+    projects: [project],
+    async api(path, identity) {
+      calls.push(path);
+      if (path === `/projects/${project.id}/runs`) return runs;
+      assert.equal(path, `/projects/${project.id}/inspect`);
+      return { run: runs.find(({ id, session }) => id === identity.requestId && session === identity.session) };
+    },
+  });
+  const inspect = commands.get('okbrain.runs');
+
+  for (const { id } of runs.slice(0, 2)) {
+    runId = id;
+    await inspect();
+    assert.ok(!availableActions.includes(patch));
+    assert.ok(!availableActions.includes(github));
+  }
+  assert.deepEqual(opened, []);
+  calls.length = 0;
+  const accepted = runs[2];
+  runId = accepted.id;
+  await inspect();
+  assert.ok(availableActions.includes(patch));
+  assert.ok(availableActions.includes(github));
+  assert.deepEqual(calls, [`/projects/${project.id}/runs`, `/projects/${project.id}/inspect`]);
+  assert.deepEqual(opened, [`${url.href}#coding/${project.id}/patch/${accepted.session}/${accepted.id}`]);
+
+  nextAction = github;
+  await inspect();
+  assert.equal(opened[1], `${url.href}#coding/${project.id}/github/${accepted.session}/${accepted.id}`);
 });

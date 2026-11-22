@@ -18,6 +18,7 @@ import {
 import { CodingEvaluationError, CodingEvaluations, parseEvaluation, presentEvidence } from "./evaluation.ts";
 import { dockerWorkerConfig, type DockerWorkerConfig } from "./docker-worker.ts";
 import { PackageReviewError, previewPackageReviews, validatePackageReviews } from "./package-review.ts";
+import { codingPatchProposals } from "./patch-proposals.ts";
 import {
   githubActivity, githubBranch, githubComparison, githubCreatePull, githubFindPull, githubPullBody, githubPullDraft,
   GitHubError, githubRemotes, githubToken, githubUrl, type GitHubFetch, type GitHubPullReceipt,
@@ -704,12 +705,30 @@ export class CodingProjectControl {
     return applied;
   }
 
-  async #patch(project: ProjectRow, body: Json, actor: Actor, apply: boolean) {
-    this.#requireOwner(actor);
-    const run = this.#runParts(body);
+  #acceptedPatchRun(project: ProjectRow, run: { session: string; requestId: string }) {
     const row = this.#readRun(project.id, run.session, run.requestId);
     if (row.status !== "done" || row.review !== "accepted")
       throw new ProjectControlError("Accept the finished result before reviewing a patch.", 409);
+    return row;
+  }
+
+  async #patchProposals(project: ProjectRow, body: Json, actor: Actor) {
+    this.#requireOwner(actor);
+    const run = this.#runParts(body);
+    this.#acceptedPatchRun(project, run);
+    if (this.#get("SELECT session FROM session_deletions WHERE project = ? AND session = ?", project.id, run.session))
+      throw new ProjectControlError("This transcript is being deleted.", 409);
+    if (this.#active.has(`${project.id}/${run.session}`))
+      throw new ProjectControlError("Wait for the active request in this session before reviewing a proposed patch.", 409);
+    const saved = await getCodingSessionStatus({ ...this.#session(project, run), includeReceipt: true }, this.#dependencies(project, actor));
+    const receipt = saved.request?.receipt;
+    return { proposals: receipt?.status === "done" ? codingPatchProposals(receipt.text, JSON.parse(project.scopes) as string[]) : [] };
+  }
+
+  async #patch(project: ProjectRow, body: Json, actor: Actor, apply: boolean) {
+    this.#requireOwner(actor);
+    const run = this.#runParts(body);
+    const row = this.#acceptedPatchRun(project, run);
     const diff = body.diff;
     if (typeof diff !== "string" || Buffer.byteLength(diff) > approvedPatchBytes)
       throw new ProjectControlError("Paste a Git unified diff up to 48 KiB.");
@@ -1287,6 +1306,7 @@ export class CodingProjectControl {
       if (action === "resume") return this.#withSession(project, body, () => this.#resume(project, body, actor));
       if (action === "cancel") return this.#withSession(project, body, () => this.#cancel(project, body, actor));
       if (action === "review") return this.#withSession(project, body, async () => this.#review(project, body, actor));
+      if (action === "patch-proposals") return this.#withSession(project, body, () => this.#patchProposals(project, body, actor));
       if (action === "patch-preview" || action === "patch-apply")
         return this.#withSession(project, body, () => this.#patch(project, body, actor, action === "patch-apply"));
       if (action === "delete-session") return this.#withSession(project, body, () => this.#deleteSession(project, body, actor));

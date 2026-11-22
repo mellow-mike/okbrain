@@ -37,11 +37,12 @@ function fileMode(value: unknown): value is ApprovedPatchFile["mode"] {
 
 function checkFiles(files: readonly PatchFileReceipt[]) {
   if (!files.length || files.length > approvedPatchFileLimit)
-    throw new GitHubError("Choose an applied patch with up to eight edited files.");
+    throw new GitHubError("Choose an applied patch with up to eight files.");
   const seen = new Set<string>();
   for (const file of files) {
     if (!file || !isApprovedPatchPath(file.path) || !fileMode(file.mode) || seen.has(file.path.toLowerCase()) ||
-        !digestPattern.test(file.before) || !digestPattern.test(file.after) || file.before === file.after)
+        (file.before !== null && (typeof file.before !== "string" || !digestPattern.test(file.before))) ||
+        typeof file.after !== "string" || !digestPattern.test(file.after) || file.before === file.after)
       throw new GitHubError("The applied patch has an invalid file receipt.", 409);
     seen.add(file.path.toLowerCase());
   }
@@ -165,18 +166,26 @@ function treePaths(db: Database, rootSha: string) {
     return loaded;
   }
 
-  return async (file: PatchFileReceipt) => {
+  return async (file: PatchFileReceipt, allowMissing = false) => {
     const parts = file.path.split("/");
     const leafName = parts.pop()!;
+    const matching = (nodes: RecordValue[], name: string) => nodes.filter((node) => allowMissing
+      ? typeof node.path === "string" && node.path.toLowerCase() === name.toLowerCase()
+      : node.path === name);
     let sha = rootSha;
     for (const part of parts) {
-      const nodes = (await getTree(sha)).filter((node) => node.path === part);
+      const nodes = matching(await getTree(sha), part);
+      if (!nodes.length && allowMissing) return null;
       const directory = nodes[0];
-      if (nodes.length !== 1 || directory?.type !== "tree" || directory.mode !== "040000")
+      if (nodes.length !== 1 || directory?.path !== part || directory.type !== "tree" || directory.mode !== "040000")
         throw new GitHubError(`GitHub’s tree does not match the approved path ${file.path}.`, 409);
       sha = objectSha(directory.sha);
     }
-    const nodes = (await getTree(sha)).filter((node) => node.path === leafName);
+    const nodes = matching(await getTree(sha), leafName);
+    if (allowMissing) {
+      if (nodes.length) throw new GitHubError(`The GitHub base already contains the new path ${file.path}.`, 409);
+      return null;
+    }
     const entry = nodes[0];
     if (nodes.length !== 1 || entry?.type !== "blob" || entry.mode !== file.mode)
       throw new GitHubError(`GitHub’s file or mode does not match the approved path ${file.path}.`, 409);
@@ -197,7 +206,7 @@ function readBlob(data: RecordValue, sha: string): Buffer {
   return bytes;
 }
 
-/** Bind the approved existing-file edits to an immutable GitHub parent and tree. */
+/** Bind the approved starting bytes and absent paths to an immutable GitHub parent and tree. */
 export async function githubPreparePatchBranch(
   repository: string, name: string, files: readonly PatchFileReceipt[], token: string, transport: GitHubFetch,
 ): Promise<GitHubBranchBase> {
@@ -212,7 +221,8 @@ export async function githubPreparePatchBranch(
   const baseTree = objectSha(record(commit.tree).sha);
   const leaf = treePaths(db, baseTree);
   await Promise.all(files.map(async (file) => {
-    const sha = await leaf(file);
+    const sha = await leaf(file, file.before === null);
+    if (sha === null) return;
     const bytes = readBlob(await db.get(`/blobs/${sha}`), sha);
     if (patchDigest(bytes) !== file.before)
       throw new GitHubError(`The GitHub base differs from the approved starting bytes of ${file.path}.`, 409);

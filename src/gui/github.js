@@ -292,11 +292,11 @@
           branchResult.querySelector('[data-branch-base-sha]').textContent = preview.baseSha;
           branchResult.querySelector('[data-commit-message]').textContent = preview.message;
           const files = branchResult.querySelector('[data-branch-files]');
-          for (const { path, content } of preview.files) {
+          for (const { path, before, content } of preview.files) {
             const file = document.createElement('details');
             const summary = document.createElement('summary');
             const text = document.createElement('pre');
-            summary.textContent = path;
+            summary.textContent = path + (before === null ? ' · New file' : '');
             text.textContent = content;
             file.append(summary, text);
             files.append(file);

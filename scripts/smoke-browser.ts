@@ -831,14 +831,20 @@ try {
   const projectPath = "/projects/" + project.id;
   const projectSource = { source: "files", files: ["browser.ts"] };
   const projectPrompt = "Review <strong>the browser source</strong> in this project.";
+  const patchPrefix = "diff --git a/browser.ts b/browser.ts\n--- a/browser.ts\n+++ b/browser.ts\n@@ -1 +1 @@\n-" + branchBefore + "+";
+  const proposedPatch = patchPrefix + branchAfter;
+  const alternatePatch = patchPrefix + "export const sourceMarker = 'alternate browser patch';\n";
+  const projectAnswer = "Project response ready for review.\n\n```diff\n" + proposedPatch + "```\n\n```diff\n" + alternatePatch + "```";
   const sourceRequests: unknown[] = [];
+  const proposalRequests: unknown[] = [];
   page.on("request", (request) => {
     if (new URL(request.url()).pathname.endsWith(projectPath + "/source-inspect")) sourceRequests.push(request.postDataJSON());
+    if (new URL(request.url()).pathname.endsWith(projectPath + "/patch-proposals")) proposalRequests.push(request.postDataJSON());
   });
   const projectPreview = await codingFixture<{ id: string }>(projectPath + "/preview", projectSource);
   projectFaux.setResponses([async () => {
     await finishProject.promise;
-    return fauxAssistantMessage("Project response ready for review.");
+    return fauxAssistantMessage(projectAnswer);
   }]);
   await codingFixture(projectPath + "/run", {
     ...projectSource, previewId: projectPreview.id, approved: true, session: "project-browser", requestId: "project-task-progress",
@@ -856,24 +862,50 @@ try {
   await page.waitForResponse((res) => new URL(res.url()).pathname.endsWith(projectPath + "/inspect"));
   assert.equal(await cancelProject.evaluate((button) => button === document.activeElement), true);
   finishProject.resolve();
-  await page.getByText("Project response ready for review.", { exact: true }).waitFor();
+  const projectResponse = page.locator(".coding-activity [data-answer]");
+  await projectResponse.waitFor();
+  assert.equal(await projectResponse.textContent(), projectAnswer);
+  const reviewPatch = page.getByRole("button", { name: "Review proposed patch", exact: true });
+  assert.equal(await reviewPatch.count(), 0);
   const acceptResult = page.getByRole("button", { name: "Accept result", exact: true });
   await acceptResult.waitFor();
   assert.equal(await page.getByRole("heading", { name: "Current Pi tasks", exact: true }).count(), 0);
   const accepted = page.waitForResponse((res) => new URL(res.url()).pathname.endsWith(projectPath + "/review"));
   await acceptResult.click();
   assert.equal((await accepted).ok(), true);
-
-  const remote = Bun.spawnSync(["git", "remote", "add", "origin", `https://github.com/${githubFixture.repository}.git`], { cwd: workspace });
-  assert.equal(remote.exitCode, 0, remote.stderr.toString());
-  await page.getByText("Apply a reviewed patch", { exact: true }).click();
-  await page.getByLabel("Git unified diff", { exact: true }).fill(
-    "diff --git a/browser.ts b/browser.ts\n--- a/browser.ts\n+++ b/browser.ts\n@@ -1 +1 @@\n-" +
-    branchBefore + "+" + branchAfter,
-  );
-  await page.getByRole("button", { name: "Preview patch", exact: true }).click();
-  await page.getByRole("checkbox", { name: "Apply this exact diff to the listed files.", exact: true }).check();
-  await page.getByRole("button", { name: "Apply to worktree", exact: true }).click();
+  await reviewPatch.waitFor();
+  assert.deepEqual(proposalRequests, []);
+  assert.equal(await Bun.file(file).text(), branchBefore);
+  await reviewPatch.click();
+  const proposalChoice = page.getByRole("combobox", { name: "Proposed diff", exact: true });
+  await proposalChoice.waitFor();
+  const targetPatch = { session: "project-browser", requestId: "project-task-progress" };
+  assert.deepEqual(proposalRequests, [targetPatch]);
+  const diffEditor = page.getByLabel("Git unified diff", { exact: true });
+  const previewPatch = page.getByRole("button", { name: "Preview patch", exact: true });
+  assert.equal(await diffEditor.inputValue(), "");
+  assert.equal(await previewPatch.isEnabled(), false);
+  assert.deepEqual(JSON.parse(await page.getByRole("combobox", { name: "Accepted result", exact: true }).inputValue()), targetPatch);
+  await proposalChoice.selectOption("0");
+  assert.equal(await diffEditor.inputValue(), proposedPatch);
+  assert.equal(await Bun.file(file).text(), branchBefore);
+  await previewPatch.click();
+  const applyPatch = page.getByRole("button", { name: "Apply to worktree", exact: true });
+  const approvePatch = page.getByRole("checkbox", { name: "Apply this exact diff to the listed files.", exact: true });
+  await approvePatch.waitFor();
+  assert.equal(await applyPatch.isEnabled(), false);
+  const staleFile = "export const sourceMarker = 'worktree changed after patch preview';\n";
+  await writeFile(file, staleFile);
+  await approvePatch.check();
+  const stalePatch = page.waitForResponse((res) => new URL(res.url()).pathname.endsWith(projectPath + "/patch-apply"));
+  await applyPatch.click();
+  assert.equal((await stalePatch).status(), 409);
+  await approvePatch.waitFor({ state: "hidden" });
+  assert.equal(await Bun.file(file).text(), staleFile);
+  await writeFile(file, branchBefore);
+  await previewPatch.click();
+  await approvePatch.check();
+  await applyPatch.click();
   await page.getByText(/Applied to the local worktree/).waitFor();
   assert.equal(await Bun.file(file).text(), branchAfter);
 
@@ -884,7 +916,7 @@ try {
   await savedProjectSource.getByText(projectPrompt, { exact: true }).waitFor();
   assert.deepEqual(sourceRequests, [{ session: "project-browser", requestId: "project-task-progress" }]);
   assert.equal(await savedProjectSource.locator("pre strong").count(), 0);
-  assert.equal(await page.getByText("Project response ready for review.", { exact: true }).isVisible(), true);
+  assert.equal(await projectResponse.isVisible(), true);
   await savedProjectSource.getByText("browser.ts", { exact: true }).click();
   assert.equal(await savedProjectSource.locator("details pre").textContent(), branchBefore);
   await hideSavedProjectSource.click();
@@ -928,6 +960,13 @@ try {
   await staleSource.finished();
   assert.equal(await savedProjectSource.locator("pre").textContent(), secondPrompt);
 
+  await page.evaluate((id) => { location.hash = "#coding/" + id + "/patch/project-browser/project-task-progress"; }, project.id);
+  await proposalChoice.waitFor();
+  assert.deepEqual(proposalRequests, [targetPatch, targetPatch]);
+  assert.deepEqual(JSON.parse(await page.getByRole("combobox", { name: "Accepted result", exact: true }).inputValue()), targetPatch);
+
+  const remote = Bun.spawnSync(["git", "remote", "add", "origin", `https://github.com/${githubFixture.repository}.git`], { cwd: workspace });
+  assert.equal(remote.exitCode, 0, remote.stderr.toString());
   const github = page.locator("[data-coding-github]");
   await github.getByRole("button", { name: "Detect GitHub remotes", exact: true }).click();
   await github.getByRole("button", { name: "Save connection", exact: true }).click();

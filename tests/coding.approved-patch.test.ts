@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createApiServer } from "../src/api.ts";
@@ -15,6 +15,13 @@ type PatchReceipt = { id: string; applied: string; reused: boolean };
 
 function diff(path = target) {
   return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-${original}+${proposed}`;
+}
+
+function addDiff(path: string, mode = "100644", content = "export const added = true;\n") {
+  const header = `diff --git a/${path} b/${path}\nnew file mode ${mode}\n`;
+  if (!content) return header + "index 0000000..e69de29\n";
+  const lines = content.slice(0, -1).split("\n");
+  return header + `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${lines.length} @@\n` + lines.map((line) => `+${line}\n`).join("");
 }
 
 async function fixture(action: (workspace: string, git: (...args: string[]) => string) => Promise<void>) {
@@ -49,6 +56,79 @@ test("previews an exact patch without touching files and applies only to the wor
     expect(await readFile(join(workspace, target), "utf8")).toBe(proposed);
     expect(git("ls-files", "--stage")).toBe(stage);
     expect(git("diff", "--", target)).toContain("+export const answer = 2;");
+  });
+});
+
+test("adds a new executable and an empty file with no changes to the real index", async () => {
+  await fixture(async (workspace, git) => {
+    const executable = "src/new/nested/check.txt";
+    const empty = "src/empty.md";
+    const text = "approved executable contents\n";
+    const index = join(workspace, ".git", "index");
+    const oldIndex = await readFile(index);
+    const patch = addDiff(executable, "100755", text) + addDiff(empty, "100644", "");
+    expect(patchPaths(patch)).toEqual([executable, empty]);
+    const receipts = await withPreparedPatch(workspace, ["src"], patch, async ({ files, apply }) => {
+      expect(files).toEqual([
+        { path: executable, mode: "100755", before: null, after: patchDigest(text) },
+        { path: empty, mode: "100644", before: null, after: patchDigest("") },
+      ]);
+      expect(await approvedPatchState(workspace, ["src"], files)).toBe("before");
+      await expect(stat(join(workspace, "src", "new"))).rejects.toThrow();
+      await expect(approvedPatchFiles(workspace, ["src"], files)).rejects.toThrow("no longer matches");
+      if (process.platform === "win32") await apply();
+      else {
+        const previousMask = process.umask(0o077);
+        try { await apply(); }
+        finally { process.umask(previousMask); }
+      }
+      return files;
+    });
+    expect(await readFile(index)).toEqual(oldIndex);
+    expect(git("ls-files", "--", executable, empty)).toBe("");
+    if (process.platform !== "win32") {
+      expect((await stat(join(workspace, executable))).mode & 0o777).toBe(0o700);
+      expect((await stat(join(workspace, empty))).mode & 0o777).toBe(0o600);
+    }
+    expect(await approvedPatchState(workspace, ["src"], receipts)).toBe("after");
+    expect((await approvedPatchFiles(workspace, ["src"], receipts)).map(({ bytes }) => Buffer.from(bytes).toString())).toEqual([text, ""]);
+    git("add", "--", empty);
+    await expect(approvedPatchFiles(workspace, ["src"], receipts)).rejects.toThrow("conflicts with the Git index");
+  });
+});
+
+test("a mixed patch detects a partial write and rejects a new file that appears after preview", async () => {
+  await fixture(async (workspace, git) => {
+    const added = "src/added.ts";
+    const file = join(workspace, added);
+    const index = git("ls-files", "--stage");
+    await withPreparedPatch(workspace, ["src"], diff() + addDiff(added), async ({ files, apply }) => {
+      expect(await approvedPatchState(workspace, ["src"], files)).toBe("before");
+      await writeFile(file, "export const added = true;\n", { mode: 0o644 });
+      expect(await approvedPatchState(workspace, ["src"], files)).toBe("different");
+      await expect(apply()).rejects.toThrow("worktree changed");
+      expect(await readFile(join(workspace, target), "utf8")).toBe(original);
+      await rm(file);
+      await apply();
+      expect(await approvedPatchState(workspace, ["src"], files)).toBe("after");
+      await rm(file);
+      expect(await approvedPatchState(workspace, ["src"], files)).toBe("different");
+    });
+    expect(git("ls-files", "--stage")).toBe(index);
+  });
+});
+
+test("new files cannot replace worktree entries, indexed aliases, or indexed parent or child paths", async () => {
+  await fixture(async (workspace, git) => {
+    const path = "src/Other.ts";
+    await writeFile(join(workspace, path), original);
+    await expect(withPreparedPatch(workspace, ["src"], addDiff(path), async () => {})).rejects.toThrow("already exists");
+    await expect(withPreparedPatch(workspace, ["src"], addDiff(path.toLowerCase()), async () => {})).rejects.toThrow("different letter case");
+    git("add", "--", path);
+    await rm(join(workspace, path));
+    for (const candidate of [path.toLowerCase(), path + "/child.ts", "src"]) {
+      await expect(withPreparedPatch(workspace, ["."], addDiff(candidate), async () => {})).rejects.toThrow("conflicts with the Git index");
+    }
   });
 });
 
@@ -88,7 +168,7 @@ test("applied patch capture rejects invalid receipts, changed Git mode, and out-
       [],
       [{ ...file!, path: "../outside.ts" }],
       [{ ...file!, before: "bad hash" }],
-      [{ ...file!, after: file!.before }],
+      [{ ...file!, after: patchDigest(original) }],
       [{ ...file!, mode: "120000" }],
       [...receipts, { ...file!, path: "SRC/example.ts" }],
     ]) {
@@ -120,6 +200,7 @@ test("rejects stale bytes, untracked and out-of-scope files, and invalid hunks",
 test("rejects malformed paths and Git metadata for more than ordinary text edits", () => {
   for (const invalid of [
     diff("../outside.ts"), diff("src/.env"), diff("src/COM1.ts"),
+    addDiff("src/.git"), addDiff("src/.GI~1/config"), addDiff("src/A/x") + addDiff("src/a/y"),
     diff().replace("+++ b/src/example.ts", "+++ b/other.ts"),
     diff().replace("--- a/src/example.ts\n", "old mode 100644\nnew mode 100755\n--- a/src/example.ts\n"),
     diff().replace("--- a/src/example.ts\n", "new file mode 100644\n--- /dev/null\n"),
@@ -141,12 +222,19 @@ test.skipIf(process.platform === "win32")("rejects files replaced by worktree sy
     await expect(withPreparedPatch(workspace, ["src"], diff(), async () => {})).rejects.toThrow("ordinary tracked UTF-8 file");
     await expect(approvedPatchFiles(workspace, ["src"], receipts)).rejects.toThrow("ordinary tracked UTF-8 file");
     expect(await readFile(linked, "utf8")).toBe(proposed);
+    const outside = join(workspace, "outside-scope");
+    await mkdir(outside);
+    await symlink(outside, join(workspace, "src", "redirect"));
+    await expect(withPreparedPatch(workspace, ["src"], addDiff("src/redirect/new.ts"), async () => {})).rejects.toThrow("symlink");
+    await expect(stat(join(outside, "new.ts"))).rejects.toThrow();
   });
 });
 
-test("coding API gates patch approval to the owner and recovers a prepared receipt on restart", async () => {
-  await fixture(async (workspace) => {
+test("coding API gates patch approval to the owner and recovers a prepared mixed receipt on restart", async () => {
+  await fixture(async (workspace, git) => {
     const stage = join(workspace, target);
+    const newPath = "src/create-on-approval.ts";
+    const index = git("ls-files", "--stage");
     const models = createModels();
     const faux = fauxProvider({ provider: "openai", models: [{ id: "patch-fixture" }] });
     models.setProvider(faux.provider);
@@ -180,7 +268,7 @@ test("coding API gates patch approval to the owner and recovers a prepared recei
         if (status !== "running" || Date.now() > deadline) { expect(status).toBe("done"); break; }
         await Bun.sleep(20);
       }
-      const patch = { ...identity, diff: diff() };
+      const patch = { ...identity, diff: diff() + addDiff(newPath) };
       expect((await request(`${prefix}/patch-preview`, patch)).status).toBe(409);
       await api(`${prefix}/review`, { ...identity, decision: "accepted" });
       expect((await request(`${prefix}/patch-preview`, patch, member.token)).status).toBe(403);
@@ -196,6 +284,8 @@ test("coding API gates patch approval to the owner and recovers a prepared recei
       expect((await request(`${prefix}/patch-apply`, { ...approved, diff: diff().replace("answer = 2", "answer = 3") })).status).toBe(409);
       const applied = await api<{ applied: string }>(`${prefix}/patch-apply`, approved);
       expect(await readFile(stage, "utf8")).toBe(proposed);
+      expect(await readFile(join(workspace, newPath), "utf8")).toBe("export const added = true;\n");
+      expect(git("ls-files", "--stage")).toBe(index);
       expect(applied.applied).toMatch(/^\d{4}-/u);
       await server.stop();
 
@@ -210,6 +300,7 @@ test("coding API gates patch approval to the owner and recovers a prepared recei
       server = createApiServer(settings);
       const recovered = await api<PatchReceipt>(`${prefix}/patch-apply`, approved);
       expect(recovered).toMatchObject({ id: selectedPatch.id, reused: true });
+      expect(git("ls-files", "--stage")).toBe(index);
       await writeFile(stage, original);
       expect(await api<PatchReceipt>(`${prefix}/patch-apply`, approved)).toEqual(recovered);
       expect(await readFile(stage, "utf8")).toBe(original);

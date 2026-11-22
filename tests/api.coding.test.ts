@@ -406,24 +406,31 @@ test("the production worker rejects a stale approval across a real child process
   }
 });
 
-test("a GitHub branch uses only the exact applied patch and recovers a lost create-ref response", async () => {
+test("an accepted Pi diff edits and adds exact files, publishes a GitHub branch, and recovers a lost ref response", async () => {
   const { root, workspace, stateDir } = await fixture("okb-github-branch-");
   const models = createModels();
   const model = "branch-fixture";
   const faux = fauxProvider({ provider: "openai", models: [{ id: model }] });
   models.setProvider(faux.provider);
-  faux.setResponses([fauxAssistantMessage("Review the change to app.ts.")]);
   const repo = "/repos/example-org/changes";
   const path = join(workspace, "app.ts");
+  const addedPath = join(workspace, "added.test.ts");
   const before = "export const count = 1;\n";
   const after = "export const count = 2;\n";
+  const added = "export const checks = 1;\n";
+  const diff = `diff --git a/app.ts b/app.ts\n--- a/app.ts\n+++ b/app.ts\n@@ -1 +1 @@\n-${before}+${after}` +
+    `diff --git a/added.test.ts b/added.test.ts\nnew file mode 100644\n--- /dev/null\n+++ b/added.test.ts\n@@ -0,0 +1 @@\n+${added}`;
+  faux.setResponses([fauxAssistantMessage("Review the change and its test.\n\n```diff\n" + diff + "```\n")]);
   const oid = (byte: string) => byte.repeat(40);
   const blob = (text: string) => createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest("hex");
-  const treeItem = (sha: string) => ({ path: "app.ts", mode: "100644", type: "blob", sha });
+  const treeItem = (path: string, sha: string) => ({ path, mode: "100644", type: "blob", sha });
+  const nextEntries = [treeItem("app.ts", blob(after)), treeItem("added.test.ts", blob(added))];
   const parent = oid("1");
   const baseTree = oid("2");
   const nextTree = oid("3");
   const commitSha = oid("4");
+  const occupiedTree = oid("5");
+  const occupiedBase = oid("6");
   const refs = new Map([["main", parent]]);
   const writes: { route: string; body: Record<string, unknown> }[] = [];
   const token = "github_pat_" + "contents_fixture_".repeat(4);
@@ -442,20 +449,27 @@ test("a GitHub branch uses only the exact applied patch and recovers a lost crea
           : Response.json({}, { status: 404 });
       }
       if (route === `/git/commits/${refs.get("main")}`)
-        return Response.json({ sha: refs.get("main"), tree: { sha: baseTree } });
-      if (route === `/git/trees/${baseTree}`)
-        return Response.json({ sha: baseTree, truncated: false, tree: [treeItem(blob(before))] });
+        return Response.json({ sha: refs.get("main"), tree: { sha: refs.get("main") === occupiedBase ? occupiedTree : baseTree } });
+      if (route === `/git/trees/${baseTree}` || route === `/git/trees/${occupiedTree}`) {
+        const sha = route.slice("/git/trees/".length);
+        return Response.json({ sha, truncated: false, tree: [treeItem("app.ts", blob(before)),
+          ...(sha === occupiedTree ? [treeItem("added.test.ts", blob(added))] : [])] });
+      }
       if (route === `/git/trees/${nextTree}`)
-        return Response.json({ sha: nextTree, truncated: false, tree: [treeItem(blob(after))] });
+        return Response.json({ sha: nextTree, truncated: false, tree: nextEntries });
       if (route === `/git/blobs/${blob(before)}`)
         return Response.json({ sha: blob(before), encoding: "base64", content: Buffer.from(before).toString("base64"), size: Buffer.byteLength(before) });
     }
     expect(options.method).toBe("POST");
     const body = JSON.parse(options.body as string) as Record<string, unknown>;
     writes.push({ route, body });
-    if (route === "/git/blobs") return Response.json({ sha: blob(after) }, { status: 201 });
+    if (route === "/git/blobs") {
+      const submitted = Buffer.from(body.content as string, "base64").toString("utf8");
+      expect([after, added]).toContain(submitted);
+      return Response.json({ sha: blob(submitted) }, { status: 201 });
+    }
     if (route === "/git/trees")
-      return Response.json({ sha: nextTree, truncated: false, tree: [treeItem(blob(after))] }, { status: 201 });
+      return Response.json({ sha: nextTree, truncated: false, tree: nextEntries }, { status: 201 });
     if (route === "/git/commits")
       return Response.json({ sha: commitSha, message: body.message, tree: { sha: nextTree }, parents: [{ sha: parent }] }, { status: 201 });
     if (route === "/git/refs") {
@@ -502,24 +516,39 @@ test("a GitHub branch uses only the exact applied patch and recovers a lost crea
     const branchPublish = prefix + "/github-branch-publish";
     expect((await request(branchPreview, draft, member.token)).status).toBe(403);
     expect((await request(branchPreview, draft)).status).toBe(409);
+    expect((await request(prefix + "/patch-proposals", id)).status).toBe(409);
     await call(prefix + "/review", { ...id, decision: "accepted" });
+    expect((await request(prefix + "/patch-proposals", id, member.token)).status).toBe(403);
+    const proposals = await call<{ proposals: { diff: string; paths: string[] }[] }>(prefix + "/patch-proposals", id);
+    expect(proposals).toEqual({ proposals: [{ diff, paths: ["app.ts", "added.test.ts"] }] });
+    expect(await Bun.file(path).text()).toBe(before);
+    expect(await Bun.file(addedPath).exists()).toBe(false);
+    expect(faux.state.callCount).toBe(1);
     expect((await request(branchPreview, draft)).status).toBe(409);
-    const diff = `diff --git a/app.ts b/app.ts\n--- a/app.ts\n+++ b/app.ts\n@@ -1 +1 @@\n-${before}+${after}`;
-    const patch = await call<{ id: string }>(prefix + "/patch-preview", { ...id, diff });
+    const patch = await call<{ id: string; files: unknown[] }>(prefix + "/patch-preview", { ...id, diff });
+    expect(patch.files).toMatchObject([{ path: "app.ts" }, { path: "added.test.ts", before: null }]);
     await call(prefix + "/patch-apply", { ...id, diff, approved: true, previewId: patch.id });
     expect(await Bun.file(path).text()).toBe(after);
+    expect(await Bun.file(addedPath).text()).toBe(added);
+    expect(Bun.spawnSync(["git", "ls-files"], { cwd: workspace }).stdout.toString()).toBe("app.ts\n");
 
     refs.set(draft.head, oid("9"));
     expect((await request(branchPreview, draft)).status).toBe(409);
     refs.delete(draft.head);
+    refs.set("main", occupiedBase);
+    expect((await request(branchPreview, draft)).status).toBe(409);
+    refs.set("main", parent);
     const preview = await call<{ approval: string }>(branchPreview, draft);
     expect(preview).toMatchObject({ baseSha: parent, message: draft.message,
-      files: [{ path: "app.ts", content: after }] });
+      files: [{ path: "app.ts", content: after }, { path: "added.test.ts", before: null, content: added }] });
     const approved = { ...draft, approval: preview.approval, approved: true };
     expect((await request(branchPublish, { ...approved, approved: false })).status).toBe(409);
     await writeFile(path, "export const count = 99;\n");
     expect((await request(branchPublish, approved)).status).toBe(409);
     await writeFile(path, after);
+    await writeFile(addedPath, "export const checks = 99;\n");
+    expect((await request(branchPublish, approved)).status).toBe(409);
+    await writeFile(addedPath, added);
     refs.set("main", oid("8"));
     expect((await request(branchPublish, approved)).status).toBe(409);
     refs.set("main", parent);
@@ -529,7 +558,8 @@ test("a GitHub branch uses only the exact applied patch and recovers a lost crea
     expect(lost.status).toBe(502);
     expect(writes).toEqual([
       { route: "/git/blobs", body: { encoding: "base64", content: Buffer.from(after).toString("base64") } },
-      { route: "/git/trees", body: { base_tree: baseTree, tree: [treeItem(blob(after))] } },
+      { route: "/git/blobs", body: { encoding: "base64", content: Buffer.from(added).toString("base64") } },
+      { route: "/git/trees", body: { base_tree: baseTree, tree: nextEntries } },
       { route: "/git/commits", body: { message: draft.message, tree: nextTree, parents: [parent] } },
       { route: "/git/refs", body: { ref: "refs/heads/" + draft.head, sha: commitSha } },
     ]);
@@ -537,6 +567,7 @@ test("a GitHub branch uses only the exact applied patch and recovers a lost crea
     await api.stop();
     api = createServer(true);
     expect((await apiClient(api.url).request(branchPublish, approved)).status).toBe(403);
+    expect((await apiClient(api.url).request(prefix + "/patch-proposals", id)).status).toBe(403);
     await api.stop();
     api = createServer();
     await writeFile(path, "Current worktree content must never be sent on recovery.\n");
@@ -547,7 +578,8 @@ test("a GitHub branch uses only the exact applied patch and recovers a lost crea
     expect(receipt).toMatchObject({ receipt: { commitSha, head: draft.head, base: draft.base,
       url: "https://github.com/example-org/changes/tree/okbrain%2Freviewed-patch" } });
     expect(await recovered.call<typeof receipt>(branchPublish, approved)).toEqual(receipt);
-    expect(writes).toHaveLength(4);
+    expect(writes).toHaveLength(5);
+    expect(faux.state.callCount).toBe(1);
     const audit = await recovered.call<{ kind: string }[]>(prefix + "/audit");
     expect(audit.map(({ kind }) => kind)).toContain("github_branch_recovered");
     expect(JSON.stringify(audit)).not.toContain(draft.message);
@@ -555,7 +587,7 @@ test("a GitHub branch uses only the exact applied patch and recovers a lost crea
     await api?.stop();
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 20_000);
 
 test("GitHub reads stay on the bound project and comparison requires an accepted request", async () => {
   const { root, workspace, stateDir } = await fixture("okb-github-project-");

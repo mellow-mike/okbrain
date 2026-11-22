@@ -46,9 +46,11 @@ Branch publication binds exact applied patch bytes to a verified GitHub base
 commit. A separate Contents write credential creates a commit and a new ref.
 The catalog saves the commit SHA before exposing the ref so receipt recovery
 can verify the exact remote branch after a lost response.
-The local patch workflow requires an accepted request and a separately approved
-diff. A disposable Git index checks exact worktree data and the project audit
-records the approval and applied result without copying the patch into the audit.
+The local patch workflow can open exact diff proposals from an accepted Pi
+receipt in the Mac app, web app, or editor handoff. Applying a proposal requires
+a separate preview and approval. A disposable Git index checks file bytes and
+new path absence before edits and additions. The project audit records approval
+and application without copying the patch into the audit.
 Linux deployments can select a pinned worker image. The host verifies the
 preview before sending the exact approved data to a container with a single
 session mount. Project retention uses the recovery ledger to expire inactive

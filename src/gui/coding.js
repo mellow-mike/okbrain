@@ -489,7 +489,7 @@
     panel.updateProject(project);
   }
 
-  function activity(parent, project, readonly, detached) {
+  function activity(parent, project, readonly, detached, reviewPatch) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
     panel.className = 'coding-panel coding-activity stack';
@@ -577,6 +577,14 @@
       if (row.status === 'done') {
         appendAction(bar, 'Accept result', '/review', row, { decision: 'accepted' });
         appendAction(bar, 'Request changes', '/review', row, { decision: 'changes_requested' });
+        if (row.review === 'accepted' && reviewPatch) {
+          const patch = document.createElement('button');
+          patch.type = 'button';
+          patch.dataset.reviewPatch = '';
+          patch.textContent = 'Review proposed patch';
+          patch.addEventListener('click', () => reviewPatch(row));
+          bar.append(patch);
+        }
       }
     }
 
@@ -591,6 +599,8 @@
         try {
           await coding(prefix + action, { ...identity(row), ...extras });
           await refresh();
+          if (extras?.decision === 'accepted' && !detached() && selected?.id === row.id && selected.session === row.session)
+            inspected.querySelector('[data-review-patch]')?.focus();
         } catch (error) { report(feedback, error); }
         finally { button.disabled = false; }
       });
@@ -861,14 +871,15 @@
     });
   }
 
-  function patchReview(parent, project, readonly) {
+  function patchReview(parent, project, readonly, detached) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('details');
     panel.className = 'coding-panel';
     panel.innerHTML = '<summary>Apply a reviewed patch</summary><form class="stack coding-form">' +
-      '<label class="field"><span>Accepted result</span><select name="run"><option value="">Choose a result</option></select></label>' +
+      '<label class="field"><span id="patch-accepted-label">Accepted result</span><select name="run" aria-labelledby="patch-accepted-label"><option value="">Choose a result</option></select></label>' +
+      '<div data-proposals></div>' +
       '<label class="field"><span>Git unified diff</span><textarea name="diff" rows="9" spellcheck="false" placeholder="diff --git a/src/example.ts b/src/example.ts"></textarea></label>' +
-      '<p class="muted">Edit existing tracked text files inside this project. This changes the local worktree and leaves the staging area alone.</p>' +
+      '<p class="muted">Edit tracked text files or add text files inside this project. This changes the local worktree and leaves the staging area alone.</p>' +
       '<div class="row"><button type="button" data-check>Preview patch</button></div><div data-summary aria-live="polite"></div>' +
       '<label class="row" data-confirm hidden><input type="checkbox" name="approved"><span>Apply this exact diff to the listed files.</span></label>' +
       '<div class="row"><button type="submit" class="primary" disabled>Apply to worktree</button></div><div class="coding-feedback" role="status"></div></form>';
@@ -880,11 +891,17 @@
     const confirm = panel.querySelector('[data-confirm]');
     const submit = panel.querySelector('[type="submit"]');
     const feedback = panel.querySelector('[role="status"]');
+    const proposalArea = panel.querySelector('[data-proposals]');
+    const heading = panel.querySelector('summary');
     let preview = null;
     let revision = 0;
+    let runsRevision = 0;
+    let proposalRevision = 0;
+    let fromProposal = false;
+    let loading = false;
     let busy = false;
     function update() {
-      check.disabled = readonly || busy || !run.value || !diff.value;
+      check.disabled = readonly || busy || loading || !run.value || !diff.value;
       submit.disabled = readonly || busy || !preview || !approved.checked;
     }
     function clear() {
@@ -895,19 +912,108 @@
       summary.replaceChildren();
       update();
     }
-    panel.addEventListener('toggle', async () => {
-      if (!panel.open || readonly) return;
+    function cancelProposalLoad() {
+      proposalRevision++;
+      loading = false;
+    }
+    function resetProposals() {
+      proposalArea.replaceChildren();
+      if (fromProposal) diff.value = '';
+      fromProposal = false;
+    }
+    async function loadRuns(target, intent) {
+      const current = ++runsRevision;
       try {
         const accepted = (await coding(prefix + '/runs')).filter((entry) => entry.status === 'done' && entry.review === 'accepted');
-        const selected = run.value;
+        if (detached() || !panel.open || current !== runsRevision) return false;
+        const selected = target && intent === proposalRevision ? JSON.stringify(target) : run.value;
         run.replaceChildren(new Option(accepted.length ? 'Choose a result' : 'No accepted results', ''),
           ...accepted.map((entry) => new Option(entry.session + ' · ' + entry.id, JSON.stringify(identity(entry)))));
         run.value = accepted.length === 1 && !selected ? run.options[1].value : selected;
         clear();
-      } catch (error) { report(feedback, error); }
+        return !target || run.value === JSON.stringify(target);
+      } catch (error) {
+        if (detached() || !panel.open || current !== runsRevision) return false;
+        throw error;
+      }
+    }
+    function loadDiff(proposal) {
+      diff.value = proposal.diff;
+      fromProposal = true;
+      clear();
+      diff.focus();
+    }
+    async function openRun(row) {
+      if (readonly || busy || detached()) return;
+      const target = identity(row);
+      const current = ++proposalRevision;
+      const active = () => current === proposalRevision && !detached() && panel.open;
+      panel.open = true;
+      heading.focus();
+      resetProposals();
+      loading = true;
+      clear();
+      feedback.textContent = 'Reading proposed patches from the saved response…';
+      try {
+        const accepted = await loadRuns(target, current);
+        if (!active()) return;
+        if (!accepted) {
+          feedback.textContent = 'Choose an accepted result to review its patch.';
+          return;
+        }
+        const { proposals } = await coding(prefix + '/patch-proposals', target);
+        if (!active()) return;
+        if (!proposals.length) {
+          feedback.textContent = 'The saved response has no supported patch. Enter a Git unified diff to continue.';
+          diff.focus();
+        } else if (proposals.length === 1 && !diff.value.trim()) {
+          feedback.textContent = 'Proposed diff loaded for review.';
+          loadDiff(proposals[0]);
+        } else {
+          proposalArea.innerHTML = '<label class="field"><span id="patch-proposal-label">Proposed diff</span>' +
+            '<select aria-labelledby="patch-proposal-label"></select></label>';
+          const choice = proposalArea.querySelector('select');
+          choice.replaceChildren(new Option('Choose a proposed diff', ''),
+            ...proposals.map(({ paths }, index) => new Option('Proposal ' + (index + 1) + ' · ' + paths.join(', '), String(index))));
+          choice.addEventListener('change', () => {
+            if (choice.value === '') {
+              if (fromProposal) diff.value = '';
+              fromProposal = false;
+              clear();
+              return;
+            }
+            loadDiff(proposals[Number(choice.value)]);
+          });
+          report(feedback);
+          choice.focus();
+        }
+      } catch (error) {
+        if (active()) report(feedback, error);
+      } finally {
+        if (active()) { loading = false; update(); }
+      }
+    }
+    heading.addEventListener('click', () => {
+      if (panel.open || readonly) return;
+      loadRuns().catch((error) => report(feedback, error));
     });
-    run.addEventListener('change', clear);
-    diff.addEventListener('input', clear);
+    panel.addEventListener('toggle', () => {
+      if (panel.open) return;
+      runsRevision++;
+      cancelProposalLoad();
+      clear();
+      report(feedback);
+    });
+    run.addEventListener('change', () => {
+      cancelProposalLoad();
+      resetProposals();
+      clear();
+      report(feedback);
+    });
+    diff.addEventListener('input', () => {
+      if (loading) { cancelProposalLoad(); report(feedback); }
+      clear();
+    });
     approved.addEventListener('change', update);
     check.addEventListener('click', async () => {
       if (check.disabled) return;
@@ -919,15 +1025,15 @@
       report(feedback);
       try {
         const result = await coding(prefix + '/patch-preview', input);
-        if (revision !== current) return;
+        if (revision !== current || detached()) return;
         if (result.applied) {
           summary.textContent = 'Applied ' + time(result.applied) + '.';
           return;
         }
         const list = document.createElement('ul');
-        for (const { path } of result.files) {
+        for (const { path, before } of result.files) {
           const item = document.createElement('li');
-          item.textContent = path;
+          item.textContent = before === null ? path + ' · New file' : path;
           list.append(item);
         }
         summary.replaceChildren(list);
@@ -935,23 +1041,31 @@
         confirm.hidden = false;
         approved.focus();
       } catch (error) {
-        if (revision === current) report(feedback, error);
+        if (revision === current && !detached()) report(feedback, error);
       } finally { busy = false; update(); }
     });
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (submit.disabled) return;
+      const current = revision;
       busy = true;
       update();
       report(feedback);
       try {
         const result = await coding(prefix + '/patch-apply', { ...preview, approved: true });
+        if (revision !== current || detached()) return;
         clear();
         feedback.textContent = 'Applied to the local worktree ' + time(result.applied) + '.';
-      } catch (error) { report(feedback, error); }
+      } catch (error) {
+        if (revision === current && !detached()) {
+          clear();
+          report(feedback, error);
+        }
+      }
       finally { busy = false; update(); }
     });
     update();
+    return openRun;
   }
 
   async function mount(view, arg, isDetached, readonly, teamMode = false) {
@@ -979,8 +1093,8 @@
     }
     if (isDetached()) return;
     const suggestedWorkspace = arg?.startsWith('workspace=') ? arg.slice('workspace='.length) : '';
-    const githubRequest = /^([a-f0-9-]{36})\/github\/([a-z0-9][a-z0-9_-]{0,63})\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})$/.exec(arg || '');
-    const projectId = githubRequest?.[1] || arg;
+    const actionRoute = /^([a-f0-9-]{36})\/(github|patch)\/([a-z0-9][a-z0-9_-]{0,63})\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})$/.exec(arg || '');
+    const projectId = actionRoute?.[1] || arg;
     const project = projects.find((item) => item.id === projectId || (suggestedWorkspace && item.workspace === suggestedWorkspace)) ||
       (!arg ? projects[0] : null);
     projectsEl.innerHTML = !teamMode && projects.length ?
@@ -1008,7 +1122,8 @@
     const right = document.createElement('div');
     right.className = 'stack coding-right';
     grid.append(left, right);
-    const runs = activity(right, project, readonly, isDetached);
+    let openPatch;
+    const runs = activity(right, project, readonly, isDetached, teamMode ? undefined : (row) => openPatch(row));
     window.okbCodingEvaluation.mount(right, { prefix: projectUrl(project.id), coding, readonly, detached: isDetached });
     composer(left, project, readonly, isDetached, runs.selectRun);
     const composerPanel = left.querySelector('.coding-composer');
@@ -1016,9 +1131,12 @@
     const github = document.createElement('div');
     github.dataset.codingGithub = '';
     left.append(github);
-    const target = githubRequest ? { session: githubRequest[2], id: githubRequest[3] } : undefined;
-    window.okbGitHub?.mount(github, { project, coding, readonly, target });
-    if (!teamMode) patchReview(left, project, readonly);
+    const target = actionRoute ? { session: actionRoute[3], id: actionRoute[4] } : undefined;
+    window.okbGitHub?.mount(github, { project, coding, readonly, target: actionRoute?.[2] === 'github' ? target : undefined });
+    if (!teamMode) {
+      openPatch = patchReview(left, project, readonly, isDetached);
+      if (actionRoute?.[2] === 'patch') void openPatch(target);
+    }
   }
 
   window.okbCoding = { mount };

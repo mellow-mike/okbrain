@@ -140,6 +140,20 @@ test("rejects mismatched starting bytes, file modes and head identities before a
   expect(wrong.events).toHaveLength(1);
 });
 
+test("proves a new path is absent and rejects GitHub case aliases before writing", async () => {
+  const addition: ApprovedPatchFile = { ...files[0]!, path: "new/nested/main.ts", before: null };
+  const absent = fixtureTransport();
+  expect(await githubPreparePatchBranch(repository, "main", [addition], token, absent.transport)).toEqual({ baseSha, baseTree });
+  expect(absent.events).toEqual(["GET /ref/heads/main", `GET /commits/${baseSha}`, `GET /trees/${baseTree}`]);
+
+  const aliases = fixtureTransport();
+  await expect(githubPreparePatchBranch(repository, "main", [{ ...addition, path: "SRC/new.ts" }], token, aliases.transport))
+    .rejects.toThrow("does not match the approved path");
+  await expect(githubPreparePatchBranch(repository, "main", [{ ...addition, path: "src/MAIN.ts" }], token, aliases.transport))
+    .rejects.toThrow("already contains the new path");
+  expect(aliases.bodies.size).toBe(0);
+});
+
 test("rejects changed staged bytes and an unexpected remote tree or parent before creating a ref", async () => {
   const original = fixtureTransport();
   const commit = { baseSha, baseTree, message: "Apply approved edits", files };
