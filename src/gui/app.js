@@ -35,10 +35,14 @@ async function api(op, params) {
   return body.result;
 }
 
-async function get(path) {
-  var res = await fetch(path, { headers: headers() });
+async function get(path, scoped) {
+  var res = await fetch(path, { headers: scoped === false ? { 'x-okb-token': TOKEN } : headers(), cache: 'no-store' });
   var body = await res.json();
-  if (!res.ok) throw new Error(body.error || res.statusText);
+  if (!res.ok) {
+    var error = new Error(body.error || res.statusText);
+    error.code = body.code;
+    throw error;
+  }
   return body;
 }
 
@@ -138,10 +142,21 @@ themeBtn.addEventListener('click', function () { Okb.theme.toggle(themeBtn); });
 
 // ---- shell: status, brains, quick search ------------------------------------
 
+function rememberBrain(name) {
+  BRAIN = name;
+  try {
+    if (name) localStorage.setItem('okb-gui-brain', name);
+    else localStorage.removeItem('okb-gui-brain');
+  } catch (err) {}
+}
+
 async function refreshStatus() {
   var el = document.getElementById('nav-status');
+  var selected = BRAIN;
   try {
-    STATUS = await get('/api/status');
+    var status = await get('/api/status');
+    if (selected !== BRAIN) return;
+    STATUS = status;
     document.getElementById('nav-brain').textContent = STATUS.brain || basename(STATUS.bundle);
     el.innerHTML =
       '<div><span class="dot' + (STATUS.hasIndex ? ' on' : '') + '"></span>index' +
@@ -149,6 +164,12 @@ async function refreshStatus() {
       '<div>okb ' + esc(STATUS.version) + ' · OKF ' + esc(STATUS.okfVersion) +
       (STATUS.readonly ? ' · <span class="chip warn">read-only</span>' : '') + '</div>';
   } catch (e) {
+    if (selected !== BRAIN) return;
+    if (selected && e.code === 'unknown_brain') {
+      rememberBrain('');
+      await loadBrains().catch(function () {});
+      return refreshStatus();
+    }
     STATUS = null;
     el.innerHTML = '<span class="error">' + esc(e.message) + '</span>';
   }
@@ -157,18 +178,22 @@ async function refreshStatus() {
 async function loadBrains() {
   var sel = document.getElementById('brain');
   try {
-    var r = await get('/api/brains');
-    if (!r.brains.length) { sel.hidden = true; return; }
+    var r = await get('/api/brains', false);
+    if (BRAIN && !r.brains.some(function (mount) { return mount.name === BRAIN && mount.exists; }))
+      rememberBrain('');
     sel.innerHTML = '<option value="">served bundle</option>' + r.brains.map(function (b) {
-      return '<option value="' + esc(b.name) + '"' + (b.name === BRAIN ? ' selected' : '') + '>' +
+      return '<option value="' + esc(b.name) + '"' + (b.name === BRAIN ? ' selected' : '') + (b.exists ? '' : ' disabled') + '>' +
         esc(b.name) + (b.readonly ? ' (read-only)' : '') + (b.exists ? '' : ' (missing)') + '</option>';
     }).join('');
-    sel.hidden = false;
-  } catch (e) { sel.hidden = true; }
+    sel.hidden = !r.brains.length;
+    return r.brains;
+  } catch (e) {
+    sel.hidden = true;
+    throw e;
+  }
 }
 document.getElementById('brain').addEventListener('change', function (e) {
-  BRAIN = e.target.value;
-  try { localStorage.setItem('okb-gui-brain', BRAIN); } catch (err) {}
+  rememberBrain(e.target.value);
   refreshStatus().then(route);
 });
 
@@ -224,8 +249,11 @@ function route() {
   var h = location.hash.slice(1) || 'home';
   var slash = h.indexOf('/');
   var name = slash < 0 ? h : h.slice(0, slash);
-  var arg = slash < 0 ? null : decodeURIComponent(h.slice(slash + 1));
-  var fn = routes[name] || renderHome;
+  var arg = null;
+  try { if (slash >= 0) arg = decodeURIComponent(h.slice(slash + 1)); }
+  catch (error) { name = 'home'; }
+  if (!Object.hasOwn(routes, name)) name = 'home';
+  var fn = routes[name];
   var seq = ++gen;
   var shared = name === 'concept' && carry && carry.getAttribute('href') === location.hash ? carry : null;
   carry = null;
@@ -283,9 +311,9 @@ async function acceptSuggestion(btn, conceptId) {
 /** Card action buttons shared by review/inbox/home lists. */
 function cardActions(id, extra) {
   return '<div class="row">' + (extra || '') +
-    '<a href="' + conceptHref(id) + '"><button class="small">Open</button></a>' +
+    '<a href="' + conceptHref(id) + '" class="link-button small">Open</a>' +
     '<button class="small" data-act="suggest">Suggest links</button>' +
-    '<a href="' + graphHref(id) + '"><button class="small">Graph</button></a></div>' +
+    '<a href="' + graphHref(id) + '" class="link-button small">Graph</a></div>' +
     '<div class="suggest"></div>';
 }
 
@@ -320,7 +348,7 @@ async function renderHome(_arg, seq) {
     '<div><h3>Inbox</h3><div id="h-inbox" class="list"></div></div>' +
     '<div><h3>Recently changed</h3><div id="h-recent"></div></div></div>' +
     '<h3>Health</h3><div class="row"><button id="h-doctor">Check conformance</button>' +
-    '<a href="#stats"><button>Stats</button></a><a href="#settings"><button>Settings</button></a></div>' +
+    '<a href="#stats" class="link-button">Stats</a><a href="#settings" class="link-button">Settings</a></div>' +
     '<div id="h-doctor-out"></div></div>';
 
   if (STATUS && !STATUS.hasIndex) {
@@ -588,11 +616,12 @@ async function renderConcept(id, seq, was) {
     (fm.description ? '<p class="lead">' + esc(fm.description) + '</p>' : '') +
     '<div class="meta">' + typeChip(fm.type) + '<code>' + esc(id) + '</code>' + badges({ status: s.status, trust: s.trust, stale: s.stale, staleAfter: fm.stale_after }) + '</div>' +
     '<div class="row" id="c-actions">' +
-    '<a href="' + editHref(id) + '"><button class="primary small">Edit</button></a>' +
+    '<a href="' + editHref(id) + '" class="link-button primary small">Edit</a>' +
     '<button class="small" data-act="verify" title="records a verified event by you">Verified ✓</button>' +
     (inInbox ? '<button class="small" data-act="read">Mark read</button>' : '') +
     '<button class="small" data-act="suggest">Suggest links</button>' +
-    '<a href="' + graphHref(id) + '"><button class="small">Graph</button></a>' +
+    '<a href="' + graphHref(id) + '" class="link-button small">Graph</a>' +
+    '<a href="' + mapHref(id) + '" class="link-button small">Focused map</a>' +
     (s.status === 'deprecated'
       ? '<button class="small" data-act="restore">Restore (stable)</button>'
       : '<button class="small" data-act="deprecate">Deprecate</button>') +
@@ -704,7 +733,7 @@ async function renderEdit(id, seq) {
     '<button class="primary">Save</button>' +
     '<select id="ed-linkpick"><option value="">insert link to…</option></select>' +
     (exists ? '<button type="button" id="ed-suggest">Suggest links</button>' : '') +
-    (exists ? '<a href="' + conceptHref(id) + '"><button type="button">Cancel</button></a>' : '') +
+    (exists ? '<a href="' + conceptHref(id) + '" class="link-button">Cancel</a>' : '') +
     '<span id="ed-msg" class="muted"></span></div>' +
     (exists ? '<p class="muted">generated: ' + R.actorLine(fm.generated) + ' · verified: ' +
       (Array.isArray(fm.verified) ? fm.verified.length : fm.verified ? 1 : 0) + ' event(s)</p>' : '') +
@@ -937,8 +966,8 @@ async function renderGraph(focusId, seq) {
     var h = '<h2>' + esc(n.title || n.id) + '</h2>' +
       '<div class="meta">' + typeChip(n.type) + '<code>' + esc(n.id) + '</code></div>' +
       '<div class="meta">' + badges(n) + '</div>' +
-      '<div class="row"><a href="' + conceptHref(id) + '"><button class="small">Open</button></a>' +
-      '<a href="' + editHref(id) + '"><button class="small">Edit</button></a></div>';
+      '<div class="row"><a href="' + conceptHref(id) + '" class="link-button small">Open</a>' +
+      '<a href="' + editHref(id) + '" class="link-button small">Edit</a></div>';
     if (n.description) h += '<p class="why">' + esc(n.description) + '</p>';
     if (n.tags.length) h += '<div class="meta">' + chips(n.tags) + '</div>';
     h += '<dl class="kv"><dt>Generated</dt><dd>' + R.actorLine(n.generated) + '</dd>' +
@@ -1004,8 +1033,8 @@ function renderSearch(initialQ) {
               '<div class="why"><code>' + esc(h.id) + '</code> · ' + chips(h.sources) + '</div>' +
               (h.description ? '<div class="why">' + esc(h.description) + '</div>' : '') +
               (h.snippet ? '<div class="muted">' + esc(h.snippet.slice(0, 240)) + '…</div>' : '') +
-              '<div class="row"><a href="' + conceptHref(h.id) + '"><button class="small">Open</button></a>' +
-              '<a href="' + editHref(h.id) + '"><button class="small">Edit</button></a>' +
+              '<div class="row"><a href="' + conceptHref(h.id) + '" class="link-button small">Open</a>' +
+              '<a href="' + editHref(h.id) + '" class="link-button small">Edit</a>' +
               '<a href="' + mapHref(h.id) + '">Focused map</a></div></div>';
           }).join('')
         : '<div class="empty">No hits.</div>';
@@ -1754,10 +1783,127 @@ async function renderStats() {
 
 // ---- settings view ------------------------------------------------------
 
-async function renderSettings() {
+async function renderBrainMounts(parent, readonly, seq) {
+  parent.innerHTML = '<h3 id="brain-mount-heading" tabindex="-1">Brain folders</h3>' +
+    '<p>Use named mounts to switch between local brains. Removing a mount keeps its files.</p>' +
+    '<div role="status" id="brain-mount-feedback"></div><div class="stack" data-mounts-list></div>';
+  var feedback = parent.querySelector('[role="status"]');
+  var list = parent.querySelector('[data-mounts-list]');
+  var selected = BRAIN;
+  var busy = false;
+  try {
+    var mounts = await loadBrains();
+    if (stale(seq)) return;
+    if (selected !== BRAIN) {
+      await refreshStatus();
+      if (!stale(seq)) await route();
+      return;
+    }
+  } catch (error) {
+    feedback.innerHTML = errorBox(error);
+    return;
+  }
+
+  function nameField(name) {
+    return '<label class="field"><span>Mount name</span><input name="mountName" value="' + esc(name) +
+      '" maxlength="64" required autocomplete="off" spellcheck="false"></label>';
+  }
+
+  function accessField(checked) {
+    return '<label class="row"><input type="checkbox" name="readOnly"' + (checked ? ' checked' : '') + '> Read-only</label>';
+  }
+
+  async function finish(next, message) {
+    rememberBrain(next);
+    await loadBrains();
+    await refreshStatus();
+    if (stale(seq)) return;
+    await route();
+    if (location.hash === '#settings') {
+      var notice = document.getElementById('brain-mount-feedback');
+      if (notice) notice.textContent = message;
+      document.getElementById('brain-mount-heading')?.focus();
+    }
+  }
+
+  async function change(button, input, next, message) {
+    if (busy) return;
+    busy = button.disabled = true;
+    feedback.textContent = 'Saving mount settings…';
+    try {
+      var response = await fetch('/api/brains/mounts', {
+        method: 'POST', cache: 'no-store', headers: headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify(input),
+      });
+      var payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || response.statusText);
+      if (!stale(seq) && BRAIN === selected) await finish(next(payload.result), message);
+    } catch (error) {
+      if (!stale(seq)) feedback.innerHTML = errorBox(error);
+    } finally {
+      busy = button.disabled = false;
+    }
+  }
+
+  list.innerHTML = (mounts.length ? mounts.map(function (mount, index) {
+    return '<details class="card brain-mount-card" data-mount="' + index + '"><summary><strong>' + esc(mount.name) +
+      '</strong>' + (mount.readonly ? ' <span class="muted">· Read-only</span>' : '') +
+      (mount.exists ? '' : ' <span class="muted">· Folder missing</span>') + '</summary>' +
+      '<div class="stack brain-mount-body">' +
+      (mount.exists && mount.name !== BRAIN ? '<div><button type="button" data-mount-open>Open brain</button></div>' : '') +
+      (readonly ? '' : '<form class="stack" data-mount-edit>' + nameField(mount.name) + accessField(mount.readonly) +
+        '<div class="row"><button type="submit">Save mount</button><button type="button" data-mount-remove>Remove mount</button></div></form>') +
+      '</div></details>';
+  }).join('') : '<p class="muted">No named brain folders.</p>') +
+    (readonly ? '<p class="notice">Switch to a writable brain to change the mount registry.</p>' :
+      '<details class="card brain-mount-card"><summary>Add a brain folder</summary><form class="stack brain-mount-body" data-mount-add>' +
+      '<div class="grid">' + nameField('') + '<label class="field"><span>Folder action</span><select name="action">' +
+      '<option value="register">Register an existing folder</option><option value="create">Create a new brain folder</option>' +
+      '</select></label></div><label class="field"><span>Absolute folder path</span>' +
+      '<input name="path" maxlength="4096" required autocomplete="off" spellcheck="false"></label>' +
+      '<p class="muted">Create accepts a new path or an empty folder.</p>' + accessField(false) +
+      '<div class="row"><button type="submit" class="primary">Add brain folder</button></div></form></details>');
+
+  list.querySelectorAll('[data-mount]').forEach(function (row) {
+    var mount = mounts[Number(row.dataset.mount)];
+    var open = row.querySelector('[data-mount-open]');
+    var form = row.querySelector('[data-mount-edit]');
+    if (open) open.addEventListener('click', function () {
+      if (busy) return;
+      busy = open.disabled = true;
+      finish(mount.name, 'Opened ' + mount.name + '.').catch(function (error) {
+        if (!stale(seq)) feedback.innerHTML = errorBox(error);
+      }).finally(function () { busy = open.disabled = false; });
+    });
+    if (!form) return;
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var input = { action: 'update', previous: mount.name, name: form.elements.mountName.value, readonly: form.elements.readOnly.checked };
+      change(form.querySelector('button[type=submit]'), input, function (result) {
+        return selected === mount.name ? result.name : selected;
+      }, 'Mount settings saved.');
+    });
+    row.querySelector('[data-mount-remove]').addEventListener('click', function (event) {
+      change(event.currentTarget, { action: 'remove', previous: mount.name }, function () {
+        return selected === mount.name ? '' : selected;
+      }, 'Mount removed. Its files are still in the folder.');
+    });
+  });
+  var add = list.querySelector('[data-mount-add]');
+  if (add) add.addEventListener('submit', function (event) {
+    event.preventDefault();
+    var input = {
+      action: add.elements.action.value, name: add.elements.mountName.value,
+      path: add.elements.path.value, readonly: add.elements.readOnly.checked,
+    };
+    change(add.querySelector('button[type=submit]'), input, function (result) { return result.name; }, 'Brain folder added.');
+  });
+}
+
+async function renderSettings(_arg, seq) {
   var st = STATUS || {};
-  var mcpCmd = 'okb mcp --bundle ' + (st.bundle || '<bundle>');
-  var mcpJson = JSON.stringify({ mcpServers: { okbrain: { command: 'okb', args: ['mcp', '--bundle', st.bundle || '<bundle>'] } } }, null, 2);
+  var mcpArgs = st.brain ? ['--brain', st.brain, 'mcp'] : ['--bundle', st.bundle || '<bundle>', 'mcp'];
+  var mcpJson = JSON.stringify({ mcpServers: { okbrain: { command: 'okb', args: mcpArgs } } }, null, 2);
   view.innerHTML =
     '<div class="stack"><h2>Settings</h2>' +
     '<h3>This server</h3><dl class="kv">' +
@@ -1766,6 +1912,7 @@ async function renderSettings() {
     (st.readonly ? ' <span class="chip warn">read-only</span>' : '') + '</dd>' +
     '<dt>Caches</dt><dd>' + (st.hasIndex ? 'index ✓' : 'no index') + ' · ' + (st.hasVectors ? 'vectors ✓' : 'no vectors') + '</dd>' +
     '<dt>Port</dt><dd>' + esc(st.port || '?') + ' (127.0.0.1 only)</dd></dl>' +
+    '<section id="brain-mount-settings" class="stack"></section>' +
     '<h3>Identity</h3><form id="actf" class="row">' +
     '<label class="field" style="flex:1"><span>Actor (generated.by / verified.by on your writes)</span>' +
     '<input id="act-in" value="' + esc(st.actor || '') + '" placeholder="human:alice"></label>' +
@@ -1808,13 +1955,16 @@ async function renderSettings() {
     }).join('') + '<button id="mx-jobs">Run jobs</button></div>' +
     '<div class="row"><span class="muted">OKF v0.2 migration:</span><button id="mx-upgrade-dry">Preview upgrade</button>' +
     '<button id="mx-upgrade">Upgrade bundle</button></div><div id="mx-out"></div>' +
-    '<h3>Agent access (MCP)</h3><p class="muted">Servers cannot start servers — run this in a terminal (add <code>--trusted</code> to expose write tools to a client you fully trust):</p>' +
-    '<pre>' + esc(mcpCmd) + '</pre><p class="muted">Claude Desktop / any MCP client config:</p><pre>' + esc(mcpJson) + '</pre>' +
+    '<section id="mcp-settings" class="stack"></section>' +
+    '<details><summary>MCP stdio client configuration</summary>' +
+    '<p class="muted">A stdio client launches okbrain using an executable path on this computer.</p><pre>' + esc(mcpJson) + '</pre></details>' +
     '<h3>Bookmarklet</h3><div id="bm-out"></div></div>';
 
   var show = setHtml;
   showBookmarklet();
+  renderBrainMounts(document.getElementById('brain-mount-settings'), Boolean(st.readonly), seq);
   renderProviderKeys(document.getElementById('provider-keys'), Boolean(st.readonly));
+  window.okbMcpSettings.mount(document.getElementById('mcp-settings'), { readonly: Boolean(st.readonly), requestHeaders: headers });
 
   document.getElementById('actf').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -1913,4 +2063,4 @@ async function renderSettings() {
 // ---- boot ----------------------------------------------------------------
 
 Okb.wordmark(document.querySelector('#nav .brand strong'));
-refreshStatus().then(function () { loadBrains(); route(); });
+loadBrains().catch(function () {}).then(refreshStatus).then(route);

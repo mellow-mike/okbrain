@@ -11,7 +11,7 @@
 // operations.ts imports this file for the `serve` op, so nothing here may
 // touch an operations.ts binding at module top level (ESM cycle).
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { BrowserPlanInputError, createBrowserPlan, type BrowserPlan } from "./core/ai/browser-plan.ts";
 import type { PlanOptions } from "./core/ai/chatgpt-plan.ts";
 import { providerKeyStatus, setProviderKey } from "./core/ai/local-keys.ts";
@@ -21,7 +21,8 @@ import { CodingProjectProfileError } from "./core/coding/project-profile.ts";
 import { CodingProjectControl, ProjectControlError, type ProjectControlOptions } from "./core/coding/project-control.ts";
 import { RepositoryContextError } from "./core/coding/repository-context.ts";
 import { CodingTeamListener, type TeamStatus } from "./core/coding/team-listener.ts";
-import { ConfigError, listBrains, resolveBrain } from "./core/config.ts";
+import { BrainMountError } from "./core/brain-mounts.ts";
+import { ConfigError, listBrains, resolveBrain, UnknownBrainError } from "./core/config.ts";
 import { openLocalContext, type LocalContext } from "./core/context.ts";
 import { defaultDbPath, EngineError } from "./core/engine/sqlite.ts";
 import { SyncError } from "./core/sync.ts";
@@ -35,6 +36,7 @@ import {
   getOp,
   OpError,
   operations,
+  runBrainMountChange,
   runConversationUpload,
   runNotionSource,
   runOp,
@@ -49,6 +51,7 @@ import {
   tokenMatches,
 } from "./core/serve-token.ts";
 import { VERSION } from "./core/version.ts";
+import { ManagedMcpHttp, ManagedMcpHttpError } from "./mcp/managed-http.ts";
 import cytoscapeJs from "./core/viz/vendor/cytoscape.min.js" with { type: "text" };
 import markedJs from "./core/viz/vendor/marked.umd.js" with { type: "text" };
 import okbJs from "./core/viz/okb.js" with { type: "text" };
@@ -56,6 +59,7 @@ import renderJs from "./core/viz/render.js" with { type: "text" };
 import safeMarkdownJs from "./core/viz/safe-markdown.js" with { type: "text" };
 import tokensCss from "./core/viz/tokens.css" with { type: "text" };
 import guiAppJs from "./gui/app.js" with { type: "text" };
+import guiMcpSettingsJs from "./gui/mcp-settings.js" with { type: "text" };
 import guiCodingJs from "./gui/coding.js" with { type: "text" };
 import guiGithubJs from "./gui/github.js" with { type: "text" };
 import guiNotionJs from "./gui/notion.js" with { type: "text" };
@@ -81,6 +85,7 @@ const WOFF2 = "font/woff2";
  */
 const GUI_ASSETS: Record<string, [string | Blob, string]> = {
   "/gui/app.js": [guiAppJs, JS],
+  "/gui/mcp-settings.js": [guiMcpSettingsJs, JS],
   "/gui/coding.js": [guiCodingJs, JS],
   "/gui/github.js": [guiGithubJs, JS],
   "/gui/notion.js": [guiNotionJs, JS],
@@ -186,7 +191,9 @@ const errStatus = (e: unknown): number =>
           : 500;
 
 const errBody = (e: unknown): { error: string; code?: string } =>
-  e instanceof OpError
+  e instanceof UnknownBrainError
+    ? { error: e.message, code: "unknown_brain" }
+    : e instanceof OpError
     ? { error: e.message, code: e.code }
     : { error: e instanceof Error ? e.message : String(e) };
 
@@ -202,6 +209,7 @@ const opDescriptors = (): unknown =>
     .map(({ name, summary, scope, params }) => ({ name, summary, scope, params }));
 
 interface ServeState {
+  mcp?: ManagedMcpHttp;
   coding?: () => CodingProjectControl;
   notion?: NotionSource;
   team?: CodingTeamListener;
@@ -225,10 +233,82 @@ function scopeOf(req: Request, url: URL, o: ServeState): Scope {
   const name = req.headers.get("x-okb-brain") ?? url.searchParams.get("brain");
   if (name === null || name === "") return { bundle: o.bundle, readonly: o.readonly, brain: null };
   const brain = resolveBrain(name);
-  return { bundle: brain.path, readonly: brain.readonly, brain: name };
+  return { bundle: brain.path, readonly: o.readonly || brain.readonly, brain: name };
 }
 
 const open = (s: Scope): LocalContext => openLocalContext(s.bundle, true, s.readonly);
+
+function mountIsAvailable(path: string): boolean {
+  try { return statSync(path).isDirectory(); } catch { return false; }
+}
+
+async function brainMountRequest(req: Request, url: URL, opts: ServeState, cors: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+    return json(401, { error: "missing or invalid local app token" }, headers);
+  if (req.headers.has("origin") && !cors["access-control-allow-origin"])
+    return json(403, { error: "Mount changes must come from the local app." }, headers);
+  if (req.method !== "POST") return json(405, { error: "Method not allowed." }, headers);
+  if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+    return json(415, { error: "Send a JSON object." }, headers);
+  try {
+    const raw = await readUpload(req, 16 * 1024, "Brain mount request exceeds 16 KiB.");
+    let body: unknown;
+    try { body = JSON.parse(raw.toString("utf8")); } catch { body = null; }
+    if (!body || typeof body !== "object" || Array.isArray(body))
+      return json(400, { error: "Send a JSON object." }, headers);
+    // Recheck the mount after reading the request. A concurrent policy
+    // change can take effect while the request body is streaming.
+    const scope = scopeOf(req, url, opts);
+    const local = open(scope);
+    try {
+      return json(200, { result: runBrainMountChange(local.ctx, body as Record<string, unknown>) }, headers);
+    } finally {
+      local.close();
+    }
+  } catch (error) {
+    return json(error instanceof BrainMountError ? error.status : error instanceof UploadTooLarge ? 413 : errStatus(error), errBody(error), headers);
+  }
+}
+
+async function managedMcpRequest(req: Request, opts: ServeState, scope: Scope, cors?: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+    return json(401, { error: "missing or invalid local app token" }, headers);
+  if (req.headers.has("origin") && !cors)
+    return json(403, { error: "MCP HTTP settings must come from the local app." }, headers);
+  const mcp = opts.mcp!;
+  if (req.method === "GET") return json(200, { result: mcp.status() }, headers);
+  if (req.method !== "POST") return json(405, { error: "Method not allowed." }, headers);
+  if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+    return json(415, { error: "Send a JSON object." }, headers);
+  try {
+    const raw = await readUpload(req, 4096, "MCP settings exceed 4 KiB.");
+    let params: Record<string, unknown>;
+    try {
+      const value: unknown = JSON.parse(raw.toString("utf8"));
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+      params = value as Record<string, unknown>;
+    } catch {
+      return json(400, { error: "Send a JSON object." }, headers);
+    }
+    if (params.action === "stop") {
+      await mcp.stop();
+      return json(200, { result: null }, headers);
+    }
+    if (params.action !== "start") return json(400, { error: "Choose Start or Stop for MCP HTTP." }, headers);
+    const mount = { ...scope, readonly: opts.readonly || scope.readonly };
+    const result = mcp.start(params, mount, () => {
+      if (!mount.brain) return mount;
+      const current = resolveBrain(mount.brain);
+      return { brain: mount.brain, bundle: current.path, readonly: opts.readonly || current.readonly };
+    });
+    return json(200, { result }, headers);
+  } catch (error) {
+    const status = error instanceof ManagedMcpHttpError ? error.status : error instanceof UploadTooLarge ? 413 : 500;
+    return json(status, status === 500 ? { error: "Could not change the MCP HTTP listener." } : errBody(error), headers);
+  }
+}
 
 async function providerKeys(req: Request, scope: Scope, cors: Hdrs): Promise<Response> {
   const headers = { ...cors, "cache-control": "no-store" };
@@ -607,17 +687,19 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     if (req.headers.has("origin") && !cors)
       return json(403, { error: "Source actions must come from the local app." });
   }
+  if (url.pathname === "/api/brains/mounts") return brainMountRequest(req, url, opts, cors ?? {});
 
   let scope: Scope;
   try {
     scope = scopeOf(req, url, opts);
   } catch (e) {
     if (!(e instanceof ConfigError)) throw e;
-    return json(400, { error: e.message }, cors);
+    return json(400, errBody(e), cors);
   }
 
   const notion = /^\/api\/personal\/sources\/notion\/(status|connect|disconnect|preview|import)$/.exec(url.pathname);
   if (notion && opts.notion) return notionRequest(req, notion[1]!, scope, opts.notion, cors ?? {});
+  if (url.pathname === "/api/mcp/http" && opts.mcp) return managedMcpRequest(req, opts, scope, cors);
 
   if ((url.pathname.startsWith("/api/plan/") && opts.plan) || url.pathname === "/api/provider-keys") {
     if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
@@ -636,10 +718,10 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
         const brains = listBrains().map((b) => ({
           name: b.name,
           readonly: b.readonly,
-          exists: existsSync(b.path),
+          exists: mountIsAvailable(b.path),
           active: b.path === scope.bundle,
         }));
-        return json(200, { brains }, cors);
+        return json(200, { brains }, { ...cors, "cache-control": "no-store" });
       } catch (e) {
         if (!(e instanceof ConfigError)) throw e;
         return json(400, { error: e.message }, cors);
@@ -679,6 +761,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
   const token = opts.token ?? ensureServeToken();
   const plan = createBrowserPlan(opts.chatgpt);
   const notion = createNotionSource(opts.notion);
+  const mcp = new ManagedMcpHttp();
   const team = new CodingTeamListener();
   const { bundle, readonly = false } = opts;
   const wanted = opts.port ?? DEFAULT_PORT;
@@ -693,7 +776,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
         const path = new URL(req.url).pathname;
         if (path === "/api/plan/answer") server.timeout(req, 150);
         if (path.startsWith("/api/coding/")) server.timeout(req, 65);
-        return handleRequest(req, { bundle, port: server.port!, token, readonly, plan, coding, team, notion });
+        return handleRequest(req, { bundle, port: server.port!, token, readonly, plan, coding, team, notion, mcp });
       },
     });
   } catch (e) {
@@ -711,7 +794,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
     async stop() {
       plan.close();
       notion.close();
-      const stopped = await Promise.allSettled([server.stop(true), team.stop(), controller?.close()]);
+      const stopped = await Promise.allSettled([server.stop(true), team.stop(), mcp.stop(), controller?.close()]);
       const failures = stopped.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
       if (failures.length) throw new AggregateError(failures, "Could not close the okbrain server.");
     },

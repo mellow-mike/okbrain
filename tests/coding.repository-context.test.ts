@@ -198,3 +198,40 @@ test("expands only direct imports inside a profile's selected and permitted root
   expect(() => parseCodingProjectProfile('{"version":2,"projects":["."]}')).toThrow("version 1");
   expect(() => parseCodingProjectProfile('{"version":1,"name":"Broken","projects":["../outside"]}')).toThrow("workspace-relative");
 });
+
+test("in a multi-word profile query, favored identifiers anchor source and documentation without promoting unrelated imports", async () => {
+  const client = "apps/web/client.ts";
+  const policy = "apps/web/policy.ts";
+  const guide = "apps/web/settings.md";
+  const unrelated = "packages/common/noise.ts";
+  const spacer = "// spacer\n".repeat(28);
+  await write(client, `import { log } from "../../packages/common/noise";\nexport const timeout = 1;\n${spacer}export const delay = policy.planRetry(timeout);\n`);
+  await write(policy, `export const retry = 1;\n${spacer}class Policy {\n  public async planRetry(timeout: number) {\n    return timeout * 2;\n  }\n}\n`);
+  await write(guide, `# Retry timeout\n${spacer}### \`planRetry\`\n\nReturns the next delay.\n`);
+  await write(unrelated, "export const log = 'unrelated import';\n");
+  git("add", "--all");
+
+  const result = await selectRepositoryContext({ workspace, query: "retry timeout planRetry", profile: {
+    version: 1, name: "Retry work", projects: ["apps/web"], sharedProjects: ["packages/common"],
+  } });
+  const selected = result.manifest.files;
+  expect(selected.find(({ path }) => path === policy)?.reason).toBe("Declares planRetry");
+  expect(selected.find(({ path }) => path === guide)?.reason).toBe("Documentation heading matches the query");
+  expect(result.excerpts.find(({ path }) => path === policy)?.content).toContain("return timeout * 2");
+  expect(result.excerpts.find(({ path }) => path === client)?.content).toContain("policy.planRetry(timeout)");
+  expect(result.excerpts.find(({ path }) => path === guide)?.content).toContain("Returns the next delay");
+  expect(selected.at(-1)).toMatchObject({ path: unrelated, reason: `Direct import from ${client}` });
+});
+
+test("a longer specific identifier gets its full query match ahead of a shorter shared prefix", async () => {
+  const path = "apps/web/workflow.ts";
+  const shorter = "const existing = config.open_export; // task\n";
+  await write("apps/web/a.ts", shorter);
+  await write(path, `${shorter}\nconst next = config.open_export_task();\n`);
+  git("add", "--all");
+  const { excerpts } = await selectRepositoryContext({ workspace, query: "open_export open_export_task", profile: {
+    version: 1, name: "Export tasks", projects: ["apps/web"],
+  } });
+  expect(excerpts[0]?.path).toBe(path);
+  expect(excerpts[0]?.content).toContain("config.open_export_task()");
+});

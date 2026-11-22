@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promis
 import { join, posix } from "node:path";
 import { dataDir } from "../config.ts";
 
-const indexVersion = 1;
+const indexVersion = 2;
 const maxIndexedFiles = 4096;
 const maxIndexBytes = 8 * 1024 * 1024;
 const maxSymbolsPerFile = 48;
@@ -12,11 +12,12 @@ const maxImportsPerFile = 32;
 const extensionPriority = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".json"];
 const symbolPattern = /^(?:\s*(?:export|default|declare|async|pub|abstract|public|private|protected|static)\s+)*\s*(?:function\*?|class|interface|type|enum|namespace|const|let|var|fn|struct|trait|def)\s+([\p{L}_$][\p{L}\p{N}_$]{0,95})\b/u;
 const goFunctionPattern = /^\s*func\s+(?:\([^)]*\)\s+)?([A-Za-z_][A-Za-z0-9_]{0,95})\b/u;
+const methodPattern = /^\s*(?:(?:public|private|protected|static|abstract)\s+)+(?:async\s+)?([\p{L}_$][\p{L}\p{N}_$]{0,95})\s*[<(]/u;
 const moduleSyntax = /\b(?:from\s+|import\s*(?:\(\s*)?|require\s*\(\s*)["']([\w@./-]{1,256})["']/gu;
 
 export interface RepositoryFileStructure {
   stamp: string;
-  symbols: { name: string; line: number }[];
+  symbols: { name: string; line: number; method?: true }[];
   imports: string[];
   pkg?: { name: string; entries: string[] };
 }
@@ -57,8 +58,9 @@ export function fileStructure(path: string, source: { stamp: string; lines: stri
   if (/\.(?:[cm]?[jt]sx?|go|py|rs)$/u.test(path)) {
     for (const [index, line] of lines.entries()) {
       if (symbols.length < maxSymbolsPerFile) {
-        const name = line.match(symbolPattern)?.[1] ?? line.match(goFunctionPattern)?.[1];
-        if (name) symbols.push({ name, line: index });
+        const method = line.match(methodPattern)?.[1];
+        const name = line.match(symbolPattern)?.[1] ?? line.match(goFunctionPattern)?.[1] ?? method;
+        if (name) symbols.push({ name, line: index, ...(method === name ? { method: true as const } : {}) });
       }
       if (imports.size < maxImportsPerFile && /\.[cm]?[jt]sx?$/u.test(path)) {
         for (const match of line.matchAll(moduleSyntax)) {
@@ -76,7 +78,8 @@ export function fileStructure(path: string, source: { stamp: string; lines: stri
 function savedFile(value: unknown): RepositoryFileStructure | undefined {
   if (!plainObject(value) || typeof value.stamp !== "string" || !Array.isArray(value.symbols) || !Array.isArray(value.imports)) return;
   if (value.symbols.length > maxSymbolsPerFile || value.imports.length > maxImportsPerFile) return;
-  if (!value.symbols.every((item) => plainObject(item) && typeof item.name === "string" && Number.isInteger(item.line) && Number(item.line) >= 0)) return;
+  if (!value.symbols.every((item) => plainObject(item) && typeof item.name === "string" && Number.isInteger(item.line) && Number(item.line) >= 0
+    && (item.method === undefined || item.method === true))) return;
   if (!value.imports.every((item) => typeof item === "string")) return;
   if (value.pkg !== undefined && (!plainObject(value.pkg) || typeof value.pkg.name !== "string" || !Array.isArray(value.pkg.entries)
     || !value.pkg.entries.every((entry) => typeof entry === "string"))) return;

@@ -9,6 +9,8 @@ On a macOS CI job for your architecture, download the corresponding `okbrain-mac
 
 Run `bun run package:mac --smoke` on macOS with Xcode command-line tools to build and launch the app. The packager checks the upstream SQLite amalgamation hash before building the embedded library. Run `bun run package:ide` with Node.js 22 and Bun to build the VSIX.
 
+The Linux browser smoke test uses the bundled app assets at a 375 px viewport with outbound requests blocked. After `bunx --bun playwright install --only-shell chromium`, run `bun run smoke:browser` to repeat the keyboard flow.
+
 ## Release flow
 
 1. Bump `version` in `package.json`, commit, tag `vX.Y.Z`, push the tag.

@@ -37,6 +37,12 @@ jobs:
       - name: Test
         run: bun test
 
+      - name: Test keyboard and offline browser workflows
+        if: runner.os == 'Linux'
+        run: |
+          bunx --bun playwright install --with-deps --only-shell chromium
+          bun run smoke:browser
+
   mac-app:
     name: macOS app (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

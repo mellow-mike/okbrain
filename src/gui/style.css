@@ -59,7 +59,7 @@ hr { border: none; border-top: 1px solid var(--line); margin: var(--space-4) 0; 
 
 /* ---- controls ------------------------------------------------------------------ */
 button, input, select, textarea { font: inherit; color: var(--ink); }
-button {
+button, a.link-button {
   display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1);
   height: var(--control-h); padding: 0 var(--space-3); font-weight: 560; white-space: nowrap; cursor: pointer;
   background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
@@ -67,14 +67,15 @@ button {
               color var(--dur-quick) var(--ease-out), font-weight var(--dur-quick) var(--ease-out),
               transform var(--dur-slow) var(--ease-spring);
 }
-button:hover:not(:disabled) { border-color: var(--ink); font-weight: 680; }
-button:active:not(:disabled) { transform: scale(0.97); transition-duration: var(--dur-instant); transition-timing-function: var(--ease-out); }
+a.link-button, a.link-button:hover { color: var(--ink); text-decoration: none; }
+button:hover:not(:disabled), a.link-button:hover { border-color: var(--ink); font-weight: 680; }
+button:active:not(:disabled), a.link-button:active { transform: scale(0.97); transition-duration: var(--dur-instant); transition-timing-function: var(--ease-out); }
 button:disabled { opacity: var(--opacity-disabled); cursor: default; }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-button.primary:hover:not(:disabled) { border-color: var(--accent); font-weight: 720; }
+button.primary, a.link-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.primary:hover:not(:disabled), a.link-button.primary:hover { border-color: var(--accent); font-weight: 720; }
 button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
 button.danger:hover:not(:disabled) { color: var(--surface); background: var(--danger); border-color: var(--danger); }
-button.small { height: var(--control-h-sm); padding: 0 var(--space-2); font-size: 12px; }
+button.small, a.link-button.small { height: var(--control-h-sm); padding: 0 var(--space-2); font-size: 12px; }
 
 input:not([type="checkbox"]):not([type="radio"]), select, textarea {
   font-weight: var(--wght-text); background-color: var(--raised);
@@ -169,6 +170,7 @@ div.error::before { content: "Error"; display: block; margin-bottom: var(--space
 .source-panel input[type="file"]::file-selector-button { margin: 4px var(--space-2) 4px 0; font: inherit; }
 .source-panel [hidden], #source-status:empty, #source-result:empty, #h-build-out:empty { display: none; }
 #plan-question[hidden] { display: none; }
+#mcp-settings [hidden], #mcp-settings [data-message]:empty { display: none; }
 .source-rows { padding-left: var(--space-6); overflow-wrap: anywhere; }
 .source-rows li + li { margin-top: var(--space-1); }
 .source-panel summary { cursor: pointer; }
@@ -183,6 +185,9 @@ div.error::before { content: "Error"; display: block; margin-bottom: var(--space
 .source-choice > span { min-width: 0; }
 .source-entry-detail { display: block; }
 .source-previous { margin-left: 1.6em; }
+.brain-mount-card summary { cursor: pointer; }
+.brain-mount-body { margin-top: var(--space-4); }
+#brain-mount-feedback:empty { display: none; }
 .source-markdown { max-height: 25rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 [data-notion-status]:empty { display: none; }
 

@@ -162,8 +162,8 @@ describe("request guards", () => {
       expect(appJs).toContain(`'${op.name}'`);
     // ...except `ask`, which the GUI drives over the SSE stream endpoint.
     expect(appJs).toContain("/api/ask/stream");
-    // localOnly ops have dedicated routes or documented terminal recipes instead.
-    for (const needle of ["/api/status", "/api/brains", "/api/bookmarklet", "okb mcp"])
+    // Settings actions have dedicated routes outside the generic op surface.
+    for (const needle of ["/api/status", "/api/brains/mounts", "/api/bookmarklet", "/api/mcp/http"])
       expect(appJs).toContain(needle);
   });
 
@@ -370,6 +370,81 @@ describe("server routes for the GUI", () => {
     } finally {
       saveConfig(saved);
       await rm(ref, { recursive: true, force: true });
+    }
+  });
+
+  test("Settings creates and registers brain folders and changes mount policy without rewriting their files", async () => {
+    const config = loadConfig();
+    const parent = await mkdtemp(join(tmpdir(), "okb-brain-mounts-"));
+    const existing = join(parent, "Existing brain");
+    const created = join(parent, "New brain");
+    await mkdir(existing, { recursive: true });
+    await writeFile(join(existing, "original.md"), "---\ntype: note\ntitle: Original\ndescription: Original draft\n---\nKeep this text.\n");
+    const original = await Bun.file(join(existing, "original.md")).text();
+    const request = (body: unknown, headers: Record<string, string> = {}, token: string | null = TOKEN) =>
+      call("api/brains/mounts", { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }, token);
+    const create = { action: "create", name: "MyBrain", path: created, readonly: false };
+    try {
+      saveConfig({ ...config, retainedSetting: { untouched: true }, brains: {} });
+      expect((await request(create, { authorization: "Bearer " + TOKEN }, null)).status).toBe(401);
+      expect((await request(create, { origin: "https://example.test" })).status).toBe(403);
+      expect((await request({ ...create, path: "relative/path" })).status).toBe(400);
+      expect((await request({ ...create, name: "__proto__" })).status).toBe(400);
+      expect((await request({ ...create, path: existing })).status).toBe(409);
+      expect((await request({ ...create, action: "register" })).status).toBe(404);
+      expect(await Bun.file(join(existing, "index.md")).exists()).toBe(false);
+
+      const response = await request(create, { origin: new URL(base).origin });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({ result: { name: "MyBrain", removed: false } });
+      expect(await Bun.file(join(created, "index.md")).text()).toContain(`okf_version: "${OKF_VERSION}"`);
+      const mounting = { action: "register", name: "Library", path: existing, readonly: false };
+      expect((await request(mounting)).status).toBe(200);
+      expect((await request({ ...mounting, name: "Duplicate" })).status).toBe(409);
+      const existingConfig = loadConfig();
+      const record = existingConfig.brains?.Library;
+      saveConfig({ ...existingConfig, brains: {
+        ...existingConfig.brains, Library: { ...(typeof record === "object" ? record : { path: existing }), mountExtension: "keep" },
+      } });
+      const rename = { action: "update", previous: "Library", name: "Reference", readonly: true };
+      expect((await request(rename, { "x-okb-brain": "Library" })).status).toBe(200);
+      const stale = await call("api/status", { headers: { "x-okb-brain": "Library" } });
+      expect(stale.status).toBe(400);
+      expect(await stale.json()).toMatchObject({ code: "unknown_brain" });
+      expect(await (await call("api/status", { headers: { "x-okb-brain": "Reference" } })).json()).toMatchObject({
+        brain: "Reference", readonly: true,
+      });
+      expect(loadConfig()).toMatchObject({
+        retainedSetting: { untouched: true }, brains: { Reference: { readonly: true, mountExtension: "keep" } },
+      });
+      const remove = { action: "remove", previous: "Reference" };
+      expect((await request(remove, { "x-okb-brain": "Reference" })).status).toBe(403);
+      const readonly = createApiServer({ bundle, port: 0, token: TOKEN, readonly: true });
+      try {
+        expect((await fetch(readonly.url + "api/brains/mounts", {
+          method: "POST", headers: { "x-okb-token": TOKEN, "x-okb-brain": "MyBrain", "content-type": "application/json" },
+          body: JSON.stringify(remove),
+        })).status).toBe(403);
+      } finally {
+        readonly.stop();
+      }
+      expect((await request(remove)).status).toBe(200);
+      expect(await Bun.file(join(existing, "original.md")).text()).toBe(original);
+      expect(await Bun.file(join(existing, "index.md")).exists()).toBe(false);
+      expect(await (await call("api/brains")).json()).toMatchObject({
+        brains: [{ name: "MyBrain", exists: true, readonly: false, active: false }],
+      });
+      expect((await post("change_brain_mount", create)).status).toBe(404);
+      const current = loadConfig();
+      saveConfig({ ...current, brains: { ...current.brains, ["__proto__"]: { path: existing, custom: "legacy" } } });
+      expect((await request({ action: "update", previous: "__proto__", name: "__proto__", readonly: true })).status).toBe(200);
+      const updated = loadConfig().brains!;
+      expect(Object.hasOwn(updated, "__proto__")).toBe(true);
+      expect(updated["__proto__"]).toMatchObject({ readonly: true, custom: "legacy" });
+    } finally {
+      saveConfig(config);
+      await rm(parent, { recursive: true, force: true });
     }
   });
 

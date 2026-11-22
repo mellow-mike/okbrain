@@ -945,6 +945,12 @@ every adapter (CLI, each local-API request, MCP even with `--trusted`), so
 serving a read-only brain cannot re-open it. Each mount is its own repo +
 its own `.okb/` index — nothing is shared between brains.
 
+The local Settings page can register an existing folder, create an empty
+OKF bundle, and update or remove a named mount. Its dedicated route requires
+the local app header and a writable context. Renaming and removing a mount
+only change the per-user registry. If a saved browser selection disappears,
+the app opens the served folder and rebuilds the picker.
+
 ---
 
 ## Tech stack

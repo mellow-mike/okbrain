@@ -71,7 +71,7 @@ A version 1 profile is a JSON document you can keep alongside the project. Selec
 }
 ```
 
-The CLI accepts `--profile-json` in place of `--projects` for preview and submission. Supply the same profile and query when using the context ID. Profile previews prioritize exact paths and source declarations with a private index of up to 4,096 tracked paths. The index recognizes common JavaScript, TypeScript, Go, Python, and Rust declarations. JavaScript and TypeScript excerpts can add up to six direct relative imports or imports from visible workspace packages. Each preview identifies the reason for selecting an excerpt. The index checks the current Git revision and tracked paths, detects worktree changes, and can be rebuilt from the checkout by removing the derived `coding/context-index/` directory within per-user app data. The index stores structural metadata including paths, symbol names, and import specifiers.
+The CLI accepts `--profile-json` in place of `--projects` for preview and submission. Supply the same profile and query when using the context ID. Profile previews prioritize exact paths and compound identifiers with a private index of up to 4,096 tracked paths. Matching source methods and documentation headings can anchor an excerpt. Nearby query terms help locate the most relevant part of a file. The index recognizes common JavaScript, TypeScript, Go, Python, and Rust declarations. JavaScript and TypeScript excerpts can add up to six direct relative imports or imports from visible workspace packages. An import with no matching text ranks below direct search matches. Each preview identifies the reason for selecting an excerpt. The index checks the current Git revision and tracked paths, detects worktree changes, and can be rebuilt from the checkout by removing the derived `coding/context-index/` directory within per-user app data. The index stores structural metadata including paths, symbol names, and import specifiers.
 
 Run `bun run scripts/benchmark-coding-context.ts` to compare explicit files, lexical preview, and indexed profile preview on a generated 1,024-file monorepo fixture. It reports evidence recall, deterministic citation acceptance, p50 and p95 preview latency, context bytes, and Pi's simulated input, output, and cache counters across eight tasks. The fixture covers direct cross-package evidence, similarly named services, a worktree edit, and repeated requests in a session. Human acceptance and live-model performance require separate evaluation.
 
@@ -79,9 +79,9 @@ Run `bun run scripts/benchmark-coding-context.ts` to compare explicit files, lex
 
 `bun run scripts/benchmark-coding-vite.ts` clones a temporary Vite checkout and measures six development traces across 2,380 tracked files. The suite covers a failed dynamic import, scaffold template selection, legacy build targets, HMR lifecycle, split CSS in the build manifest, and dependency scan inputs. Use `--workspace /path/to/vite` to reuse a clean checkout at the pinned commit. The script checks the revision and hand-labeled evidence before timing and reads the checkout without running its install, build, or test scripts. [Vite v7.0.0 at b85f322](https://github.com/vitejs/vite/tree/b85f32275b443bf6b647572a9209f1e078b5b4dd)
 
-The wide setting uses package directories and a 4,096-token excerpt budget. `--narrow --token-budget 12288` uses tighter subsystem directories and a larger budget. Within each setting, automatic strategies share the same authorized directories. Explicit attachments use the already known evidence files as a reference. File recall counts expected paths that appeared. Evidence recall counts excerpts containing the specific expected text.
+The wide setting uses package directories and a 4,096-token excerpt budget. `--narrow --token-budget 12288` uses tighter subsystem directories and a larger budget. Lexical preview searches all permitted directories directly. Indexed preview searches primary directories and can reach a shared directory only through a direct import. Five of the 15 evidence targets are documentation or tests in shared directories without such an import. Explicit attachments use the already known evidence files as a reference. File recall counts expected paths that appeared. Evidence recall counts excerpts containing the specific expected text.
 
-One Linux x64 run with Bun 1.3.14 and an Intel i7-1260P used eight repetitions per task. Each row summarizes 48 previews with 120 expected evidence targets.
+The first baseline run used Linux x64, Bun 1.3.14, an Intel i7-1260P, and eight repetitions per task. Each row summarizes 48 previews with 120 expected evidence targets.
 
 | Settings | Strategy | File recall | Evidence recall | p50 / p95 preview | Mean context |
 |---|---|---:|---:|---:|---:|
@@ -92,7 +92,16 @@ One Linux x64 run with Bun 1.3.14 and an Intel i7-1260P used eight repetitions p
 | Subsystem, 12,288 tokens | Lexical | 100% | 60.0% | 60.01 / 108.13 ms | 11.5 KB |
 | Subsystem, 12,288 tokens | Indexed | 66.7% | 20.0% | 30.43 / 87.92 ms | 8.0 KB |
 
-At package scope, both automatic strategies reached a preview limit on every task and returned incomplete evidence. At subsystem scope, lexical preview returned every target for two of the six traces, and the indexed setting returned fewer supporting lines despite faster previews. Review the chosen excerpts before sending. The Vite suite makes zero provider calls. Live provider token use, cache reuse, answer quality, and independent human acceptance remain unmeasured.
+The same eight-repetition suite with the current indexed ranking found 64 of 120 exact evidence targets in each setting, up from 24. File recall stayed at 66.7%. Indexed preview included every target for the legacy plugin trace. Lexical preview included every target for two traces at subsystem scope.
+
+| Settings | Strategy | Evidence recall | p50 / p95 preview | Mean context |
+|---|---|---:|---:|---:|
+| Package, 4,096 tokens | Lexical | 33.3% | 249.14 / 300.95 ms | 8.2 KB |
+| Package, 4,096 tokens | Current indexed | 53.3% | 312.92 / 387.94 ms | 8.1 KB |
+| Subsystem, 12,288 tokens | Lexical | 60.0% | 55.35 / 109.85 ms | 11.5 KB |
+| Subsystem, 12,288 tokens | Current indexed | 53.3% | 34.18 / 86.69 ms | 8.0 KB |
+
+The Vite suite makes zero provider calls. Live provider token use, cache reuse, answer quality, and independent human acceptance remain unmeasured.
 
 ### Review independent packages
 

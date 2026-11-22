@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createApiServer } from "../src/api.ts";
+import { loadConfig, saveConfig } from "../src/core/config.ts";
 import { parse } from "../src/core/okf/document.ts";
 import { createMcpServer, mcpActor, mcpOps, runMcpHttp } from "../src/mcp/server.ts";
 import { okb } from "./helpers.ts";
@@ -162,6 +164,109 @@ describe("streamable HTTP transport", () => {
       await client.close();
     } finally {
       httpServer.close();
+    }
+  });
+});
+
+describe("app-managed MCP HTTP", () => {
+  const appToken = "mcp-settings-test";
+  type Connection = { url: string; auth: string; trusted: boolean; brain: string | null; mountChanged: boolean };
+
+  function controller(url: string) {
+    const endpoint = new URL("/api/mcp/http", url);
+    const setup = (params?: object, mount?: string) => fetch(endpoint, {
+      method: params ? "POST" : "GET",
+      headers: {
+        "x-okb-token": appToken,
+        ...(params ? { "content-type": "application/json" } : {}),
+        ...(mount ? { "x-okb-brain": mount } : {}),
+      },
+      body: params ? JSON.stringify(params) : undefined,
+    });
+    return { endpoint, setup };
+  }
+
+  async function connectHttp(connection: Connection) {
+    const client = new Client({ name: "mcp-settings-client", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(connection.url), {
+      requestInit: { headers: { authorization: connection.auth } },
+    }));
+    return client;
+  }
+
+  test("starts an authenticated read-only transport, revokes it on stop, and rotates the next token", async () => {
+    const api = createApiServer({ bundle, token: appToken, port: 0 });
+    let client: Client | undefined;
+    let stopped = false;
+    try {
+      const { endpoint, setup } = controller(api.url);
+      expect((await fetch(endpoint)).status).toBe(401);
+      expect((await fetch(endpoint, { headers: { authorization: "Bearer " + appToken } })).status).toBe(401);
+      expect((await fetch(endpoint, { headers: { "x-okb-token": appToken, origin: "https://unrelated.example" } })).status).toBe(403);
+      const start = await setup({ action: "start", port: 0 });
+      expect(start.status).toBe(200);
+      expect(start.headers.get("cache-control")).toBe("no-store");
+      const { result: connection } = await start.json() as { result: Connection };
+      expect(connection.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
+      expect(connection).toMatchObject({ trusted: false, brain: null });
+      expect(connection.auth).toMatch(/^Bearer [A-Za-z0-9_-]{43}$/);
+      expect((await setup({ action: "start", port: 0 })).status).toBe(409);
+      expect((await fetch(connection.url)).status).toBe(401);
+      expect((await fetch(connection.url, { headers: { authorization: "Bearer " + appToken } })).status).toBe(401);
+      expect((await fetch(connection.url, { headers: { authorization: connection.auth, origin: "https://unrelated.example" } })).status).toBe(403);
+      expect((await fetch(connection.url + "?token=" + connection.auth.slice(7))).status).toBe(404);
+      client = await connectHttp(connection);
+      const { tools } = await client.listTools();
+      const toolNames = tools.map((tool) => tool.name);
+      expect(toolNames).toContain("search");
+      expect(toolNames).not.toContain("write_concept");
+      expect(toolNames).not.toContain("mcp");
+      expect(toolNames).not.toContain("code_run");
+      const result = await client.callTool({ name: "search", arguments: { query: "databases" } });
+      expect(textOf(result)).toContain("notes/alpha");
+      expect((await setup({ action: "stop" })).status).toBe(200);
+      await expect(fetch(connection.url)).rejects.toThrow();
+      const restarted = await setup({ action: "start", port: 0 });
+      const { result: second } = await restarted.json() as { result: Connection };
+      expect(second.auth).not.toBe(connection.auth);
+      expect((await fetch(second.url, { headers: { authorization: connection.auth } })).status).toBe(401);
+      await api.stop();
+      stopped = true;
+      await expect(fetch(second.url)).rejects.toThrow();
+    } finally {
+      await client?.close();
+      if (!stopped) await api.stop();
+    }
+  });
+
+  test("allows explicit trusted writes only while the bound mount remains writable", async () => {
+    const api = createApiServer({ bundle, token: appToken, port: 0 });
+    const original = loadConfig();
+    let client: Client | undefined;
+    try {
+      const { setup } = controller(api.url);
+      const name = "mcpManagedTarget";
+      const configure = (readonly: boolean) => saveConfig({
+        ...original, brains: { ...original.brains, [name]: { path: bundle, readonly } },
+      });
+      configure(true);
+      expect((await setup({ action: "start", port: 0, trusted: true }, name)).status).toBe(403);
+      configure(false);
+      const start = await setup({ action: "start", port: 0, trusted: true }, name);
+      expect(start.status).toBe(200);
+      const { result: connection } = await start.json() as { result: Connection };
+      expect(connection).toMatchObject({ trusted: true, brain: name, mountChanged: false });
+      client = await connectHttp(connection);
+      expect((await client.listTools()).tools.some((tool) => tool.name === "write_concept")).toBe(true);
+      configure(true);
+      const active = await setup();
+      expect(await active.json()).toMatchObject({ result: { mountChanged: true } });
+      expect((await fetch(connection.url, { headers: { authorization: connection.auth } })).status).toBe(403);
+      await expect(client.callTool({ name: "write_concept", arguments: { id: "notes/forbidden", body: "test" } })).rejects.toThrow();
+    } finally {
+      await client?.close();
+      await api.stop();
+      saveConfig(original);
     }
   });
 });

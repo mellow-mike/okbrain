@@ -12,6 +12,12 @@ Open **Focused map** with a question, project, or note. Filter by source, date, 
 
 Use **Sources** to import conversations, browser bookmarks, Markdown, and Notion export files, find web capture and RSS tools, or get to AI settings. The import forms show which brain receives drafts. If you have multiple brains mounted, select a writable brain before importing.
 
+### Manage brain folders
+
+Use **Settings → Brain folders → Add a brain folder** to create a brain in a new or empty directory, or register an existing folder by its absolute path. Create writes a portable OKF index. Registering an existing folder keeps its contents. The new named brain opens immediately and appears in the sidebar picker.
+
+Expand a named mount in **Brain folders** to rename it, set its read-only status, or remove it from the picker. Removing the mount leaves the directory and its contents in place. To change a mount while viewing a read-only brain, switch the sidebar picker to a writable brain first.
+
 ## Ask questions with your ChatGPT plan
 
 Sign in through your browser, choose your ChatGPT account and workspace, and grant plan usage. OpenAI offers this integration for eligible ChatGPT Plus and Pro subscribers. The connection authorizes inference for okbrain. To bring over your ChatGPT history, use the export workflow below. [OpenAI’s Sign in with ChatGPT guide](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt)
@@ -86,7 +92,13 @@ okb export-viz
 
 The local GUI can browse, search, and edit conversation drafts in its selected bundle. `okb sync` keeps untracked `db_only/` files out of Git and omits private note metadata from the shared root index and log. When managing the bundle directly with Git, verify that `db_only/` is ignored and untracked. `okb export-viz` omits notes under `db_only/` by default. Pass `--include-private` only when you want the generated HTML to contain those notes and their contents.
 
-## Connect Claude Desktop over MCP
+## Connect an MCP client
+
+Select the brain you want to share and open **Settings → MCP agent access**. Choose **Start MCP HTTP**, open **Connection details**, and copy the loopback URL and Authorization header into a client that supports Streamable HTTP with custom headers. The default is read-only. Enable **Allow trusted clients to write to this brain** before starting if the client should edit a writable brain.
+
+The listener is bound to the selected brain and issues a fresh token each time it starts. Keep the token private. Choose **Stop MCP HTTP** to disconnect it. If you change the bound brain's path or remove its write permission while trusted access is active, stop and start the listener with the updated mount.
+
+### Claude Desktop and stdio clients
 
 In Claude Desktop, open **Settings → Developer → Edit Config** and add an MCP server entry. Use absolute paths to an installed `okb` executable and the bundle you want to share. Merge this entry with any existing MCP servers and restart Claude Desktop. [MCP setup guide for Claude Desktop](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
 
@@ -101,4 +113,4 @@ In Claude Desktop, open **Settings → Developer → Edit Config** and add an MC
 }
 ```
 
-Claude Desktop runs `okb mcp` locally and uses your native Claude account for the conversation. The default tool access is read-only and includes private drafts in the configured bundle. Tool outputs can be shared with Claude when the connector is used. Choose a separate bundle if you only want to share a subset of notes. Direct Claude inference from `okb ask` uses `ANTHROPIC_API_KEY` and Anthropic API billing. [Claude's local MCP guide](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop), [Anthropic’s authentication guidance](https://code.claude.com/docs/en/legal-and-compliance)
+Claude Desktop launches `okb mcp` locally over stdio and uses your native Claude account for the conversation. This setup uses an executable and arguments in the client configuration. The default tool access is read-only and includes private drafts in the configured bundle. Tool outputs can be shared with Claude when the connector is used. Choose a separate bundle if you only want to share a subset of notes. Direct Claude inference from `okb ask` uses `ANTHROPIC_API_KEY` and Anthropic API billing. [Claude’s local MCP guide](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop), [Anthropic’s authentication guidance](https://code.claude.com/docs/en/legal-and-compliance)

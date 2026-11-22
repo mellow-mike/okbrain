@@ -49,6 +49,7 @@ export function dataDir(p: Platform = currentPlatform()): string {
 }
 
 export class ConfigError extends Error {}
+export class UnknownBrainError extends ConfigError {}
 
 /** AI provider settings persisted by `okb init` (resolution: core/ai/gateway.ts). */
 export interface AiSettings {
@@ -104,7 +105,7 @@ export interface OkbConfig {
    * Named bundle mounts (Stage 5): `okb --brain work …`. A string is the
    * bundle path; the object form adds a per-brain access policy.
    */
-  brains?: Record<string, string | { path: string; readonly?: boolean }>;
+  brains?: Record<string, string | { path: string; readonly?: boolean; [key: string]: unknown }>;
   /** Unknown keys are preserved on rewrite (permissive, like the OKF reader). */
   [key: string]: unknown;
 }
@@ -190,7 +191,7 @@ export function resolveBrain(name: string, p: Platform = currentPlatform()): Bra
   const brains = listBrains(p);
   const brain = brains.find((b) => b.name === name);
   if (!brain)
-    throw new ConfigError(
+    throw new UnknownBrainError(
       brains.length === 0
         ? `no brains configured — add a "brains" map to config.json (okb help brains)`
         : `unknown brain: ${name} (configured: ${brains.map((b) => b.name).join(", ")})`,

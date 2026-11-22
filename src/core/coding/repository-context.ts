@@ -298,22 +298,42 @@ interface Match {
   dependencyOf?: string;
 }
 
-function findMatch(candidate: Candidate, lines: string[], pattern: RegExp): Match | undefined {
+function findMatch(candidate: Candidate, lines: string[], pattern: RegExp, specific?: Set<string>): Match | undefined {
   if (lines.length === 0) return;
+  const weight = (found: Set<string>) => {
+    let score = found.size;
+    if (specific?.size) for (const term of found) if (specific.has(term)) score += 4;
+    return score;
+  };
   const terms = new Set(candidate.pathTerms);
+  const byLine = specific?.size ? lines.map((line) => {
+    const matches = matchingTerms(line, pattern);
+    return matches.size ? matches : undefined;
+  }) : undefined;
   let center = 0;
   let bestLineTerms = 0;
-  for (let index = 0; index < lines.length; index++) {
-    const lineTerms = matchingTerms(lines[index]!, pattern);
+  for (const [index, line] of lines.entries()) {
+    const lineTerms = byLine ? byLine[index] : matchingTerms(line, pattern);
+    if (!lineTerms?.size) continue;
     for (const term of lineTerms) terms.add(term);
-    if (lineTerms.size > bestLineTerms) {
-      bestLineTerms = lineTerms.size;
+    let strength = weight(lineTerms);
+    if (byLine) {
+      // Favor nearby corroborating terms without letting repeated generic words
+      // displace an exact identifier on the line being excerpted.
+      const cluster = new Set<string>();
+      for (let nearby = Math.max(0, index - 4); nearby < Math.min(byLine.length, index + 5); nearby++) {
+        for (const term of byLine[nearby] ?? []) cluster.add(term);
+      }
+      strength += weight(cluster) / 3;
+    }
+    if (strength > bestLineTerms) {
+      bestLineTerms = strength;
       center = index;
     }
   }
   if (terms.size === 0) return;
   // Distinct query terms drive ranking, with a preference for concentrated matches.
-  const score = terms.size * 4 + bestLineTerms * 2 + candidate.pathTerms.size;
+  const score = weight(terms) * 4 + bestLineTerms * 2 + weight(candidate.pathTerms);
   return { path: candidate.path, lines, center, score };
 }
 
@@ -321,6 +341,7 @@ type TrackedText = NonNullable<Awaited<ReturnType<typeof readTrackedText>>>;
 
 interface QueryHints {
   identifiers: Set<string>;
+  singleIdentifier: boolean;
   paths: Set<string>;
 }
 
@@ -332,16 +353,27 @@ function matchedSymbol(file: RepositoryFileStructure | undefined, hints: QueryHi
   return file?.symbols.find(({ name }) => hints.identifiers.has(name.toLowerCase()));
 }
 
+function matchingHeading(path: string, lines: string[], hints: QueryHints): number {
+  if (!/\.md$/iu.test(path) || !hints.identifiers.size) return -1;
+  return lines.findIndex((line) => {
+    const name = /^ {0,3}#{1,6}\s+`?([\p{L}_$][\p{L}\p{N}_$]*)`?\s*#*$/u.exec(line)?.[1];
+    return name !== undefined && hints.identifiers.has(name.toLowerCase());
+  });
+}
+
 function profileMatch(candidate: Candidate, source: TrackedText, pattern: RegExp, hints: QueryHints, saved: RepositoryFileStructure | undefined): Match | undefined {
   if (!source.lines.length) return;
-  const lexical = findMatch(candidate, source.lines, pattern);
+  const lexical = findMatch(candidate, source.lines, pattern, hints.identifiers);
   const symbol = matchedSymbol(saved?.stamp === source.stamp ? saved : fileStructure(candidate.path, source), hints);
   const exactPath = matchesPath(candidate.path, hints);
-  if (!exactPath && !symbol) return lexical && { ...lexical, reason: "Path or source text matches the query" };
+  const heading = matchingHeading(candidate.path, source.lines, hints);
+  if (!exactPath && !symbol && heading < 0) return lexical && { ...lexical, reason: "Path or source text matches the query" };
+  const declaration = symbol && symbol.line < source.lines.length ? symbol.line : undefined;
+  const anchor = heading >= 0 ? heading : hints.singleIdentifier || symbol?.method ? declaration : undefined;
   return {
-    path: candidate.path, lines: source.lines, center: symbol?.line ?? lexical?.center ?? 0,
-    score: (lexical?.score ?? 0) + (exactPath ? 400 : 200),
-    reason: exactPath ? "Exact workspace path" : `Declares ${symbol!.name}`,
+    path: candidate.path, lines: source.lines, center: anchor ?? lexical?.center ?? declaration ?? 0,
+    score: (lexical?.score ?? 0) + (exactPath ? 400 : 8),
+    reason: exactPath ? "Exact workspace path" : heading >= 0 ? "Documentation heading matches the query" : `Declares ${symbol!.name}`,
   };
 }
 
@@ -359,9 +391,10 @@ function indexPaths(candidates: Candidate[]): string[] {
 }
 
 async function expandDependencies(workspace: string, primary: Match[], candidates: Candidate[], sources: Map<string, TrackedText>,
-  index: ReadonlyMap<string, RepositoryFileStructure>): Promise<{ matches: Match[]; fileBytes: boolean }> {
+  index: ReadonlyMap<string, RepositoryFileStructure>, pattern: RegExp, hints: QueryHints): Promise<{ matches: Match[]; fileBytes: boolean }> {
   const seen = new Set(primary.map((match) => match.path));
-  const resolver = dependencyResolver(index, new Set(candidates.map(({ path }) => path)));
+  const byPath = new Map(candidates.map((candidate) => [candidate.path, candidate]));
+  const resolver = dependencyResolver(index, new Set(byPath.keys()));
   const matches: Match[] = [];
   let fileBytes = false;
   for (const parent of primary.slice(0, 4)) {
@@ -376,8 +409,9 @@ async function expandDependencies(workspace: string, primary: Match[], candidate
       const dependency = sources.get(path) ?? await readTrackedText(workspace, path);
       if (!dependency?.lines.length) continue;
       fileBytes ||= dependency.limited;
+      const match = profileMatch(byPath.get(path)!, dependency, pattern, hints, index.get(path));
       matches.push({
-        path, lines: dependency.lines, center: 0, score: Math.max(0, parent.score - 1),
+        path, lines: dependency.lines, center: match?.center ?? 0, score: match ? Math.min(parent.score - 1, match.score / 2) : 0,
         reason: `Direct import from ${parent.path}`, dependencyOf: parent.path,
       });
       expanded++;
@@ -438,9 +472,14 @@ export async function selectRepositoryContext(options: RepositoryContextOptions)
   if (!query || Buffer.byteLength(query) > maxQueryBytes) {
     throw new RepositoryContextError(`Enter a repository context query of 1–${maxQueryBytes} UTF-8 bytes.`);
   }
-  const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}$]+/gu) ?? [])]
+  const plainTerms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}$]+/gu) ?? [])]
     .filter((term) => !stopWords.has(term)).slice(0, 16);
-  if (terms.length === 0) throw new RepositoryContextError("Enter repository context search terms such as identifiers, paths, or feature names.");
+  if (plainTerms.length === 0) throw new RepositoryContextError("Enter repository context search terms such as identifiers, paths, or feature names.");
+  const identifiers = (query.match(/[\p{L}_$][\p{L}\p{N}_$]*/gu) ?? []).filter((term) => !stopWords.has(term.toLowerCase())).slice(0, 16);
+  const singleIdentifier = identifiers.length === 1;
+  const specific = new Set(identifiers.filter((term) => singleIdentifier || /[\p{Ll}\p{N}]\p{Lu}|\p{Lu}{2}\p{Ll}|[_$\d]/u.test(term)).map((term) => term.toLowerCase()));
+  // A whole identifier with separators and its subwords are both search clues.
+  const terms = profile ? [...new Set([...specific, ...plainTerms])].sort((a, b) => b.length - a.length) : plainTerms;
   const alternatives = terms.map((term) => term.replaceAll("$", "\\$")).join("|");
   const pattern = new RegExp(`(?<![\\p{L}\\p{N}$])(?:${alternatives})(?![\\p{L}\\p{N}$])`, "gu");
 
@@ -458,7 +497,8 @@ export async function selectRepositoryContext(options: RepositoryContextOptions)
     paths: indexPaths(candidates), stamp: (path) => worktreeStamp(workspace, path), read: (path) => readTrackedText(workspace, path),
   }) : undefined;
   const hints: QueryHints = {
-    identifiers: new Set(query.toLowerCase().match(/[\p{L}_$][\p{L}\p{N}_$]*/gu)?.filter((term) => !stopWords.has(term))),
+    identifiers: specific,
+    singleIdentifier,
     paths: new Set(query.toLowerCase().split(/\s+/u).map((term) => term.replaceAll("\\", "/").replace(/^\.\//u, "").replace(/:\d+(?::\d+)?$/u, ""))),
   };
   const eligible = candidates.filter(({ shared }) => !shared);
@@ -487,7 +527,7 @@ export async function selectRepositoryContext(options: RepositoryContextOptions)
     matches.push(match);
   }
   matches.sort(compareMatches);
-  const expanded = index ? await expandDependencies(workspace, matches, candidates, sources, index.files) : undefined;
+  const expanded = index ? await expandDependencies(workspace, matches, candidates, sources, index.files, pattern, hints) : undefined;
   if (expanded) {
     matches.push(...expanded.matches);
     matches.sort(compareMatches);

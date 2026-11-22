@@ -15,6 +15,7 @@ import { CHATGPT_USAGE, createChatgptPlan, type ChatgptPlanStatus } from "./ai/c
 import { gatewayEnvironment } from "./ai/local-keys.ts";
 import { focusedMap, MAP_SOURCES } from "./graph/focus.ts";
 import { openInBrowser } from "./browser.ts";
+import { changeBrainMount } from "./brain-mounts.ts";
 import type { CodingSessionResult, CodingSessionStatusResult } from "./coding/durable.ts";
 import { CodingProjectProfileError, parseCodingProjectProfile } from "./coding/project-profile.ts";
 import type { RepositoryContextManifest, RepositoryContextSelection, RepositoryContextOptions } from "./coding/repository-context.ts";
@@ -637,6 +638,12 @@ export async function runNotionSource(ctx: OpContext, connector: NotionSource, a
     }
     default: throw new OpError("Notion action not found.", "not_found");
   }
+}
+
+/** Keep filesystem mount administration on the dedicated local Settings route. */
+export function runBrainMountChange(ctx: OpContext, input: Record<string, unknown>) {
+  checkOpScope({ name: "brain mount settings", scope: "admin" }, ctx);
+  return changeBrainMount(input);
 }
 
 export const operations: readonly Operation[] = [

@@ -14,7 +14,8 @@
     "build": "bun build --compile --outfile bin/okb src/cli.ts && bun run scripts/copy-vec0.ts bin",
     "package": "bun run scripts/package-release.ts --local",
     "package:mac": "bun run scripts/package-mac.ts",
-    "package:ide": "bun run scripts/package-ide.ts"
+    "package:ide": "bun run scripts/package-ide.ts",
+    "smoke:browser": "bun run scripts/smoke-browser.ts"
   },
   "engines": {
     "bun": ">=1.1.0"
@@ -22,6 +23,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "@types/turndown": "^5.0.6",
+    "playwright": "1.65.1",
     "typescript": "^5.5.0"
   },
   "dependencies": {

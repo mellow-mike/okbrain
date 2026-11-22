@@ -18,6 +18,10 @@ declare module "*/app.js" {
   const text: string;
   export default text;
 }
+declare module "*/mcp-settings.js" {
+  const text: string;
+  export default text;
+}
 declare module "*/coding.js" {
   const text: string;
   export default text;

@@ -31,6 +31,7 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Add browser ChatGPT account management with account selection, model
   selection, sign-out, and exact source preview before sending a question.
 - [x] Add in-app provider key management and local model endpoint settings.
+- [x] Manage named brain folders and loopback MCP HTTP access from Settings.
 - [x] Add bounded focused maps with source, privacy, and date filters and
   explanations of direct relationships.
 - [x] Package the personal and coding interfaces in a native macOS app.
@@ -52,7 +53,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   previews in a pinned synthetic monorepo with latency, evidence, and simulated
   token and cache measurements.
 - [x] Measure evidence recall and preview latency on pinned public Vite source
-  across six repository tasks and two scope and budget settings.
+  across six repository tasks and two scope and budget settings. Improve
+  indexed excerpt recall from 20.0% to 53.3% with the same source boundaries.
 - [ ] Measure live provider usage and tokens per accepted result with
   independent human review of citations and outcomes.
 - [x] Add project authorization, expiring member tokens, dedicated worker
