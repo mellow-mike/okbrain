@@ -7,11 +7,13 @@
 import { existsSync } from "node:fs";
 import { readdir, readFile, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { createApiServer } from "../api.ts";
 import { runMcpHttp, runMcpStdio } from "../mcp/server.ts";
 import { AiError, createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
 import { CHATGPT_USAGE, createChatgptPlan, type ChatgptPlanStatus } from "./ai/chatgpt-plan.ts";
 import { openInBrowser } from "./browser.ts";
+import type { CodingSessionResult } from "./coding/durable.ts";
 import { listBrains, loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { calibration, CLAIM_TYPE, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
@@ -623,6 +625,48 @@ export const operations: readonly Operation[] = [
     params: [],
     handler: () => createChatgptPlan().models(),
     render: (r) => ((r as { slug: string; name: string }[]).map((m) => `${m.slug} — ${m.name}`).join("\n")) || "No models available.",
+  },
+  {
+    name: "code_run",
+    cliName: "code run",
+    summary: "Start or resume a Pi Durable coding request for human review",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [
+      { name: "workspace", type: "string", required: true, description: "local directory for the coding session" },
+      { name: "session", type: "string", required: true, description: "persistent session name" },
+      { name: "request-id", type: "string", required: true, description: "stable ID for one request or retry" },
+      { name: "provider", type: "string", required: true, description: "Pi provider: openai or anthropic" },
+      { name: "model", type: "string", required: true, description: "model ID in Pi's provider catalog" },
+      { name: "prompt", type: "string", description: "coding task (omit when resuming a saved request)" },
+      { name: "files", type: "string", description: "comma-separated workspace-relative text files to attach" },
+    ],
+    handler: async (_ctx, p) => {
+      const { CodingError, runCodingSession } = await import("./coding/durable.ts");
+      if (p.files !== undefined && p.prompt === undefined)
+        throw new OpError("Use --files with a new request prompt.", "bad_params");
+      try {
+        return await runCodingSession({
+          workspace: p.workspace as string,
+          session: p.session as string,
+          requestId: p["request-id"] as string,
+          provider: p.provider as string,
+          model: p.model as string,
+          prompt: p.prompt as string | undefined,
+          files: (p.files as string | undefined)?.split(",").map((file) => file.trim()),
+        });
+      } catch (error) {
+        if (error instanceof CodingError) throw new OpError(error.message, "refused");
+        throw error;
+      }
+    },
+    render: (r) => {
+      const result = r as CodingSessionResult;
+      const text = result.status === "done" ? result.text : `Request ${result.requestId} unanswered: ${result.reason}`;
+      return stripVTControlCharacters(text);
+    },
+    exitCode: (r) => (r as CodingSessionResult).status === "done" ? 0 : 1,
   },
   {
     name: "read_concept",
