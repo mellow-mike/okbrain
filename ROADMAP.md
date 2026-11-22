@@ -37,6 +37,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Package the personal and coding interfaces in a native macOS app.
 - [x] Set Git identity and connect a new HTTPS origin in the Mac and web apps.
   Show publication destinations and recover interrupted text conflicts in place.
+- [x] Save and remove a private, repository-scoped GitHub credential for
+  app-managed personal HTTPS sync from the Mac or web app.
 
 ### Stage 8 — Enterprise coding
 
@@ -46,6 +48,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   request IDs, and reviewable responses.
 - [x] Open standalone CLI sessions in the local Mac and web apps. Preview and
   send new requests, inspect saved source, and resume or cancel pending work.
+- [x] Delete standalone Pi transcripts in the Mac and web apps using the
+  existing cross-process lease and a recoverable deletion marker.
 - [x] Preview bounded, deterministic excerpts from explicitly scoped Git
   projects. Bind the reviewed selection to its source bytes at admission and
   recover from the stored snapshot.
@@ -789,6 +793,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added private GitHub sync credentials and owner-confirmed
+  standalone Pi transcript deletion in the Mac and web apps.
 - 2026-11-22 — Added in-app Git identity and origin setup, a reviewable text
   conflict resolver, and search index refresh after sync and rebase recovery.
 - 2026-11-22 — Blocked remote sync when deleted `db_only/` files remain in

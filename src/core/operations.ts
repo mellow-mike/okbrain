@@ -109,6 +109,8 @@ export interface OpContext {
   trusted: boolean;
   /** Local owner surfaces may contribute to explicitly enabled usage counts. */
   localUsage?: boolean;
+  /** Direct local owner requests may use the brain’s saved GitHub credential. */
+  allowSavedSyncCredential?: boolean;
   /** Read-only brain mount (Stage 5): write/admin ops are refused. */
   readonly?: boolean;
   /**
@@ -1715,7 +1717,7 @@ export const operations: readonly Operation[] = [
     ],
     handler: async (ctx, p) => {
       if (p.status === true) return syncStatus(ctx.bundle);
-      const result = await syncBundle(ctx.bundle, p.message as string | undefined);
+      const result = await syncBundle(ctx.bundle, p.message as string | undefined, ctx.allowSavedSyncCredential === true);
       return result.pulled || result.committed ? { ...result, ...await refreshSyncIndex(ctx) } : result;
     },
     render: (r) => {

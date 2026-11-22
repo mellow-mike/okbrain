@@ -7,7 +7,8 @@
 
 import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { lstat, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, open, readFile, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve } from "node:path";
 import { listConcepts, readConceptPermissive } from "./okf/bundle.ts";
 import { OkfParseError, parse } from "./okf/document.ts";
@@ -16,6 +17,10 @@ import { removePrivateLogEntries } from "./okf/logmd.ts";
 import { inDbOnlyDir } from "./okf/paths.ts";
 import { checkPrivacyPath } from "./okf/privacy.ts";
 import { nowTimestamp } from "./okf/write.ts";
+import {
+  brainEnclosesGitHubSyncStore, gitHubSyncTransport, parseGitHubSyncCredential, savedGitHubSyncCredential, syncGitHubRepository,
+  updateGitHubSyncCredential, type GitHubSyncCredential,
+} from "./sync-credentials.ts";
 
 export class SyncError extends Error {}
 
@@ -26,8 +31,13 @@ interface GitResult {
 }
 
 /** Spawn git by argv. Never throws on nonzero exit — callers decide. */
-export function runGit(cwd: string, args: string[], input?: string, extraEnv?: Record<string, string>): Promise<GitResult> {
-  const env: NodeJS.ProcessEnv = { ...process.env, ...extraEnv, GIT_TERMINAL_PROMPT: "0" };
+export function runGit(cwd: string, args: string[], input?: string, extraEnv?: NodeJS.ProcessEnv): Promise<GitResult> {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const [key, value] of Object.entries(extraEnv ?? {})) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  env.GIT_TERMINAL_PROMPT = "0";
   // The selected brain, rather than inherited Git plumbing, determines the repository.
   for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CONFIG"]) delete env[key];
   return new Promise((done, fail) => {
@@ -186,8 +196,8 @@ async function configValues(root: string, key: string, local = false): Promise<s
   return result.stdout.split("\0").slice(0, -1);
 }
 
-async function originURLs(root: string, push = false): Promise<string[]> {
-  const result = await runGit(root, ["remote", "get-url", "--all", ...(push ? ["--push"] : []), "origin"]);
+async function originURLs(root: string, push = false, env?: NodeJS.ProcessEnv): Promise<string[]> {
+  const result = await runGit(root, ["remote", "get-url", "--all", ...(push ? ["--push"] : []), "origin"], undefined, env);
   return result.code === 0 ? result.stdout.trimEnd().split(/\r?\n/u) : [];
 }
 
@@ -227,10 +237,18 @@ function newOrigin(value: unknown): string {
   return url.href;
 }
 
+function originForSetup(value: unknown): string {
+  const origin = newOrigin(value);
+  const page = origin.replace(/\/$/u, "");
+  if (syncGitHubRepository(page)) return page;
+  const clone = page + ".git";
+  return syncGitHubRepository(clone) ? clone : origin;
+}
+
 const changedOriginError = () => new SyncError("Git configuration changes the fetch or push destination. Review the Git URL rules before connecting this remote.");
 
-async function verifyOriginDestination(root: string, url: string): Promise<void> {
-  const endpoints = await Promise.all([originURLs(root), originURLs(root, true)]);
+async function verifyOriginDestination(root: string, url: string, env?: NodeJS.ProcessEnv): Promise<void> {
+  const endpoints = await Promise.all([originURLs(root, false, env), originURLs(root, true, env)]);
   if (endpoints.some((values) => values.length !== 1 || values[0] !== url))
     throw changedOriginError();
 }
@@ -308,7 +326,7 @@ export async function syncSettings(root: string, input: SyncSettingsInput): Prom
       entries = [["user.name", name], ["user.email", email]];
     } else if (input.action === "origin") {
       if (current.originConfigured) throw new SyncError("This brain already has an origin. Change an existing remote with Git.");
-      const url = newOrigin(input.url);
+      const url = originForSetup(input.url);
       entries = [["remote.origin.url", url], ["remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], ["okbrain.syncRemote", url]];
       if (current.repository === "new") await verifyProposedOrigin(canonical, url);
     } else {
@@ -325,6 +343,77 @@ export async function syncSettings(root: string, input: SyncSettingsInput): Prom
     } : undefined);
     return readSyncSettings(canonical);
   });
+}
+
+type SyncGitHubCredentialInput = { action: "status" | "save" | "remove"; login?: string; token?: string };
+
+function readGitHubCredential(root: string) {
+  try { return savedGitHubSyncCredential(root); }
+  catch { throw new SyncError("Unable to read the private GitHub sync credential store."); }
+}
+
+async function managedGitHubOrigin(root: string) {
+  if ((await standaloneRepository(root)).repository !== "ready") return null;
+  const origin = (await configValues(root, "okbrain.syncRemote", true)).at(-1);
+  if (!origin) return null;
+  const repository = syncGitHubRepository(origin);
+  if (!repository) return null;
+  try { await verifyOriginDestination(root, origin); }
+  catch (error) {
+    if (error instanceof SyncError) return null;
+    throw error;
+  }
+  return { origin, repository };
+}
+
+/** Only the local owner adapter may call this with credential material. */
+export async function syncGitHubCredential(root: string, input: SyncGitHubCredentialInput, canWrite?: () => boolean) {
+  return withSyncRepository(root, async (canonical) => {
+    const enclosesStore = brainEnclosesGitHubSyncStore(canonical);
+    const managed = enclosesStore ? null : await managedGitHubOrigin(canonical);
+    if (input.action === "save" || input.action === "remove") {
+      let value: GitHubSyncCredential | null = null;
+      if (input.action === "save") {
+        if (enclosesStore) throw new SyncError("This brain contains the local GitHub credential directory. Choose a separate brain folder.");
+        if (!managed) throw new SyncError("Save a managed GitHub HTTPS origin ending in .git and verify its Git destinations first.");
+        value = parseGitHubSyncCredential(managed.origin, input.login, input.token);
+      }
+      if (canWrite && !canWrite()) throw new SyncError("The selected brain is no longer writable.");
+      try { updateGitHubSyncCredential(canonical, value); }
+      catch { throw new SyncError("Unable to update the private GitHub sync credential store."); }
+    } else if (input.action !== "status") {
+      throw new SyncError("Choose a GitHub sync credential action.");
+    }
+    const saved = readGitHubCredential(canonical);
+    return { repository: managed?.repository ?? null, hasToken: saved !== null, savedFor: saved ? syncGitHubRepository(saved.origin) : null };
+  });
+}
+
+/** Run a managed fetch or push against its approved origin. */
+export async function managedGitTransport(
+  root: string, origin: string, args: ["fetch" | "push", ...string[]], credential: GitHubSyncCredential | null,
+): Promise<GitResult> {
+  const protocol = { GIT_ALLOW_PROTOCOL: "https" };
+  if (!credential) {
+    await verifyOriginDestination(root, origin);
+    return runGit(root, ["-c", `http.${origin}.followRedirects=false`, ...args], undefined, protocol);
+  }
+  if (credential.origin !== origin) throw new SyncError("The saved GitHub credential belongs to a different origin.");
+  const hooks = await mkdtemp(join(tmpdir(), "okb-sync-hooks-"));
+  try {
+    const { args: authArgs, env } = gitHubSyncTransport(credential, hooks);
+    // Check the destinations using the same configuration environment as the
+    // transport, with no credential present in the verification processes.
+    await verifyOriginDestination(root, origin, { ...env, ...protocol, OKB_SYNC_AUTH_HEADER: undefined });
+    try {
+      const result = await runGit(root, [...authArgs, ...args], undefined, { ...env, ...protocol });
+      if (result.code === 0) return { code: 0, stdout: "", stderr: "" };
+    } catch { /* A child error can contain request diagnostics. */ }
+    const action = args[0] === "push" ? "push failed (changes are committed locally)" : "fetch failed";
+    throw new SyncError(`GitHub ${action}. Check repository access and the saved token's permissions and expiration.`);
+  } finally {
+    await rmdir(hooks).catch(() => {});
+  }
 }
 
 // Seeded into the bundle's git files on every sync (ensure, never remove).
@@ -484,11 +573,13 @@ export interface SyncResult {
 }
 
 /** Init if needed, seed ignore/attribute lines, commit, then pull+push if a remote is set. */
-export function syncBundle(root: string, message?: string): Promise<SyncResult> {
-  return withSyncRepository(root, (canonical) => syncRepository(canonical, message));
+export function syncBundle(root: string, message?: string, useSavedGitHubCredential = false): Promise<SyncResult> {
+  return withSyncRepository(root, (canonical) => syncRepository(canonical, message, useSavedGitHubCredential));
 }
 
-async function syncRepository(root: string, message?: string): Promise<SyncResult> {
+async function syncRepository(root: string, message: string | undefined, useSavedGitHubCredential: boolean): Promise<SyncResult> {
+  if (brainEnclosesGitHubSyncStore(root))
+    throw new SyncError("This brain contains the local GitHub credential directory. Sync a separate brain folder to keep credentials private.");
   const top = await repoRoot(root);
   if (top !== null && !sameDir(top, root))
     throw new SyncError(
@@ -502,6 +593,8 @@ async function syncRepository(root: string, message?: string): Promise<SyncResul
   if (initialized) await initializeRepository(root);
   const managed = (await configValues(root, "okbrain.syncRemote", true)).at(-1);
   if (managed) await verifyOriginDestination(root, newOrigin(managed));
+  const saved = useSavedGitHubCredential && managed && syncGitHubRepository(managed) ? readGitHubCredential(root) : null;
+  const credential = saved?.origin === managed ? saved : null;
 
   const marked = await privateNotesForSync(root);
   const privatePaths = new Set([...marked].map((id) => gitPathEquals(privatePath(id))));
@@ -539,16 +632,15 @@ async function syncRepository(root: string, message?: string): Promise<SyncResul
   if (remote !== null && branch !== "") {
     const hasUpstream =
       (await runGit(root, ["rev-parse", "--abbrev-ref", "@{upstream}"])).code === 0;
-    const transport = managed ? ["-c", `http.${managed}.followRedirects=false`] : [];
-    const transportEnv = managed ? { GIT_ALLOW_PROTOCOL: "https" } : undefined;
+    const managedNetwork = (args: ["fetch" | "push", ...string[]]) => managedGitTransport(root, managed!, args, credential);
     if (hasUpstream) {
       let upstream = "@{upstream}";
       if (managed) {
         upstream = (await git(root, ["rev-parse", "--symbolic-full-name", upstream])).trim();
         if ((await configValues(root, `branch.${branch}.remote`)).at(-1) !== "origin" || upstream !== `refs/remotes/origin/${branch}`)
           throw new SyncError("The current branch tracks a different destination. Review the branch's Git configuration before syncing.");
-        await verifyOriginDestination(root, managed);
-        await git(root, [...transport, "fetch", "--no-recurse-submodules", "origin"], undefined, transportEnv);
+        const fetched = await managedNetwork(["fetch", "--no-recurse-submodules", "origin"]);
+        if (fetched.code !== 0) throw new SyncError(`git fetch failed: ${gitDiagnostic(fetched)}`);
       } else if (marked.size) {
         await git(root, ["fetch"]);
       }
@@ -566,10 +658,9 @@ async function syncRepository(root: string, message?: string): Promise<SyncResul
     }
     await verifyPrivatePaths(root, await privateNotesForSync(root));
     await verifyPrivateDirectoryHistory(root);
-    if (managed) await verifyOriginDestination(root, managed);
-    const push = await runGit(root, managed
-      ? [...transport, "push", "--no-recurse-submodules", ...(hasUpstream ? [] : ["-u"]), "origin", `refs/heads/${branch}:refs/heads/${branch}`]
-      : hasUpstream ? ["push"] : ["push", "-u", "origin", `refs/heads/${branch}`], undefined, transportEnv);
+    const push = managed
+      ? await managedNetwork(["push", "--no-recurse-submodules", ...(hasUpstream ? [] : ["-u"]), "origin", `refs/heads/${branch}:refs/heads/${branch}`])
+      : await runGit(root, hasUpstream ? ["push"] : ["push", "-u", "origin", `refs/heads/${branch}`]);
     if (push.code !== 0)
       throw new SyncError(
         `git push failed (changes are committed locally): ${gitDiagnostic(push)}`,

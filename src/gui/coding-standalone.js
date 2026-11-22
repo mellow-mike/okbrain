@@ -47,7 +47,13 @@
       '<section class="coding-panel stack"><div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh sessions</button></div>' +
       '<label class="field"><span>Saved session</span><select data-sessions><option value="">Loading sessions…</option></select></label>' +
       '<label class="field" data-request-picker hidden><span>Saved request</span><select data-requests></select></label>' +
-      '<div data-inspect class="stack" aria-live="polite"></div><div data-history-feedback class="coding-feedback" role="status"></div></section>';
+      '<div data-inspect class="stack" aria-live="polite"></div>' +
+      '<details data-delete-session hidden><summary>Delete standalone session</summary><form class="stack coding-form">' +
+      '<p>Permanently delete the saved requests, source snapshots, and responses for <code data-delete-name></code> from this device.</p>' +
+      '<p class="muted" data-delete-state></p><label class="field"><span>Type the session name to confirm</span>' +
+      '<input name="confirmation" maxlength="64" autocomplete="off" spellcheck="false" required></label>' +
+      '<div class="row"><button type="submit" class="danger" disabled>Delete session</button></div></form></details>' +
+      '<div data-history-feedback class="coding-feedback" role="status"></div></section>';
     parent.append(grid);
 
     const form = grid.querySelector('form');
@@ -64,6 +70,12 @@
     const inspectEl = grid.querySelector('[data-inspect]');
     const historyFeedback = grid.querySelector('[data-history-feedback]');
     const refreshButton = grid.querySelector('[data-refresh]');
+    const deletePanel = grid.querySelector('[data-delete-session]');
+    const deleteForm = deletePanel.querySelector('form');
+    const deleteName = deletePanel.querySelector('[data-delete-name]');
+    const deleteNotice = deletePanel.querySelector('[data-delete-state]');
+    const deleteInput = deleteForm.elements.confirmation;
+    const deleteButton = deleteForm.querySelector('button');
     let catalog = [];
     let sessions = [];
     let sessionName = '';
@@ -72,6 +84,10 @@
     let busy = false;
     let previewing = false;
     let running = false;
+    let refreshing = false;
+    let runActionPending = false;
+    let deleting = false;
+    let sessionState = '';
     let preview = null;
     let revision = 0;
     let generation = 0;
@@ -89,12 +105,24 @@
     function updateControls() {
       const waiting = !!sessionName && !binding;
       const key = selectedProvider()?.credential;
-      previewButton.disabled = busy || running || waiting || previewing;
+      previewButton.disabled = busy || running || waiting || previewing || deleting || sessionState === 'deleting';
       send.disabled = readonly || previewButton.disabled || !preview || !form.checkValidity() ||
         !controls.approved.checked || (key !== 'saved' && key !== 'environment');
       controls.workspace.readOnly = !!binding;
       controls.session.readOnly = !!sessionName;
       for (const control of [controls.provider, controls.model, controls.thinkingLevel]) control.disabled = !!binding;
+      sessionsSelect.disabled = deleting;
+      requestsSelect.disabled = running || deleting || sessionState === 'deleting';
+      refreshButton.disabled = refreshing || deleting;
+      deletePanel.hidden = readonly || !sessionName;
+      deleteName.textContent = sessionName;
+      deleteNotice.textContent = deleting ? 'Deleting the transcript…' : running || busy || runActionPending
+        ? 'Wait for the current invocation to finish before deleting this session.'
+        : sessionState === 'deleting' ? 'Deletion started. Confirm the session name again to finish.' : '';
+      deleteButton.textContent = sessionState === 'deleting' ? 'Retry deletion' : 'Delete session';
+      deleteInput.disabled = deletePanel.hidden || busy || running || refreshing || runActionPending || deleting ||
+        !['ready', 'deleting', 'unavailable'].includes(sessionState);
+      deleteButton.disabled = deleteInput.disabled || deleteInput.value !== sessionName;
     }
 
     function invalidate() {
@@ -218,6 +246,10 @@
         inspectEl.textContent = 'This session is open in another invocation.';
         return;
       }
+      if (state === 'deleting') {
+        inspectEl.textContent = 'Deletion is incomplete for this session.';
+        return;
+      }
       if (!requestId) {
         inspectEl.textContent = sessionName ? 'No saved requests in this session.' : 'Choose a saved session to inspect its requests.';
         return;
@@ -293,8 +325,10 @@
       approval?.addEventListener('change', () => { button.disabled = !approval.checked; });
       bar.append(button);
       button.addEventListener('click', async () => {
-        if (session !== sessionName || target !== requestId || (approval && !approval.checked)) return;
+        if (session !== sessionName || target !== requestId || deleting || runActionPending || (approval && !approval.checked)) return;
         button.disabled = true;
+        runActionPending = true;
+        updateControls();
         report(historyFeedback);
         try {
           await coding(prefix + '/' + action, { session, requestId: target, ...(approval ? { approved: true } : {}) });
@@ -303,14 +337,18 @@
             await inspect();
           }
         } catch (error) { if (!detached() && session === sessionName) report(historyFeedback, error); }
-        finally { button.disabled = !!approval && !approval.checked; }
+        finally {
+          runActionPending = false;
+          button.disabled = !!approval && !approval.checked;
+          updateControls();
+        }
       });
     }
 
     async function inspect() {
       clearTimeout(timer);
       const current = ++generation;
-      if (detached()) return;
+      if (detached() || (deleting && sessionName)) return;
       if (!sessionName) {
         showRequests([]);
         showInspection({}, false);
@@ -319,6 +357,11 @@
       try {
         const result = await coding(prefix + '/inspect', { session: sessionName, ...(requestId ? { requestId } : {}) });
         if (detached() || current !== generation) return;
+        sessionState = result.state || (result.identity ? 'ready' : '');
+        if (sessionState === 'deleting') {
+          requestId = '';
+          deletePanel.open = !readonly;
+        }
         fillBinding(result.identity || binding);
         running = result.active?.status === 'running' || result.state === 'busy';
         updateControls();
@@ -331,11 +374,17 @@
           showRequests(requests);
           return inspect();
         }
-        requestsSelect.disabled = running;
         showRequests(requests);
         showInspection(result, result.pi?.pendingRequestIds.includes(requestId) === true);
         if (running) timer = setTimeout(inspect, 1200);
-      } catch (error) { if (!detached() && current === generation) report(historyFeedback, error); }
+      } catch (error) {
+        if (detached() || current !== generation) return;
+        if (sessions.some((entry) => entry.session === sessionName && entry.state === 'unavailable')) {
+          sessionState = 'unavailable';
+          updateControls();
+        }
+        report(historyFeedback, error);
+      }
     }
 
     async function selectSession(value) {
@@ -343,6 +392,9 @@
       requestId = '';
       binding = null;
       running = false;
+      sessionState = '';
+      deleteInput.value = '';
+      deletePanel.open = false;
       controls.session.value = value || 'main';
       controls.requestId.value = crypto.randomUUID();
       controls.workspace.value = '';
@@ -358,7 +410,9 @@
     }
 
     async function refresh(initial = false) {
-      refreshButton.disabled = true;
+      if (refreshing || deleting) return;
+      refreshing = true;
+      updateControls();
       report(historyFeedback);
       try {
         const response = await coding(prefix);
@@ -372,8 +426,47 @@
         } else await inspect();
         showSessions();
       } catch (error) { if (!detached()) report(historyFeedback, error); }
-      finally { refreshButton.disabled = false; }
+      finally { refreshing = false; updateControls(); }
     }
+
+    deleteInput.addEventListener('input', updateControls);
+    deleteForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (deleteButton.disabled || !sessionName) return;
+      const session = sessionName;
+      const confirmation = deleteInput.value;
+      deleting = true;
+      deleteInput.value = '';
+      requestId = '';
+      ++generation;
+      clearTimeout(timer);
+      showRequests([]);
+      inspectEl.replaceChildren();
+      inspected = undefined;
+      invalidate();
+      historyFeedback.textContent = 'Deleting standalone session…';
+      try {
+        await coding(prefix + '/delete-session', { session, confirm: confirmation });
+        if (detached()) return;
+        sessions = sessions.filter((entry) => entry.session !== session);
+        await selectSession('');
+        showSessions();
+        historyFeedback.textContent = 'Deleted standalone session ' + session + '.';
+      } catch (error) {
+        deleting = false;
+        if (!detached()) {
+          await inspect();
+          report(historyFeedback, error);
+        }
+      } finally {
+        deleting = false;
+        if (!detached()) {
+          updateControls();
+          if (sessionName) deleteInput.focus();
+          else sessionsSelect.focus();
+        }
+      }
+    });
 
     form.addEventListener('input', (event) => { if (event.target !== controls.approved) invalidate(); });
     controls.approved.addEventListener('change', updateControls);

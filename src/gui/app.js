@@ -2337,13 +2337,18 @@ function mountGitSync(panel, seq) {
   var identity = panel.querySelector('[data-sync-identity]');
   var origin = panel.querySelector('[data-sync-origin]');
   var destinations = panel.querySelector('[data-sync-destinations]');
+  var github = panel.querySelector('[data-sync-github]');
+  var credential = github.querySelector('form');
+  var saveCredential = credential.querySelector('[type="submit"]');
+  var removeCredential = github.querySelector('[data-remove-sync-credential]');
+  var credentialFeedback = github.querySelector('[role="status"]');
   var sync = panel.querySelector('[data-sync-run]');
   var runButton = sync.querySelector('[type="submit"]');
   var refreshButton = sync.querySelector('[data-sync-refresh]');
   var stateLine = panel.querySelector('[data-sync-state]');
   var feedback = panel.querySelector('[data-sync-feedback]');
   var recovery = panel.querySelector('[data-sync-recovery]');
-  var settings, rebase, focusAfter, busy = false;
+  var settings, rebase, credentialRepository, focusAfter, busy = false;
 
   function active() { return panel.isConnected && !stale(seq) && brain === BRAIN; }
   function notice(message, error) {
@@ -2353,6 +2358,7 @@ function mountGitSync(panel, seq) {
   function updateButtons() {
     identity.querySelector('button').disabled = busy;
     origin.querySelector('button').disabled = busy;
+    saveCredential.disabled = removeCredential.disabled = busy;
     refreshButton.disabled = busy;
     runButton.disabled = busy || !settings?.identityReady || settings.repository === 'unavailable' || !rebase || rebase.inProgress;
     recovery.querySelectorAll('button, select, textarea').forEach(function (control) { control.disabled = busy; });
@@ -2361,7 +2367,7 @@ function mountGitSync(panel, seq) {
     if (busy || !active()) return;
     busy = true;
     updateButtons();
-    notice(message);
+    if (message !== undefined) notice(message);
     try { await action(); }
     catch (error) { if (active()) notice(error.message, true); }
     finally {
@@ -2390,6 +2396,61 @@ function mountGitSync(panel, seq) {
     destinations.querySelector('[data-sync-fetch]').textContent = next.fetch || 'Configured in Git';
     destinations.querySelector('[data-sync-push]').textContent = next.push || 'Configured in Git';
   }
+
+  async function githubCredential(input) {
+    var response = await fetch('/api/brains/sync-github', {
+      method: 'POST', headers: headers({ 'content-type': 'application/json' }), body: JSON.stringify(input), cache: 'no-store',
+    });
+    var payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Could not update the GitHub credential.');
+    return payload.result;
+  }
+  function showCredential(next) {
+    if (!active()) return;
+    if (credentialRepository !== next.repository) credential.reset();
+    credentialRepository = next.repository;
+    github.hidden = !next.repository && !next.hasToken;
+    credential.parentElement.hidden = !next.repository;
+    github.querySelector('[data-sync-github-repo]').textContent = next.repository || '';
+    github.querySelector('[data-sync-github-status]').textContent = !next.hasToken ? '' :
+      next.savedFor === next.repository ? 'Credential saved for this repository.' : 'The saved credential for ' + next.savedFor + ' is inactive.';
+    saveCredential.textContent = next.hasToken ? 'Replace GitHub credential' : 'Save GitHub credential';
+    removeCredential.parentElement.hidden = !next.hasToken;
+  }
+  async function refreshCredential() {
+    try { showCredential(await githubCredential({ action: 'status' })); }
+    catch (error) { if (active()) credentialFeedback.textContent = error.message; }
+  }
+  function changeCredential(input) {
+    void perform(undefined, async function () {
+      credentialFeedback.textContent = input.action === 'save' ? 'Saving GitHub credential…' : 'Removing GitHub credential…';
+      try {
+        var next = await githubCredential(input);
+        if (!active()) return;
+        credential.reset();
+        showCredential(next);
+        credentialFeedback.textContent = input.action === 'save' ? 'GitHub credential saved.' : 'GitHub credential removed.';
+        github.hidden = false;
+        focusAfter = input.action === 'save' ? saveCredential : next.repository ? credential.elements.login : github.querySelector('summary');
+      } catch (error) {
+        if (active()) {
+          credentialFeedback.textContent = error.message;
+          focusAfter = credential.elements.token;
+        }
+      }
+    });
+  }
+  github.addEventListener('toggle', function () { if (!github.open) credential.elements.token.value = ''; });
+  credential.addEventListener('submit', function (event) {
+    event.preventDefault();
+    var token = credential.elements.token.value;
+    credential.elements.token.value = '';
+    changeCredential({ action: 'save', login: credential.elements.login.value, token: token });
+  });
+  removeCredential.addEventListener('click', function () {
+    credential.elements.token.value = '';
+    changeCredential({ action: 'remove' });
+  });
 
   function version(label, side, open) {
     var details = document.createElement('details');
@@ -2494,7 +2555,7 @@ function mountGitSync(panel, seq) {
     });
   }
   async function refresh() {
-    var results = await Promise.allSettled([api('sync_settings', { action: 'status' }), api('sync_recovery', { action: 'status' })]);
+    var results = await Promise.allSettled([api('sync_settings', { action: 'status' }), api('sync_recovery', { action: 'status' }), refreshCredential()]);
     if (!active()) return;
     if (results[0].status === 'fulfilled') showSettings(results[0].value);
     if (results[1].status === 'fulfilled') showRecovery(results[1].value);
@@ -2519,6 +2580,8 @@ function mountGitSync(panel, seq) {
       if (!active()) return;
       origin.reset();
       showSettings(next);
+      await refreshCredential();
+      if (!active()) return;
       notice('Origin saved. Sync now connects using this device’s Git credentials.');
       focusAfter = refreshButton;
     });
@@ -2614,6 +2677,14 @@ async function renderSettings(_arg, seq) {
       '<div class="row"><button>Connect origin</button></div></form></div></div></details>' +
       '<div data-sync-destinations hidden><dl class="kv"><dt>Fetch from</dt><dd><code data-sync-fetch></code></dd>' +
       '<dt>Push to</dt><dd><code data-sync-push></code></dd></dl></div>' +
+      '<details data-sync-github hidden><summary>GitHub credentials</summary><div class="stack">' +
+      '<p class="muted" data-sync-github-status></p><div hidden>' +
+      '<p>For a private repository, use a fine-grained token for <code data-sync-github-repo></code> with Contents read and write access.</p>' +
+      '<form class="stack" autocomplete="off">' +
+      '<label class="field"><span>GitHub login</span><input name="login" maxlength="39" spellcheck="false" required></label>' +
+      '<label class="field"><span>GitHub personal access token</span><input name="token" type="password" maxlength="267" autocomplete="new-password" spellcheck="false" required></label>' +
+      '<div class="row"><button type="submit">Save GitHub credential</button></div></form></div>' +
+      '<div hidden><button type="button" data-remove-sync-credential>Remove GitHub credential</button></div><p role="status"></p></div></details>' +
       '<form class="stack" data-sync-run><label class="field"><span>Commit message (optional)</span>' +
       '<input name="message" placeholder="Automatic timestamped message"></label><div class="row">' +
       '<button type="button" data-sync-refresh>Refresh Git status</button><button type="submit" disabled>Sync now</button></div></form>' +

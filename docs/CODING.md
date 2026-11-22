@@ -23,6 +23,8 @@ Choose a workspace, enter a task, and preview explicit files or tracked reposito
 
 After an interruption, inspect the saved task and source before choosing **Resume request**. Pi uses the saved bytes, so you can resume even if the original workspace is absent. **Cancel request** withdraws a waiting or running request. If a session is open in another invocation, wait for that invocation to finish before refreshing the list.
 
+To erase a standalone transcript, select the session and open **Delete standalone session**. Type its name and choose **Delete session**. This removes the saved tasks, attachments, and responses from this device. A running session must finish or be cancelled first. If deletion was interrupted, select the session and choose **Retry deletion**. Review your backup retention separately.
+
 ## Give a team member access
 
 Save a project-specific provider API key and create a token for the member in **Project settings → Team access**. Copy the token when it appears. Each token grants access to a single project and expires after seven days. The operator can revoke it before then.
@@ -165,7 +167,7 @@ okbrain pins Pi Durable, Pi AI, and Chord at `1.0.0`. It opens `Harness` with th
 
 Sessions live under `$XDG_DATA_HOME/okbrain/coding` on Linux and macOS, defaulting to `~/.local/share/okbrain/coding`. On Windows they live under `%LOCALAPPDATA%\okbrain\coding`, defaulting to `AppData\Local\okbrain\coding` in the user profile. Each `session-<name>` directory holds an SQLite transcript and an ownership database. A SQLite lock allows one invocation per session and releases on process exit. Keep the session directory on a local filesystem.
 
-The transcript stores prompts, selected source, and responses as local SQLite data. The chosen provider receives the prompt, selected source text, and active conversation history. The source manifest stays local. Protect session directories and backups with the same controls as the source files. For a CLI session, delete its `session-<name>` directory after all invocations have exited.
+The transcript stores prompts, selected source, and responses as local SQLite data. The chosen provider receives the prompt, selected source text, and active conversation history. The source manifest stays local. Protect session directories and backups with the same controls as the source files. Standalone transcript deletion keeps the local SQLite ownership file as the lock anchor for future sessions with that name.
 
 Browser, Mac and IDE projects use a separate `coding-projects` directory within the same per-user application data. Each project has its own transcript directory. The project database holds the run index, review state, metadata-only audit, hashed team tokens, and any provider credentials the operator saved. Workers receive one scoped request and the selected provider credential over their private input pipe. They report admission and completion separately. A server restart leaves unsettled work available by the same request ID. An interrupted provider attempt can still have incurred upstream charges.
 

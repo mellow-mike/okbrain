@@ -27,7 +27,7 @@ import { ConfigError, listBrains, resolveBrain, UnknownBrainError } from "./core
 import { localBundleWatchBackend, openLocalContext, type LocalContext } from "./core/context.ts";
 import { BundleWatcher } from "./core/engine/bundle-watch.ts";
 import { EngineError } from "./core/engine/sqlite.ts";
-import { SyncError } from "./core/sync.ts";
+import { SyncError, syncGitHubCredential } from "./core/sync.ts";
 import { MAX_CONVERSATION_EXPORT_BYTES } from "./core/ingest/conversations.ts";
 import { createNotionSource, NotionSourceError, type NotionSource, type NotionSourceOptions } from "./core/ingest/notion-source.ts";
 import { isOfflineSourceKind, MAX_OFFLINE_FILE_BYTES, MAX_SOURCE_FILES, MAX_SOURCE_ROWS, MAX_SOURCE_UPLOAD_BYTES } from "./core/ingest/personal-sources.ts";
@@ -403,6 +403,49 @@ async function providerKeys(req: Request, scope: Scope, cors: Hdrs): Promise<Res
   }
 }
 
+async function syncGitHubRequest(req: Request, url: URL, opts: ServeState, cors: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+    return json(401, { error: "missing or invalid local app token" }, headers);
+  if (req.headers.has("origin") && !cors["access-control-allow-origin"])
+    return json(403, { error: "GitHub credentials must come from the local app." }, headers);
+  if (req.method !== "POST") return json(405, { error: "Method not allowed." }, headers);
+  if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+    return json(415, { error: "Send a JSON object." }, headers);
+  try {
+    const selected = scopeOf(req, url, opts);
+    const raw = await readUpload(req, 4096, "GitHub credential request exceeds 4 KiB.");
+    let body: unknown;
+    try { body = JSON.parse(raw.toString("utf8")); } catch { body = null; }
+    if (!body || typeof body !== "object" || Array.isArray(body))
+      return json(400, { error: "Send a JSON object." }, headers);
+    const { action, login, token } = body as Record<string, unknown>;
+    if (action !== "status" && action !== "save" && action !== "remove")
+      return json(400, { error: "Choose a GitHub credential action." }, headers);
+    if (action === "save" && (typeof login !== "string" || typeof token !== "string"))
+      return json(400, { error: "Enter a GitHub username and token." }, headers);
+    const requireCurrentWrite = () => {
+      let writable = false;
+      try {
+        const current = scopeOf(req, url, opts);
+        writable = !selected.readonly && !current.readonly && current.bundle === selected.bundle;
+      } catch { /* The request's original brain is no longer selected. */ }
+      if (!writable) throw new OpError("Open Git sync from a writable brain to manage its GitHub credential.", "refused");
+      return true;
+    };
+    requireCurrentWrite();
+    const result = await syncGitHubCredential(selected.bundle, action === "save"
+      ? { action, login: login as string, token: token as string } : { action }, requireCurrentWrite);
+    return json(200, { result }, headers);
+  } catch (error) {
+    if (error instanceof UploadTooLarge) return json(413, errBody(error), headers);
+    if (error instanceof TypeError) return json(400, { error: "Enter a valid GitHub username and fine-grained token." }, headers);
+    if (error instanceof ConfigError || error instanceof SyncError || error instanceof OpError)
+      return json(errStatus(error), errBody(error), headers);
+    return json(409, { error: "Could not use the local GitHub credential store." }, headers);
+  }
+}
+
 async function rssSettings(req: Request, url: URL, opts: ServeState, cors?: Hdrs): Promise<Response> {
   const headers = { ...cors, "cache-control": "no-store" };
   if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
@@ -465,8 +508,10 @@ async function runJsonOp(
   scope: Scope,
   raw: Record<string, unknown>,
   cors: Hdrs = {},
+  allowSavedSyncCredential = false,
 ): Promise<Response> {
   const local = open(scope);
+  local.ctx.allowSavedSyncCredential = allowSavedSyncCredential;
   try {
     return json(200, { result: await runOp(op, local.ctx, raw) }, cors);
   } catch (e) {
@@ -833,6 +878,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   }
 
   if (url.pathname.startsWith("/api/coding/") && opts.coding) return codingRequest(req, url, opts, cors ?? {});
+  if (url.pathname === "/api/brains/sync-github") return syncGitHubRequest(req, url, opts, cors ?? {});
 
   const presented =
     req.headers.get("x-okb-token") ??
@@ -938,7 +984,10 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
         return json(400, errBody(error), cors);
       }
     }
-    return runJsonOp(op, scope, raw as Record<string, unknown>, ownerFileAction ? { ...cors, "cache-control": "no-store" } : cors);
+    const allowSavedSyncCredential = op.name === "sync" && tokenMatches(req.headers.get("x-okb-token"), opts.token)
+      && (!req.headers.has("origin") || cors !== undefined);
+    return runJsonOp(op, scope, raw as Record<string, unknown>,
+      ownerFileAction || allowSavedSyncCredential ? { ...cors, "cache-control": "no-store" } : cors, allowSavedSyncCredential);
   }
 
   return json(404, { error: "not found" }, cors);

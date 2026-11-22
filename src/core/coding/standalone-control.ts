@@ -1,7 +1,8 @@
 import { isAbsolute } from "node:path";
 import { gatewayEnvironment, providerKeyStatus } from "../ai/local-keys.ts";
 import {
-  cancelCodingRequest, canonicalWorkspace, CodingError, CodingSessionBusyError, inspectStandaloneCodingSession,
+  cancelCodingRequest, canonicalWorkspace, CodingError, CodingSessionBusyError, CodingSessionDeletingError, CodingSessionMissingError,
+  deleteStandaloneCodingSession, inspectStandaloneCodingSession,
   listCodingModels, listStandaloneCodingRequests, listStandaloneCodingSessions, prepareCodingInput,
   previewCodingAttachments, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions, type CodingSessionResult,
@@ -24,7 +25,6 @@ interface ActiveRun extends SessionRequest {
   error?: string;
   liveAnswer?: CodingLiveAnswer;
   taskProgress?: CodingTaskProgress;
-  receipt?: CodingSessionResult;
 }
 
 const providerKey = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY", google: "GEMINI_API_KEY" };
@@ -85,6 +85,7 @@ function requestOf(input: Input): string {
 /** Local browser lifecycle for the same private Pi stores used by `okb code`. */
 export class StandaloneCodingControl {
   #runs = new Map<string, { view: ActiveRun; abort: AbortController; done: Promise<void> }>();
+  #gates = new Map<string, Promise<void>>();
   #closed = false;
   constructor(private readonly dependencies: Dependencies = {}) {}
 
@@ -92,7 +93,7 @@ export class StandaloneCodingControl {
     this.#closed = true;
     const current = [...this.#runs.values()];
     for (const run of current) if (run.view.status === "running") run.abort.abort();
-    await Promise.allSettled(current.map(({ done }) => done));
+    await Promise.allSettled([...this.#gates.values(), ...current.map(({ done }) => done)]);
     this.#runs.clear();
   }
 
@@ -107,14 +108,36 @@ export class StandaloneCodingControl {
       const selected = await selectRepositoryContext({ workspace, ...source.repository });
       return { source: "repository", id: selected.manifest.id, ...selected };
     }
-    if (!["/inspect", "/run", "/resume", "/cancel"].includes(path))
+    if (!["/inspect", "/run", "/resume", "/cancel", "/delete-session"].includes(path))
       throw new StandaloneControlError("Standalone coding route not found.", 404);
     const session = sessionOf(input);
     if (path === "/inspect") return this.#inspect(session, input.requestId === undefined ? undefined : requestOf(input));
+    return this.#withSession(session, () => this.#changeSession(session, path, input, canWrite));
+  }
+
+  #withSession<T>(session: string, change: () => Promise<T>): Promise<T> {
+    const result = (this.#gates.get(session) ?? Promise.resolve()).then(change);
+    const gate = result.then(() => {}, () => {});
+    this.#gates.set(session, gate);
+    return result.finally(() => { if (this.#gates.get(session) === gate) this.#gates.delete(session); });
+  }
+
+  async #changeSession(session: string, path: string, input: Input, canWrite: () => boolean) {
     this.#checkWrite(canWrite);
+    const current = this.#runs.get(session);
+    if (path === "/delete-session") {
+      if (input.confirm !== session) throw new StandaloneControlError("Type the session name to confirm transcript deletion.");
+      if (current?.view.status === "running")
+        throw new StandaloneControlError("Wait for this session to finish or cancel its run before deleting it.", 409);
+      const deleted = await deleteStandaloneCodingSession(session, this.dependencies, () => {
+        this.#checkWrite(canWrite);
+        this.#runs.delete(session);
+      });
+      this.#runs.delete(session);
+      return { session, deleted };
+    }
     const requestId = requestOf(input);
     const identity = { session, requestId };
-    const current = this.#runs.get(session);
     if (path === "/cancel" && current?.view.status === "running") {
       if (current.view.requestId !== requestId) throw new StandaloneControlError("Another request is active in this session.", 409);
       current.abort.abort();
@@ -189,14 +212,22 @@ export class StandaloneCodingControl {
   async #inspect(session: string, requestId?: string) {
     const active = this.#runs.get(session)?.view;
     if (active?.status === "running") return { active, requests: [] };
+    const relevant = active && (!requestId || active.requestId === requestId) ? active : undefined;
+    const refused = relevant?.status === "failed" && !relevant.admitted;
     try {
       const { identity, requests } = await listStandaloneCodingRequests(session, this.dependencies);
       const selected = requestId && requests.some((request) => request.requestId === requestId) ? requestId : undefined;
       const pi = await inspectStandaloneCodingSession(session, selected, this.dependencies);
-      return { identity, requests, pi, ...(active && (!requestId || active.requestId === requestId) ? { active } : {}) };
+      const hasCurrentRequest = relevant && requests.some((request) => request.requestId === relevant.requestId);
+      return { identity, requests, pi, ...(refused || hasCurrentRequest ? { active: relevant } : {}) };
     } catch (error) {
-      if (active && (!requestId || active.requestId === requestId)) return { active, requests: [] };
+      if (error instanceof CodingSessionDeletingError) {
+        if (this.#runs.get(session)?.view === active) this.#runs.delete(session);
+        return { state: "deleting", requests: [] };
+      }
       if (error instanceof CodingSessionBusyError) return { state: "busy", requests: [] };
+      if (refused) return { active: relevant, requests: [] };
+      if (error instanceof CodingSessionMissingError && this.#runs.get(session)?.view === active) this.#runs.delete(session);
       throw error;
     }
   }
@@ -216,7 +247,6 @@ export class StandaloneCodingControl {
           liveAnswer: (answer) => { view.liveAnswer = answer; },
           taskProgress: (progress) => { view.taskProgress = progress; },
         });
-        view.receipt = receipt;
         view.status = receipt.status;
       } catch (error) {
         view.status = "failed";

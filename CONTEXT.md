@@ -32,6 +32,9 @@ Standalone transcripts share per-user storage between the CLI and the local
 Mac and web apps. Only the local operator can inspect their saved prompts and
 source or start, resume, and cancel requests. The app recovers the workspace
 and model binding from Pi's stored agent configuration.
+Owners can explicitly delete a standalone transcript under its SQLite lease.
+A deletion marker prevents opening the transcript after an interrupted erase.
+The app can retry deletion while keeping the ownership file stable.
 Compaction reduces active context while preserving the original transcript.
 The project control plane scopes credentials, members, worker runs, and
 review decisions to registered projects. Independent package review uses Pi
@@ -288,6 +291,10 @@ rejects on any warning class — doctor is the only strict surface.
   conflict and stage a reviewed resolution against its current Git state.
   Explicit continue or abort leaves publication to the next sync. Completed
   sync and rebase operations reconcile the existing keyword and graph cache.
+- An optional GitHub credential is stored in per-user app data for an exact
+  brain and app-managed origin. Direct local sync passes it to the Git fetch
+  and push subprocesses with HTTPS verification and redirects disabled.
+  The browser reads only its saved status and repository binding.
 - Seeding is append-only "ensure these lines exist" (user lines are never
   rewritten): `.gitignore` gets `.okb/`, `/viz.html`, `db_only/`;
   `.gitattributes` gets `* text=auto eol=lf` — Windows `autocrlf` must never

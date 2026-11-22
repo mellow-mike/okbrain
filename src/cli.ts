@@ -201,6 +201,7 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
   let local: LocalContext | undefined;
   try {
     local = openLocalContext(bundle, true, readonly);
+    local.ctx.allowSavedSyncCredential = true;
     local.ctx.brain = brainName;
     let written = false;
     const result = !json && raw.stream === true && op.stream && op.renderStreamFooter

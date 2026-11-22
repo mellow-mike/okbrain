@@ -89,6 +89,10 @@ test("local coding opens existing standalone Pi receipts and admits app requests
     const project = await call<Project>("/projects", { workspace, title: "Separate team space", provider: "openai", model: "standalone-test" });
     const member = await call<{ token: string }>("/projects/" + project.id + "/members", { name: "reviewer" });
     expect((await request("/standalone", undefined, member.token)).status).toBe(403);
+    const erase = { session: identity.session, confirm: identity.session };
+    expect((await request("/standalone/delete-session", erase, member.token)).status).toBe(403);
+    expect((await apiClient(readonly.url).request("/standalone/delete-session", erase)).status).toBe(403);
+    expect((await request("/standalone/delete-session", { session: identity.session, confirm: "another-session" })).status).toBe(400);
     expect((await request("/standalone/inspect", { session: "../projects" })).status).toBe(400);
     const first = await call<View>("/standalone/inspect", { session: identity.session, requestId: "cli-original" });
     expect(first.requests).toEqual([expect.objectContaining({ requestId: "cli-original", status: "done" })]);
@@ -138,6 +142,7 @@ test("local coding opens existing standalone Pi receipts and admits app requests
     const pending = { session: identity.session, requestId: "cancel-app-request" };
     await call("/standalone/run", { ...approved, ...pending });
     await modelStarted.promise;
+    expect((await request("/standalone/delete-session", erase)).status).toBe(409);
     await call("/standalone/cancel", pending);
     const cancelled = await waitFor(
       () => call<View>("/standalone/inspect", pending),
@@ -145,6 +150,15 @@ test("local coding opens existing standalone Pi receipts and admits app requests
     );
     expect(cancelled.active).toMatchObject({ status: "unanswered", cancelled: true });
     expect(cancelled.pi?.pendingRequestIds).toEqual([]);
+    expect(await call<{ session: string; deleted: boolean }>("/standalone/delete-session", erase)).toEqual({ session: identity.session, deleted: true });
+    expect(await call<{ sessions: unknown[] }>("/standalone")).toMatchObject({ sessions: [] });
+    const erased = await request("/standalone/inspect", { session: identity.session, requestId: task.requestId });
+    expect(erased.status).toBe(404);
+    expect(await erased.text()).not.toContain("App follow-up answer.");
+    expect((await request("/standalone/resume", { ...pending, approved: true })).status).toBe(404);
+    expect(await call<{ session: string; deleted: boolean }>("/standalone/delete-session", erase)).toEqual({ session: identity.session, deleted: false });
+    expect(await Bun.file(join(stateDir, `session-${identity.session}`, "transcript.sqlite")).exists()).toBe(false);
+    expect(await Bun.file(join(stateDir, `session-${identity.session}`, "owner.sqlite")).exists()).toBe(true);
     expect(faux.state.callCount).toBe(3);
   } finally {
     await Promise.all([api.stop(), readonly.stop()]);
@@ -187,6 +201,7 @@ test("the local coding app resumes an interrupted standalone request after the w
     const { call, request } = apiClient(api.url);
     expect(await call("/standalone")).toMatchObject({ sessions: [{ session: "legacy", state: "busy" }] });
     expect(await call<{ state: "busy"; requests: unknown[] }>("/standalone/inspect", identity)).toEqual({ state: "busy", requests: [] });
+    expect((await request("/standalone/delete-session", { session: identity.session, confirm: identity.session })).status).toBe(409);
     child.kill("SIGKILL");
     await child.exited;
     await rm(workspace, { recursive: true, force: true });

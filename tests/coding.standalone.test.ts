@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
-import { copyFile, link, mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, link, mkdir, mkdtemp, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  CodingSessionBusyError, getCodingSessionStatus, getStandaloneCodingIdentity, inspectStandaloneCodingSession,
+  CodingSessionBusyError, CodingSessionDeletingError, CodingSessionMissingError, deleteStandaloneCodingSession,
+  getCodingSessionStatus, getStandaloneCodingIdentity, inspectStandaloneCodingSession,
   listStandaloneCodingRequests, listStandaloneCodingSessions, runCodingSession,
 } from "../src/core/coding/durable.ts";
 import { selectRepositoryContext } from "../src/core/coding/repository-context.ts";
@@ -80,6 +81,89 @@ test("identifies busy sessions from the existing SQLite lease", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("deletion respects a CLI process lease and never opens a marked transcript or leftover WAL", async () => {
+  const { root, options, dependencies, faux } = await fixture();
+  const script = `
+    import { createModels, fauxProvider } from "@earendil-works/pi-ai";
+    import { runCodingSession } from "./src/core/coding/durable.ts";
+    const { options, stateDir } = JSON.parse(process.argv.at(-1));
+    const models = createModels();
+    const faux = fauxProvider({provider: options.provider, models: [{ id: options.model }]});
+    models.setProvider(faux.provider);
+    const keepAlive = setInterval(() => {}, 1000);
+    faux.setResponses([() => {
+      console.log("session-leased");
+      return new Promise(() => {});
+    }]);
+    try { await runCodingSession({...options, prompt: "Private request in the interrupted WAL"}, {stateDir, models}); }
+    finally { clearInterval(keepAlive); }
+  `;
+  const child = Bun.spawn([process.execPath, "-e", script, "--", JSON.stringify({ options, stateDir: dependencies.stateDir })], {
+    cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "inherit",
+  });
+  const setupTimeout = setTimeout(() => child.kill("SIGKILL"), 8000);
+  try {
+    try {
+      const reader = child.stdout.getReader();
+      const first = await reader.read();
+      reader.releaseLock();
+      expect(new TextDecoder().decode(first.value).trim()).toBe("session-leased");
+      expect(await listStandaloneCodingSessions(dependencies)).toEqual([{ session: options.session, state: "busy" }]);
+      await expect(deleteStandaloneCodingSession(options.session, dependencies)).rejects.toBeInstanceOf(CodingSessionBusyError);
+    } finally {
+      clearTimeout(setupTimeout);
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+
+    const directory = join(dependencies.stateDir, "session-legacy");
+    const owner = await stat(join(directory, "owner.sqlite"));
+    const database = join(directory, "transcript.sqlite");
+    const wal = database + "-wal";
+    expect((await stat(wal)).size).toBeGreaterThan(32);
+    expect(await Bun.file(database).exists()).toBe(true);
+    await writeFile(join(directory, "deleting"), "", { flag: "wx", mode: 0o600 });
+    const transcriptFiles = async () => (await readdir(directory)).filter((name) => !name.startsWith("owner.sqlite")).sort();
+    const markedFiles = await transcriptFiles();
+    expect(await listStandaloneCodingSessions(dependencies)).toEqual([{ session: options.session, state: "deleting" }]);
+    await expect(inspectStandaloneCodingSession(options.session, options.requestId, dependencies)).rejects.toBeInstanceOf(CodingSessionDeletingError);
+    await expect(runCodingSession(options, dependencies)).rejects.toBeInstanceOf(CodingSessionDeletingError);
+    await expect(runCodingSession({ ...options, prompt: "A new request must wait for deletion" }, dependencies))
+      .rejects.toBeInstanceOf(CodingSessionDeletingError);
+    expect(await transcriptFiles()).toEqual(markedFiles);
+
+    await rm(database);
+    expect(await Bun.file(wal).exists()).toBe(true);
+    expect(await deleteStandaloneCodingSession(options.session, dependencies)).toBe(true);
+    expect(await deleteStandaloneCodingSession(options.session, dependencies)).toBe(false);
+    expect(await listStandaloneCodingSessions(dependencies)).toEqual([]);
+    await expect(runCodingSession(options, dependencies)).rejects.toBeInstanceOf(CodingSessionMissingError);
+    expect(await readdir(directory)).toEqual(["owner.sqlite"]);
+    expect((await stat(join(directory, "owner.sqlite"))).ino).toBe(owner.ino);
+    expect(faux.state.callCount).toBe(0);
+
+    faux.setResponses([fauxAssistantMessage("Explicitly approved replacement.")]);
+    const next = await runCodingSession({ ...options, requestId: "fresh", prompt: "Start a new session" }, dependencies);
+    expect(next).toMatchObject({ status: "done", text: "Explicitly approved replacement." });
+    expect((await listStandaloneCodingRequests(options.session, dependencies)).requests).toEqual([
+      { requestId: "fresh", kind: "request", status: "done" },
+    ]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 15_000);
+
+test("a revoked deletion confirmation leaves the standalone transcript readable", async () => {
+  const { root, options, dependencies, faux } = await fixture();
+  try {
+    faux.setResponses([fauxAssistantMessage("Saved answer")]);
+    await runCodingSession({ ...options, prompt: "Saved task" }, dependencies);
+    await expect(deleteStandaloneCodingSession(options.session, dependencies, () => { throw new Error("Mount changed"); }))
+      .rejects.toThrow("Mount changed");
+    expect((await inspectStandaloneCodingSession(options.session, options.requestId, dependencies)).request?.receipt)
+      .toMatchObject({ text: "Saved answer" });
+    expect(await deleteStandaloneCodingSession(options.session, dependencies)).toBe(true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("returns the archived repository preview exactly after tracked source changes", async () => {
   const { root, options, dependencies, faux } = await fixture();
   try {
@@ -117,6 +201,8 @@ test("rejects aliases to private standalone database paths and isolates invalid 
       { session: "legacy", state: "ready" }, { session: "other", state: "unavailable" },
     ]);
     await expect(inspectStandaloneCodingSession("other", options.requestId, dependencies)).rejects.toThrow("regular private files");
+    await expect(deleteStandaloneCodingSession("other", dependencies)).rejects.toThrow("regular private files");
+    expect(await Bun.file(copied).exists()).toBe(true);
     const unsafeLease = join(dependencies.stateDir, "session-lease");
     await mkdir(unsafeLease);
     await link(copied, join(unsafeLease, "owner.sqlite"));

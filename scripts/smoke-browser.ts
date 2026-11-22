@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -292,6 +292,43 @@ try {
   await page.getByRole("heading", { name: "Projects and decisions starter guide", exact: true }).waitFor();
   assert.match(await Bun.file(join(root, "field-notes", "start-here.md")).text(), /starter_template: projects/);
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
+
+  const privateSync = page.getByRole("region", { name: "Git sync", exact: true });
+  const privateGitHub = privateSync.locator("[data-sync-github]");
+  assert.equal(await privateGitHub.isVisible(), false);
+  await privateSync.getByLabel("Origin HTTPS URL", { exact: true }).fill("https://github.com/fixture-owner/private-knowledge.git");
+  await privateSync.getByRole("button", { name: "Connect origin", exact: true }).click();
+  await privateGitHub.getByText("GitHub credentials", { exact: true }).click();
+  await privateGitHub.getByText("fixture-owner/private-knowledge", { exact: true }).waitFor();
+  const login = privateGitHub.getByLabel("GitHub login", { exact: true });
+  const tokenInput = privateGitHub.getByLabel("GitHub personal access token", { exact: true });
+  const fakeGitHubTokens = ["github_pat_" + "a".repeat(36), "github_pat_" + "b".repeat(36)];
+  assert.equal(await tokenInput.getAttribute("type"), "password");
+  for (const [index, fakeToken] of fakeGitHubTokens.entries()) {
+    await login.fill("fixture-owner");
+    await tokenInput.fill(fakeToken);
+    const savedCredential = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/brains/sync-github" &&
+      response.request().postDataJSON().action === "save");
+    await privateGitHub.getByRole("button", { name: index === 0 ? "Save GitHub credential" : "Replace GitHub credential", exact: true }).click();
+    const saved = await savedCredential;
+    const receipt = await saved.text();
+    assert.ok(saved.ok(), "GitHub credential save returned " + saved.status() + " " + receipt.replaceAll(fakeToken, "[credential]"));
+    assert.equal(receipt.includes(fakeToken), false);
+    await privateGitHub.getByText("GitHub credential saved.", { exact: true }).waitFor();
+    assert.equal(await tokenInput.inputValue(), "");
+  }
+  const fieldBrain = join(root, "field-notes");
+  const fieldConfig = await Bun.file(join(fieldBrain, ".git", "config")).text();
+  for (const fakeToken of fakeGitHubTokens) assert.equal(fieldConfig.includes(fakeToken), false);
+  assert.match(fieldConfig, /url = https:\/\/github\.com\/fixture-owner\/private-knowledge\.git/u);
+  const changedGitHub = Bun.spawnSync(["git", "-C", fieldBrain, "remote", "set-url", "origin", "https://example.invalid/inactive.git"]);
+  assert.equal(changedGitHub.exitCode, 0, changedGitHub.stderr.toString());
+  await privateSync.getByRole("button", { name: "Refresh Git status", exact: true }).click();
+  await privateGitHub.getByText("The saved credential for fixture-owner/private-knowledge is inactive.", { exact: true }).waitFor();
+  assert.equal(await tokenInput.isVisible(), false);
+  await privateGitHub.getByRole("button", { name: "Remove GitHub credential", exact: true }).click();
+  await privateGitHub.getByText("GitHub credential removed.", { exact: true }).waitFor();
+  assert.equal(await privateGitHub.getByRole("button", { name: "Remove GitHub credential", exact: true }).isVisible(), false);
 
   await page.getByLabel("Local port", { exact: true }).fill("0");
   await page.getByRole("button", { name: "Start MCP HTTP" }).click();
@@ -705,7 +742,7 @@ try {
   }
   await page.getByRole("combobox", { name: "Saved session" }).selectOption("");
   await page.getByLabel("Absolute workspace path").fill(workspace);
-  await page.getByLabel("Session name").fill("from-browser");
+  await page.getByLabel("Session name", { exact: true }).fill("from-browser");
   await page.getByRole("combobox", { name: "Source", exact: true }).selectOption("repository");
   await page.getByLabel("Search source").fill("sourceMarker");
   const previewStandalone = page.getByRole("button", { name: "Preview source", exact: true });
@@ -734,6 +771,9 @@ try {
   await sendStandalone.click();
   await page.getByRole("heading", { name: "Current Pi tasks", exact: true }).waitFor();
   await page.getByText("Model response · 1 running", { exact: true }).waitFor();
+  const deleteStandalone = page.locator("[data-delete-session]");
+  await deleteStandalone.getByText("Delete standalone session", { exact: true }).click();
+  assert.equal(await deleteStandalone.getByLabel("Type the session name to confirm", { exact: true }).isEnabled(), false);
   finishStandalone.resolve();
   await page.getByText("Reviewed browser source.", { exact: true }).waitFor();
   assert.equal(await page.getByRole("heading", { name: "Current Pi tasks", exact: true }).count(), 0);
@@ -744,6 +784,37 @@ try {
   await page.getByRole("combobox", { name: "Saved session" }).selectOption("existing-cli");
   await page.getByRole("combobox", { name: "Saved request" }).selectOption("cli-complete");
   await page.getByText("Saved CLI answer.", { exact: true }).waitFor();
+  await page.getByText("Saved task and source", { exact: true }).click();
+  await page.getByText("Saved CLI task.", { exact: true }).waitFor();
+  const existingCliDirectory = join(standaloneState, "session-existing-cli");
+  assert.ok((await readdir(existingCliDirectory)).includes("transcript.sqlite"));
+  await deleteStandalone.getByText("Delete standalone session", { exact: true }).click();
+  const deleteConfirmation = deleteStandalone.getByLabel("Type the session name to confirm", { exact: true });
+  const deleteSession = deleteStandalone.getByRole("button", { name: "Delete session", exact: true });
+  await deleteConfirmation.fill("wrong-session");
+  assert.equal(await deleteSession.isEnabled(), false);
+  await deleteConfirmation.fill("existing-cli");
+  const deletionRequested = Promise.withResolvers<void>();
+  const releaseDeletion = Promise.withResolvers<void>();
+  await page.route("**/api/coding/standalone/delete-session", async (route) => {
+    deletionRequested.resolve();
+    await releaseDeletion.promise;
+    await route.continue();
+  }, { times: 1 });
+  try {
+    const deleted = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding/standalone/delete-session");
+    await deleteSession.click();
+    await deletionRequested.promise;
+    assert.equal(await page.getByText("Saved CLI task.", { exact: true }).count(), 0);
+    assert.equal(await page.getByText("Saved CLI answer.", { exact: true }).count(), 0);
+    releaseDeletion.resolve();
+    assert.deepEqual((await (await deleted).json()).result, { session: "existing-cli", deleted: true });
+  } finally { releaseDeletion.resolve(); }
+  await page.getByText("Deleted standalone session existing-cli.", { exact: true }).waitFor();
+  assert.deepEqual(await readdir(existingCliDirectory), ["owner.sqlite"]);
+  const savedSessions = page.getByRole("combobox", { name: "Saved session" });
+  assert.equal(await savedSessions.locator('option[value="existing-cli"]').count(), 0);
+  assert.equal(await savedSessions.locator('option[value="from-browser"]').count(), 1);
 
   async function codingFixture<T>(path: string, data: unknown): Promise<T> {
     const response = await fetch(new URL("api/coding" + path, server.url), {

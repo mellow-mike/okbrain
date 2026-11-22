@@ -12,7 +12,7 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, realpath, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, realpath, stat, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { dataDir } from "../config.ts";
 import { ensureExtensionCapableSqlite } from "../engine/custom-sqlite.ts";
@@ -58,6 +58,7 @@ const instructions = [
 export class CodingError extends Error {}
 export class CodingSessionBusyError extends CodingError {}
 export class CodingSessionMissingError extends CodingError {}
+export class CodingSessionDeletingError extends CodingError {}
 export type CodingLiveAnswer = { text: string; truncated: boolean };
 
 export interface CodingSessionOptions {
@@ -352,6 +353,8 @@ export function hasCodingCredential(provider: CodingProvider, dependencies: Codi
 type StandaloneState = Pick<CodingDependencies, "stateDir">;
 const codingStateRoot = ({ stateDir }: StandaloneState) => stateDir ?? join(dataDir(), "coding");
 const sessionDirectoryName = (name: string) => `session-${name}`;
+const sqliteFiles = (path: string) => ["", "-wal", "-shm", "-journal"].map((suffix) => path + suffix);
+const sessionMissing = (name: string) => new CodingSessionMissingError(`No coding session ${name} exists.`);
 
 async function statIfPresent(path: string) {
   try { return await lstat(path); }
@@ -360,7 +363,14 @@ async function statIfPresent(path: string) {
   }
 }
 
-async function openCodingStorage(
+async function privateFileInfo(files: string[]) {
+  const infos = await Promise.all(files.map(statIfPresent));
+  if (infos.some((info) => info && (!info.isFile() || info.nlink !== 1)))
+    throw new CodingError("Coding session databases must be regular private files.");
+  return infos;
+}
+
+async function openCodingLease(
   name: string,
   dependencies: StandaloneState,
   create: boolean,
@@ -369,28 +379,27 @@ async function openCodingStorage(
   const state = codingStateRoot(dependencies);
   const directory = join(state, sessionDirectoryName(name));
   const transcript = join(directory, "transcript.sqlite");
-  const missing = () => new CodingSessionMissingError(`No coding session ${name} exists.`);
+  const deleting = join(directory, "deleting");
   try {
     if (create && !await statIfPresent(state)) await mkdir(state, { recursive: true, mode: 0o700 });
     const stateInfo = await statIfPresent(state);
-    if (!stateInfo) throw missing();
+    if (!stateInfo) throw sessionMissing(name);
     if (!stateInfo.isDirectory()) throw new CodingError("Coding session state must be a local directory.");
     if (create) await mkdir(directory, { recursive: true, mode: 0o700 });
     const directoryInfo = await statIfPresent(directory);
-    if (!directoryInfo) throw missing();
+    if (!directoryInfo) throw sessionMissing(name);
     if (!directoryInfo.isDirectory()) throw new CodingError("Coding session state must be a directory.");
     if (process.platform !== "win32" && (directoryInfo.mode & 0o077) !== 0) await chmod(directory, 0o700);
 
-    const files = ["transcript.sqlite", "owner.sqlite"].flatMap(file =>
-      ["", "-wal", "-shm", "-journal"].map(suffix => join(directory, file + suffix)));
-    const infos = await Promise.all(files.map(statIfPresent));
-    if (infos.some(info => info && (!info.isFile() || info.nlink !== 1)))
-      throw new CodingError("Coding session databases must be regular private files.");
-    if (!create && !infos[0]) throw missing();
-
+    const files = sqliteFiles(transcript);
+    const [owner] = await privateFileInfo(sqliteFiles(join(directory, "owner.sqlite")));
+    if (!create && !owner && !(await privateFileInfo([deleting, ...files])).some(Boolean)) throw sessionMissing(name);
     const lease = acquireSession(directory, name);
-    try { return { storage: await SqliteStorage.open(openDurableDatabase(transcript, create)), lease }; }
-    catch (error) { lease.close(); throw error; }
+    try {
+      const [marker, main, ...sidecars] = await privateFileInfo([deleting, ...files]);
+      return { lease, transcript, files, deleting, marked: Boolean(marker), hasTranscript: Boolean(main),
+        hasFiles: Boolean(main) || sidecars.some(Boolean) };
+    } catch (error) { lease.close(); throw error; }
   } catch (error) {
     if (error instanceof CodingError) throw error;
     throw new CodingError(`Could not open Pi Durable session ${name}.`, { cause: error });
@@ -403,14 +412,21 @@ async function withCodingStorage<T>(
   create: boolean,
   use: (storage: SqliteStorage) => Promise<T>,
 ): Promise<T> {
-  const { storage, lease } = await openCodingStorage(name, dependencies, create);
-  try { return await use(storage); }
-  finally {
-    // A harness closes its storage too. The SDK's storage close is idempotent,
-    // so this also covers callbacks that fail before a harness owns it.
-    try { await storage.close(context); }
-    finally { lease.close(); }
-  }
+  const session = await openCodingLease(name, dependencies, create);
+  try {
+    if (session.marked) throw new CodingSessionDeletingError(`Finish deleting coding session ${name} before opening it.`);
+    if (!session.hasTranscript) {
+      if (session.hasFiles) throw new CodingError(`Delete the remaining SQLite files for coding session ${name} before opening it.`);
+      if (!create) throw sessionMissing(name);
+    }
+    const database = openDurableDatabase(session.transcript, create);
+    let storage: SqliteStorage;
+    try { storage = await SqliteStorage.open(database); }
+    catch (error) { await database.close(); throw error; }
+    // A harness closes its storage too. The SDK's storage close is idempotent.
+    try { return await use(storage); }
+    finally { await storage.close(context); }
+  } finally { session.lease.close(); }
 }
 
 async function withCodingSession<T>(
@@ -621,7 +637,8 @@ export async function runCodingSession(
   options: CodingSessionOptions,
   dependencies: CodingDependencies = {},
 ): Promise<CodingSessionResult> {
-  return withCodingSession(options, dependencies, true, async ({ harness, storage, root, workspace, provider, budget, history, sourceTool }) => {
+  const hasNewInput = options.prompt !== undefined || dependencies.preparedInput !== undefined;
+  return withCodingSession(options, dependencies, hasNewInput, async ({ harness, storage, root, workspace, provider, budget, history, sourceTool }) => {
     const identity = { session: options.session, requestId: options.requestId };
     const existing = await storage.submissionByRequest(ROOT_CONVERSATION_ID, options.requestId, context);
     const packageTask = await packageReviewTask(harness, options.requestId, context);
@@ -632,7 +649,6 @@ export async function runCodingSession(
       const task = await harness.getTask(packageTask, context);
       if (task?.state.status === "terminal") return { ...identity, ...packageReviewReceipt(task.state.outcome) };
     }
-    const hasNewInput = options.prompt !== undefined || dependencies.preparedInput !== undefined;
     if (!existing && !packageTask && !hasNewInput) {
       throw new CodingError(`No saved request ${options.requestId} exists in coding session ${options.session}.`);
     }
@@ -890,7 +906,7 @@ export interface StandaloneCodingIdentity {
 }
 
 export type StandaloneCodingSessionSummary = ({ state: "ready" } & StandaloneCodingIdentity)
-  | { session: string; state: "busy" | "unavailable" };
+  | { session: string; state: "busy" | "deleting" | "unavailable" };
 
 export interface StandaloneCodingRequestSummary {
   requestId: string;
@@ -942,10 +958,45 @@ export async function listStandaloneCodingSessions(dependencies: StandaloneState
     catch (error) {
       // Aborted invocations may have created an empty directory before admission.
       if (!(error instanceof CodingSessionMissingError))
-        sessions.push({ session, state: error instanceof CodingSessionBusyError ? "busy" : "unavailable" });
+        sessions.push({ session, state: error instanceof CodingSessionBusyError ? "busy" :
+          error instanceof CodingSessionDeletingError ? "deleting" : "unavailable" });
     }
   }
   return sessions;
+}
+
+/** Delete only the standalone transcript, retaining the SQLite cross-process lease anchor. */
+export async function deleteStandaloneCodingSession(
+  name: string,
+  dependencies: StandaloneState = {},
+  authorize?: () => void,
+): Promise<boolean> {
+  const session = await openCodingLease(name, dependencies, false).catch((error: unknown) => {
+    if (error instanceof CodingSessionMissingError) return null;
+    throw error;
+  });
+  if (!session) return false;
+  try {
+    if (!session.hasFiles && !session.marked) return false;
+    authorize?.();
+    try {
+      if (!session.marked) {
+        const marker = await open(session.deleting, "wx", 0o600);
+        try { await marker.sync(); }
+        finally { await marker.close(); }
+      }
+      // Keep the marker until every sidecar and the database are gone. All openers
+      // check it under the same lease before opening a transcript or creating one.
+      const [main, ...sidecars] = session.files;
+      for (const file of [...sidecars, main!]) {
+        await unlink(file).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+      }
+      await unlink(session.deleting);
+      return true;
+    } catch (error) {
+      throw new CodingError(`Could not finish deleting coding session ${name}.`, { cause: error });
+    }
+  } finally { session.lease.close(); }
 }
 
 /** Catalog request IDs and state without opening a harness or materializing transcript entries. */
