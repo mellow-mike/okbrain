@@ -840,8 +840,10 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     url.searchParams.get("token");
   if (!tokenMatches(presented, opts.token))
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
-  const ownerFileAction = url.pathname.startsWith("/api/op/computation_") ||
-    ["/api/op/export_markdown", "/api/op/inbox_file", "/api/op/keep_private", "/api/op/cache_settings"].includes(url.pathname);
+  const recoveryAction = url.pathname === "/api/op/sync_recovery";
+  const ownerFileAction = recoveryAction || url.pathname.startsWith("/api/op/computation_") ||
+    ["/api/op/export_markdown", "/api/op/inbox_file", "/api/op/keep_private", "/api/op/cache_settings",
+      "/api/op/sync_settings"].includes(url.pathname);
   if (ownerFileAction) {
     if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
       return json(401, { error: "missing or invalid local app token" }, cors);
@@ -919,7 +921,9 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     if (!op) return json(404, { error: `unknown op: ${m[1]}` }, cors);
     let raw: unknown;
     try {
-      const text = ownerFileAction ? (await readUpload(req, 16 * 1024, "Request exceeds 16 KiB.")).toString("utf8") : await req.text();
+      // JSON escaping can expand the approved 256 KiB merged text before it reaches the core.
+      const text = ownerFileAction ? (await readUpload(req, recoveryAction ? 2 * 1024 * 1024 : 16 * 1024,
+        recoveryAction ? "Git recovery request exceeds 2 MiB." : "Request exceeds 16 KiB.")).toString("utf8") : await req.text();
       raw = text === "" ? {} : JSON.parse(text);
     } catch (error) {
       if (error instanceof UploadTooLarge) return json(413, errBody(error), cors);
@@ -966,6 +970,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
         if (path === "/api/plan/answer") server.timeout(req, 150);
         if (path === "/api/ask/stream") server.timeout(req, 0);
         if (path.startsWith("/api/coding/")) server.timeout(req, 65);
+        if (path === "/api/op/sync" || path === "/api/op/sync_recovery") server.timeout(req, 260);
         return handleRequest(req, { bundle, servedBrain: opts.servedBrain, watches, port: server.port!, token, readonly, plan, coding, standalone, team, notion, mcp });
       },
     });

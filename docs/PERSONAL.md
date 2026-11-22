@@ -146,7 +146,17 @@ okb serve --open
 okb export-viz
 ```
 
-The local GUI can browse, search, and edit conversation drafts in its selected bundle. **Settings → Sync now** accepts an optional commit message and uses an automatic timestamped message when the field is blank. Sync keeps untracked `db_only/` files out of Git and omits private note metadata from the shared root index and log. Remote sync stops when Git history still contains a `db_only/` directory, even after its files have been deleted. When managing the bundle directly with Git, verify that `db_only/` is ignored and untracked. **Settings → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`. Select **Embed app fonts in graph export** or pass `--fonts` to include the app's typefaces for offline viewing.
+The local app can browse, search, and edit conversation drafts in its selected bundle. **Settings → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`. Select **Embed app fonts in graph export** or pass `--fonts` to include the app's typefaces for offline viewing.
+
+### Set up Git sync
+
+In the Mac or web app, open **Settings → Git sync** for a writable brain. Set the name and email Git should record on commits for this brain. Saving identity creates a local repository if needed. Choose **Sync now** to make a local commit. Enter a commit message or leave it blank to use the timestamped default.
+
+For remote sync, create an empty repository with your Git host. Add its HTTPS URL as the brain’s `origin` and review the displayed fetch and push destinations. Saving changes the local repository configuration. Choose **Sync now** to contact the host. For a private repository, Git uses the credential helper configured on your computer. Keep credentials out of the remote URL. If Git cannot publish to the remote, the local commit remains available for retry. [Git credentials](https://git-scm.com/docs/gitcredentials) · [Git remotes](https://git-scm.com/docs/git-remote)
+
+Sync keeps untracked `db_only/` files out of Git and omits private note metadata from the shared root index and log. Remote sync stops when Git history still contains a `db_only/` directory, even after its files have been deleted.
+
+If Git pauses a rebase, open the conflict in **Git sync**. For regular UTF-8 files up to 256 KiB, compare the saved local commit with the upstream version, then choose a version or edit merged text. After resolving each conflict, continue the rebase. You may also abort the rebase to restore the original branch, which discards conflict-resolution edits from that rebase. Review the result before using **Sync now** to publish it. The app refreshes the existing keyword and graph index after the rebase finishes. [Git rebase](https://git-scm.com/docs/git-rebase)
 
 ### Export notes to Markdown or Obsidian
 

@@ -93,7 +93,10 @@ import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/scor
 import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken, publishDesktopAddress } from "./serve-token.ts";
 import { computeStats, type BrainStats } from "./stats.ts";
 import { JobLockError, runJobs, type Job, type JobResult } from "./jobs/worker.ts";
-import { protectUnsharedNote, syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
+import {
+  protectUnsharedNote, syncBundle, syncRebaseInProgress, syncSettings, syncStatus, withSyncRepository, type SyncResult, type SyncStatus,
+} from "./sync.ts";
+import { syncRecovery } from "./sync-recovery.ts";
 import { buildVizGraph, exportViz, type VizExport, type VizGraph } from "./viz/export.ts";
 
 export type Scope = "read" | "write" | "admin";
@@ -309,6 +312,22 @@ async function reindex(ctx: OpContext, ids: string[]): Promise<void> {
     log.warn("vector refresh failed — run `okb embed` to catch up", {
       error: (e as Error).message,
     });
+  }
+}
+
+/** Refresh only the local search and graph cache after Git changes the bundle. */
+async function refreshSyncIndex(ctx: OpContext): Promise<{ indexWarning?: string }> {
+  try {
+    await withSyncRepository(ctx.bundle, async (root) => {
+      if (await syncRebaseInProgress(root)) return;
+      await withIndexWrite(root, async () => {
+        if (await ctx.hasIndex()) await buildIndex(root, await ctx.engine());
+      });
+    });
+    return {};
+  } catch (error) {
+    log.warn("Git finished but the search index refresh failed", { error: (error as Error).message });
+    return { indexWarning: "Git finished. Use Re-index in Settings to refresh search and the graph." };
   }
 }
 
@@ -1694,10 +1713,11 @@ export const operations: readonly Operation[] = [
       { name: "message", type: "string", description: "commit message (default: okb sync <timestamp>)" },
       { name: "status", type: "boolean", description: "report repo state without changing anything" },
     ],
-    handler: (ctx, p) =>
-      p.status === true
-        ? syncStatus(ctx.bundle)
-        : syncBundle(ctx.bundle, p.message as string | undefined),
+    handler: async (ctx, p) => {
+      if (p.status === true) return syncStatus(ctx.bundle);
+      const result = await syncBundle(ctx.bundle, p.message as string | undefined);
+      return result.pulled || result.committed ? { ...result, ...await refreshSyncIndex(ctx) } : result;
+    },
     render: (r) => {
       if ("repo" in (r as object)) {
         const s = r as SyncStatus;
@@ -1705,7 +1725,7 @@ export const operations: readonly Operation[] = [
         const up = s.ahead === null ? "no upstream" : `ahead ${s.ahead}, behind ${s.behind}`;
         return `on ${s.branch ?? "(detached)"} — ${s.dirty} dirty, remote ${s.remote ?? "none"}, ${up}`;
       }
-      const s = r as SyncResult;
+      const s = r as SyncResult & { indexWarning?: string };
       const parts: string[] = [];
       if (s.initialized) parts.push("initialized git repo");
       if (s.seeded.length > 0) parts.push(`seeded ${s.seeded.join(", ")}`);
@@ -1713,8 +1733,55 @@ export const operations: readonly Operation[] = [
       if (s.pulled) parts.push("pulled");
       if (s.pushed) parts.push("pushed");
       else if (s.remote === null) parts.push("no remote configured (local-only)");
+      if (s.indexWarning) parts.push(s.indexWarning);
       return parts.join("; ");
     },
+  },
+  {
+    name: "sync_settings",
+    cliName: "sync settings",
+    summary: "Inspect or configure the current brain’s Git repository",
+    scope: "admin",
+    params: [
+      { name: "action", type: "string", required: true, positional: true, description: "status, identity, or origin" },
+      { name: "name", type: "string", description: "repository commit name" },
+      { name: "email", type: "string", description: "repository commit email" },
+      { name: "url", type: "string", description: "credential-free HTTPS origin URL" },
+    ],
+    handler: (ctx, p) => {
+      const action = p.action;
+      if (action !== "status" && action !== "identity" && action !== "origin")
+        throw new OpError("Choose status, identity, or origin.", "bad_params");
+      return syncSettings(ctx.bundle, { action, name: p.name as string | undefined, email: p.email as string | undefined,
+        url: p.url as string | undefined });
+    },
+    render: (result) => JSON.stringify(result, null, 2),
+  },
+  {
+    name: "sync_recovery",
+    cliName: "sync recovery",
+    summary: "Inspect, resolve, continue, or abort a Git sync rebase",
+    scope: "admin",
+    params: [
+      { name: "action", type: "string", required: true, positional: true, description: "status, preview, resolve, continue, or abort" },
+      { name: "path", type: "string", description: "bundle-relative conflicted path" },
+      { name: "approval", type: "string", description: "approval from the current conflict preview" },
+      { name: "choice", type: "string", description: "local, upstream, or manual" },
+      { name: "text", type: "string", stdinFallback: true, description: "replacement text for a manual resolution" },
+      { name: "confirm", type: "boolean", description: "approve the selected action" },
+    ],
+    handler: async (ctx, p) => {
+      const { action, choice } = p;
+      if (action !== "status" && action !== "preview" && action !== "resolve" && action !== "continue" && action !== "abort")
+        throw new OpError("Choose status, preview, resolve, continue, or abort.", "bad_params");
+      if (choice !== undefined && choice !== "local" && choice !== "upstream" && choice !== "manual")
+        throw new OpError("Choose the local or upstream version, or enter merged text.", "bad_params");
+      const result = await syncRecovery(ctx.bundle, { action, choice, path: p.path as string | undefined, approval: p.approval as string | undefined,
+        text: p.text as string | undefined, confirm: p.confirm === true });
+      return !result.inProgress && (action === "abort" || action === "continue")
+        ? { ...result, ...await refreshSyncIndex(ctx) } : result;
+    },
+    render: (result) => JSON.stringify(result, null, 2),
   },
   {
     name: "computation_configure",

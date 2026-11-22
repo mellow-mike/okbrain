@@ -160,13 +160,21 @@ export function normalizeSources(sources: SourceEntry[]): SourceEntry[] {
 const event = (e: ActorEvent): ActorEvent =>
   e.at === undefined ? { by: e.by } : { by: e.by, at: e.at };
 
-async function publishConcept(path: string, bytes: string, mode: number | undefined, expected?: string): Promise<boolean> {
+/** Publish reviewed raw bytes atomically, optionally checking a stronger caller-owned snapshot. */
+export async function publishConcept(
+  path: string,
+  bytes: string,
+  mode: number | undefined,
+  expected?: string,
+  matches?: () => Promise<boolean>,
+): Promise<boolean> {
   const temporary = join(dirname(path), `.okb-write-${randomUUID()}.tmp`);
   try {
     await writeFile(temporary, bytes, { encoding: "utf8", flag: "wx", mode });
+    if (matches && !await matches()) return false;
     if (expected === undefined) await link(temporary, path);
     else {
-      if (readFileSync(path, "utf8") !== expected) return false;
+      if (!matches && readFileSync(path, "utf8") !== expected) return false;
       renameSync(temporary, path);
     }
     return true;

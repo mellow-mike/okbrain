@@ -281,8 +281,13 @@ rejects on any warning class — doctor is the only strict surface.
   `origin` remote is configured, `pull --rebase` + `push` (upstream set on
   first push). `okb sync --status` reports repo/branch/dirty/remote/
   ahead/behind without side effects. Git is spawned by argv only, with
-  `GIT_TERMINAL_PROMPT=0` (a missing credential fails fast, never hangs);
-  missing identity fails with the exact `git config` commands to run.
+  `GIT_TERMINAL_PROMPT=0`. Git uses the user's credential helper.
+- The owner’s Git sync panel manages the standalone brain repository’s
+  identity and can connect a new HTTPS origin. Configuration is local and
+  separate from sending commits. The owner can inspect each active rebase
+  conflict and stage a reviewed resolution against its current Git state.
+  Explicit continue or abort leaves publication to the next sync. Completed
+  sync and rebase operations reconcile the existing keyword and graph cache.
 - Seeding is append-only "ensure these lines exist" (user lines are never
   rewritten): `.gitignore` gets `.okb/`, `/viz.html`, `db_only/`;
   `.gitattributes` gets `* text=auto eol=lf` — Windows `autocrlf` must never

@@ -2331,6 +2331,226 @@ function mountCacheSettings(panel) {
   restore.addEventListener('click', function () { void save('sqlite'); });
 }
 
+function mountGitSync(panel, seq) {
+  var brain = BRAIN;
+  var setup = panel.querySelector('[data-sync-setup]');
+  var identity = panel.querySelector('[data-sync-identity]');
+  var origin = panel.querySelector('[data-sync-origin]');
+  var destinations = panel.querySelector('[data-sync-destinations]');
+  var sync = panel.querySelector('[data-sync-run]');
+  var runButton = sync.querySelector('[type="submit"]');
+  var refreshButton = sync.querySelector('[data-sync-refresh]');
+  var stateLine = panel.querySelector('[data-sync-state]');
+  var feedback = panel.querySelector('[data-sync-feedback]');
+  var recovery = panel.querySelector('[data-sync-recovery]');
+  var settings, rebase, focusAfter, busy = false;
+
+  function active() { return panel.isConnected && !stale(seq) && brain === BRAIN; }
+  function notice(message, error) {
+    feedback.className = error ? 'error' : message ? 'notice' : '';
+    feedback.textContent = message;
+  }
+  function updateButtons() {
+    identity.querySelector('button').disabled = busy;
+    origin.querySelector('button').disabled = busy;
+    refreshButton.disabled = busy;
+    runButton.disabled = busy || !settings?.identityReady || settings.repository === 'unavailable' || !rebase || rebase.inProgress;
+    recovery.querySelectorAll('button, select, textarea').forEach(function (control) { control.disabled = busy; });
+  }
+  async function perform(message, action) {
+    if (busy || !active()) return;
+    busy = true;
+    updateButtons();
+    notice(message);
+    try { await action(); }
+    catch (error) { if (active()) notice(error.message, true); }
+    finally {
+      busy = false;
+      if (active()) {
+        updateButtons();
+        if (focusAfter) focusAfter.focus();
+      }
+      focusAfter = undefined;
+    }
+  }
+
+  function showSettings(next) {
+    if (!active()) return;
+    var first = !settings;
+    settings = next;
+    var available = next.repository !== 'unavailable';
+    stateLine.textContent = next.reason || (next.repository === 'new' ? 'Set a Git identity to start tracking this brain.' :
+      next.identityReady ? 'Git is ready for this brain.' : 'Set a Git identity before syncing.');
+    if (first) setup.open = available && (next.repository === 'new' || !next.identityReady);
+    setup.hidden = !available;
+    identity.elements.name.value = next.name || '';
+    identity.elements.email.value = next.email || '';
+    origin.parentElement.hidden = next.originConfigured;
+    destinations.hidden = !next.originConfigured;
+    destinations.querySelector('[data-sync-fetch]').textContent = next.fetch || 'Configured in Git';
+    destinations.querySelector('[data-sync-push]').textContent = next.push || 'Configured in Git';
+  }
+
+  function version(label, side, open) {
+    var details = document.createElement('details');
+    details.open = open;
+    details.innerHTML = '<summary>' + label + '</summary>' +
+      (side.kind === 'text' ? '<pre class="source-markdown"></pre>' : '<p class="muted"></p>');
+    details.lastElementChild.textContent = side.kind === 'text' ? side.text :
+      side.kind === 'deleted' ? 'File deleted in this version.' : 'Text preview unavailable.';
+    return details;
+  }
+  function showRecovery(next) {
+    if (!active()) return;
+    rebase = next;
+    recovery.hidden = !next.inProgress;
+    recovery.replaceChildren();
+    if (next.inProgress) {
+      var selected = next.preview;
+      recovery.innerHTML = '<div class="card stack"><h4>Resolve sync conflicts</h4>' +
+        (next.notice ? '<p>' + esc(next.notice) + '</p>' : '') +
+        (next.conflicts.length ? '<form class="stack" data-review-conflict><label class="field"><span id="sync-conflict-path">Conflicting file</span>' +
+          '<select name="path" aria-labelledby="sync-conflict-path">' + next.conflicts.map(function (path) { return '<option value="' + esc(path) + '">' + esc(path) + '</option>'; }).join('') +
+          '</select></label><div class="row"><button type="submit">Preview conflict</button></div></form>' :
+          next.canContinue ? '<p>All conflicts are staged. Continue the rebase to finish or review the next conflict.</p>' : '') +
+        '<div class="stack" data-conflict-preview></div><div class="row">' +
+        (next.canContinue ? '<button type="button" class="primary" data-continue-rebase>Continue rebase</button>' : '') +
+        (next.canAbort ? '<button type="button" data-abort-rebase>Abort rebase</button>' : '') + '</div></div>';
+      var review = recovery.querySelector('[data-review-conflict]');
+      var preview = recovery.querySelector('[data-conflict-preview]');
+      if (review && selected) review.elements.path.value = selected.path;
+      review?.elements.path.addEventListener('change', function () { preview.replaceChildren(); });
+      review?.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var path = review.elements.path.value;
+        void perform('Reading versions…', async function () {
+          var result = await api('sync_recovery', { action: 'preview', path: path });
+          if (!active()) return;
+          showRecovery(result);
+          notice('');
+          focusAfter = recovery.querySelector('[name="choice"]');
+        });
+      });
+      for (var action of ['continue', 'abort']) wireRebaseAction(action);
+      if (selected) mountResolution(preview, selected);
+    }
+  }
+  function wireRebaseAction(action) {
+    var abort = action === 'abort';
+    recovery.querySelector('[data-' + action + '-rebase]')?.addEventListener('click', function () {
+      if (busy || !active() || !confirm(abort
+        ? 'Abort this rebase and restore the files from before it began? Edits made during conflict resolution will be discarded.'
+        : 'Continue the rebase with these staged resolutions? Publish later with Sync now.')) return;
+      void perform(abort ? 'Aborting rebase…' : 'Continuing rebase…', async function () {
+        var next = await api('sync_recovery', { action: action, confirm: true });
+        if (!active()) return;
+        showRecovery(next);
+        var outcome = next.inProgress ? next.notice || 'Review the remaining conflicts.' :
+          abort ? 'Rebase aborted. Local commits are available.' : 'Rebase complete. Use Sync now when you are ready to publish.';
+        notice([outcome, next.indexWarning].filter(Boolean).join(' '));
+        focusAfter = recovery.querySelector('[data-review-conflict] button, [data-continue-rebase], [data-abort-rebase]') || refreshButton;
+      });
+    });
+  }
+  function mountResolution(panel, preview) {
+    panel.replaceChildren(version('Local changes', preview.local, true), version('Upstream changes', preview.upstream, true),
+      version('Common base', preview.base, false), version('Current working copy', preview.worktree, false));
+    if (preview.worktree.kind === 'unavailable' || (!preview.canManual &&
+        preview.local.kind === 'unavailable' && preview.upstream.kind === 'unavailable')) {
+      panel.insertAdjacentHTML('beforeend', '<p>Git sync can stage resolutions for regular UTF-8 files up to 256 KiB.</p>');
+      return;
+    }
+    panel.insertAdjacentHTML('beforeend',
+      '<form class="stack"><label class="field"><span id="sync-conflict-choice">Resolution</span><select name="choice" aria-labelledby="sync-conflict-choice" required>' +
+      '<option value="">Choose a resolution</option>' +
+      (preview.local.kind === 'unavailable' ? '' : '<option value="local">' +
+        (preview.local.kind === 'deleted' ? 'Delete file as in local changes' : 'Keep local version') + '</option>') +
+      (preview.upstream.kind === 'unavailable' ? '' : '<option value="upstream">' +
+        (preview.upstream.kind === 'deleted' ? 'Delete file as upstream did' : 'Use upstream version') + '</option>') +
+      (preview.canManual ? '<option value="manual">Edit merged text</option>' : '') + '</select></label>' +
+      (preview.canManual ? '<label class="field" hidden><span>Merged file text</span><textarea name="text" rows="10" maxlength="262144"></textarea></label>' : '') +
+      '<div class="row"><button type="submit">Stage resolution</button></div></form>');
+    var form = panel.querySelector('form');
+    var choice = form.elements.choice;
+    var manual = form.elements.text;
+    if (manual) {
+      manual.value = preview.worktree.text ?? preview.local.text ?? preview.upstream.text ?? '';
+      choice.addEventListener('change', function () {
+        manual.parentElement.hidden = choice.value !== 'manual';
+      });
+    }
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var selected = choice.value;
+      if (!selected) return;
+      void perform('Staging resolution…', async function () {
+        var next = await api('sync_recovery', { action: 'resolve', path: preview.path, approval: preview.approval,
+          choice: selected, text: selected === 'manual' ? manual.value : undefined });
+        if (!active()) return;
+        showRecovery(next);
+        notice('Staged the resolution for ' + preview.path + '.');
+        focusAfter = recovery.querySelector('[data-review-conflict] button, [data-continue-rebase], [data-abort-rebase]') || refreshButton;
+      });
+    });
+  }
+  async function refresh() {
+    var results = await Promise.allSettled([api('sync_settings', { action: 'status' }), api('sync_recovery', { action: 'status' })]);
+    if (!active()) return;
+    if (results[0].status === 'fulfilled') showSettings(results[0].value);
+    if (results[1].status === 'fulfilled') showRecovery(results[1].value);
+    else rebase = undefined;
+    var failure = results.find(function (result) { return result.status === 'rejected'; });
+    if (failure) throw failure.reason;
+  }
+
+  identity.addEventListener('submit', function (event) {
+    event.preventDefault();
+    void perform('Saving Git identity…', async function () {
+      var next = await api('sync_settings', { action: 'identity', name: identity.elements.name.value, email: identity.elements.email.value });
+      if (!active()) return;
+      showSettings(next);
+      notice('Git identity saved for this brain.');
+    });
+  });
+  origin.addEventListener('submit', function (event) {
+    event.preventDefault();
+    void perform('Saving origin…', async function () {
+      var next = await api('sync_settings', { action: 'origin', url: origin.elements.url.value });
+      if (!active()) return;
+      origin.reset();
+      showSettings(next);
+      notice('Origin saved. Sync now connects using this device’s Git credentials.');
+      focusAfter = refreshButton;
+    });
+  });
+  refreshButton.addEventListener('click', function () {
+    void perform('Checking Git…', async function () {
+      await refresh();
+      if (!active()) return;
+      if (settings.repository !== 'ready') { notice(''); return; }
+      var status = await api('sync', { status: true });
+      if (!active()) return;
+      notice(status.repo ? [status.branch || 'Detached HEAD', status.dirty + ' changed paths',
+        status.ahead === null ? '' : status.ahead + ' ahead, ' + status.behind + ' behind'].filter(Boolean).join(' · ') : '');
+    });
+  });
+  sync.addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (runButton.disabled) return;
+    var message = sync.elements.message.value.trim();
+    void perform('Syncing this brain…', async function () {
+      var result;
+      try { result = await appWork(api('sync', message ? { message: message } : {})); }
+      finally { if (active()) await refresh().catch(function () {}); }
+      if (!active()) return;
+      sync.reset();
+      notice([result.committed ? 'Local commit saved (' + result.committed + ').' : 'No local changes to commit.',
+        result.pulled ? 'Pulled upstream changes.' : '', result.pushed ? 'Pushed changes.' : '', result.indexWarning].filter(Boolean).join(' '));
+    });
+  });
+  void perform('Checking Git…', async function () { await refresh(); if (active()) notice(''); });
+}
+
 async function renderSettings(_arg, seq) {
   var st = STATUS || {};
   var mcpArgs = st.brain ? ['--brain', st.brain, 'mcp'] : ['--bundle', st.bundle || '<bundle>', 'mcp'];
@@ -2381,10 +2601,23 @@ async function renderSettings(_arg, seq) {
     '<option>lean</option><option>balanced</option><option>max</option></select></label>' +
     '<button>Save</button></div></form>' +
     '<div id="set-out"></div><p class="muted">A local provider needs no API key.</p><section id="provider-keys" class="stack"></section>' +
-    '<h3>Sync (git)</h3><form id="syncf" class="stack">' +
-    field('sync-message', 'Commit message (optional)', '', 'Automatic timestamped message') +
-    '<div class="row"><button id="sync-status" type="button">Status</button><button type="submit">Sync now</button></div></form>' +
-    '<div id="sync-out"></div>' +
+    '<section id="sync-settings" class="stack" aria-labelledby="sync-title"><h3 id="sync-title">Git sync</h3>' +
+    (st.readonly ? '<p>Open a writable brain to set up or run Git sync.</p>' :
+      '<p data-sync-state></p><details data-sync-setup hidden><summary>Repository setup</summary><div class="stack">' +
+      '<form class="stack" data-sync-identity><div class="grid">' +
+      '<label class="field"><span>Git name</span><input name="name" autocomplete="name" maxlength="256" required></label>' +
+      '<label class="field"><span>Git email</span><input name="email" type="email" autocomplete="email" maxlength="256" required></label></div>' +
+      '<p class="muted">Git records this name and email on commits.</p><div class="row"><button>Save Git identity</button></div></form>' +
+      '<div hidden><form class="stack" data-sync-origin>' +
+      '<label class="field"><span>Origin HTTPS URL</span><input type="url" name="url" maxlength="2048" autocomplete="off" required></label>' +
+      '<p class="muted">Choose an empty HTTPS repository. Connecting saves its URL.</p>' +
+      '<div class="row"><button>Connect origin</button></div></form></div></div></details>' +
+      '<div data-sync-destinations hidden><dl class="kv"><dt>Fetch from</dt><dd><code data-sync-fetch></code></dd>' +
+      '<dt>Push to</dt><dd><code data-sync-push></code></dd></dl></div>' +
+      '<form class="stack" data-sync-run><label class="field"><span>Commit message (optional)</span>' +
+      '<input name="message" placeholder="Automatic timestamped message"></label><div class="row">' +
+      '<button type="button" data-sync-refresh>Refresh Git status</button><button type="submit" disabled>Sync now</button></div></form>' +
+      '<div data-sync-feedback role="status"></div><div data-sync-recovery hidden></div>') + '</section>' +
     '<h3>Enrichment (guardrailed web pass)</h3>' +
     '<form id="enrf" class="stack"><div class="grid">' +
     field('web-seed', 'Seed URLs', '', 'comma-separated http(s) URLs') +
@@ -2454,6 +2687,7 @@ async function renderSettings(_arg, seq) {
   renderBrainMounts(document.getElementById('brain-mount-settings'), Boolean(st.readonly), seq);
   renderProviderKeys(document.getElementById('provider-keys'), Boolean(st.readonly));
   window.okbMcpSettings.mount(document.getElementById('mcp-settings'), { readonly: Boolean(st.readonly), requestHeaders: headers });
+  if (!st.readonly) mountGitSync(document.getElementById('sync-settings'), seq);
 
   var folderLog = document.getElementById('folder-log-form');
   folderLog?.addEventListener('submit', async function (event) {
@@ -2554,18 +2788,6 @@ async function renderSettings(_arg, seq) {
           .concat(r.written.map(function (w) { return (w.created ? 'created ' : 'enriched ') + w.id; }))
           .concat([(r.summary || '(no summary)') + ' — ' + r.steps + ' steps']).join('\n')) + '</div>');
     } catch (err) { show('enr-out', errorBox(err)); }
-  });
-  document.getElementById('sync-status').addEventListener('click', async function () {
-    working('sync-out', 'checking');
-    try { show('sync-out', jsonNotice(await api('sync', { status: true }))); }
-    catch (e) { show('sync-out', errorBox(e)); }
-  });
-  document.getElementById('syncf').addEventListener('submit', async function (e) {
-    e.preventDefault();
-    var message = document.getElementById('ed-sync-message').value.trim();
-    working('sync-out', 'syncing');
-    try { show('sync-out', jsonNotice(await appWork(api('sync', message ? { message: message } : {})))); }
-    catch (e) { show('sync-out', errorBox(e)); }
   });
   async function maint(op, verb, params, render, output) {
     var target = output || 'mx-out';

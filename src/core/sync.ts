@@ -7,7 +7,7 @@
 
 import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
 import { listConcepts, readConceptPermissive } from "./okf/bundle.ts";
 import { OkfParseError, parse } from "./okf/document.ts";
@@ -26,7 +26,10 @@ interface GitResult {
 }
 
 /** Spawn git by argv. Never throws on nonzero exit — callers decide. */
-function runGit(cwd: string, args: string[], input?: string): Promise<GitResult> {
+export function runGit(cwd: string, args: string[], input?: string, extraEnv?: Record<string, string>): Promise<GitResult> {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extraEnv, GIT_TERMINAL_PROMPT: "0" };
+  // The selected brain, rather than inherited Git plumbing, determines the repository.
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CONFIG"]) delete env[key];
   return new Promise((done, fail) => {
     const child = execFile(
       "git",
@@ -35,8 +38,7 @@ function runGit(cwd: string, args: string[], input?: string): Promise<GitResult>
         cwd,
         timeout: 120_000,
         maxBuffer: 16 * 1024 * 1024,
-        // Never hang on a credential prompt; fail fast so the CLI stays usable.
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        env,
       },
       (err, stdout, stderr) => {
         const e = err as (NodeJS.ErrnoException & { killed?: boolean }) | null;
@@ -58,22 +60,22 @@ function runGit(cwd: string, args: string[], input?: string): Promise<GitResult>
 }
 
 /** Run git and throw a SyncError (with git's own message) on failure. */
-async function git(cwd: string, args: string[], input?: string): Promise<string> {
-  const r = await runGit(cwd, args, input);
+export async function git(cwd: string, args: string[], input?: string, env?: Record<string, string>): Promise<string> {
+  const r = await runGit(cwd, args, input, env);
   if (r.code !== 0)
-    throw new SyncError(`git ${args[0]} failed: ${(r.stderr || r.stdout).trim()}`);
+    throw new SyncError(`git ${args[0]} failed: ${gitDiagnostic(r)}`);
   return r.stdout;
 }
 
 /** Toplevel of the repo containing `dir`, or null when not in one. */
-async function repoRoot(dir: string): Promise<string | null> {
+export async function repoRoot(dir: string): Promise<string | null> {
   const r = await runGit(dir, ["rev-parse", "--show-toplevel"]);
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
 // Symlinks (macOS /tmp) and 8.3 short names (Windows temp) make naive string
 // comparison lie; realpath both sides and fold case on win32.
-function sameDir(a: string, b: string): boolean {
+export function sameDir(a: string, b: string): boolean {
   const norm = (p: string): string => {
     let r: string;
     try {
@@ -86,14 +88,253 @@ function sameDir(a: string, b: string): boolean {
   return norm(a) === norm(b);
 }
 
+const repositoryGates = new Map<string, Promise<void>>();
+
+/** Serialize app mutations of the same brain, including alternate spellings of its path. */
+export async function withSyncRepository<T>(root: string, work: (canonicalRoot: string) => Promise<T>): Promise<T> {
+  const canonical = await realpath(root);
+  const key = process.platform === "win32" ? canonical.toLowerCase() : canonical;
+  const previous = repositoryGates.get(key) ?? Promise.resolve();
+  const result = previous.then(() => work(canonical));
+  const gate = result.then(() => {}, () => {});
+  repositoryGates.set(key, gate);
+  try { return await result; }
+  finally { if (repositoryGates.get(key) === gate) repositoryGates.delete(key); }
+}
+
+export async function syncRebaseInProgress(root: string): Promise<boolean> {
+  const paths = await Promise.all(["rebase-merge", "rebase-apply"].map(async (part) =>
+    resolve(root, (await git(root, ["rev-parse", "--git-path", part])).trimEnd())));
+  return existsSync(paths[0]!) || (existsSync(paths[1]!) && !existsSync(join(paths[1]!, "applying")));
+}
+
+function displayRemote(value: string): string {
+  if (/^[a-z][a-z\d+.-]*:\/\//iu.test(value)) {
+    const url = URL.parse(value);
+    if (!url) return "Configured Git remote";
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.href;
+  }
+  return value.replace(/^[^/\\\s@]+@(?=[^/\\\s:]+:)/u, "");
+}
+
+function gitDiagnostic(result: GitResult): string {
+  return (result.stderr || result.stdout).trim().replace(/[a-z][a-z\d+.-]*:\/\/[^\s'"<>]+/giu, displayRemote);
+}
+
+type SyncSettingsInput = { action: "status" | "identity" | "origin"; name?: string; email?: string; url?: string };
+
+export interface SyncSettings {
+  repository: "new" | "ready" | "unavailable";
+  reason?: string;
+  identityReady: boolean;
+  name: string | null;
+  email: string | null;
+  originConfigured: boolean;
+  origin: string | null;
+  fetch: string | null;
+  push: string | null;
+}
+
+function absent(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+async function standaloneRepository(root: string): Promise<Pick<SyncSettings, "repository" | "reason">> {
+  const unavailable = (reason: string) => ({ repository: "unavailable" as const, reason });
+  try {
+    const top = await repoRoot(root);
+    if (top && !sameDir(top, root)) return unavailable("This brain is inside another Git repository.");
+    const directory = join(root, ".git");
+    const marker = await lstat(directory).catch((error: unknown) => {
+      if (!absent(error)) throw error;
+    });
+    if (marker && !marker.isDirectory()) return unavailable("Git setup needs a standalone repository. Linked worktrees and submodules share Git configuration.");
+    if (top && marker) {
+      const config = await lstat(join(directory, "config"));
+      if (config.isFile() && config.nlink === 1) return { repository: "ready" };
+    }
+    if (top || marker || (await runGit(root, ["rev-parse", "--is-bare-repository"])).stdout.trim() === "true")
+      return unavailable("This brain does not have a writable standalone Git configuration.");
+    // A repository rejected by Git (for example ownership) must not be treated as a fresh brain.
+    for (let parent = dirname(root); parent !== root; parent = dirname(root)) {
+      if (await lstat(join(parent, ".git")).then(() => true, (error: unknown) => {
+        if (!absent(error)) throw error;
+        return false;
+      })) return unavailable("This brain is inside another Git repository.");
+      root = parent;
+    }
+    return { repository: "new" };
+  } catch (error) {
+    return unavailable(error instanceof SyncError ? error.message : "Unable to inspect this brain's Git configuration.");
+  }
+}
+
+async function gitIdentity(root: string) {
+  const [author, committer] = await Promise.all(["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"].map((id) => runGit(root, ["var", id])));
+  const effective = /^(.+) <([^<>]+)> /u.exec(author!.stdout);
+  return { identityReady: author!.code === 0 && committer!.code === 0, name: effective?.[1] ?? null, email: effective?.[2] ?? null };
+}
+
+async function configValues(root: string, key: string, local = false): Promise<string[]> {
+  const result = await runGit(root, ["config", ...(local ? ["--local"] : []), "--null", "--get-all", key]);
+  if (result.code === 1) return [];
+  if (result.code !== 0) throw new SyncError("Unable to inspect this brain's Git configuration.");
+  return result.stdout.split("\0").slice(0, -1);
+}
+
+async function originURLs(root: string, push = false): Promise<string[]> {
+  const result = await runGit(root, ["remote", "get-url", "--all", ...(push ? ["--push"] : []), "origin"]);
+  return result.code === 0 ? result.stdout.trimEnd().split(/\r?\n/u) : [];
+}
+
+async function readSyncSettings(root: string): Promise<SyncSettings> {
+  const status = await standaloneRepository(root);
+  const empty = { ...status, identityReady: false, name: null, email: null, originConfigured: false, origin: null, fetch: null, push: null };
+  if (status.repository === "unavailable") return empty;
+  const identity = await gitIdentity(root);
+  if (status.repository === "new") {
+    const [configured, pushURL] = await Promise.all([configValues(root, "remote.origin.url"), configValues(root, "remote.origin.pushurl")]);
+    return { ...empty, ...identity, originConfigured: Boolean(configured.length || pushURL.length),
+      origin: configured.length ? configured.map(displayRemote).join(", ") : null };
+  }
+  const [names, emails, configured, fetch, push, remotes] = await Promise.all([
+    configValues(root, "user.name", true), configValues(root, "user.email", true), configValues(root, "remote.origin.url"),
+    originURLs(root), originURLs(root, true), git(root, ["remote"]),
+  ]);
+  const display = (urls: string[]) => urls.length ? urls.map(displayRemote).join(", ") : null;
+  return {
+    ...status, ...identity, name: names.at(-1) ?? identity.name, email: emails.at(-1) ?? identity.email,
+    originConfigured: Boolean(configured.length || fetch.length || push.length || remotes.split(/\r?\n/u).includes("origin")),
+    origin: display(configured), fetch: display(fetch), push: display(push),
+  };
+}
+
+function identityField(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value) > 256 || /[\x00-\x1f\x7f<>]/u.test(value))
+    throw new SyncError(`Enter a valid Git ${label}.`);
+  return value.trim();
+}
+
+function newOrigin(value: unknown): string {
+  const url = typeof value === "string" && Buffer.byteLength(value) <= 2048 &&
+    /^https:\/\/[^@/?#\\\s]+\/[^?#\\\s]+$/iu.test(value) ? URL.parse(value) : null;
+  if (!url || !url.hostname || url.username || url.password || url.pathname === "/" || url.pathname.includes("%00"))
+    throw new SyncError("Enter a Git repository HTTPS URL without credentials, query parameters, or a fragment.");
+  return url.href;
+}
+
+const changedOriginError = () => new SyncError("Git configuration changes the fetch or push destination. Review the Git URL rules before connecting this remote.");
+
+async function verifyOriginDestination(root: string, url: string): Promise<void> {
+  const endpoints = await Promise.all([originURLs(root), originURLs(root, true)]);
+  if (endpoints.some((values) => values.length !== 1 || values[0] !== url))
+    throw changedOriginError();
+}
+
+async function verifyProposedOrigin(root: string, url: string): Promise<void> {
+  // --get-url expands fetch rewriting without contacting the remote. Git 2.x
+  // cannot use `remote get-url` against a command-only proposed remote.
+  const [fetch, rules] = await Promise.all([
+    runGit(root, ["ls-remote", "--get-url", "--", url]),
+    runGit(root, ["config", "--null", "--get-regexp", "^url\\..*\\.pushinsteadof$"]),
+  ]);
+  if (fetch.code !== 0 || fetch.stdout.trimEnd() !== url || (rules.code !== 0 && rules.code !== 1))
+    throw changedOriginError();
+  let bestLength = -1;
+  let destination = url;
+  for (const rule of rules.stdout.split("\0")) {
+    const separator = rule.indexOf("\n");
+    if (separator === -1) continue;
+    const prefix = rule.slice(separator + 1);
+    if (prefix.length > bestLength && url.startsWith(prefix)) {
+      bestLength = prefix.length;
+      destination = rule.slice("url.".length, separator - ".pushinsteadof".length) + url.slice(prefix.length);
+    }
+  }
+  if (destination !== url) throw changedOriginError();
+}
+
+async function initializeRepository(root: string): Promise<void> {
+  await git(root, ["init"]);
+  // `git init -b` is unavailable on older Git releases.
+  await git(root, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+}
+
+/** Update both fields with Git's parser under the normal external Git config lock. */
+async function saveRepositoryConfig(root: string, entries: readonly [string, string][], verify?: () => Promise<void>): Promise<void> {
+  const config = join(root, ".git", "config");
+  const info = await lstat(config);
+  if (!info.isFile() || info.nlink !== 1) throw new SyncError("This brain does not have a writable standalone Git configuration.");
+  const lockPath = config + ".lock";
+  const lock = await open(lockPath, "wx", info.mode & 0o777).catch(() => {
+    throw new SyncError("Git configuration cannot be locked. Close any other Git settings editor and try again.");
+  });
+  let scratch: string | undefined;
+  let installed = false;
+  try {
+    await verify?.();
+    scratch = await mkdtemp(join(root, ".git", "okbrain-config-"));
+    const edited = join(scratch, "config");
+    await writeFile(edited, await readFile(config), { mode: 0o600 });
+    for (const [name, value] of entries)
+      await git(root, ["config", "--file", edited, "--replace-all", "--", name, value]);
+    await lock.writeFile(await readFile(edited));
+    await lock.sync();
+    await lock.close();
+    await rename(lockPath, config);
+    installed = true;
+  } finally {
+    await lock.close().catch(() => {});
+    if (!installed) await rm(lockPath, { force: true }).catch(() => {});
+    if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** Inspect or save local Git settings. This operation never contacts a remote. */
+export async function syncSettings(root: string, input: SyncSettingsInput): Promise<SyncSettings> {
+  if (input.action === "status") return readSyncSettings(root);
+  return withSyncRepository(root, async (canonical) => {
+    const current = await readSyncSettings(canonical);
+    if (current.repository === "unavailable") throw new SyncError(current.reason!);
+    let entries: [string, string][];
+    if (input.action === "identity") {
+      const name = identityField(input.name, "name");
+      const email = identityField(input.email, "email");
+      if (!/^[^\s@]+@[^\s@]+$/u.test(email)) throw new SyncError("Enter a valid Git email address.");
+      entries = [["user.name", name], ["user.email", email]];
+    } else if (input.action === "origin") {
+      if (current.originConfigured) throw new SyncError("This brain already has an origin. Change an existing remote with Git.");
+      const url = newOrigin(input.url);
+      entries = [["remote.origin.url", url], ["remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], ["okbrain.syncRemote", url]];
+      if (current.repository === "new") await verifyProposedOrigin(canonical, url);
+    } else {
+      throw new SyncError("Choose a Git settings action.");
+    }
+    if (current.repository === "new") await initializeRepository(canonical);
+    if ((await standaloneRepository(canonical)).repository !== "ready")
+      throw new SyncError("This brain does not have a writable standalone Git configuration.");
+    await saveRepositoryConfig(canonical, entries, input.action === "origin" ? async () => {
+      const registered = await readSyncSettings(canonical);
+      if (registered.originConfigured) throw new SyncError("This brain already has an origin. Change an existing remote with Git.");
+      const url = entries[0]![1];
+      await verifyProposedOrigin(canonical, url);
+    } : undefined);
+    return readSyncSettings(canonical);
+  });
+}
+
 // Seeded into the bundle's git files on every sync (ensure, never remove).
 const IGNORE_LINES = [".okb/", "/viz.html", "db_only/"];
 const IGNORE_HEADER = "# okb sync keeps these entries present; add your own freely.";
 const ATTR_LINES = ["* text=auto eol=lf"];
 const ATTR_HEADER = "# Normalize to LF so diffs and content hashes are stable across OSes.";
 
-const privatePath = (id: string) => `${id}.md`;
-const gitPathEquals = (path: string) => process.platform === "win32" || process.platform === "darwin" ? path.toLowerCase() : path;
+export const privatePath = (id: string) => `${id}.md`;
+export const gitPathEquals = (path: string) => process.platform === "win32" || process.platform === "darwin" ? path.toLowerCase() : path;
 
 async function notePathsHaveHistory(root: string, paths: string[]): Promise<boolean> {
   for (let index = 0; index < paths.length; index += 32) {
@@ -129,7 +370,7 @@ export async function protectUnsharedNote(root: string, id: string): Promise<voi
   await localExcludes(root, new Set([id]));
 }
 
-async function privateNotesForSync(root: string): Promise<Set<string>> {
+export async function privateNotesForSync(root: string): Promise<Set<string>> {
   const marked = new Set<string>();
   for (const id of await listConcepts(root)) {
     if (inDbOnlyDir(id.toLowerCase())) continue;
@@ -142,7 +383,7 @@ async function privateNotesForSync(root: string): Promise<Set<string>> {
   return marked;
 }
 
-async function verifyPrivatePaths(root: string, marked: ReadonlySet<string>): Promise<void> {
+export async function verifyPrivatePaths(root: string, marked: ReadonlySet<string>): Promise<void> {
   const privatePaths = new Set([...marked].map((id) => gitPathEquals(privatePath(id))));
   const tracked = (await git(root, ["ls-files", "-z"])).split("\0");
   if (tracked.some((path) => inDbOnlyDir(path.toLowerCase()) || privatePaths.has(gitPathEquals(path))))
@@ -151,12 +392,12 @@ async function verifyPrivatePaths(root: string, marked: ReadonlySet<string>): Pr
     throw new SyncError("Git history contains a private note path. Review the repository before syncing.");
 }
 
-async function verifyPrivateDirectoryHistory(root: string): Promise<void> {
+export async function verifyPrivateDirectoryHistory(root: string): Promise<void> {
   const found = await git(root, ["log", "--all", "--full-history", "-1", "--format=%H", "--", ":(glob,icase)**/db_only/**"]);
   if (found.trim()) throw new SyncError("Git history contains a db_only directory. Review the repository history before syncing.");
 }
 
-async function verifyNoPrivateStagedNotes(root: string): Promise<void> {
+export async function verifyNoPrivateStagedNotes(root: string): Promise<void> {
   const changed = await git(root, ["diff", "--cached", "--text", "-G", "db_only", "--name-only", "-z", "--diff-filter=ACMR", "--", "*.md"]);
   for (const path of changed.split("\0").filter(Boolean)) {
     const text = await git(root, ["show", `:${path}`]);
@@ -225,7 +466,7 @@ export async function syncStatus(root: string): Promise<SyncStatus> {
     repo: true,
     branch,
     dirty,
-    remote: remoteR.code === 0 ? remoteR.stdout.trim() : null,
+    remote: remoteR.code === 0 ? displayRemote(remoteR.stdout.trim()) : null,
     ahead: counts?.[0] ?? null,
     behind: counts?.[1] ?? null,
   };
@@ -243,18 +484,24 @@ export interface SyncResult {
 }
 
 /** Init if needed, seed ignore/attribute lines, commit, then pull+push if a remote is set. */
-export async function syncBundle(root: string, message?: string): Promise<SyncResult> {
+export function syncBundle(root: string, message?: string): Promise<SyncResult> {
+  return withSyncRepository(root, (canonical) => syncRepository(canonical, message));
+}
+
+async function syncRepository(root: string, message?: string): Promise<SyncResult> {
   const top = await repoRoot(root);
   if (top !== null && !sameDir(top, root))
     throw new SyncError(
       `bundle is inside another git repository (${top}); okb sync manages the bundle as its own repo — move the bundle out or sync it with that repo's own workflow`,
     );
   const initialized = top === null;
-  if (initialized) {
-    await git(root, ["init"]);
-    // Portable default-branch name (git init -b needs ≥2.28).
-    await git(root, ["symbolic-ref", "HEAD", "refs/heads/main"]);
-  }
+  if (!initialized && await syncRebaseInProgress(root))
+    throw new SyncError("A Git rebase is in progress. Open Sync recovery in Settings before syncing again.");
+  if (!(await gitIdentity(root)).identityReady)
+    throw new SyncError("Git author and committer are unavailable. Save Git identity in Settings before syncing.");
+  if (initialized) await initializeRepository(root);
+  const managed = (await configValues(root, "okbrain.syncRemote", true)).at(-1);
+  if (managed) await verifyOriginDestination(root, newOrigin(managed));
 
   const marked = await privateNotesForSync(root);
   const privatePaths = new Set([...marked].map((id) => gitPathEquals(privatePath(id))));
@@ -280,42 +527,52 @@ export async function syncBundle(root: string, message?: string): Promise<SyncRe
   let committed: string | null = null;
   const staged = (await git(root, ["diff", "--cached", "--name-only", "-z"])).length > 0;
   if (staged) {
-    if ((await runGit(root, ["var", "GIT_COMMITTER_IDENT"])).code !== 0)
-      throw new SyncError(
-        'git identity is not configured — set it once with `git config --global user.name "Your Name"` and `git config --global user.email you@example.com`',
-      );
     await git(root, ["commit", "-m", message ?? `okb sync ${nowTimestamp()}`]);
     committed = (await git(root, ["rev-parse", "--short", "HEAD"])).trim();
   }
 
   const remoteR = await runGit(root, ["remote", "get-url", "origin"]);
-  const remote = remoteR.code === 0 ? remoteR.stdout.trim() : null;
+  const remote = remoteR.code === 0 ? displayRemote(remoteR.stdout.trim()) : null;
   const branch = (await runGit(root, ["symbolic-ref", "--short", "HEAD"])).stdout.trim();
   let pulled = false;
   let pushed = false;
   if (remote !== null && branch !== "") {
     const hasUpstream =
       (await runGit(root, ["rev-parse", "--abbrev-ref", "@{upstream}"])).code === 0;
+    const transport = managed ? ["-c", `http.${managed}.followRedirects=false`] : [];
+    const transportEnv = managed ? { GIT_ALLOW_PROTOCOL: "https" } : undefined;
     if (hasUpstream) {
-      if (marked.size) {
+      let upstream = "@{upstream}";
+      if (managed) {
+        upstream = (await git(root, ["rev-parse", "--symbolic-full-name", upstream])).trim();
+        if ((await configValues(root, `branch.${branch}.remote`)).at(-1) !== "origin" || upstream !== `refs/remotes/origin/${branch}`)
+          throw new SyncError("The current branch tracks a different destination. Review the branch's Git configuration before syncing.");
+        await verifyOriginDestination(root, managed);
+        await git(root, [...transport, "fetch", "--no-recurse-submodules", "origin"], undefined, transportEnv);
+      } else if (marked.size) {
         await git(root, ["fetch"]);
-        const upstream = (await git(root, ["ls-tree", "-r", "--name-only", "-z", "@{upstream}"])).split("\0");
-        if (upstream.some((path) => inDbOnlyDir(path.toLowerCase()) || privatePaths.has(gitPathEquals(path))))
+      }
+      if (marked.size) {
+        const paths = (await git(root, ["ls-tree", "-r", "--name-only", "-z", upstream])).split("\0");
+        if (paths.some((path) => inDbOnlyDir(path.toLowerCase()) || privatePaths.has(gitPathEquals(path))))
           throw new SyncError("An upstream file conflicts with a local private note. Review the repository before syncing.");
       }
-      const pull = await runGit(root, marked.size ? ["rebase", "@{upstream}"] : ["pull", "--rebase"]);
+      const pull = await runGit(root, managed || marked.size ? ["rebase", upstream] : ["pull", "--rebase"]);
       if (pull.code !== 0)
         throw new SyncError(
-          `git pull --rebase failed (local commits are safe): ${(pull.stderr || pull.stdout).trim()}\nresolve in the bundle with git, then rerun okb sync`,
+          `git pull --rebase failed (local commits are safe): ${gitDiagnostic(pull)}\nOpen Sync recovery in Settings, then rerun sync.`,
         );
       pulled = true;
     }
     await verifyPrivatePaths(root, await privateNotesForSync(root));
     await verifyPrivateDirectoryHistory(root);
-    const push = await runGit(root, hasUpstream ? ["push"] : ["push", "-u", "origin", branch]);
+    if (managed) await verifyOriginDestination(root, managed);
+    const push = await runGit(root, managed
+      ? [...transport, "push", "--no-recurse-submodules", ...(hasUpstream ? [] : ["-u"]), "origin", `refs/heads/${branch}:refs/heads/${branch}`]
+      : hasUpstream ? ["push"] : ["push", "-u", "origin", `refs/heads/${branch}`], undefined, transportEnv);
     if (push.code !== 0)
       throw new SyncError(
-        `git push failed (changes are committed locally): ${(push.stderr || push.stdout).trim()}`,
+        `git push failed (changes are committed locally): ${gitDiagnostic(push)}`,
       );
     pushed = true;
   }

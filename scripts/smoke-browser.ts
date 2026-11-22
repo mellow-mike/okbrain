@@ -397,15 +397,81 @@ try {
   assert.equal(stats.embedded, 1);
   assert.ok(stats.pending > 0);
 
-  for (const args of [["init", "--quiet"], ["config", "user.name", "Browser Smoke"], ["config", "user.email", "smoke@example.invalid"]]) {
-    assert.equal(Bun.spawnSync(["git", "-C", bundle, ...args]).exitCode, 0);
-  }
-  await page.getByLabel("Commit message (optional)").fill("Sync browser notes");
-  await page.getByRole("button", { name: "Sync now", exact: true }).click();
-  await page.locator("#sync-out .notice").waitFor();
-  const gitLog = Bun.spawnSync(["git", "-C", bundle, "log", "-1", "--format=%s"]);
-  assert.equal(gitLog.exitCode, 0);
-  assert.equal(gitLog.stdout.toString().trim(), "Sync browser notes");
+  const gitSync = page.getByRole("region", { name: "Git sync", exact: true });
+  const git = (...args: string[]) => {
+    const result = Bun.spawnSync(["git", "-C", bundle, ...args]);
+    assert.equal(result.exitCode, 0, result.stderr.toString());
+    return result.stdout.toString().trim();
+  };
+  await gitSync.getByLabel("Git name", { exact: true }).fill("Browser Smoke");
+  await gitSync.getByLabel("Git email", { exact: true }).fill("smoke@example.invalid");
+  await gitSync.getByRole("button", { name: "Save Git identity", exact: true }).click();
+  await gitSync.getByText("Git identity saved for this brain.", { exact: true }).waitFor();
+  assert.equal(git("config", "--local", "user.name"), "Browser Smoke");
+  assert.equal(git("config", "--local", "user.email"), "smoke@example.invalid");
+  assert.equal(Bun.spawnSync(["git", "-C", bundle, "rev-parse", "--verify", "HEAD"]).exitCode, 128);
+  await gitSync.getByLabel("Commit message (optional)").fill("Sync browser notes");
+  await gitSync.getByRole("button", { name: "Sync now", exact: true }).click();
+  await gitSync.getByText(/Local commit saved/).waitFor();
+  assert.equal(git("log", "-1", "--format=%s"), "Sync browser notes");
+
+  let originRequests = 0;
+  const originFixture = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: {
+    open(socket) { originRequests++; socket.end(); },
+    data() {},
+  } });
+  try {
+    const originUrl = `https://127.0.0.1:${originFixture.port}/notes.git`;
+    await gitSync.getByLabel("Origin HTTPS URL", { exact: true }).fill(originUrl);
+    const originSaved = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/sync_settings" &&
+      response.request().postDataJSON().action === "origin");
+    await gitSync.getByRole("button", { name: "Connect origin", exact: true }).click();
+    const saved = await originSaved;
+    assert.equal(saved.ok(), true, await saved.text());
+    await gitSync.getByText(/Origin saved/).waitFor();
+    assert.equal(await gitSync.locator("[data-sync-fetch]").textContent(), originUrl);
+    assert.equal(await gitSync.locator("[data-sync-push]").textContent(), originUrl);
+    assert.equal(git("remote", "get-url", "origin"), originUrl);
+    assert.equal(originRequests, 0);
+  } finally { originFixture.stop(true); }
+
+  const mergeOriginal = await Bun.file(legacyFile).text();
+  const upstreamText = mergeOriginal.replace("Record the date.", "Record the <script>upstream date</script>.");
+  const localText = mergeOriginal.replace("Record the date.", "Record the local date.");
+  const gitBranch = git("branch", "--show-current");
+  git("checkout", "-b", "browser-upstream");
+  await writeFile(legacyFile, upstreamText);
+  git("add", "--", "legacy-field-note.md");
+  git("commit", "-m", "Change the upstream date");
+  git("checkout", gitBranch);
+  await writeFile(legacyFile, localText);
+  git("add", "--", "legacy-field-note.md");
+  git("commit", "-m", "Clarify the local date");
+  const startRebase = Bun.spawnSync(["git", "-C", bundle, "rebase", "browser-upstream"]);
+  assert.equal(startRebase.exitCode, 1, startRebase.stderr.toString());
+  const conflictStatus = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/sync_recovery" &&
+    response.request().postDataJSON().action === "status");
+  await gitSync.getByRole("button", { name: "Refresh Git status", exact: true }).click();
+  assert.deepEqual((await (await conflictStatus).json()).result?.conflicts, ["legacy-field-note.md"]);
+  await gitSync.getByRole("heading", { name: "Resolve sync conflicts", exact: true }).waitFor();
+  assert.equal(await gitSync.getByRole("button", { name: "Sync now", exact: true }).isEnabled(), false);
+  assert.equal(await gitSync.getByLabel("Conflicting file", { exact: true }).inputValue(), "legacy-field-note.md");
+  await gitSync.getByRole("button", { name: "Preview conflict", exact: true }).click();
+  const conflictPreview = gitSync.locator("[data-conflict-preview]");
+  await conflictPreview.getByText("Upstream changes", { exact: true }).waitFor();
+  assert.equal(await conflictPreview.locator("details[open] pre").nth(0).textContent(), localText);
+  assert.equal(await conflictPreview.locator("details[open] pre").nth(1).textContent(), upstreamText);
+  assert.equal(await conflictPreview.locator("script").count(), 0);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  await conflictPreview.getByLabel("Resolution", { exact: true }).selectOption("local");
+  await conflictPreview.getByRole("button", { name: "Stage resolution", exact: true }).click();
+  await gitSync.getByText("Staged the resolution for legacy-field-note.md.", { exact: true }).waitFor();
+  page.once("dialog", (dialog) => dialog.accept());
+  await gitSync.getByRole("button", { name: "Continue rebase", exact: true }).click();
+  await gitSync.getByText(/Rebase complete/).waitFor();
+  assert.equal(await Bun.file(legacyFile).text(), localText);
+  assert.equal(git("status", "--porcelain"), "");
+  assert.equal(git("log", "-1", "--format=%s"), "Clarify the local date");
 
   const feedUrl = "https://example.invalid/feed";
   const feedRequests: unknown[] = [];
