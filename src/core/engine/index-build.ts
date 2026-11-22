@@ -61,7 +61,7 @@ function upsertConcept(engine: Engine, { id, doc, parsed }: PermissiveConcept, h
  * Outgoing typed targets: body links (classified), then `sources` provenance
  * edges typed `cites` — minus self-links (dangling targets kept; see header).
  */
-function outgoing(id: string, doc: OkfDocument, known: Set<string>): TypedTarget[] {
+function outgoing(id: string, doc: OkfDocument, known: Pick<ReadonlySet<string>, "has">): TypedTarget[] {
   const out = classifyTargets(id, doc.body);
   const seen = new Set(out.map((t) => t.dst));
   for (const dst of sourceTargets(id, doc.frontmatter, known))
@@ -91,10 +91,9 @@ export async function buildIndex(root: string, engine: Engine): Promise<IndexSta
     indexed++;
   }
 
-  const current = new Set(ids);
   let removed = 0;
   for (const id of have.keys()) {
-    if (current.has(id)) continue;
+    if (known.has(id)) continue;
     engine.removeNode(id);
     removed++;
   }
@@ -107,5 +106,5 @@ export async function buildIndex(root: string, engine: Engine): Promise<IndexSta
 export async function updateIndexFor(root: string, id: string, engine: Engine): Promise<void> {
   const concept = await readConceptPermissive(root, id);
   upsertConcept(engine, concept, hashOf(concept.raw));
-  engine.replaceEdgesFor(id, outgoing(id, concept.doc, new Set([...engine.listNodeIds(), id])));
+  engine.replaceEdgesFor(id, outgoing(id, concept.doc, { has: (target) => engine.hasNode(target) }));
 }

@@ -29,6 +29,8 @@ function splitTarget(raw: string): { dest: string; suffix: string } {
   return { dest, suffix: t.slice(dest.length) };
 }
 
+type KnownConcepts = Pick<ReadonlySet<string>, "has">;
+
 /**
  * Resolve one raw link target to a bundle-relative concept id, or null if it is
  * external, an anchor, non-`.md`, or escapes the bundle root. Pure.
@@ -61,13 +63,13 @@ export function resolveLinkTarget(srcId: string, rawTarget: string): string | nu
 export function resolvePathField(
   srcId: string,
   raw: string,
-  known?: Set<string>,
+  known?: KnownConcepts,
 ): string | null {
   const rel = resolveLinkTarget(srcId, raw);
-  if (rel === null || known === undefined || known.has(rel)) return rel;
-  if (raw.startsWith("/") || raw.startsWith(".")) return rel;
+  if (rel === null || known === undefined || raw.startsWith("/") || raw.startsWith(".")) return rel;
   const fromRoot = resolveLinkTarget("", raw);
-  return fromRoot !== null && known.has(fromRoot) ? fromRoot : rel;
+  return fromRoot !== null && fromRoot !== rel && !known.has(rel) && known.has(fromRoot)
+    ? fromRoot : rel;
 }
 
 /**
@@ -101,7 +103,7 @@ export function extractTargets(srcId: string, body: string): string[] {
 export function sourceTargets(
   srcId: string,
   fm: Record<string, unknown>,
-  known?: Set<string>,
+  known?: KnownConcepts,
 ): string[] {
   const seen = new Set<string>();
   for (const s of fmSources(fm)) {

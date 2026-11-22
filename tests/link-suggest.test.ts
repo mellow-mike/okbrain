@@ -2,7 +2,7 @@
 // already-connected concepts, and the accept path writing a conformant
 // normalized link under # Related (backlink appears via incremental reindex).
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -83,6 +83,26 @@ describe("suggestLinks", () => {
     expect(tagged!.reasons).toContain("shares tags: math");
     expect(suggestLinks(me, e, 1).length).toBe(1);
     e.close();
+  });
+
+  test("reads candidate metadata in one pass and preserves shared-tag ordering", () => {
+    const e = fixture();
+    try {
+      e.upsertNode(node("notes/many-tags", "Many Tags", {
+        tags: ["zeta", "Alpha", "beta", "alpha", "gamma"],
+      }));
+      const getNode = spyOn(e, "getNode");
+      const getTags = spyOn(e, "getTags");
+      const input = { ...me, title: "", description: "", body: "" };
+      expect(suggestLinks({ ...input, tags: ["zeta", "ALPHA", "beta", "gamma", "alpha", "alpha"] }, e)).toEqual([
+        { id: "notes/many-tags", title: "Many Tags", score: 1.5, reasons: ["shares tags: alpha, beta, gamma"] },
+      ]);
+      expect(suggestLinks({ ...input, tags: [] }, e)).toEqual([]);
+      expect(getNode).not.toHaveBeenCalled();
+      expect(getTags).not.toHaveBeenCalled();
+    } finally {
+      e.close();
+    }
   });
 });
 

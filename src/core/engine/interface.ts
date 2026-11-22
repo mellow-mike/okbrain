@@ -49,6 +49,12 @@ export interface SearchHit {
   score: number;
 }
 
+export interface LinkCandidate {
+  id: string;
+  title: string;
+  sharedTags: string[];
+}
+
 export interface Neighbor {
   id: string;
   /** Hops from the origin (≥1); minimum over all paths. */
@@ -120,9 +126,12 @@ export interface Engine {
   upsertNode(node: NodeUpsert): void;
   removeNode(id: string): void;
   getNode(id: string): NodeRecord | null;
+  hasNode(id: string): boolean;
   getTags(id: string): string[];
   /** All indexed node ids, sorted. */
   listNodeIds(): string[];
+  /** Indexed concept titles and matching tags for link suggestions, sorted by id. */
+  listLinkCandidates(tags: readonly string[]): LinkCandidate[];
   /** id → contentHash for every indexed node (drives skip/removal logic). */
   contentHashes(): Map<string, string>;
   /**

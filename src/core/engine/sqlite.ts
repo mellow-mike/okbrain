@@ -14,6 +14,7 @@ import { ensureExtensionCapableSqlite } from "./custom-sqlite.ts";
 import type {
   EdgeRecord,
   Engine,
+  LinkCandidate,
   Neighbor,
   NodeRecord,
   NodeUpsert,
@@ -226,6 +227,8 @@ export function openSqliteEngine(dbPath: string): Engine {
       return row ? toRecord(row) : null;
     }),
 
+    hasNode: fresh((id) => db.query("SELECT 1 FROM nodes WHERE id = ?").get(id) !== null),
+
     getTags: fresh((id) =>
       db
         .query<{ tag: string }, [string]>(
@@ -250,6 +253,25 @@ export function openSqliteEngine(dbPath: string): Engine {
         .all()
         .map((r) => r.id),
     ),
+
+    listLinkCandidates: fresh((tags: readonly string[]) => {
+      const wanted = new Set(tags);
+      const rows = db.query<{ id: string; title: string; tag: string | null }, [boolean]>(
+        `SELECT n.id, n.title, t.tag FROM nodes n
+         LEFT JOIN tags t ON t.node_id = n.id AND ?
+         ORDER BY n.id, t.tag`,
+      ).all(wanted.size > 0);
+      const candidates: LinkCandidate[] = [];
+      for (const { id, title, tag } of rows) {
+        let candidate = candidates.at(-1);
+        if (candidate?.id !== id) {
+          candidate = { id, title, sharedTags: [] };
+          candidates.push(candidate);
+        }
+        if (tag !== null && wanted.has(tag)) candidate.sharedTags.push(tag);
+      }
+      return candidates;
+    }),
 
     replaceEdges: fresh((edges) => replaceEdges(edges)),
     replaceEdgesFor: fresh((src, edges) => replaceEdgesFor(src, edges)),
