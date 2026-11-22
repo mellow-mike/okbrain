@@ -15,6 +15,12 @@ For explicit files and repository excerpts, you can let the model look up line n
 
 Use **Project settings** to rotate or remove an API key, inspect the audit log, or set transcript retention. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.
 
+### Reuse a request preset
+
+Presets keep a recurring task, repository search query, and [version 1 project profile](#reuse-a-project-profile) together. In the Mac or web app, choose **Tracked repository excerpts**, fill in the task and search query, and set the directories and budget or supply a profile under **Scope and budget**. Open **Run presets**, enter a name, and choose **Save new preset**. The local owner can select an existing preset to update it from the form or remove it. Project members can load the same presets. Keep prompts and profile guidance suitable for sharing with everyone who can access the project.
+
+Load a preset from the project request form. Local operators can also use **okbrain: Preview Saved Request Preset** in VS Code or Cursor with the registered folder open. The request starts with the saved draft and current working-tree evidence. Review a fresh source preview, choose whether to allow approved-source lookup, and approve this request. Removing a preset leaves earlier Pi runs and their admitted sources available to the project's reviewers.
+
 ### Open a standalone session
 
 In the Mac or local web app, open **Coding → Standalone sessions** to open an existing `okb code` session or start a new one without registering a project. The same session name opens the same private transcript from either surface. An existing session keeps its workspace, provider, and model. Standalone requests run on the local operator’s computer. Registered projects provide team access, audit and review records, and worker isolation.

@@ -59,4 +59,10 @@ async function projectFile(workspace, file) {
   return inside.split(sep).join('/');
 }
 
-module.exports = { connect, localUrl, projectFile };
+async function matchesProjectWorkspace(workspace, folder) {
+  if (!isAbsolute(workspace) || !isAbsolute(folder)) return false;
+  const [root, opened] = await Promise.all([realpath(workspace), realpath(folder)]);
+  return relative(root, opened) === '';
+}
+
+module.exports = { connect, localUrl, projectFile, matchesProjectWorkspace };

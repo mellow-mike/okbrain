@@ -2,12 +2,13 @@
 
 const vscode = require('vscode');
 const { randomUUID } = require('node:crypto');
-const { connect, projectFile } = require('./connection.cjs');
+const { connect, projectFile, matchesProjectWorkspace } = require('./connection.cjs');
 const { taskProgressLines } = require('./run-progress.cjs');
 
 const savedSourceScheme = 'okbrain-saved-source';
 const openingSources = new Map();
 let inspection = 0;
+let presetReview = 0;
 
 function pathFor(project, action) {
   return `/projects/${encodeURIComponent(project.id)}/${action}`;
@@ -37,6 +38,20 @@ async function showText(content) {
   return vscode.window.showTextDocument(document, { preview: true, preserveFocus: false });
 }
 
+async function showReadOnlyText(title, content, isCurrent) {
+  const uri = vscode.Uri.from({ scheme: savedSourceScheme, path: `/${title}.txt`, query: randomUUID() });
+  const key = uri.toString();
+  openingSources.set(key, content);
+  try {
+    let document = await vscode.workspace.openTextDocument(uri);
+    if (!isCurrent()) return;
+    if (document.languageId !== 'plaintext') document = await vscode.languages.setTextDocumentLanguage(document, 'plaintext');
+    if (isCurrent()) await vscode.window.showTextDocument(document, { preview: true, preserveFocus: false });
+  } finally {
+    openingSources.delete(key);
+  }
+}
+
 async function showSavedRequestSource(connection, project, identity, isCurrent) {
   let source;
   try {
@@ -58,17 +73,25 @@ async function showSavedRequestSource(connection, project, identity, isCurrent) 
       lines.push('', file.path + range, file.text);
     }
   }
-  const uri = vscode.Uri.from({ scheme: savedSourceScheme, path: '/Saved request source.txt', query: randomUUID() });
-  const key = uri.toString();
-  openingSources.set(key, lines.join('\n'));
-  try {
-    let document = await vscode.workspace.openTextDocument(uri);
-    if (!isCurrent()) return;
-    if (document.languageId !== 'plaintext') document = await vscode.languages.setTextDocumentLanguage(document, 'plaintext');
-    if (isCurrent()) await vscode.window.showTextDocument(document, { preview: true, preserveFocus: false });
-  } finally {
-    openingSources.delete(key);
+  await showReadOnlyText('Saved request source', lines.join('\n'), isCurrent);
+}
+
+function chooseSession() {
+  return vscode.window.showInputBox({ prompt: 'Coding session name', value: 'ide-review', ignoreFocusOut: true,
+    validateInput: (input) => /^[a-z0-9][a-z0-9_-]{0,63}$/.test(input) ? null : 'Use lowercase letters, digits, hyphens, or underscores.' });
+}
+
+async function submitApprovedRequest(connection, project, request, canSubmit = () => true) {
+  if (!await canSubmit()) return;
+  let run;
+  try { run = await connection.api(pathFor(project, 'run'), request); }
+  catch (error) {
+    const retry = await vscode.window.showErrorMessage(`${error.message} Request ID: ${request.requestId}.`, 'Try Same Request');
+    if (!retry || !await canSubmit()) return;
+    run = await connection.api(pathFor(project, 'run'), request);
   }
+  const inspect = await vscode.window.showInformationMessage(`Coding request ${run.id} is ${run.status}.`, 'Inspect Request');
+  if (inspect) await inspectRun(connection, project, run);
 }
 
 async function runActiveFile(connection) {
@@ -87,8 +110,7 @@ async function runActiveFile(connection) {
   const prompt = await vscode.window.showInputBox({ prompt: 'What should Pi review or propose?', ignoreFocusOut: true,
     validateInput: (input) => input.trim() ? null : 'Enter a request.' });
   if (!prompt) return;
-  const session = await vscode.window.showInputBox({ prompt: 'Coding session name', value: 'ide-review', ignoreFocusOut: true,
-    validateInput: (input) => /^[a-z0-9][a-z0-9_-]{0,63}$/.test(input) ? null : 'Use lowercase letters, digits, hyphens, or underscores.' });
+  const session = await chooseSession();
   if (!session) return;
 
   const source = { source: 'files', files: [choice.relative] };
@@ -104,18 +126,88 @@ async function runActiveFile(connection) {
     'Send Request', 'Send with Source Lookup');
   if (!send) return;
 
-  const requestId = `ide-${randomUUID()}`;
-  const request = { ...source, session, requestId, prompt, previewId: preview.id, approved: true,
-    ...(send === 'Send with Source Lookup' ? { approvedSourceLookup: true } : {}) };
-  let run;
-  try { run = await connection.api(pathFor(choice.project, 'run'), request); }
-  catch (error) {
-    const retry = await vscode.window.showErrorMessage(`${error.message} Request ID: ${requestId}.`, 'Try Same Request');
-    if (!retry) return;
-    run = await connection.api(pathFor(choice.project, 'run'), request);
+  await submitApprovedRequest(connection, choice.project, {
+    ...source, session, requestId: `ide-${randomUUID()}`, prompt, previewId: preview.id, approved: true,
+    ...(send === 'Send with Source Lookup' ? { approvedSourceLookup: true } : {}),
+  });
+}
+
+function localWorkspaceFolders() {
+  return vscode.workspace.workspaceFolders?.filter(({ uri }) => uri.scheme === 'file') ?? [];
+}
+
+async function runPreset(connection) {
+  const review = ++presetReview;
+  const isCurrent = () => review === presetReview;
+  const activeFile = vscode.window.activeTextEditor?.document.uri;
+  const folders = localWorkspaceFolders();
+  const activePath = activeFile?.scheme === 'file' ? vscode.workspace.getWorkspaceFolder(activeFile)?.uri.fsPath : undefined;
+  const candidates = activeFile?.scheme === 'file' ? folders.filter(({ uri }) => uri.fsPath === activePath) : folders;
+  const choices = [];
+  for (const project of connection.projects) {
+    if (!project.workspace) continue;
+    for (const { uri } of candidates) {
+      if (!await matchesProjectWorkspace(project.workspace, uri.fsPath).catch(() => false)) continue;
+      if (activeFile?.scheme === 'file' && !await projectFile(project.workspace, activeFile.fsPath).catch(() => null)) continue;
+      choices.push({ label: project.title, description: uri.fsPath, project, workspace: uri.fsPath });
+      break;
+    }
   }
-  const inspect = await vscode.window.showInformationMessage(`Coding request ${run.id} is ${run.status}.`, 'Inspect Request');
-  if (inspect) await inspectRun(connection, choice.project, run);
+  if (!isCurrent()) return;
+  if (!choices.length) throw new Error('Open the registered project folder to preview a saved request preset.');
+  const choice = await chooseProject(connection, choices);
+  if (!choice || !isCurrent()) return;
+  const { project, workspace } = choice;
+  const confirmWorkspace = async () => {
+    if (!isCurrent()) return false;
+    const file = vscode.window.activeTextEditor?.document.uri;
+    if (!vscode.workspace.isTrusted || vscode.env.remoteName || !localWorkspaceFolders().some(({ uri }) => uri.fsPath === workspace) ||
+        (file?.scheme === 'file' && vscode.workspace.getWorkspaceFolder(file)?.uri.fsPath !== workspace) ||
+        !await matchesProjectWorkspace(project.workspace, workspace).catch(() => false)) {
+      throw new Error('The open workspace changed. Open the registered project and preview the preset again.');
+    }
+    return isCurrent();
+  };
+
+  if (!await confirmWorkspace()) return;
+  const { presets } = await connection.api(pathFor(project, 'presets'));
+  if (!isCurrent()) return;
+  if (!presets.length) return vscode.window.showInformationMessage('This project has no saved request presets.');
+  const item = await vscode.window.showQuickPick(presets.map((preset) => ({ label: preset.name, preset })),
+    { placeHolder: 'Choose a saved request preset', ignoreFocusOut: true });
+  if (!item || !isCurrent()) return;
+  const { name, prompt, query, profile } = item.preset;
+  const session = await chooseSession();
+  if (!session || !await confirmWorkspace()) return;
+
+  const source = { source: 'repository', query, profile };
+  const preview = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Previewing repository source locally' },
+    () => connection.api(pathFor(project, 'preview'), source));
+  if (!isCurrent()) return;
+  if (!preview.excerpts.length) return vscode.window.showInformationMessage('No source matched this preset. Edit its query or profile in the Coding workspace and try again.');
+
+  const lookup = await vscode.window.showQuickPick([
+    { label: 'Keep source lookup off', enabled: false },
+    { label: 'Allow lookups in approved excerpts', enabled: true },
+  ], { placeHolder: 'Choose source lookup for this request', ignoreFocusOut: true });
+  if (!lookup || !await confirmWorkspace()) return;
+  await showReadOnlyText('Project preset preview', [
+    `Project: ${project.title}`, `Preset: ${name}`, `Provider and model: ${project.provider} / ${project.model}`, `Session: ${session}`,
+    `Source lookup: ${lookup.enabled ? 'Allowed within the approved excerpts' : 'Off'}`,
+    '', 'Task', prompt,
+    ...(preview.guidance ? ['', 'Project guidance', preview.guidance] : []),
+    ...preview.excerpts.flatMap(({ path, startLine, endLine, content }) => ['', `${path}:${startLine}–${endLine}`, content]),
+  ].join('\n'), isCurrent);
+  if (!isCurrent()) return;
+  const send = await vscode.window.showInformationMessage(
+    `Review the task and excerpts in the editor. Sending includes active session history and uses ${project.provider} / ${project.model}.`,
+    'Send Request');
+  if (send !== 'Send Request') return;
+
+  await submitApprovedRequest(connection, project, {
+    ...source, session, requestId: `ide-${randomUUID()}`, prompt, previewId: preview.manifest.id, approved: true,
+    ...(lookup.enabled ? { approvedSourceLookup: true } : {}),
+  }, confirmWorkspace);
 }
 
 async function inspectRun(connection, project, selected) {
@@ -193,6 +285,7 @@ function activate(context) {
   }));
   register('okbrain.open', openWeb);
   register('okbrain.runFile', runActiveFile);
+  register('okbrain.runPreset', runPreset);
   register('okbrain.runs', listRuns);
 }
 

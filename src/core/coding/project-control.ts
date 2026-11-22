@@ -25,7 +25,7 @@ import {
 } from "./github.ts";
 import { githubBranchRef, githubCreatePatchCommit, githubCreatePatchRef, githubPreparePatchBranch } from "./github-branch.ts";
 import { excludedPath, selectRepositoryContext } from "./repository-context.ts";
-import { validateCodingProjectProfile } from "./project-profile.ts";
+import { validateCodingProjectProfile, type CodingProjectProfile } from "./project-profile.ts";
 import { launchProjectWorker, ProjectWorkerInterrupted } from "./project-worker.ts";
 import type { CodingTaskProgress } from "./task-progress.ts";
 
@@ -35,6 +35,7 @@ type ProjectRow = {
   id: string; title: string; workspace: string; scopes: string; provider: CodingProvider; model: string;
   thinking: ModelThinkingLevel | null; api_key: string | null; created: string;
 };
+type PresetRow = { id: string; name: string; prompt: string; query: string; profile: string };
 type RunStatus = "running" | "interrupted" | "done" | "unanswered" | "failed" | "cancelled";
 type RunRow = {
   project: string; session: string; id: string; actor: string; status: RunStatus; signature: string;
@@ -68,6 +69,8 @@ export class ProjectControlError extends Error {
 
 const sessionPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const requestPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+const presetPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
+const maxProjectPresets = 24;
 const now = () => new Date().toISOString();
 const digest = (input: string) => createHash("sha256").update(input).digest("hex");
 const retentionActor = "system:transcript-retention";
@@ -108,6 +111,12 @@ function pathsInProject(project: ProjectRow, value: unknown): string[] {
   return roots;
 }
 
+function profileInProject(project: ProjectRow, input: unknown): CodingProjectProfile {
+  const profile = validateCodingProjectProfile(input);
+  pathsInProject(project, [...profile.projects, ...(profile.sharedProjects ?? [])]);
+  return profile;
+}
+
 function sourceOptions(project: ProjectRow, body: Json) {
   if (body.source === "files") return { files: stringList(body.files ?? [], 12) };
   if (body.source === "packages") {
@@ -125,8 +134,7 @@ function sourceOptions(project: ProjectRow, body: Json) {
   if (body.profile !== undefined) {
     if (body.projects !== undefined || body.tokenBudget !== undefined)
       throw new ProjectControlError("Use the project profile or set directories and a budget explicitly.");
-    const profile = validateCodingProjectProfile(body.profile);
-    pathsInProject(project, [...profile.projects, ...(profile.sharedProjects ?? [])]);
+    const profile = profileInProject(project, body.profile);
     return { repository: { profile, query } };
   }
   const tokenBudget = body.tokenBudget;
@@ -197,6 +205,11 @@ export class CodingProjectControl {
         CREATE TABLE IF NOT EXISTS projects(
           id TEXT PRIMARY KEY, title TEXT NOT NULL, workspace TEXT NOT NULL, scopes TEXT NOT NULL,
           provider TEXT NOT NULL, model TEXT NOT NULL, thinking TEXT, api_key TEXT, created TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS project_presets(
+          project TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, id TEXT NOT NULL,
+          name TEXT COLLATE NOCASE NOT NULL, prompt TEXT NOT NULL, query TEXT NOT NULL, profile TEXT NOT NULL,
+          PRIMARY KEY(project, id), UNIQUE(project, name)
         );
         CREATE TABLE IF NOT EXISTS members(
           id TEXT PRIMARY KEY, project TEXT NOT NULL REFERENCES projects(id), actor TEXT NOT NULL,
@@ -401,6 +414,52 @@ export class CodingProjectControl {
     const actual = await canonicalWorkspace(project.workspace);
     if (actual !== project.workspace) throw new ProjectControlError("The project's workspace path changed. Register the intended workspace again.", 409);
     return actual;
+  }
+
+  #presets(project: ProjectRow, method: "GET" | "POST", body: Json, actor: Actor) {
+    if (method === "POST") {
+      this.#requireOwner(actor);
+      const action = body.action;
+      if (action !== "save" && action !== "remove") throw new ProjectControlError("Choose whether to save or remove a project preset.");
+      const id = body.id === undefined && action === "save" ? undefined : field(body, "id", 36);
+      if (id !== undefined && !presetPattern.test(id)) throw new ProjectControlError("Choose a valid project preset ID.");
+      if (action === "save") {
+        const name = field(body, "name", 120);
+        const prompt = field(body, "prompt", 16384);
+        const query = field(body, "query", 1024);
+        if (/[\x00-\x1f\x7f]/u.test(name) || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(prompt + query))
+          throw new ProjectControlError("Use a single-line preset name and plain task and query text.");
+        const profile = JSON.stringify(profileInProject(project, body.profile));
+        this.#db.transaction(() => {
+          if (id !== undefined) this.#requirePreset(project.id, id);
+          if (this.#get("SELECT 1 FROM project_presets WHERE project = ? AND name = ? AND id IS NOT ?", project.id, name, id ?? null))
+            throw new ProjectControlError("A preset in this project already uses that name.", 409);
+          if (id === undefined) {
+            const count = this.#get<{ count: number }>("SELECT count(*) AS count FROM project_presets WHERE project = ?", project.id)?.count ?? 0;
+            if (count >= maxProjectPresets) throw new ProjectControlError(`Save up to ${maxProjectPresets} presets per project.`, 409);
+            this.#write("INSERT INTO project_presets(project, id, name, prompt, query, profile) VALUES (?, ?, ?, ?, ?, ?)",
+              project.id, randomUUID(), name, prompt, query, profile);
+          } else {
+            this.#write("UPDATE project_presets SET name = ?, prompt = ?, query = ?, profile = ? WHERE project = ? AND id = ?",
+              name, prompt, query, profile, project.id, id);
+          }
+          this.#audit(project.id, "preset_saved", actor.id);
+        })();
+      } else {
+        this.#db.transaction(() => {
+          this.#requirePreset(project.id, id!);
+          this.#write("DELETE FROM project_presets WHERE project = ? AND id = ?", project.id, id!);
+          this.#audit(project.id, "preset_removed", actor.id);
+        })();
+      }
+    }
+    const rows = this.#all<PresetRow>("SELECT id, name, prompt, query, profile FROM project_presets WHERE project = ? ORDER BY name COLLATE NOCASE, id", project.id);
+    return { presets: rows.map(({ profile, ...preset }) => ({ ...preset, profile: JSON.parse(profile) as CodingProjectProfile })) };
+  }
+
+  #requirePreset(project: string, id: string) {
+    if (!this.#get("SELECT 1 FROM project_presets WHERE project = ? AND id = ?", project, id))
+      throw new ProjectControlError("Coding preset not found in this project.", 404);
   }
 
   async #preview(project: ProjectRow, body: Json, actor: Actor) {
@@ -1287,6 +1346,7 @@ export class CodingProjectControl {
     const project = this.#project(match[1]!, actor);
     const action = match[2];
     if (action === "retention" && (method === "GET" || method === "POST")) return this.#retention(project, method, body, actor);
+    if (action === "presets" && (method === "GET" || method === "POST")) return this.#presets(project, method, body, actor);
     if (action && method === "POST" && (githubPullActions.includes(action) || githubBranchActions.includes(action)))
       return this.#withSession(project, body, () => this.#github(project, action, method, body, actor));
     if (action?.startsWith("github-")) return this.#github(project, action, method, body, actor);

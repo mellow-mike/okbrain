@@ -67,6 +67,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   excerpts, using Pi Durable replay against the saved request bytes.
 - [x] Add versioned project profiles, a rebuildable worktree-aware symbol and
   dependency index, selection explanations, and stable Pi provider affinity.
+- [x] Save reusable project request presets in the Mac and web apps. Use a
+  preset in the apps or editor with a fresh source preview and approval.
 - [x] Compare explicit attachments, scoped lexical previews, and indexed
   previews in a pinned synthetic monorepo with latency, evidence, and simulated
   token and cache measurements.
@@ -797,6 +799,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added project run presets for recurring task, query, and profile
+  combinations. Preserved per-request approval across the apps and editor.
 - 2026-11-22 — Connected accepted Pi responses to patch review in the apps
   and editor. Added files can go through local approval and GitHub publication.
 - 2026-11-22 — Added private GitHub sync credentials and owner-confirmed

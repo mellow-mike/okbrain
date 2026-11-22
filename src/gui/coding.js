@@ -326,7 +326,125 @@
     };
   }
 
-  function composer(parent, project, readonly, detached, selectRun) {
+  function mountRunPresets(panel, { prefix, manage, detached, inRepository, readDraft, loadDraft, clearPreview }) {
+    panel.innerHTML = '<summary>Run presets</summary><div class="stack coding-form">' +
+      '<label class="field"><span id="coding-preset-label">Saved preset</span><select form="" aria-labelledby="coding-preset-label"></select></label>' +
+      '<div class="row"><button type="button" data-load-preset>Load preset</button></div>' +
+      (manage ? field('Preset name', '', 'text', 'data-preset-name form="" maxlength="120"') +
+        '<p class="muted">Presets share the task, query, and profile with project members. A blank profile uses the current scope and budget.</p>' +
+        '<div class="row"><button type="button" data-save-preset>Save new preset</button>' +
+        '<button type="button" data-remove-preset>Remove preset</button></div>' : '') +
+      '<div class="coding-feedback" role="status"></div></div>';
+    const select = panel.querySelector('select');
+    const name = panel.querySelector('[data-preset-name]');
+    const load = panel.querySelector('[data-load-preset]');
+    const save = panel.querySelector('[data-save-preset]');
+    const remove = panel.querySelector('[data-remove-preset]');
+    const feedback = panel.querySelector('[role="status"]');
+    let rows = [];
+    let loading = false;
+    let busy = false;
+    const selected = () => rows.find((entry) => entry.id === select.value);
+    const canUse = () => !loading && !busy && !detached() && inRepository();
+
+    function update() {
+      const choice = selected();
+      select.disabled = loading || busy;
+      load.disabled = loading || busy || !choice;
+      if (manage) {
+        name.disabled = busy;
+        save.disabled = loading || busy;
+        remove.disabled = loading || busy || !choice;
+        save.textContent = choice ? 'Update preset' : 'Save new preset';
+      }
+    }
+    function show(result, id, preserveDraft = false) {
+      const priorId = select.value;
+      const changedName = name && name.value !== (selected()?.name || '');
+      rows = result.presets;
+      select.replaceChildren(new Option(manage ? 'New preset' : 'Choose a preset', ''),
+        ...rows.map((entry) => new Option(entry.name, entry.id)));
+      select.value = rows.some((entry) => entry.id === id) ? id : '';
+      if (name && (!preserveDraft || !changedName || select.value !== priorId)) name.value = selected()?.name || '';
+    }
+    async function perform(message, action) {
+      if (!canUse()) return;
+      busy = true;
+      update();
+      report(feedback);
+      feedback.textContent = message;
+      try { return await action(); }
+      catch (error) { if (!detached()) report(feedback, error); }
+      finally {
+        busy = false;
+        update();
+      }
+    }
+
+    show({ presets: [] });
+    update();
+    panel.addEventListener('toggle', async () => {
+      if (!panel.open || !canUse()) return;
+      loading = true;
+      update();
+      report(feedback);
+      feedback.textContent = 'Loading run presets…';
+      try {
+        const result = await coding(prefix + '/presets');
+        if (detached()) return;
+        show(result, select.value, true);
+        feedback.textContent = result.presets.length || manage ? '' : 'No presets for this project yet.';
+      } catch (error) { if (!detached()) report(feedback, error); }
+      finally {
+        loading = false;
+        update();
+      }
+    });
+    select.addEventListener('change', () => {
+      if (name) name.value = selected()?.name || '';
+      report(feedback);
+      update();
+    });
+    load.addEventListener('click', () => {
+      const choice = selected();
+      if (!canUse() || !choice) return;
+      loadDraft(choice);
+      feedback.textContent = 'Loaded ' + choice.name + '. Preview source before sending.';
+    });
+    if (!manage) return;
+    name.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.isComposing) return;
+      event.preventDefault();
+      if (canUse()) save.click();
+    });
+    save.addEventListener('click', () => {
+      void perform('Saving preset…', async () => {
+        const label = name.value.trim();
+        if (!label) throw new Error('Enter a preset name.');
+        const choice = selected();
+        const draft = readDraft(label);
+        clearPreview();
+        const known = new Set(rows.map(({ id }) => id));
+        const result = await coding(prefix + '/presets', { action: 'save', id: choice?.id, name: label, ...draft });
+        if (detached()) return;
+        show(result, choice?.id || result.presets.find((entry) => !known.has(entry.id) && entry.name === label)?.id);
+        feedback.textContent = 'Preset saved.';
+      });
+    });
+    remove.addEventListener('click', () => {
+      const choice = selected();
+      if (!canUse() || !choice || !confirm('Remove ' + choice.name + ' from this project’s presets?')) return;
+      void perform('Removing preset…', async () => {
+        const result = await coding(prefix + '/presets', { action: 'remove', id: choice.id });
+        if (detached()) return;
+        show(result);
+        feedback.textContent = 'Preset removed.';
+        return true;
+      }).then((removed) => { if (removed && canUse()) select.focus(); });
+    });
+  }
+
+  function composer(parent, project, readonly, detached, selectRun, managePresets) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
     panel.className = 'coding-panel coding-composer stack';
@@ -338,6 +456,7 @@
       '<label class="field"><span id="coding-source-label">Source</span><select name="source" aria-labelledby="coding-source-label"><option value="repository">Tracked repository excerpts</option>' +
       '<option value="files">Explicit files</option><option value="packages">Independent package review</option></select></label>' +
       '<div class="stack" data-repository>' +
+      '<details data-run-presets></details>' +
       field('Search source', '', 'search', 'name="query" maxlength="1024" placeholder="Identifier, path, or terms"') +
       '<details><summary>Scope and budget</summary><div class="stack coding-form">' +
       field('Directories', project.scopes.join(', '), 'text', 'name="projects" spellcheck="false"') +
@@ -358,7 +477,7 @@
       '<div data-evaluation-options></div>' +
       '<label class="row" data-approve hidden><input type="checkbox" name="approved"><span data-approve-text></span></label>' +
       '<div class="row"><button type="submit" class="primary" disabled>Send request</button><span class="muted">' + esc(project.model) +
-      '</span></div><div class="coding-feedback" role="status"></div></form>';
+      '</span></div><div data-composer-feedback class="coding-feedback" role="status"></div></form>';
     parent.append(panel);
 
     const form = panel.querySelector('form');
@@ -369,7 +488,7 @@
     const approve = form.querySelector('[data-approve]');
     const approveText = form.querySelector('[data-approve-text]');
     const packageFields = Array.from(form.querySelectorAll('[data-package]'));
-    const feedback = form.querySelector('[role="status"]');
+    const feedback = form.querySelector('[data-composer-feedback]');
     const evaluation = window.okbCodingEvaluation.composerOptions(form.querySelector('[data-evaluation-options]'), readonly);
     let preview = null;
     let revision = 0;
@@ -405,6 +524,28 @@
       }
       return data;
     }
+
+    mountRunPresets(form.querySelector('[data-run-presets]'), {
+      prefix, manage: managePresets, detached, inRepository: () => source.value === 'repository',
+      readDraft: (name) => {
+        const selection = sourceInput();
+        if (!prompt.value.trim() || !selection.query.trim()) throw new Error('Enter a task and source query to save a preset.');
+        return { prompt: prompt.value, query: selection.query, profile: selection.profile !== undefined ? selection.profile : {
+          version: 1, name, projects: selection.projects,
+          ...(selection.tokenBudget === undefined ? {} : { tokenBudget: selection.tokenBudget }),
+        } };
+      },
+      loadDraft: (preset) => {
+        prompt.value = preset.prompt;
+        form.elements.query.value = preset.query;
+        profile.value = JSON.stringify(preset.profile, null, 2);
+        projects.value = preset.profile.projects.join(', ');
+        tokenBudget.value = preset.profile.tokenBudget ?? '';
+        approvedSourceLookup.checked = false;
+        clearPreview();
+      },
+      clearPreview,
+    });
 
     for (const input of [source, projects, tokenBudget, profile, files, session, requestId, prompt, approvedSourceLookup,
       form.elements.query, ...form.querySelectorAll('[data-package] input')])
@@ -1125,7 +1266,7 @@
     let openPatch;
     const runs = activity(right, project, readonly, isDetached, teamMode ? undefined : (row) => openPatch(row));
     window.okbCodingEvaluation.mount(right, { prefix: projectUrl(project.id), coding, readonly, detached: isDetached });
-    composer(left, project, readonly, isDetached, runs.selectRun);
+    composer(left, project, readonly, isDetached, runs.selectRun, !teamMode && !readonly);
     const composerPanel = left.querySelector('.coding-composer');
     if (!teamMode) settings(left, project, readonly, composerPanel.updateProject, runs.refresh);
     const github = document.createElement('div');

@@ -19,10 +19,11 @@ When using a ChatGPT plan, review the excerpts in **Ask with ChatGPT** before
 sending them.
 
 Open **Coding** to register a permitted workspace, preview source excerpts,
-send a Pi Durable request, and inspect, resume, or review its result. The
-VS Code and Cursor extension previews saved editor files and opens run
-results for review. Connect a GitHub remote from Coding to review repository
-activity and hand off accepted work.
+send a Pi Durable request, and inspect, resume, or review its result. Save
+project request presets for recurring work. The VS Code and Cursor extension
+previews saved editor files or project presets and opens run results for
+review. Connect a GitHub remote from Coding to review repository activity and
+hand off accepted work.
 See the [personal guide](docs/PERSONAL.md) and [coding guide](docs/CODING.md).
 
 > [!NOTE]

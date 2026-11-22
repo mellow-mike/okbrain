@@ -9,4 +9,6 @@ Install `okbrain-coding.vsix` with **Extensions → Install from VSIX**. Open a 
 5. For a saved request, choose **View saved request source** to open a read-only editor with the original task and the exact files or excerpts supplied to Pi.
 6. On an accepted result, choose **Review proposed patch in okbrain** to open that request in the patch review form. Preview the diff in okbrain and confirm it before applying.
 
+With the registered project folder open, choose **okbrain: Preview Saved Request Preset** from the Command Palette. Select a preset and session, then choose whether Pi can look up lines within the selected excerpts. Review the saved task and the fresh repository excerpts before choosing **Send Request**. Create or edit presets in the okbrain Coding workspace.
+
 The local server enforces project scope and binds the approved preview to the source bytes. Requests use the project model and any active session history. Editor review records a decision in okbrain. On an accepted result, choose **Prepare GitHub pull request in okbrain** to open the web workflow. There you can publish an applied patch on a new branch and create a GitHub pull request.

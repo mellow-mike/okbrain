@@ -851,6 +851,90 @@ try {
     prompt: projectPrompt,
   });
   await page.evaluate((id) => { location.hash = "#coding/" + id; }, project.id);
+  const projectComposer = page.locator(".coding-composer");
+  const presets = projectComposer.locator("[data-run-presets]");
+  const presetSelector = presets.getByRole("combobox", { name: "Saved preset", exact: true });
+  const presetName = presets.getByLabel("Preset name", { exact: true });
+  const presetPrompt = "Summarize the browser source marker.";
+  const task = projectComposer.getByLabel("Task", { exact: true });
+  const query = projectComposer.locator('[name="query"]');
+  await task.fill(presetPrompt);
+  await query.fill("sourceMarker");
+  const listingStarted = Promise.withResolvers<void>();
+  const releaseListing = Promise.withResolvers<void>();
+  await page.route("**" + projectPath + "/presets", async (route) => {
+    listingStarted.resolve();
+    await releaseListing.promise;
+    await route.continue();
+  }, { times: 1 });
+  const saveNewPreset = presets.getByRole("button", { name: "Save new preset", exact: true });
+  try {
+    await presets.getByText("Run presets", { exact: true }).click();
+    await listingStarted.promise;
+    await presetName.fill("Review source marker");
+    assert.equal(await saveNewPreset.isEnabled(), false);
+  } finally { releaseListing.resolve(); }
+  const presetCreated = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith(projectPath + "/presets") &&
+    response.request().method() === "POST");
+  await saveNewPreset.click();
+  const presetResponse = await presetCreated;
+  assert.ok(presetResponse.ok(), await presetResponse.text());
+  await presets.getByText("Preset saved.", { exact: true }).waitFor();
+  const savedPresetID = await presetSelector.inputValue();
+  assert.ok(savedPresetID);
+
+  const projectLookup = projectComposer.getByRole("checkbox", { name: /Let the model look up line numbers/ });
+  const explicitApproval = projectComposer.locator("[data-approve] input");
+  const sendProject = projectComposer.getByRole("button", { name: "Send request", exact: true });
+  const previewProject = projectComposer.getByRole("button", { name: "Preview source", exact: true });
+  await task.fill("A temporary task that must not replace the saved preset.");
+  await projectLookup.check();
+  await previewProject.click();
+  await explicitApproval.check();
+  assert.equal(await sendProject.isEnabled(), true);
+  await presets.getByRole("button", { name: "Load preset", exact: true }).click();
+  assert.equal(await task.inputValue(), presetPrompt);
+  assert.equal(await query.inputValue(), "sourceMarker");
+  assert.equal(await projectLookup.isChecked(), false);
+  assert.equal(await explicitApproval.isChecked(), false);
+  assert.equal(await sendProject.isEnabled(), false);
+  await projectComposer.getByText("Scope and budget", { exact: true }).click();
+  const profileField = projectComposer.getByLabel("Project profile (optional JSON)", { exact: true });
+  const expectedProfile = { version: 1, name: "Review source marker", projects: ["."], tokenBudget: 4096 };
+  assert.deepEqual(JSON.parse(await profileField.inputValue()), expectedProfile);
+
+  await task.fill("Review source marker and cite the file.");
+  await profileField.fill(JSON.stringify({ ...expectedProfile, guidance: "Cite repository paths." }));
+  await previewProject.click();
+  await explicitApproval.check();
+  assert.equal(await sendProject.isEnabled(), true);
+  await presetName.fill("Review source with citations");
+  const editPreset = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith(projectPath + "/presets") &&
+    response.request().method() === "POST");
+  await presetName.press("Enter");
+  assert.equal((await editPreset).ok(), true);
+  await presets.getByText("Preset saved.", { exact: true }).waitFor();
+  assert.equal(await presetSelector.inputValue(), savedPresetID);
+  assert.equal(await sendProject.isEnabled(), false);
+  assert.equal(await explicitApproval.isChecked(), false);
+  await presets.getByRole("button", { name: "Load preset", exact: true }).click();
+  assert.equal(JSON.parse(await profileField.inputValue()).guidance, "Cite repository paths.");
+  assert.equal(await task.inputValue(), "Review source marker and cite the file.");
+
+  const projectMode = projectComposer.getByRole("combobox", { name: "Source", exact: true });
+  await projectMode.selectOption("files");
+  const manualFiles = projectComposer.getByLabel("Files inside the permitted directories", { exact: true });
+  await manualFiles.fill("browser.ts");
+  assert.equal(await presets.isVisible(), false);
+  await projectMode.selectOption("repository");
+  assert.equal(await presetSelector.inputValue(), savedPresetID);
+  page.once("dialog", (dialog) => dialog.accept());
+  await presets.getByRole("button", { name: "Remove preset", exact: true }).click();
+  await presets.getByText("Preset removed.", { exact: true }).waitFor();
+  assert.equal(await presetSelector.locator("option").count(), 1);
+  await projectMode.selectOption("files");
+  assert.equal(await manualFiles.inputValue(), "browser.ts");
+
   await page.getByRole("button", { name: /project-task-progress/ }).click();
   await page.getByText("Model response · 1 running", { exact: true }).waitFor();
   const savedProjectSource = page.locator("[data-saved-request-source]");

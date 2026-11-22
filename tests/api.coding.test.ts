@@ -8,9 +8,11 @@ import { createApiServer, type ApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
 import { listCodingModels, maxLiveAnswerLength, runCodingSession, type CodingLiveAnswer, type CodingSessionStatusResult, type SavedCodingRequestInput } from "../src/core/coding/durable.ts";
 import type { CodingTaskProgress } from "../src/core/coding/task-progress.ts";
+import type { CodingProjectProfile } from "../src/core/coding/project-profile.ts";
 
 const ownerToken = "local-operator-test";
 type Project = { id: string; workspace: string; credential: string };
+type Presets = { presets: { id: string; name: string; prompt: string; query: string; profile: CodingProjectProfile }[] };
 type Run = { id: string; status: string; actor: string; admitted: boolean; error: string | null; review: string | null };
 type Inspection = { run: Run; liveAnswer?: CodingLiveAnswer; taskProgress?: CodingTaskProgress; pi?: { request?: { receipt?: { text?: string } } } };
 
@@ -320,6 +322,79 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     expect(await call<Run[]>(path + "/runs")).toEqual([]);
     await call(path + "/members", { revoke: member.id });
     expect((await request(path + "/runs", undefined, member.token)).status).toBe(401);
+  } finally {
+    await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project run presets share request drafts and require fresh source approval", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-coding-presets-");
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: "preset-test" }] });
+  models.setProvider(faux.provider);
+  const open = (readonly = false) => createApiServer({ bundle: root, port: 0, token: ownerToken, readonly, coding: { stateDir, models } });
+  let api = open();
+  try {
+    for (const args of [["init", "--quiet"], ["add", "--", "src/example.ts", "private/example.ts"]]) {
+      const git = Bun.spawnSync(["git", ...args], { cwd: workspace, stdout: "ignore", stderr: "pipe" });
+      if (git.exitCode !== 0) throw new Error(git.stderr.toString());
+    }
+    const { call, request } = apiClient(api.url);
+    const settings = { title: "Preset project", workspace, scopes: ["src"], provider: "openai", model: "preset-test" };
+    const project = await call<Project>("/projects", settings);
+    const other = await call<Project>("/projects", { ...settings, title: "Other preset project" });
+    const path = "/projects/" + project.id;
+    const presets = path + "/presets";
+    const member = await call<{ token: string }>(path + "/members", { name: "preset-reviewer" });
+    const draft: Omit<Presets["presets"][number], "id"> = {
+      name: "Answer review", prompt: "Trace the answer.", query: "answer",
+      profile: { version: 1, name: "Answer code", projects: ["src"], guidance: "Cite source lines.", tokenBudget: 500 },
+    };
+    expect((await request(presets, undefined, null)).status).toBe(401);
+    expect((await request("/projects/" + other.id + "/presets", undefined, member.token)).status).toBe(403);
+    expect((await request(presets, { action: "save", ...draft }, member.token)).status).toBe(403);
+    expect(await call<Presets>(presets)).toEqual({ presets: [] });
+    const forbiddenScope = await request(presets, { action: "save", ...draft, profile: { ...draft.profile, sharedProjects: ["private"] } });
+    expect(forbiddenScope.ok).toBe(false);
+    const { presets: [created] } = await call<Presets>(presets, {
+      action: "save", ...draft, previewId: "previous-preview", approved: true, approvedSourceLookup: true, files: ["src/example.ts"],
+    });
+    expect(created).toEqual({ ...draft, id: expect.any(String) });
+    expect((await request(presets, { action: "save", ...draft, name: "answer review" })).status).toBe(409);
+    expect(await call<Presets>(presets, undefined, member.token)).toEqual({ presets: [created!] });
+    const updated = { ...created!, prompt: "Trace the current answer and cite the file." };
+    expect((await request("/projects/" + other.id + "/presets", { action: "save", ...updated })).status).toBe(404);
+    expect(await call<Presets>(presets, { action: "save", ...updated })).toEqual({ presets: [updated] });
+    expect(await call<Run[]>(path + "/runs")).toEqual([]);
+    expect(faux.state.callCount).toBe(0);
+
+    await api.stop();
+    api = open(true);
+    const readonly = apiClient(api.url);
+    expect(await readonly.call<Presets>(presets)).toEqual({ presets: [updated] });
+    expect((await readonly.request(presets, { action: "remove", id: updated.id })).status).toBe(403);
+    await api.stop();
+    api = open();
+    const fresh = apiClient(api.url);
+    await writeFile(join(workspace, "src", "example.ts"), "export const answer = 53;\n");
+    const selection = { source: "repository", query: updated.query, profile: updated.profile };
+    const run = { ...selection, session: "preset-run", requestId: "use-preset", prompt: updated.prompt };
+    const preview = await fresh.call<{ manifest: { id: string }; excerpts: { path: string; content: string }[] }>(path + "/preview", selection, member.token);
+    expect(preview.excerpts).toEqual([expect.objectContaining({ path: "src/example.ts", content: expect.stringContaining("answer = 53") })]);
+    expect((await fresh.request(path + "/run", { ...run, previewId: preview.manifest.id }, member.token)).status).toBe(400);
+    expect(faux.state.callCount).toBe(0);
+    faux.setResponses([fauxAssistantMessage("The saved excerpt sets answer to 53.")]);
+    await fresh.call(path + "/run", { ...run, approved: true, previewId: preview.manifest.id }, member.token);
+    expect(await waitFor(() => fresh.call<Inspection>(path + "/inspect", run, member.token), ({ run }) => run.status === "done"))
+      .toMatchObject({ run: { status: "done", admitted: true } });
+    expect((await fresh.request(presets, { action: "remove", id: updated.id }, member.token)).status).toBe(403);
+    expect(await fresh.call<Presets>(presets, { action: "remove", id: updated.id })).toEqual({ presets: [] });
+    expect(await fresh.call<SavedCodingRequestInput>(path + "/source-inspect", run, member.token)).toMatchObject({
+      prompt: updated.prompt, guidance: draft.profile.guidance,
+      groups: [{ files: [expect.objectContaining({ path: "src/example.ts", text: expect.stringContaining("answer = 53") })] }],
+    });
+    expect(faux.state.callCount).toBe(1);
   } finally {
     await api.stop();
     await rm(root, { recursive: true, force: true });
@@ -1129,6 +1204,11 @@ test("the dedicated team listener serves only coding assets and project token ro
     const connected = apiClient(team.url);
     expect((await connected.request("/projects")).status).toBe(401);
     expect(await connected.call<Project[]>("/projects", undefined, token)).toMatchObject([{ id: project.id, credential: "project" }]);
+    const preset = { name: "Review source", prompt: "Review the source.", query: "answer",
+      profile: { version: 1, name: "Team source", projects: ["src"] } };
+    const saved = await local.call<Presets>(localPath + "/presets", { action: "save", ...preset });
+    expect(await connected.call<Presets>(localPath + "/presets", undefined, token)).toEqual(saved);
+    expect((await connected.request(localPath + "/presets", { action: "save", ...preset }, token)).status).toBe(403);
     expect((await connected.request("/team", { action: "stop" }, token)).status).toBe(404);
     const originRequest = (origin: string) => fetch(new URL("api/coding/projects", team.url), {
       headers: { origin, authorization: `Bearer ${token}` },
