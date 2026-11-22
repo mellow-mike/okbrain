@@ -463,6 +463,7 @@ Goal: the brain improves itself on a schedule.
       ok), path allow/deny prefixes, page cap (checked last so policy
       refusals report their real reason), step cap; guarded fetch underneath
       (SSRF guard stays live)
+- [x] Apply the enrichment host and path rules before following redirects.
 - [x] Crawler loop: JSON-action protocol over the plain-text chat gateway
       (list_concepts / read_concept / fetch_url / write_concept / done);
       enrich existing | mint `references/<slug>` (new ids confined there,
@@ -814,6 +815,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Applied personal enrichment’s host and path scope to every
+  redirect destination.
 - 2026-11-22 — Made Pi context limits visible in the Mac app, web app, and editor.
 - 2026-11-22 — Added optional reviewed handoffs to Pi context resets in the
   Mac and web apps and the VS Code and Cursor extension.

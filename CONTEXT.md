@@ -784,6 +784,7 @@ embed it).
   host allowlist (defaults to the seeds' hosts, subdomains included), path
   allow/deny prefixes, `--web-max-pages` (checked last so a policy refusal
   reports its real reason), and a step cap so a chatty run always ends.
+  The host and path rules apply before opening each redirect destination.
   Guard refusals and bad writes come back as error observations the model
   can correct; two unparseable replies abort. `guardedFetch` (clip's SSRF
   guard) sits underneath. **Provenance is frontmatter, enforced in the

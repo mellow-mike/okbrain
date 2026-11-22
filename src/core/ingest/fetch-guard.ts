@@ -17,6 +17,8 @@ export interface GuardedFetchOptions {
   maxRedirects?: number;
   /** Permit loopback/private targets — tests and (future) intranet config only. */
   allowPrivate?: boolean;
+  /** Throw to refuse a URL before DNS or connection, including after a redirect. */
+  authorizeUrl?: (url: URL) => void;
 }
 
 export interface FetchedPage {
@@ -92,10 +94,11 @@ const v6Private = (ip: string): boolean => {
 export const isPrivateIp = (ip: string): boolean =>
   isIP(ip) === 4 ? v4Private(ip) : v6Private(ip.replace(/^\[|\]$/g, ""));
 
-async function assertAllowed(url: URL, allowPrivate: boolean): Promise<void> {
+async function assertAllowed(url: URL, { allowPrivate, authorizeUrl }: GuardedFetchOptions): Promise<void> {
   if (url.protocol !== "http:" && url.protocol !== "https:")
     throw new FetchGuardError(`only http/https URLs can be fetched: ${url.protocol}//`);
-  if (allowPrivate) return;
+  authorizeUrl?.(new URL(url));
+  if (allowPrivate === true) return;
   const host = url.hostname.replace(/^\[|\]$/g, "");
   let addrs: { address: string }[];
   try {
@@ -125,7 +128,7 @@ export async function guardedFetch(
 
   let res: Response | undefined;
   for (let hop = 0; ; hop++) {
-    await assertAllowed(url, opts.allowPrivate === true);
+    await assertAllowed(url, opts);
     try {
       res = await fetch(url, {
         redirect: "manual",
@@ -142,7 +145,7 @@ export async function guardedFetch(
       if (loc === null) throw new FetchGuardError(`redirect without Location from ${url.href}`);
       if (hop >= maxRedirects)
         throw new FetchGuardError(`too many redirects (> ${maxRedirects}) from ${rawUrl}`);
-      url = new URL(loc, url); // next hop re-runs the host guard
+      url = new URL(loc, url); // next hop re-runs both URL and network policy
       continue;
     }
     break;

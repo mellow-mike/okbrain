@@ -97,7 +97,9 @@ Select **Restore default chat endpoint** or **Restore default embedding endpoint
 
 **Ask** displays text as the provider returns it and verifies citations when the answer completes. **Stop** cancels the in-flight answer. Providers that return a complete response display it in one piece. Use `okb ask --stream 'your question'` for incremental terminal output. `--json` returns a single completed result.
 
-In **Settings → Enrichment**, enter comma-separated **Allowed path prefixes** to restrict fetching to those paths. Denied path prefixes still apply. In **Settings → OKF v0.2 migration**, enter **Actor to credit** to attribute legacy timestamps and reviews during migration. Preview the changes before choosing **Upgrade bundle**.
+In **Settings → Enrichment**, enter comma-separated **Allowed hosts**, **Allowed path prefixes**, and **Denied path prefixes** to set the crawler’s scope. The crawler checks these settings before each request, including redirects. Denied path prefixes take precedence.
+
+In **Settings → OKF v0.2 migration**, enter **Actor to credit** to attribute legacy timestamps and reviews during migration. Preview the changes before choosing **Upgrade bundle**.
 
 ## Import conversations
 
