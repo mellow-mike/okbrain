@@ -11,6 +11,8 @@ Use the **Coding** workspace in the Mac app or local web app to review source fi
 
 Choose **View saved request source** in the app or editor to review a selected run’s task and approved files or excerpts. For an independent package review, the source is grouped by package. The preview reads from the saved Pi admission, so it includes the evidence the run used even if the checkout changes.
 
+**Run history** shows the most recent requests. In the Mac or web app, open **Find saved request**, enter the session name and request ID, and choose **Open saved request**. In VS Code or Cursor, choose **Find saved request by ID…** from the run picker. A retained request opens even after it falls off the recent list. Exact run and GitHub review links can reopen retained results under the same project access rules.
+
 For explicit files and repository excerpts, you can let the model look up line numbers inside the current request’s approved source. Select the option before previewing, then review the selection and approve it. Each lookup reads at most 24 consecutive lines from a single saved file or excerpt. The provider may make an extra request to turn the lookup results into an answer. Completed requests report usage from both turns. Open **Approved source lookups** in Run history to see the ranges Pi returned and the counts of refused or incomplete calls. The run report and editor inspection include the same bounded receipt. A later request starts with its own choice.
 
 Use **Project settings** to rotate or remove an API key, inspect the audit log, or set transcript retention. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.

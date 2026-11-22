@@ -181,7 +181,7 @@ try {
   const readonlyBrain = "readonly-search-fixture";
   const readonlyFolder = join(root, readonlyBrain);
   await mkdir(readonlyFolder);
-  await writeFile(join(readonlyFolder, "orchids.md"), "---\ntype: note\ntitle: Read-only orchard reference\n---\nOrchid names.\n");
+  await writeFile(join(readonlyFolder, "orchids.md"), "---\ntype: note\ntitle: Read-only orchard reference\ngenerated:\n  by: human:smoke\n  at: '2026-01-01T00:00:00.000Z'\n---\nOrchid names.\n");
   const changeMount = (input: Record<string, unknown>) => fetch(new URL("api/brains/mounts", server.url), {
     method: "POST", headers: { "x-okb-token": server.token, "content-type": "application/json" }, body: JSON.stringify(input),
   });
@@ -189,26 +189,58 @@ try {
   assert.ok(mounted.ok, await mounted.text());
   const readonlySearch = await browser.newPage({ viewport: { width: 375, height: 700 }, reducedMotion: "reduce" });
   readonlySearch.setDefaultTimeout(8000);
-  const readonlyPosts: string[] = [];
+  const indexAndLookupPosts: string[] = [];
   try {
     await readonlySearch.addInitScript((name) => localStorage.setItem("okb-gui-brain", name), readonlyBrain);
     readonlySearch.on("pageerror", (error) => errors.push(error.message));
     await readonlySearch.route("**/*", (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== origin) { outbound.push(url.href); return route.abort(); }
-      if (searchOperations.has(url.pathname)) readonlyPosts.push(url.pathname);
+      if (searchOperations.has(url.pathname) || url.pathname === "/api/op/focused_map") indexAndLookupPosts.push(url.pathname);
       return route.continue();
     });
     await readonlySearch.goto(server.url + "#search/orchid");
     await readonlySearch.getByText(/This read-only brain has no local search index\./).waitFor();
     assert.equal(await readonlySearch.locator("#brain").inputValue(), readonlyBrain);
     assert.equal(await readonlySearch.getByRole("button", { name: "Build index and search", exact: true }).count(), 0);
+    await readonlySearch.getByRole("navigation", { name: "okbrain" }).getByRole("link", { name: "Focused map" }).click();
+    await readonlySearch.getByRole("heading", { name: "Focused map", exact: true }).waitFor();
+    await readonlySearch.getByText(/This read-only brain has no local search index\./).waitFor();
+    assert.equal(await readonlySearch.getByRole("button", { name: /Build .*map/ }).count(), 0);
     await readonlySearch.getByRole("link", { name: "Browse its notes", exact: true }).click();
     await readonlySearch.getByRole("link", { name: "Read-only orchard reference", exact: true }).waitFor();
-    assert.deepEqual(readonlyPosts, []);
+    assert.deepEqual(indexAndLookupPosts, []);
     const status = await brainStatus(readonlyBrain);
     assert.equal(status.hasIndex, false);
     assert.equal(status.readonly, true);
+
+    const unlocked = await changeMount({ action: "update", previous: readonlyBrain, name: readonlyBrain, readonly: false });
+    assert.ok(unlocked.ok, await unlocked.text());
+    await readonlySearch.goto(server.url + "#map/orchids");
+    await readonlySearch.reload();
+    const buildMap = readonlySearch.getByRole("button", { name: "Build index and map", exact: true });
+    await buildMap.waitFor();
+    assert.deepEqual(indexAndLookupPosts, []);
+    await readonlySearch.getByRole("link", { name: "Start with search", exact: true }).click();
+    const mapQuery = readonlySearch.getByRole("searchbox", { name: "Question or project" });
+    await mapQuery.fill("orchid");
+    const mapSource = readonlySearch.getByRole("combobox", { name: "Source", exact: true });
+    await mapSource.selectOption("notes");
+    const mapDate = readonlySearch.getByLabel("Updated since", { exact: true });
+    await mapDate.fill("2020-01-01");
+    const firstMap = readonlySearch.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/focused_map");
+    await buildMap.focus();
+    await readonlySearch.keyboard.press("Enter");
+    const mapResponse = await firstMap;
+    assert.ok(mapResponse.ok(), await mapResponse.text());
+    assert.deepEqual(mapResponse.request().postDataJSON(), { query: "orchid", source: "notes", since: "2020-01-01", "include-private": false });
+    assert.deepEqual(indexAndLookupPosts, ["/api/op/index", "/api/op/focused_map"]);
+    const mappedNote = readonlySearch.locator("#map-result").getByRole("link", { name: "Read-only orchard reference", exact: true });
+    await mappedNote.waitFor();
+    assert.equal(await mappedNote.evaluate((link) => link === document.activeElement), true);
+    assert.equal(await mapQuery.inputValue(), "orchid");
+    assert.equal(await mapSource.inputValue(), "notes");
+    assert.equal(await mapDate.inputValue(), "2020-01-01");
     assert.equal(modelFixtureCalls, 0);
   } finally {
     await readonlySearch.close();
@@ -2349,6 +2381,20 @@ try {
     } finally {
       await writeFile(file, branchBefore);
     }
+
+    const retainedTeamRun = { session: "project-browser", id: "project-task-progress" };
+    await reviewerPage.route("**" + projectPath + "/runs", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json() as { result: { id: string; session: string }[] };
+      payload.result = payload.result.filter((row) => row.id !== retainedTeamRun.id || row.session !== retainedTeamRun.session);
+      await route.fulfill({ response, json: payload });
+    });
+    const callsBeforeLookup = projectFaux.state.callCount;
+    const teamRunRoute = "#coding/" + project.id + "?" + new URLSearchParams({ session: retainedTeamRun.session, request: retainedTeamRun.id });
+    await reviewerPage.evaluate((hash) => { location.hash = hash; }, teamRunRoute);
+    await reviewerPage.locator(".coding-activity").getByText(projectAnswer, { exact: true }).waitFor();
+    assert.equal(await reviewerPage.locator("[data-runs]").getByRole("button", { name: new RegExp(retainedTeamRun.id) }).count(), 0);
+    assert.equal(projectFaux.state.callCount, callsBeforeLookup);
   } finally {
     await Promise.all(teamPages.map((view) => view.close()));
     await codingFixture("/team", { action: "stop" });
@@ -2713,10 +2759,19 @@ try {
   await staleSource.finished();
   assert.equal(await savedProjectSource.locator("pre").textContent(), secondPrompt);
 
-  await page.evaluate((id) => { location.hash = "#coding/" + id + "/patch/project-browser/project-task-progress"; }, project.id);
-  await proposalChoice.waitFor();
-  assert.deepEqual(proposalRequests, [alternativeRun, targetPatch, targetPatch]);
-  assert.deepEqual(JSON.parse(await page.getByRole("combobox", { name: "Accepted result", exact: true }).inputValue()), targetPatch);
+  const hiddenPatchRuns = "**" + projectPath + "/runs";
+  await page.route(hiddenPatchRuns, async (route) => {
+    const response = await route.fetch();
+    const payload = await response.json() as { result: { id: string; session: string }[] };
+    payload.result = payload.result.filter((row) => row.id !== targetPatch.requestId || row.session !== targetPatch.session);
+    await route.fulfill({ response, json: payload });
+  });
+  try {
+    await page.evaluate((id) => { location.hash = "#coding/" + id + "/patch/project-browser/project-task-progress"; }, project.id);
+    await proposalChoice.waitFor();
+    assert.deepEqual(proposalRequests, [alternativeRun, targetPatch, targetPatch]);
+    assert.deepEqual(JSON.parse(await page.getByRole("combobox", { name: "Accepted result", exact: true }).inputValue()), targetPatch);
+  } finally { await page.unroute(hiddenPatchRuns); }
 
   const remote = Bun.spawnSync(["git", "remote", "add", "origin", `https://github.com/${githubFixture.repository}.git`], { cwd: workspace });
   assert.equal(remote.exitCode, 0, remote.stderr.toString());
@@ -2733,8 +2788,21 @@ try {
   await github.getByLabel("Pull request publishing token", { exact: true }).fill(githubFixture.pullToken);
   await github.getByRole("button", { name: "Save publishing token", exact: true }).click();
   await github.getByText("Pull request publishing token saved.", { exact: true }).waitFor();
-  await github.getByText("Prepare GitHub review", { exact: true }).click();
-  await github.getByRole("combobox", { name: "Accepted request", exact: true }).selectOption({ label: "project-browser / project-task-progress" });
+  const githubOlderRunsRoute = "**" + projectPath + "/runs";
+  await page.route(githubOlderRunsRoute, async (route) => {
+    const response = await route.fetch();
+    const { result } = await response.json() as { result: { session: string; id: string }[] };
+    const recent = result.filter((run) => run.session !== targetPatch.session || run.id !== targetPatch.requestId);
+    await route.fulfill({ response, json: { result: recent } });
+  });
+  try {
+    await page.evaluate(({ id, session, requestId }) => { location.hash = "#coding/" + id + "/github/" + session + "/" + requestId; },
+      { id: project.id, ...targetPatch });
+    const olderChoice = github.getByRole("combobox", { name: "Accepted request", exact: true }).locator("option:checked");
+    await olderChoice.filter({ hasText: "project-browser / project-task-progress" }).waitFor({ state: "attached" });
+  } finally {
+    await page.unroute(githubOlderRunsRoute);
+  }
   await github.getByLabel("Base branch", { exact: true }).fill(githubFixture.base);
   await github.getByLabel("Head branch", { exact: true }).fill(githubFixture.head);
   await github.getByText("Create branch from applied patch", { exact: true }).click();
@@ -2879,6 +2947,60 @@ try {
   await lookups.getByText("browser.ts:1", { exact: true }).waitFor();
   await lookups.getByText("1 served · 1 refused · 0 incomplete", { exact: true }).waitFor();
   assert.ok(!(await lookups.textContent())?.includes("outside-project.ts"));
+
+  {
+    const listRoute = "**" + projectPath + "/runs";
+    const inspectRoute = "**" + projectPath + "/inspect";
+    const activity = page.locator(".coding-activity");
+    const callsBeforeFinder = projectFaux.state.callCount;
+    const missingID = "unknown-saved-request";
+    const expiredID = "expired-saved-request";
+    const inspectedMissing: string[] = [];
+    let anotherRunActive = false;
+    await page.route(listRoute, async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json() as { result: { id: string; session: string; status: string }[] };
+      payload.result = payload.result.filter((row) => row.id !== lookupIdentity.requestId || row.session !== lookupIdentity.session);
+      if (anotherRunActive && payload.result[0]) payload.result[0].status = "running";
+      await route.fulfill({ response, json: payload });
+    });
+    await page.route(inspectRoute, async (route) => {
+      const request = route.request().postDataJSON() as typeof lookupIdentity;
+      if (request.requestId === missingID) inspectedMissing.push(request.requestId);
+      if (request.requestId === expiredID) return route.fulfill({ status: 410, json: { error: "Fixture transcript expired." } });
+      return route.continue();
+    });
+    try {
+      await page.evaluate((hash) => { location.hash = hash; }, "#coding/" + project.id);
+      const finder = activity.locator("[data-find-saved-run]");
+      await finder.getByText("Find saved request", { exact: true }).click();
+      await finder.getByLabel("Session name", { exact: true }).fill(lookupIdentity.session);
+      const requestID = finder.getByLabel("Request ID", { exact: true });
+      await requestID.fill(lookupIdentity.requestId);
+      await requestID.press("Enter");
+      await activity.getByText("Reviewed the line returned from the saved preview.", { exact: true }).waitFor();
+      const selected = activity.getByRole("heading", { name: lookupIdentity.requestId, exact: true });
+      assert.equal(await selected.evaluate((heading) => heading === document.activeElement), true);
+      assert.equal(await activity.locator("[data-runs]").getByRole("button", { name: new RegExp(lookupIdentity.requestId) }).count(), 0);
+
+      anotherRunActive = true;
+      await requestID.fill(missingID);
+      await finder.getByRole("button", { name: "Open saved request", exact: true }).click();
+      await activity.getByText("No saved request has that session and request ID.", { exact: true }).waitFor();
+      assert.equal(await selected.count(), 0);
+      await page.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding" + projectPath + "/runs");
+      assert.deepEqual(inspectedMissing, [missingID]);
+
+      anotherRunActive = false;
+      await requestID.fill(expiredID);
+      await requestID.press("Enter");
+      await activity.getByText("This saved request expired under the project’s retention policy.", { exact: true }).waitFor();
+      assert.equal(projectFaux.state.callCount, callsBeforeFinder);
+    } finally {
+      await page.unroute(listRoute);
+      await page.unroute(inspectRoute);
+    }
+  }
 
   await page.evaluate(() => { location.hash = "#concept/%ZZ"; });
   await page.getByRole("textbox", { name: "Quick note" }).waitFor();

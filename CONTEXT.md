@@ -94,6 +94,8 @@ review notes with authenticated reviewer identities. New clients submit a
 stable review ID and the last observed decision ID. A retry acknowledges the
 same review without changing the latest decision, which still governs patch
 and publication approval. Review notes share the run's deletion policy.
+The Mac, web, and editor apps can inspect a retained project request by exact
+session and request ID, independently of the 200-row recent list.
 Owners can save named task, query,
 and repository profile presets in the project catalog. Project members can
 load them in the team web app or editor. The editor stores the team token,
@@ -414,6 +416,8 @@ rejects on any warning class — doctor is the only strict surface.
   the local `info/exclude`. Owner privacy changes refuse tracked or historical
   note paths. Shared exports, provider retrieval and focused maps omit private
   notes by default, with explicit inclusion controls on those surfaces.
+  The local Review queue includes private notes. Optional AI annotations use
+  public queue and recent-note metadata from the bundle.
 
 ### Conversation exports
 
@@ -1157,6 +1161,10 @@ CI and the release workflow pin the Bun version (a floating
 `latest` once broke Windows CI, B6). Homebrew/Scoop manifest templates live
 in `packaging/`; artifacts stay unsigned until org certificates exist (hook
 points documented in `packaging/README.md`).
+CI assembles the five standalone archives, both Mac app archives, and the
+VSIX using the same manifest checks as the release workflow. The release
+workflow binds the tag to `package.json` and verifies the assets before
+its publishing job runs.
 
 ### Local search and graph caches
 

@@ -134,3 +134,32 @@ jobs:
           name: okbrain-editor-extension
           path: dist/okbrain-coding.vsix
           if-no-files-found: error
+
+  release-candidate:
+    name: Verify complete release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    needs: [mac-app, ide-extension]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - name: Build release archives
+        run: bun run scripts/package-release.ts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: okbrain-macos-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: okbrain-editor-extension
+          path: dist
+      - name: Assemble and verify release assets
+        run: |
+          bun run scripts/release-assets.ts assemble
+          bun run scripts/release-assets.ts verify

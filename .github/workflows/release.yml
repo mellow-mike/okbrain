@@ -9,13 +9,27 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  validate-tag:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - name: Match the tag to package.json
+        env:
+          OKB_RELEASE_TAG: ${{ github.ref_name }}
+        run: bun run scripts/release-assets.ts validate-tag
+
   mac-app:
     name: Package macOS app (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 12
+    needs: validate-tag
     strategy:
       matrix:
         os: [macos-15, macos-15-intel]
@@ -32,8 +46,10 @@ jobs:
           path: dist/okbrain-*-macos-*.zip
           if-no-files-found: error
 
-  release:
+  assemble:
+    name: Assemble and verify release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: mac-app
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +69,7 @@ jobs:
           bun test
 
       - name: Build release archives
-        run: bun run scripts/package-release.ts ${{ github.ref_name }}
+        run: bun run scripts/package-release.ts
 
       - uses: actions/download-artifact@v4
         with:
@@ -65,9 +81,31 @@ jobs:
         with:
           node-version: 22
       - run: bun run package:ide
-      - name: Checksum the apps and editor extension
-        working-directory: dist
-        run: sha256sum okbrain-*-macos-*.zip okbrain-coding.vsix >> SHA256SUMS.txt
+      - name: Assemble release asset checksums
+        run: bun run scripts/release-assets.ts assemble
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okbrain-release-assets
+          path: dist/
+          compression-level: 0
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: assemble
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - uses: actions/download-artifact@v4
+        with:
+          name: okbrain-release-assets
+          path: dist
+      - name: Verify staged release assets
+        run: bun run scripts/release-assets.ts verify
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

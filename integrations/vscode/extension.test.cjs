@@ -220,6 +220,87 @@ test('editor copies only the approved report for the currently inspected saved r
   assert.deepEqual(notices, ['Run report copied.']);
 });
 
+for (const team of [false, true]) test(`${team ? 'team' : 'owner'} editor finds a retained request by exact identity outside recent runs`, async () => {
+  const project = { id: '773447c4-ef90-423a-9e58-34af0350fdcc', title: 'Project fixture' };
+  const url = new URL(team ? 'https://team.example.test/' : 'http://127.0.0.1:6510/');
+  const token = 'okbp_' + 'a'.repeat(43);
+  const recent = { id: 'recent', session: 'main', status: 'done' };
+  const retained = { id: 'Older.Request-1', session: 'saved-session', status: 'done', project: project.id, admitted: true };
+  const commands = new Map();
+  const calls = [], opened = [], errors = [];
+  let provideText, document, editorChanged;
+  let requestID = retained.id;
+  let bound = true;
+  let mode = 'success';
+  const vscode = {
+    Uri: { from: (uri) => ({ ...uri, toString: () => `${uri.scheme}:${uri.path}?${uri.query}` }), parse: (value) => new URL(value) },
+    commands: { registerCommand: (name, action) => commands.set(name, action) },
+    env: { openExternal: async (address) => { opened.push(address.href); } },
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider(_scheme, provider) { provideText = provider.provideTextDocumentContent; },
+      async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
+    },
+    window: {
+      onDidChangeActiveTextEditor(listener) { editorChanged = listener; },
+      async showTextDocument(visible) { document = visible; this.activeTextEditor = { document }; editorChanged(this.activeTextEditor); },
+      async showInputBox({ prompt, validateInput }) {
+        assert.ok(validateInput('../outside'));
+        if (prompt === 'Saved session name') return ` ${retained.session} `;
+        assert.equal(prompt, 'Saved request ID');
+        if (mode === 'cancel') return undefined;
+        if (mode === 'unbind') bound = false;
+        if (mode === 'switch-editor') editorChanged(this.activeTextEditor);
+        return requestID;
+      },
+      async showQuickPick(items, options) {
+        if (options.placeHolder === 'Choose a request to inspect') {
+          assert.deepEqual(Array.from(items, ({ label }) => label), [recent.id, 'Find saved request by ID…']);
+          return items.at(-1);
+        }
+        return items.find(({ label }) => label === 'Open in okbrain');
+      },
+      async showErrorMessage(message) { errors.push(message); },
+    },
+  };
+  const connection = { url, projects: [project], ...(team ? { mode: 'team', projectId: project.id } : {}), async api(path, data) {
+    const prefix = `/projects/${project.id}/`;
+    assert.ok(path.startsWith(prefix));
+    const action = path.slice(prefix.length);
+    calls.push([action, data === undefined ? undefined : JSON.parse(JSON.stringify(data))]);
+    if (action === 'runs') return [recent];
+    assert.equal(action, 'inspect');
+    if (data.requestId === 'unknown') throw Object.assign(new Error('Fixture missing'), { status: 404 });
+    if (data.requestId === 'expired') throw Object.assign(new Error('Fixture expired'), { status: 410 });
+    return { run: retained, reviewHistory: { latestId: null, entries: [] }, pi: { request: { receipt: { text: 'Retained answer.' } } } };
+  } };
+  activateExtension(vscode, connection, {
+    secrets: { onDidChange() {}, async get() { return bound ? JSON.stringify({ origin: url.origin, projectId: project.id, token }) : undefined; } },
+    connectTeam: async (origin, supplied, projectId) => {
+      assert.deepEqual([origin, supplied, projectId], [url.origin, token, project.id]);
+      return connection;
+    },
+  });
+  const inspect = commands.get(team ? 'okbrain.teamRuns' : 'okbrain.runs');
+  await inspect();
+  assert.deepEqual(calls.splice(0), [['runs', undefined], ['inspect', { session: retained.session, requestId: retained.id }]]);
+  assert.match(document.text, /Retained answer\./);
+  assert.equal(document.uri.scheme, 'okbrain-saved-source');
+  assert.deepEqual(opened, [`${url.href}#coding/${project.id}?session=${retained.session}&request=${retained.id}`]);
+  assert.ok(!opened[0].includes(token));
+
+  for (requestID of ['unknown', 'expired']) await inspect();
+  assert.deepEqual(errors, ['No saved request has that session and request ID.', 'This saved request expired under the project’s retention policy.']);
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect', 'runs', 'inspect']);
+  requestID = retained.id;
+  for (mode of ['cancel', 'switch-editor', ...(team ? ['unbind'] : [])]) {
+    await inspect();
+    assert.deepEqual(calls.splice(0), [['runs', undefined]]);
+  }
+  assert.equal(opened.length, 1);
+});
+
 test('owner review keeps feedback bound to the inspected run and safely retries the exact decision', async () => {
   const project = { id: 'fixture', title: 'Project fixture' };
   const run = { id: 'saved-request', session: 'main', status: 'done', admitted: true };
@@ -919,7 +1000,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
         if (options.placeHolder === `Choose a request for ${project.title}`) return items[mode.startsWith('manual') ? 0 : 1];
         if (options.placeHolder === 'Choose approved team repository directories') return [items[mode === 'manual-literal' ? 2 : 1]];
         if (options.placeHolder === 'Choose source lookup for this request') return items[lookup ? 1 : 0];
-        if (options.placeHolder === 'Choose a request to inspect') return items.find(({ run }) => run.id === selectedRun.id && run.session === selectedRun.session);
+        if (options.placeHolder === 'Choose a request to inspect') return items.find(({ run }) => run?.id === selectedRun.id && run.session === selectedRun.session);
         assert.equal(options.placeHolder, 'Choose a run action');
         availableActions = Array.from(items, ({ label }) => label);
         const action = items.find(({ label }) => label === nextRunAction);

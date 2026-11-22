@@ -1444,7 +1444,7 @@ async function renderReview() {
     '<label class="field">Queue size<input id="rlimit" type="number" min="1" step="1" placeholder="Default"></label>' +
     '<label class="field">Retrieval profile<select id="rprofile"><option value="">Default</option>' +
     '<option value="lean">Lean</option><option value="balanced">Balanced</option><option value="max">Max</option></select></label></div>' +
-    '<label class="row"><input type="checkbox" id="rgarnish"> Ask the configured model to connect items to recent notes</label>' +
+    '<label class="row"><input type="checkbox" id="rgarnish"> Ask the configured model to relate public review items to recent public notes</label>' +
     '<div class="row"><button id="rload" type="submit">Update queue</button></div></form>' +
     (STATUS?.readonly ? '' : '<div class="row"><label class="field">Snooze days<input id="rdays" type="number" min="1" step="1" value="7" required></label></div>') +
     '<div id="rlist" class="list"></div></div>';

@@ -53,6 +53,9 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   Ask routes, with selectable Markdown when clipboard access is unavailable.
 - [x] Save a completed answer from either Ask route as a private Markdown
   draft with model attribution and verified sources. Recover a lost save response.
+- [x] Build a first map and its local index in place with the selected filters.
+- [x] Keep private notes in local Review while using only public note metadata
+  for optional AI annotations.
 
 ### Stage 8 — Enterprise coding
 
@@ -125,6 +128,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   transcript deletion, review and approval, and a team browser through local HTTPS.
 - [x] Record durable review decisions and optional notes in the Mac, web, and
   editor apps. Reuse the latest change-request note in a reviewed follow-up.
+- [x] Open retained requests by session name and request ID in the Mac, web,
+  and editor apps, including requests outside the recent list.
 - [x] Add opt-in Linux Docker worker isolation and owner-configured transcript
   expiry with expired-ID replay protection. Verify with a real offline Docker run
   and application-level retention tests.
@@ -722,6 +727,8 @@ Goal: the brain improves itself on a schedule.
       archive with the vec0 from `node_modules`, fully offline
 - [x] CI, release, and the worker pin Bun 1.4.3 for guarded proxy handling (B6
       was a `latest` drift).
+- [x] Verify the complete release candidate in PR CI. Match the release tag
+      to the package version and verify the assembled files before publishing.
 - [x] Docs: README (v0.2, GUI tour, offline package, upgrade), CONTEXT,
       CLAUDE.md invariant 1, REFERENCES (R1 updated, R3/R4 added), skills
 - [ ] Tag `v0.1.0` (runs the release workflow) — the maintainer's call
@@ -859,6 +866,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added retained run lookup and release candidate verification.
+  Built first maps in place and kept private notes out of Review AI annotations.
 - 2026-11-22 — Added an owner-approved model lookup from the configured Coding
   worker. Live provider evaluation and intended deployment verification remain open.
 - 2026-11-22 — Added private Coding review history, safe review retries,

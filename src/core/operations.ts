@@ -90,7 +90,7 @@ import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./r
 import { hybridRetrieve, type HybridArms, type HybridHit } from "./retrieval/hybrid.ts";
 import { PROFILES, ProfileError, resolveProfile, type RetrievalProfile } from "./retrieval/profiles.ts";
 import { rerankConfigured, rerankHits } from "./retrieval/rerank.ts";
-import { garnishQueue, pickRecent, type GarnishNote } from "./review/garnish.ts";
+import { describePublicReviewNote, garnishQueue, pickRecent } from "./review/garnish.ts";
 import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/score.ts";
 import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken, publishDesktopAddress } from "./serve-token.ts";
 import { computeStats, type BrainStats } from "./stats.ts";
@@ -2033,7 +2033,7 @@ export const operations: readonly Operation[] = [
     scope: "read",
     params: [
       { name: "limit", type: "int", description: "queue size (default 5, config review.queueSize)" },
-      { name: "garnish", type: "boolean", description: "add an AI one-liner tying each item to recent notes (off in lean)" },
+      { name: "garnish", type: "boolean", description: "add an AI one-liner tying public review items to recent public notes (off in lean)" },
       { name: "profile", type: "string", description: "retrieval profile gating the garnish: lean|balanced|max" },
     ],
     handler: async (ctx, p) => {
@@ -2044,13 +2044,13 @@ export const operations: readonly Operation[] = [
         return q;
       }
       try {
+        const describe = (id: string) => describePublicReviewNote(ctx.bundle, id);
+        const publicQueue = (await Promise.all(q.map(({ id }) => describe(id)))).filter((note) => note !== undefined);
+        if (!publicQueue.length) return q;
         const eng = await ctx.engine();
-        const describe = async (n: { id: string; title: string }): Promise<GarnishNote> => ({
-          ...n,
-          description: (await eng.getNode(n.id))?.description ?? "",
-        });
-        const recent = pickRecent(await eng.listReviewRows(), new Set(q.map((it) => it.id)), new Date());
-        const lines = await garnishQueue(await Promise.all(q.map(describe)), await Promise.all(recent.map(describe)), (m) =>
+        const recent = await pickRecent(await eng.listReviewRows(), new Set(q.map((it) => it.id)), new Date(), describe);
+        if (!recent.length) return q;
+        const lines = await garnishQueue(publicQueue, recent, (m) =>
           createGateway(ctx.config().ai ?? {}).chat(m),
         );
         return q.map((it) => {

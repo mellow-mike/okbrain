@@ -13,13 +13,15 @@ The Linux browser smoke test uses the bundled app assets at a 375 px viewport wi
 
 ## Release flow
 
-1. Bump `version` in `package.json`, commit, tag `vX.Y.Z`, push the tag.
+The **Verify complete release candidate** CI job assembles and checksums the eight release assets using the same checks as the tag workflow. Mac app and editor downloads remain available from their CI packaging jobs.
+
+1. Set `version` in `package.json`, commit, and check that CI passes. Tag the reviewed commit `vX.Y.Z` with the exact package version and push the tag.
 2. `.github/workflows/release.yml` cross-compiles all five targets
    (linux-x64/arm64, darwin-x64/arm64, windows-x64) via
    `scripts/package-release.ts`, pairs each with its platform's vec0 (pulled
    from the npm registry at the repo's pinned sqlite-vec version), and uploads
    `okb-<ver>-<os>-<arch>.tar.gz` / `.zip` + `SHA256SUMS.txt` to a GitHub
-   release. It also builds the macOS app on both architectures and includes the VSIX.
+   release. It also builds the macOS app on both architectures and includes the VSIX. A separate publishing job verifies the assembled checksums before creating the release.
 3. Update the manifests here from `SHA256SUMS.txt`:
    - `homebrew/okb.rb` → copy into a tap repo (`<owner>/homebrew-okb`).
    - `scoop/okb.json` → copy into a Scoop bucket.

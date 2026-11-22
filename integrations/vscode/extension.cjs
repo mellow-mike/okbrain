@@ -9,6 +9,8 @@ const { teamUrl, isTeamToken, connectTeam, isBranchComparisonSide } = require('.
 const savedSourceScheme = 'okbrain-saved-source';
 const teamSecret = 'okbrain.team.connection';
 const reviewIdPattern = /^[a-f0-9]{32}$/u;
+const runSessionName = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
+const runRequestId = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
 const openingSources = new Map();
 let inspection = 0;
 let requestReview = 0;
@@ -107,16 +109,16 @@ function pathFor(project, action) {
 
 function openWeb(connection, project, run, section) {
   const target = new URL(connection.url);
+  if (project && run && (section === 'request' || section === 'alternative-branch')) {
+    target.hash = `coding/${encodeURIComponent(project.id)}?${new URLSearchParams({ session: run.session, request: run.id })}`;
+    return vscode.env.openExternal(vscode.Uri.parse(target.toString()));
+  }
   if (connection.mode === 'team') return vscode.env.openExternal(vscode.Uri.parse(target.origin + '/'));
   const folder = vscode.workspace.workspaceFolders?.find((item) => item.uri.scheme === 'file');
   target.hash = project ? `coding/${encodeURIComponent(project.id)}` : folder
     ? `coding/${encodeURIComponent(`workspace=${folder.uri.fsPath}`)}` : 'coding';
   if (project && run) {
-    if (section === 'alternative-branch') {
-      target.hash += `?${new URLSearchParams({ session: run.session, request: run.id })}`;
-    } else {
-      target.hash += `/${section}/${encodeURIComponent(run.session)}/${encodeURIComponent(run.id)}`;
-    }
+    target.hash += `/${section}/${encodeURIComponent(run.session)}/${encodeURIComponent(run.id)}`;
   }
   return vscode.env.openExternal(vscode.Uri.parse(target.toString()));
 }
@@ -607,9 +609,17 @@ async function inspectRun(connection, project, selected, pendingReview) {
   const beforeInspectEditor = editorRevision;
   const previousEditor = vscode.window.activeTextEditor;
   const identity = { session: selected.session, requestId: selected.id };
-  const { run, pi, admissionMissing, liveAnswer, taskProgress, report, alternativeBranchEligible, reviewHistory } =
-    await connection.api(pathFor(project, 'inspect'), identity);
+  let inspectedResult;
+  try { inspectedResult = await connection.api(pathFor(project, 'inspect'), identity); }
+  catch (error) {
+    if (!isCurrent()) return;
+    const status = error.status ?? error.statusCode;
+    if (status === 404) throw new Error('No saved request has that session and request ID.');
+    if (status === 410) throw new Error('This saved request expired under the project’s retention policy.');
+    throw error;
+  }
   if (!isCurrent()) return;
+  const { run, pi, admissionMissing, liveAnswer, taskProgress, report, alternativeBranchEligible, reviewHistory } = inspectedResult;
   const sameRun = run.session === identity.session && run.id === identity.requestId &&
     (run.project === undefined || run.project === project.id);
   const history = sameRun && validReviewHistory(reviewHistory) ? reviewHistory : undefined;
@@ -684,7 +694,7 @@ async function inspectRun(connection, project, selected, pendingReview) {
   if (canOpenAlternative && sameInspection()) choices.push({ label: 'Preview alternative branch in okbrain', action: 'alternative-branch' });
   const action = await vscode.window.showQuickPick(choices, { placeHolder: 'Choose a run action', ignoreFocusOut: true });
   if (!action || !isCurrent() || (team && !await connection.isBound())) return;
-  if (action.action === 'open') return openWeb(connection, project);
+  if (action.action === 'open') return sameRun && sameInspection() ? openWeb(connection, project, run, 'request') : undefined;
   if (action.action === 'patch' || action.action === 'github') {
     if (canHandoffReview && sameInspection()) return openWeb(connection, project, run, action.action);
     return;
@@ -721,17 +731,34 @@ async function inspectRun(connection, project, selected, pendingReview) {
   await vscode.window.showInformationMessage(`Request ${result.id} · ${result.review || result.status}`);
 }
 
+async function findSavedRun(connection, project, current) {
+  const workspace = workspaceRevision;
+  const editor = editorRevision;
+  const team = connection.mode === 'team';
+  const isCurrent = () => current === inspection && workspace === workspaceRevision && editor === editorRevision && trustedEditor() &&
+    (!team || connection.current());
+  const session = (await vscode.window.showInputBox({ prompt: 'Saved session name', ignoreFocusOut: true,
+    validateInput: (value) => runSessionName.test(value.trim()) ? null : 'Use lowercase letters, digits, hyphens, or underscores.' }))?.trim();
+  if (!runSessionName.test(session ?? '') || !isCurrent()) return;
+  const id = (await vscode.window.showInputBox({ prompt: 'Saved request ID', ignoreFocusOut: true,
+    validateInput: (value) => runRequestId.test(value.trim()) ? null : 'Enter the exact request ID from okbrain.' }))?.trim();
+  if (!runRequestId.test(id ?? '') || !isCurrent() || (team && !await connection.isBound()) || !isCurrent()) return;
+  return inspectRun(connection, project, { session, id });
+}
+
 async function listRuns(connection) {
+  const current = ++inspection;
   const item = await chooseProject(connection, connection.projects.map((project) => ({ label: project.title, project })));
-  if (!item) return;
+  if (!item || current !== inspection) return;
   const runs = await connection.api(pathFor(item.project, 'runs'));
-  if (!runs.length) {
-    await vscode.window.showInformationMessage('This project has no coding requests yet.');
-    return;
-  }
-  const selected = await vscode.window.showQuickPick(runs.map((run) => ({ label: run.id,
-    description: `${run.session} · ${run.status}`, detail: run.review || undefined, run })), { placeHolder: 'Choose a request to inspect' });
-  if (selected) await inspectRun(connection, item.project, selected.run);
+  if (current !== inspection) return;
+  const choices = runs.map((run) => ({ label: run.id, description: `${run.session} · ${run.status}`, detail: run.review || undefined, run }));
+  const find = { label: 'Find saved request by ID…' };
+  choices.splice(1, 0, find);
+  const selected = await vscode.window.showQuickPick(choices, { placeHolder: 'Choose a request to inspect' });
+  if (!selected || current !== inspection) return;
+  if (selected === find) return findSavedRun(connection, item.project, current);
+  return inspectRun(connection, item.project, selected.run);
 }
 
 function activate(context) {

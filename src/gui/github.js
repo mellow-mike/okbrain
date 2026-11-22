@@ -14,7 +14,8 @@
   }
 
   function mount(parent, { project, coding, readonly, detached, loadIssue, target }) {
-    const path = '/projects/' + encodeURIComponent(project.id) + '/github-';
+    const prefix = '/projects/' + encodeURIComponent(project.id);
+    const path = prefix + '/github-';
     parent.className = 'coding-panel stack';
     parent.innerHTML = '<h3>GitHub</h3><div data-github-body><p class="muted">Loading connection…</p></div>' +
       '<div class="coding-feedback" role="status"></div>';
@@ -248,15 +249,30 @@
       }
       async function loadRuns() {
         const selected = selectedRun() ?? target;
-        const rows = await coding('/projects/' + encodeURIComponent(project.id) + '/runs');
-        accepted = rows.filter((run) => run.status === 'done' && run.review === 'accepted');
+        const rows = await coding(prefix + '/runs');
+        const matches = (run) => run?.session === selected?.session && run?.id === selected?.id;
+        const isAccepted = (run) => run.status === 'done' && run.review === 'accepted';
+        let selectedError;
+        let older;
+        if (selected && !rows.some(matches)) {
+          try {
+            const { run } = await coding(prefix + '/inspect', { session: selected.session, requestId: selected.id });
+            if (!matches(run) || run.project !== project.id) throw new Error('The saved result did not match the selected request.');
+            if (!isAccepted(run)) throw new Error('The selected request needs an accepted result before GitHub review.');
+            older = run;
+          } catch (error) { selectedError = error.message; }
+        }
+        if (detached() || !prepare.isConnected) return;
+        accepted = rows.filter(isAccepted);
+        if (older) accepted.unshift(older);
         request.replaceChildren(new Option(accepted.length ? 'Choose an accepted request' : 'Accept a run in Review first', ''),
           ...accepted.map((run, index) => new Option(run.session + ' / ' + run.id + (run.branch ? ' · Alternative' : ''), String(index))));
-        const index = selected ? accepted.findIndex((run) => run.session === selected.session && run.id === selected.id) : -1;
+        const index = selected ? accepted.findIndex(matches) : -1;
         if (index >= 0) request.value = String(index);
         else if (!selected && accepted.length === 1) request.value = '0';
         clearPreview();
         updateSelection();
+        if (selectedError) notice(selectedError, true);
       }
       updateSelection();
       prepare.addEventListener('toggle', () => {

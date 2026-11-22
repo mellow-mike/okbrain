@@ -27,6 +27,8 @@
 
   const projectUrl = (id) => '/projects/' + encodeURIComponent(id);
   const projectHref = (id) => '#coding/' + encodeURIComponent(id);
+  const runSessionName = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
+  const runRequestId = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
   const entries = (text) => text.split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
   const statuses = {
     running: 'Running', interrupted: 'Interrupted', done: 'Ready for review', unanswered: 'Unanswered',
@@ -1495,6 +1497,10 @@
     const panel = document.createElement('section');
     panel.className = 'coding-panel coding-activity stack';
     panel.innerHTML = '<div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh</button></div>' +
+      '<details data-find-saved-run><summary>Find saved request</summary><form class="stack coding-form">' +
+      field('Session name', '', 'text', 'name="session" maxlength="64" spellcheck="false" required') +
+      field('Request ID', '', 'text', 'name="requestId" maxlength="128" spellcheck="false" required') +
+      '<div class="row"><button type="submit">Open saved request</button></div></form></details>' +
       '<div class="stack coding-runs" data-runs></div><div class="stack" data-inspect aria-live="polite"></div>' +
       '<section class="stack" data-run-review hidden></section>' +
       '<div class="row" data-compare-branch hidden></div>' +
@@ -1506,6 +1512,7 @@
     const list = panel.querySelector('[data-runs]');
     const inspected = panel.querySelector('[data-inspect]');
     const feedback = panel.querySelector('[role="status"]');
+    const finder = panel.querySelector('[data-find-saved-run] form');
     const setRunReview = mountRunReview(panel.querySelector('[data-run-review]'), {
       prefix, readonly, detached, refresh, loadFollowUp: loadReviewFollowUp,
       afterAccepted: () => inspected.querySelector('[data-review-patch]')?.focus(),
@@ -1541,13 +1548,15 @@
       if (detached() || current !== generation) return;
       const pi = result.pi;
       const row = result.run;
-      if (row?.session !== run.session || row?.id !== run.id) throw new Error('The saved run did not match the selected request.');
+      if (row?.session !== run.session || row?.id !== run.id || row?.project !== project.id)
+        throw new Error('The saved run did not match the selected request.');
       const compactionPending = pi?.context?.compactionPending === true;
       const branch = row.branch || alternativeSessionName.test(row.session);
       setRunReview(row, result.reviewHistory, !readonly && (!branch || !!ownerActions));
       setComparisonRun(row);
       if (pi && !branch) ownerActions?.markCompactionPending(row.session, compactionPending);
-      setContextSession?.(!branch && idle && pi && !pi.pendingRequestIds.length ? row.session : null, compactionPending);
+      setContextSession?.(!branch && idle && row.status !== 'running' && row.status !== 'interrupted' &&
+        pi && !pi.pendingRequestIds.length ? row.session : null, compactionPending);
       setBranchTarget?.(!branch && result.alternativeBranchEligible === true ? row : null);
       const canViewSource = row.status !== 'running' &&
         (row.admitted || pi?.request || (row.status === 'interrupted' && !result.admissionMissing));
@@ -1561,7 +1570,7 @@
       if (row.status === 'running' && inspected.dataset.run === row.id && inspected.dataset.session === row.session && live) {
         showLiveAnswer(live, result.liveAnswer);
         showTaskProgress(inspected.querySelector('[data-task-progress]'), progress, true);
-        return;
+        return row;
       }
       inspected.dataset.run = row.id;
       inspected.dataset.session = row.session;
@@ -1594,7 +1603,7 @@
         const sources = (child.sources ?? []).map((file) => file.path + ':' + file.startLine + '–' + file.endLine);
         bar.before(disclosure(child.project + ' · ' + child.requestId, child.summary || child.reason || '', [usageText(child.usage), ...sources]));
       }
-      if (readonly) return;
+      if (readonly) return row;
       if ((!branch || ownerActions) && row.status === 'running') appendAction(bar, 'Cancel run', '/cancel', row);
       if ((!branch || ownerActions) && row.status === 'interrupted') {
         appendAction(bar, 'Resume', '/resume', row);
@@ -1610,6 +1619,7 @@
           bar.append(patch);
         }
       }
+      return row;
     }
 
     function appendAction(container, label, action, row) {
@@ -1635,9 +1645,10 @@
         const rows = await coding(prefix + '/runs');
         if (detached() || current !== generation) return;
         const active = rows.some((row) => row.status === 'running');
-        const target = selected && rows.find((row) => row.session === selected.session && row.id === selected.id);
+        const recent = selected && rows.find((row) => row.session === selected.session && row.id === selected.id);
+        const target = recent || selected;
         const markup = rows.length ? rows.map((row, index) =>
-          '<button type="button" class="coding-run" aria-pressed="' + (row === target) + '" data-run="' + index + '">' +
+          '<button type="button" class="coding-run" aria-pressed="' + (row === recent) + '" data-run="' + index + '">' +
           '<span><strong>' + esc(row.id) + '</strong><span class="muted">' + esc(row.session) + '</span></span>' +
           '<span>' + esc(labelStatus(row)) + '</span></button>').join('') : '<p class="empty">No requests in this project.</p>';
         if (list.dataset.markup !== markup) {
@@ -1649,47 +1660,61 @@
             button.addEventListener('click', () => selectRun(rows[Number(button.dataset.run)]));
           });
         }
+        let opened;
         if (target) {
           const idle = !rows.some((row) => row.session === target.session && (row.status === 'running' || row.status === 'interrupted'));
           if (!idle) setContextSession?.(null);
-          await readRun(target, current, idle);
+          try { opened = await readRun(target, current, idle); }
+          catch (error) {
+            if (detached() || current !== generation) return;
+            if (error.status !== 404 && error.status !== 410) throw error;
+            selected = null;
+            clearInspection();
+            list.querySelector('[aria-pressed="true"]')?.setAttribute('aria-pressed', 'false');
+            const message = error.status === 410 ? 'This saved request expired under the project’s retention policy.' :
+              'No saved request has that session and request ID.';
+            report(feedback, new Error(message));
+          }
         }
-        else {
-          selected = null;
-          setSavedSourceRun(null);
-          setContextSession?.(null);
-          setBranchTarget?.(null);
-          setComparisonRun(null);
-          setRunReview(null);
-          inspected.replaceChildren();
-          if (focusResult) report(feedback, new Error('That request is no longer in Run history.'));
-        }
-        if (focusResult && target && current === generation) {
+        if (focusResult && opened && current === generation) {
           const heading = inspected.querySelector('h4');
           heading?.setAttribute('tabindex', '-1');
           const branchButton = initialRun === selected && !branchPanel?.hidden ? branchPanel?.querySelector('[data-branch-start]') : null;
           (branchButton || heading)?.focus();
         }
-        if (active && current === generation && !detached()) timer = setTimeout(refresh, 1200);
+        if ((active || opened?.status === 'running') && current === generation && !detached()) timer = setTimeout(refresh, 1200);
       } catch (error) {
         if (!detached() && current === generation) report(feedback, error);
       }
     }
 
+    function clearInspection() {
+      setSavedSourceRun(null);
+      setContextSession?.(null);
+      setBranchTarget?.(null);
+      setComparisonRun(null);
+      setRunReview(null);
+      inspected.replaceChildren();
+    }
+
     function selectRun(row) {
-      if (selected?.id !== row.id || selected.session !== row.session) {
-        setSavedSourceRun(null);
-        setContextSession?.(null);
-        setBranchTarget?.(null);
-        setComparisonRun(null);
-        setRunReview(null);
-        inspected.replaceChildren();
-      }
+      if (selected?.id !== row.id || selected.session !== row.session) clearInspection();
       selected = row;
       report(feedback);
       return refresh(true);
     }
 
+    finder.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (detached()) return;
+      const session = finder.elements.session.value.trim();
+      const id = finder.elements.requestId.value.trim();
+      if (!runSessionName.test(session) || !runRequestId.test(id)) {
+        report(feedback, new Error('Enter a valid session name and request ID.'));
+        return;
+      }
+      void selectRun({ session, id });
+    });
     panel.querySelector('[data-refresh]').addEventListener('click', () => refresh());
     refresh(Boolean(initialRun));
     return { refresh, selectRun };
@@ -2264,9 +2289,17 @@
     }
     async function loadRuns(target, intent) {
       const current = ++runsRevision;
+      const active = () => !detached() && panel.open && current === runsRevision;
       try {
         const accepted = (await coding(prefix + '/runs')).filter((entry) => entry.status === 'done' && entry.review === 'accepted');
-        if (detached() || !panel.open || current !== runsRevision) return false;
+        if (!active()) return false;
+        const targeted = (entry) => entry.session === target.session && entry.id === target.requestId;
+        if (target && intent === proposalRevision && !accepted.some(targeted)) {
+          const { run: saved } = await coding(prefix + '/inspect', target);
+          if (!active() || intent !== proposalRevision) return false;
+          if (saved?.project === project.id && targeted(saved) && saved.status === 'done' && saved.review === 'accepted')
+            accepted.unshift(saved);
+        }
         const selected = target && intent === proposalRevision ? JSON.stringify(target) : run.value;
         run.replaceChildren(new Option(accepted.length ? 'Choose a result' : 'No accepted results', ''),
           ...accepted.map((entry) => new Option(entry.session + ' · ' + entry.id, JSON.stringify(identity(entry)))));
@@ -2274,7 +2307,7 @@
         clear();
         return !target || run.value === JSON.stringify(target);
       } catch (error) {
-        if (detached() || !panel.open || current !== runsRevision) return false;
+        if (!active()) return false;
         throw error;
       }
     }
@@ -2439,8 +2472,8 @@
     const params = new URLSearchParams(runRoute?.[2]);
     const requestedSession = params.get('session');
     const requestedRun = params.get('request');
-    const initialRun = /^[a-z0-9][a-z0-9_-]{0,63}$/u.test(requestedSession || '') &&
-      /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(requestedRun || '') ? { session: requestedSession, id: requestedRun } : undefined;
+    const initialRun = runSessionName.test(requestedSession || '') && runRequestId.test(requestedRun || '')
+      ? { session: requestedSession, id: requestedRun } : undefined;
     const projectId = actionRoute?.[1] || runRoute?.[1] || arg;
     const project = projects.find((item) => item.id === projectId || (suggestedWorkspace && item.workspace === suggestedWorkspace)) ||
       (!arg ? projects[0] : null);
@@ -2454,7 +2487,10 @@
       register(projectsEl, models, suggestedWorkspace, readonly);
       teamSettings(projectsEl, readonly, isDetached, () => { if (refreshDeployment) void refreshDeployment(); });
     }
-    if (!project) return;
+    if (!project) {
+      if (teamMode) report(projectsEl, new Error('This request link does not match the connected project.'));
+      return;
+    }
     const intro = document.createElement('header');
     intro.className = 'coding-project-header stack';
     intro.innerHTML = '<h3>' + esc(project.title) + '</h3>' + (project.workspace
@@ -2517,6 +2553,11 @@
     const disconnect = document.querySelector('#team-disconnect');
     const teamView = document.querySelector('#team-view');
     let generation = 0;
+    function mountTeam() {
+      const sequence = ++generation;
+      const route = /^#coding\/[a-f0-9-]{36}\?/u.test(window.location.hash) ? window.location.hash.slice('#coding/'.length) : null;
+      return mount(teamView, route, () => sequence !== generation, false, true);
+    }
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       teamToken = form.elements.token.value.trim();
@@ -2524,17 +2565,17 @@
       report(feedback);
       try {
         await coding('/projects');
-        const sequence = ++generation;
         form.reset();
         entrance.hidden = true;
         teamView.hidden = disconnect.hidden = false;
         teamView.focus();
-        await mount(teamView, null, () => sequence !== generation, false, true);
+        await mountTeam();
       } catch (error) {
         teamToken = null;
         report(feedback, error);
       } finally { submit.disabled = false; }
     });
+    window.addEventListener('hashchange', () => { if (teamToken && !teamView.hidden) void mountTeam(); });
     disconnect.addEventListener('click', () => {
       ++generation;
       teamToken = null;
