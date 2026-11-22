@@ -24,7 +24,10 @@ beforeEach(async () => {
   };
 });
 
-afterEach(async () => { await rm(testDirectory, { force: true, recursive: true }); });
+afterEach(async () => {
+  // Windows can briefly keep the crashed child's SQLite files locked.
+  await rm(testDirectory, { force: true, recursive: true, maxRetries: 8, retryDelay: 100 });
+});
 
 function provider() {
   const models = createModels();
@@ -127,7 +130,7 @@ test("resumes an interrupted Pi Durable request using the original attachment by
   const child = Bun.spawn([process.execPath, "-e", script, "--", processArgs], {
     cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "inherit",
   });
-  const startupTimeout = setTimeout(() => child.kill(), 10_000);
+  const startupTimeout = setTimeout(() => child.kill("SIGKILL"), 10_000);
 
   try {
     const reader = child.stdout.getReader();
@@ -137,7 +140,7 @@ test("resumes an interrupted Pi Durable request using the original attachment by
     await expect(runCodingSession(options, { stateDir, models })).rejects.toThrow("already open");
   } finally {
     clearTimeout(startupTimeout);
-    child.kill();
+    child.kill("SIGKILL");
     await child.exited;
   }
 
