@@ -198,7 +198,105 @@
       : '<p class="muted">No provider or tool usage recorded for this session.</p>') + '</details>';
   }
 
-  function register(parent, models, suggestedWorkspace, readonly) {
+  function checkoutRepository(url) {
+    if (typeof url !== 'string') return;
+    const match = /^https:\/\/github\.com\/([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)\/([a-z0-9_.-]{1,100}?)(?:\.git)?\/?$/iu.exec(url);
+    if (!match || match[2] === '.' || match[2] === '..') return;
+    return (match[1] + '/' + match[2]).toLowerCase();
+  }
+
+  function mountGitHubCheckout(registration, detached) {
+    const panel = document.createElement('details');
+    panel.dataset.githubCheckout = '';
+    panel.innerHTML = '<summary>Prepare GitHub checkout</summary><form class="stack coding-form">' +
+      '<p class="muted">Create a shallow checkout of one branch in private app data. Preparing the same repository and branch again can reopen the existing local copy.</p>' +
+      field('GitHub repository URL', '', 'url', 'name="url" maxlength="2048" required spellcheck="false" placeholder="https://github.com/owner/repository"') +
+      field('GitHub branch', '', 'text', 'name="branch" maxlength="255" required spellcheck="false" placeholder="main"') +
+      field('GitHub login (optional)', '', 'text', 'name="login" maxlength="39" autocomplete="off" spellcheck="false"') +
+      field('Contents-read token (optional)', '', 'password', 'name="token" maxlength="280" autocomplete="off"') +
+      '<p class="muted">For a private repository, enter your GitHub login and a short-lived fine-grained token for this repository with Contents read access. The checkout uses it once.</p>' +
+      '<label class="row"><input type="checkbox" name="approved"><span>Prepare a shallow checkout in private app data</span></label>' +
+      '<div class="row"><button type="submit" disabled>Prepare checkout</button></div>' +
+      '<div class="coding-feedback" role="status"></div><dl class="coding-grid coding-deployment-summary" hidden></dl></form>';
+    registration.before(panel);
+    const form = panel.querySelector('form');
+    const { url, branch, login, token, approved } = form.elements;
+    const submit = form.querySelector('button');
+    const feedback = form.querySelector('[role="status"]');
+    const receipt = form.querySelector('dl');
+    const brain = document.querySelector('#brain')?.value;
+    const current = () => panel.isConnected && !detached() && document.querySelector('#brain')?.value === brain;
+    let busy = false;
+    let workspaceEdits = 0;
+    registration.elements.workspace.addEventListener('input', () => { workspaceEdits++; });
+
+    function update() {
+      for (const field of [url, branch, login, token, approved]) field.disabled = busy;
+      submit.disabled = busy || !approved.checked;
+    }
+
+    for (const field of [url, branch, login, token]) field.addEventListener('input', () => {
+      approved.checked = false;
+      update();
+    });
+    approved.addEventListener('change', update);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (busy || !approved.checked || !current()) return;
+      const endpoint = url.value.trim();
+      const repository = checkoutRepository(endpoint);
+      const selectedBranch = branch.value.trim();
+      const username = login.value.trim();
+      const credential = token.value.trim();
+      if (!repository || !selectedBranch) {
+        report(feedback, new Error('Enter a GitHub.com HTTPS repository URL and the exact branch name.'));
+        return;
+      }
+      if (!!username !== !!credential) {
+        report(feedback, new Error('Enter both a GitHub login and a token for a private repository.'));
+        return;
+      }
+
+      const editsAtApproval = workspaceEdits;
+      const workspaceAtApproval = registration.elements.workspace.value;
+      login.value = token.value = '';
+      approved.checked = false;
+      busy = true;
+      update();
+      receipt.hidden = true;
+      receipt.replaceChildren();
+      report(feedback, undefined, 'Preparing GitHub checkout…');
+      try {
+        const result = await coding('/github-checkouts', { url: endpoint, branch: selectedBranch, approved: true,
+          ...(credential ? { login: username, token: credential } : {}) });
+        if (!current()) return;
+        if (typeof result?.repository !== 'string' || result.repository.toLowerCase() !== repository || checkoutRepository(result.origin) !== repository ||
+            result.branch !== selectedBranch || typeof result.commit !== 'string' || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(result.commit) ||
+            typeof result.workspace !== 'string' || !/^(?:\/(?!\/)|[a-z]:[/\\])/iu.test(result.workspace) ||
+            /[\x00-\x1f\x7f]/u.test(result.workspace) || typeof result.reused !== 'boolean')
+          throw new Error('The checkout receipt did not match the approved repository and branch.');
+        const unchanged = workspaceEdits === editsAtApproval && registration.elements.workspace.value === workspaceAtApproval;
+        if (unchanged) {
+          registration.elements.workspace.value = result.workspace;
+          if (!registration.elements.title.value.trim()) registration.elements.title.value = result.repository.split('/')[1];
+        }
+        receipt.innerHTML = [['Repository', result.origin], ['Branch', result.branch], ['Imported commit', result.commit],
+          ['Local workspace', result.workspace]].map(([label, value]) => '<div><dt class="muted">' + label +
+          '</dt><dd><code>' + esc(value) + '</code></dd></div>').join('');
+        receipt.hidden = false;
+        const status = result.reused ? 'Existing checkout reopened.' : 'GitHub checkout prepared.';
+        report(feedback, undefined, status + (unchanged ? ' Choose your project scope and model, then add the project.' :
+          ' Your workspace field has changed. The prepared path is shown below.'));
+      } catch (error) {
+        if (current()) report(feedback, error);
+      } finally {
+        busy = false;
+        if (current()) update();
+      }
+    });
+  }
+
+  function register(parent, models, suggestedWorkspace, readonly, detached) {
     const dialog = document.createElement('details');
     dialog.className = 'coding-panel';
     dialog.open = !!suggestedWorkspace || !parent.querySelector('[data-project-link]');
@@ -217,6 +315,7 @@
       '<div class="row"><button class="primary" type="submit">Add project</button></div><div class="coding-feedback" role="status"></div></form>';
     parent.append(dialog);
     const form = dialog.querySelector('form');
+    if (!readonly) mountGitHubCheckout(form, detached);
     const { provider, model, thinking } = form.elements;
     const submit = form.querySelector('button[type="submit"]');
     const feedback = form.querySelector('[role="status"]');
@@ -2484,7 +2583,7 @@
     let refreshDeployment;
     if (!teamMode) {
       projectsEl.insertAdjacentHTML('beforeend', '<div class="row coding-project-links"><a href="#coding/standalone">Standalone sessions</a></div>');
-      register(projectsEl, models, suggestedWorkspace, readonly);
+      register(projectsEl, models, suggestedWorkspace, readonly, isDetached);
       teamSettings(projectsEl, readonly, isDetached, () => { if (refreshDeployment) void refreshDeployment(); });
     }
     if (!project) {

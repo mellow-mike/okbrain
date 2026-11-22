@@ -20,9 +20,11 @@ Open **Inbox** and choose **File note** on an unread capture. Enter a new concep
 
 The terminal equivalent is `okb inbox file <inbox-id> <destination-id>`. Run it again with `--confirm <preview-id>` to approve the displayed move.
 
-In **Review**, you can change the queue size and the number of days to snooze notes. To ask your configured model to relate queue items to recent notes, opt in, select a retrieval profile, and choose **Update queue**. The model receives IDs, titles, and descriptions for public notes. Private drafts still appear in the local queue. Review skips the model call in the lean profile or when either the queue or recent context has no public notes.
+In **Review**, you can change the queue size and the number of days to snooze notes. To ask your configured model to relate queue items to recent notes, opt in, select a retrieval profile, and choose **Update queue**. The model receives IDs, titles, and descriptions for public notes. Private drafts still appear in the local queue. Review skips the model call in the lean profile or when either the queue or recent context has no public notes. Marking a note reviewed updates the local queue and the note's review metadata.
 
 Open **Add** to give a capture its own title and tags or include a quote and comment with a web clip. Select **Choose Markdown files** to open **Sources** with Markdown selected. Pick files or a folder, preview the entries, then save the selected notes as private drafts. To import from a path on the computer running okbrain, expand **Import directly from a server path**. You can set the destination and default note type and open imported notes from the results.
+
+On the clip form, **Suggest tags with AI using public tags** shares the article title, description, and a short excerpt with your configured chat model. Its optional vocabulary comes from public notes in the current brain.
 
 Open **Focused map** with a question, project, or note. Filter by source, date, or private drafts. On a writable brain without an index, choose **Build index and map** to run the map with the filters you selected. Each row explains the link direction and can move the map to the linked note.
 

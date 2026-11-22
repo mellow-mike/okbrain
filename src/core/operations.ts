@@ -33,7 +33,7 @@ import { extractTargets } from "./graph/links.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
 import { log } from "./log.ts";
 import { noteUsageSettings, recordCitedNotes, recordNoteOpen, type LocalUsageView } from "./local-usage.ts";
-import { suggestTags } from "./ingest/autotag.ts";
+import { publicTagVocabulary, suggestTags } from "./ingest/autotag.ts";
 import { captureNote } from "./ingest/capture.ts";
 import { clipUrl, type ClipOptions, type ClipResult } from "./ingest/clip.ts";
 import {
@@ -536,7 +536,7 @@ function autoTagger(ctx: OpContext, wanted: boolean): ClipOptions["suggestTags"]
   }
   return async (article) => {
     try {
-      const vocabulary = await ctx.hasIndex() ? await (await ctx.engine()).listTags() : [];
+      const vocabulary = await ctx.hasIndex() ? await publicTagVocabulary(ctx.bundle, await (await ctx.engine()).listNodeIds()) : [];
       return await suggestTags(article, vocabulary, (m) =>
         createGateway(ctx.config().ai ?? {}).chat(m),
       );
@@ -2086,7 +2086,7 @@ export const operations: readonly Operation[] = [
       const by = ctx.actor();
       const at = nowTimestamp();
       await writing(() => writeConcept(ctx.bundle, { id, verify: { by, at }, metadataOnly: true }));
-      await reindex(ctx, [id]);
+      await reindex(ctx, [id], false);
       await afterMarkdownWrite(async () => (await ctx.engine()).clearSnooze(id));
       return { id, verifiedBy: by, verifiedAt: at };
     },
@@ -2130,7 +2130,7 @@ export const operations: readonly Operation[] = [
       { name: "note", type: "string", description: "your comment, saved with the quote" },
       { name: "tags", type: "string", description: "comma-separated extra tags" },
       { name: "read", type: "boolean", description: "skip the inbox tag (already read)" },
-      { name: "auto-tag", type: "boolean", description: "suggest topic tags via the chat model (also config clip.autoTag; off in lean)" },
+      { name: "auto-tag", type: "boolean", description: "suggest topic tags via the chat model using public vocabulary (also config clip.autoTag; off in lean)" },
     ],
     handler: async (ctx, p) => {
       const clip = ctx.config().clip;

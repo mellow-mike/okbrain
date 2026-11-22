@@ -312,3 +312,137 @@ test("restores public and private GitHub brains over real HTTPS and leaves exist
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+test("the local operator prepares a GitHub Coding checkout with transient auth and registers it separately", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "okb-coding-github-https-")));
+  const bundle = join(root, "brain");
+  const workspaceMount = join(root, "other-brain");
+  const gitRoot = join(root, "git-root");
+  const checkouts = join(root, "data", "okbrain", "coding-projects", "checkouts");
+  const code = "export const codingCheckoutFixture = true;\n";
+  const seen: { repository: string; auth: string | null }[] = [];
+  const fetchStarted = Promise.withResolvers<void>();
+  const fetchRelease = Promise.withResolvers<void>();
+  let tls: ReturnType<typeof Bun.serve> | undefined;
+  let proxy: Awaited<ReturnType<typeof fixtureProxy>> | undefined;
+  let api: Awaited<ReturnType<typeof startRestoreApp>> | undefined;
+  const request = (path: string, body?: unknown, options: { authorization?: string; brain?: string; anonymous?: boolean } = {}) =>
+    fetch(new URL(`api/${path}`, api!.url), {
+      method: body === undefined ? "GET" : "POST",
+      headers: { ...(options.anonymous ? {} : options.authorization ? { authorization: `Bearer ${options.authorization}` } : { "x-okb-token": ownerToken }),
+        ...(body === undefined ? {} : { "content-type": "application/json" }), ...(options.brain ? { "x-okb-brain": options.brain } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(18_000),
+    });
+  const prepare = (body: Record<string, unknown>, options?: Parameters<typeof request>[2]) => request("coding/github-checkouts", body, options);
+  const result = async <T,>(response: Response): Promise<T> => {
+    const body = await response.text();
+    expect(body).not.toContain(token);
+    expect(body).not.toContain(basic(token));
+    if (!response.ok) throw new Error(`Coding fixture request failed (${response.status}): ${body}`);
+    return JSON.parse(body).result as T;
+  };
+
+  try {
+    await Promise.all([mkdir(bundle), mkdir(workspaceMount)]);
+    await makeRepository(root, gitRoot, "coding-workspace", "---\ntype: note\ntitle: Removed fixture\n---\nOld bytes.\n");
+    const source = join(root, "source-coding-workspace");
+    git(source, "rm", "--", "index.md", "notes/restored.md");
+    await mkdir(join(source, "src"));
+    await writeFile(join(source, "src", "fixture.ts"), code);
+    git(source, "add", "--", "src/fixture.ts");
+    git(source, "commit", "--quiet", "-m", "Publish a coding checkout");
+    const commit = git(source, "rev-parse", "HEAD");
+    const remote = join(gitRoot, "fixture", "coding-workspace.git");
+    git(source, "push", "--quiet", remote, `refs/heads/${branch}:refs/heads/${branch}`);
+    const unsupportedBranch = "linked-files";
+    git(source, "checkout", "-qb", unsupportedBranch);
+    await writeFile(join(source, "link-target.txt"), "../outside\n");
+    const link = git(source, "hash-object", "-w", "--", "link-target.txt");
+    git(source, "update-index", "--add", "--cacheinfo", `120000,${link},fixture-link`);
+    git(source, "commit", "--quiet", "-m", "Publish a branch that needs an existing checkout");
+    git(source, "push", "--quiet", remote, `refs/heads/${unsupportedBranch}:refs/heads/${unsupportedBranch}`);
+    tls = Bun.serve({ hostname: "127.0.0.1", port: 0, tls: { cert: Bun.file(cert), key: Bun.file(key) }, async fetch(req) {
+      const url = new URL(req.url);
+      const route = /^\/fixture\/(coding-workspace|coding-redirect)\.git\/(info\/refs|git-upload-pack)$/u.exec(url.pathname);
+      if (!route || (route[2] === "info/refs" ? req.method !== "GET" || url.search !== "?service=git-upload-pack" : req.method !== "POST"))
+        return new Response("Not found", { status: 404 });
+      const repository = route[1]!;
+      const auth = req.headers.get("authorization");
+      seen.push({ repository, auth });
+      if (repository === "coding-redirect")
+        return Response.redirect(github("coding-workspace") + "/info/refs?service=git-upload-pack", 307);
+      if (auth !== basic(token)) return new Response("Authentication required", { status: 401, headers: { "www-authenticate": 'Basic realm="fixture"' } });
+      fetchStarted.resolve();
+      await fetchRelease.promise;
+      return smartGit(req, url, gitRoot);
+    } });
+    proxy = await fixtureProxy(tls.port!);
+    api = await startRestoreApp(root, bundle, proxy.url);
+    const mount = await request("brains/mounts", { action: "register", name: "read-only-setup", path: workspaceMount, readonly: true });
+    expect(mount.status).toBe(200);
+    const baseProject = { title: "Checkout reviewer fixture", workspace: bundle, provider: "openai", model: "gpt-5-mini" };
+    const registered = await result<{ id: string }>(await request("coding/projects", baseProject));
+    const member = await result<{ token: string }>(await request(`coding/projects/${registered.id}/members`, { name: "reviewer" }));
+    const draft = { url: github("coding-workspace"), branch, login, token, approved: true };
+    expect((await prepare(draft, { anonymous: true })).status).toBe(401);
+    expect((await prepare(draft, { authorization: member.token })).status).toBe(403);
+    expect((await prepare(draft, { brain: "read-only-setup" })).status).toBe(403);
+    expect((await prepare({ ...draft, approved: false })).status).toBe(400);
+    expect((await prepare({ ...draft, workspace: bundle })).status).toBe(400);
+    expect((await prepare({ ...draft, url: "https://fixture.invalid/owner/repository.git" })).status).toBe(400);
+    expect((await prepare({ ...draft, token: undefined })).status).toBe(400);
+    expect(seen).toEqual([]);
+
+    const redirected = await prepare({ ...draft, url: github("coding-redirect") });
+    expect(redirected.status).toBe(409);
+    expect(await redirected.text()).not.toContain(token);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((row) => row.repository === "coding-redirect" && row.auth === basic(token))).toBe(true);
+    expect(await readdir(checkouts)).toEqual([]);
+
+    const pending = prepare(draft);
+    await Promise.race([fetchStarted.promise, pending.then(() => { throw new Error("Checkout completed before Git received its request."); })]);
+    expect((await prepare(draft)).status).toBe(409);
+    fetchRelease.resolve();
+    const receipt = await result<{ workspace: string; origin: string; repository: string; branch: string; commit: string; reused: boolean }>(await pending);
+    expect(receipt).toMatchObject({ origin: draft.url, repository: "fixture/coding-workspace", branch, commit, reused: false });
+    expect(dirname(receipt.workspace)).toBe(checkouts);
+    expect(await readdir(checkouts)).toEqual([basename(receipt.workspace)]);
+    expect((await readdir(receipt.workspace)).sort()).toEqual([".git", "src"]);
+    expect(git(receipt.workspace, "rev-parse", "--is-shallow-repository")).toBe("true");
+    expect(git(receipt.workspace, "rev-parse", "HEAD")).toBe(commit);
+    expect(git(receipt.workspace, "rev-parse", "--symbolic-full-name", "@{upstream}")).toBe(`refs/remotes/origin/${branch}`);
+    expect(git(receipt.workspace, "remote", "get-url", "origin")).toBe(draft.url);
+    expect(git(receipt.workspace, "config", "--local", "--list")).not.toContain(token);
+    expect(await readFile(join(receipt.workspace, "src", "fixture.ts"), "utf8")).toBe(code);
+
+    const unsupported = await prepare({ ...draft, branch: unsupportedBranch });
+    expect(unsupported.status).toBe(409);
+    expect(await unsupported.text()).toContain("submodules or symlinks");
+    expect(await readdir(checkouts)).toEqual([basename(receipt.workspace)]);
+
+    const projectList = await result<{ id: string }[]>(await request("coding/projects"));
+    expect(projectList.map(({ id }) => id)).toEqual([registered.id]);
+    const requestCount = seen.length;
+    await writeFile(join(receipt.workspace, "src", "fixture.ts"), code + "// Keep this local edit.\n");
+    await api.stop();
+    api = undefined;
+    api = await startRestoreApp(root, bundle, proxy.url);
+    const reopened = await result<typeof receipt>(await prepare({ url: draft.url.replace(/\.git$/u, ""), branch, approved: true }));
+    expect(reopened).toEqual({ ...receipt, reused: true });
+    expect(seen).toHaveLength(requestCount);
+    expect(await readFile(join(reopened.workspace, "src", "fixture.ts"), "utf8")).toContain("Keep this local edit.");
+    const project = await result<{ id: string; workspace: string; scopes: string[] }>(await request("coding/projects", {
+      ...baseProject, title: "Prepared repository", workspace: reopened.workspace, scopes: ["src"],
+    }));
+    expect(project).toMatchObject({ workspace: reopened.workspace, scopes: ["src"] });
+    expect((await request(`coding/projects/${project.id}/preview`, { source: "files", files: ["src/fixture.ts"] })).status).toBe(200);
+    expect(await result(await request(`coding/projects/${project.id}/runs`))).toEqual([]);
+  } finally {
+    fetchRelease.resolve();
+    await api?.stop();
+    await proxy?.stop();
+    await tls?.stop(true);
+    await rm(root, { recursive: true, force: true });
+  }
+}, 35_000);

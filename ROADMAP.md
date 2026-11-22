@@ -56,6 +56,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Build a first map and its local index in place with the selected filters.
 - [x] Keep private notes in local Review while using only public note metadata
   for optional AI annotations.
+- [x] Use public note tags for optional clip suggestions. Keep marking a note
+  reviewed local even when its vector is missing.
 
 ### Stage 8 — Enterprise coding
 
@@ -153,6 +155,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   verified GitHub branch workflow while preserving the local Git index.
 - [x] Bind GitHub repositories, show activity, and prepare a GitHub browser
   comparison for accepted results.
+- [x] Prepare a shallow GitHub branch checkout from the Mac and web apps before
+  registering a Coding project. Use transient authentication for private source.
 - [x] Preview an issue from the bound GitHub repository and use it in a new
   Coding draft. Keep task editing, source preview, and approval separate.
 - [x] Preview and publish an owner-approved GitHub pull request from an accepted
@@ -866,6 +870,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added GitHub checkout setup in the apps and protected private tags
+  and local Review decisions from incidental provider requests.
 - 2026-11-22 — Added retained run lookup and release candidate verification.
   Built first maps in place and kept private notes out of Review AI annotations.
 - 2026-11-22 — Added an owner-approved model lookup from the configured Coding

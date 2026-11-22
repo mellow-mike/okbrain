@@ -11,6 +11,8 @@ import { join } from "node:path";
 import type { IndexVectors, VectorStore } from "../src/core/engine/interface.ts";
 import { openPostgresVectors } from "../src/core/engine/postgres-vectors.ts";
 import { defaultVectorsPath, openVectorStore } from "../src/core/engine/vectors.ts";
+import { readConceptPermissive } from "../src/core/okf/bundle.ts";
+import { normalizeVerified } from "../src/core/okf/document.ts";
 import { embedBundle, embedConcept, type Embedder } from "../src/core/retrieval/embed.ts";
 import { okb } from "./helpers.ts";
 
@@ -275,6 +277,33 @@ describe("okb embed + write hook (stub embed server)", () => {
     expect(requests).toBe(before + 1); // the hook embedded it
     const stats = await okb(["--bundle", root, "embed"]);
     expect(stats.stdout).toContain("skipped 4");
+  });
+
+  test("review done updates verification and the queue without embedding an uncached note", async () => {
+    const id = "notes/beta";
+    const cli = (...args: string[]) => okb(["--bundle", root, ...args]);
+    expect((await cli("index")).code).toBe(0);
+    const primed = await cli("embed", "--limit", "1");
+    expect(primed.code).toBe(0);
+    expect(primed.stdout).toContain("embedded 1");
+    expect((await cli("review", "--json")).stdout).toContain(`"${id}"`);
+    const before = requests;
+    const original = (await readConceptPermissive(root, id)).doc;
+
+    const reviewed = await cli("review", "done", id);
+    expect(reviewed.code).toBe(0);
+    expect(reviewed.stdout).toContain(`reviewed ${id}`);
+    expect(requests).toBe(before);
+    const saved = (await readConceptPermissive(root, id)).doc;
+    expect(saved.body).toBe(original.body);
+    expect(normalizeVerified(saved.frontmatter)).toHaveLength(1);
+    expect((await cli("review", "--json")).stdout).not.toContain(`"${id}"`);
+    const cached = openVectorStore(defaultVectorsPath(root));
+    try {
+      expect(cached.meta()?.provider).toBe("ollama");
+      expect(cached.embeddedHashes().has("notes/alpha")).toBe(true);
+      expect(cached.embeddedHashes().has(id)).toBe(false);
+    } finally { cached.close(); }
   });
 
   test("an unreachable embed provider never fails the write", async () => {

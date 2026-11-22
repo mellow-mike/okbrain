@@ -1653,7 +1653,7 @@ function renderAdd(_arg, seq) {
     '<label class="field"><span>Tags</span><input id="clip-tags" placeholder="Comma-separated"></label></div></details>' +
     '<div class="row">' +
     '<label class="row" style="gap:5px"><input type="checkbox" id="clip-read"> already read</label>' +
-    '<label class="row" style="gap:5px"><input type="checkbox" id="clip-auto"> auto-tag (AI)</label>' +
+    '<label class="row" style="gap:5px"><input type="checkbox" id="clip-auto"> Suggest tags with AI using public tags</label>' +
     '<button>Clip</button></div></form><div id="clip-out"></div>' +
     '<p class="muted">Clipped pages arrive as <code>references/</code> concepts with the page recorded under <code>sources</code>.</p>' +
     '<h3>Bookmarklet</h3><div id="bm-out"></div>' +

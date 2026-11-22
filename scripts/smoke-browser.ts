@@ -1295,6 +1295,106 @@ try {
 
   await nav.getByRole("link", { name: "Coding", exact: true }).click();
   await page.getByText("Add a project", { exact: true }).waitFor();
+  {
+    const apiPath = "/api/coding/github-checkouts";
+    const checkoutRoute = "**" + apiPath;
+    const checkout = page.locator("[data-github-checkout]");
+    const activate = checkout.getByRole("button", { name: "Prepare checkout", exact: true });
+    const consent = checkout.getByRole("checkbox", { name: "Prepare a shallow checkout in private app data", exact: true });
+    const urlField = checkout.getByLabel("GitHub repository URL", { exact: true });
+    const branchField = checkout.getByLabel("GitHub branch", { exact: true });
+    const loginField = checkout.getByLabel("GitHub login (optional)", { exact: true });
+    const tokenField = checkout.getByLabel("Contents-read token (optional)", { exact: true });
+    const workspaceField = page.getByLabel("Absolute workspace path", { exact: true });
+    const titleField = page.getByLabel("Project name", { exact: true });
+    const url = "https://github.com/Fixture-Org/fresh-project";
+    const branch = "release/alpha";
+    const login = "fixture-user";
+    const token = "github_pat_checkout_FixtureOnly0123456789";
+    const fixtureCheckout = { workspace: join(root, "prepared-checkout"), repository: "fixture-org/fresh-project",
+      origin: url + ".git", branch, commit: "a".repeat(40), reused: false };
+    const posts: string[] = [];
+    const submissions: unknown[] = [];
+    const callsBefore = projectFaux.state.callCount;
+    const firstReceived = Promise.withResolvers<void>();
+    const firstRelease = Promise.withResolvers<void>();
+    const secondReceived = Promise.withResolvers<void>();
+    const secondRelease = Promise.withResolvers<void>();
+    const recordCheckoutPost = (request: BrowserRequest) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === "POST" && path.startsWith("/api/coding/")) posts.push(path);
+    };
+    page.on("request", recordCheckoutPost);
+    await page.route(checkoutRoute, async (route) => {
+      const request = route.request();
+      assert.equal(request.method(), "POST");
+      assert.equal(request.headers()["x-okb-token"], server.token);
+      submissions.push(request.postDataJSON());
+      const attempt = submissions.length;
+      if (attempt === 1) { firstReceived.resolve(); await firstRelease.promise; }
+      if (attempt === 2) { secondReceived.resolve(); await secondRelease.promise; }
+      await route.fulfill({ json: { result: { ...fixtureCheckout, reused: attempt === 2,
+        ...(attempt === 3 ? { branch: "wrong-branch", workspace: join(root, "wrong-checkout") } : {}),
+      } } });
+    });
+    try {
+      await checkout.getByText("Prepare GitHub checkout", { exact: true }).click();
+      await urlField.fill(url);
+      await branchField.fill("main");
+      await loginField.fill(login);
+      await tokenField.fill(token);
+      assert.equal(await tokenField.getAttribute("type"), "password");
+      assert.equal(await activate.isEnabled(), false);
+      await consent.check();
+      await branchField.fill(branch);
+      assert.equal(await consent.isChecked(), false);
+      assert.equal(await activate.isEnabled(), false);
+      await consent.check();
+      await activate.click();
+      await firstReceived.promise;
+      assert.deepEqual(submissions, [{ url, branch, login, token, approved: true }]);
+      assert.equal(await loginField.inputValue(), "");
+      assert.equal(await tokenField.inputValue(), "");
+      assert.equal(await workspaceField.inputValue(), "");
+      assert.equal(await activate.isEnabled(), false);
+      firstRelease.resolve();
+      await checkout.getByText(/GitHub checkout prepared\./).waitFor();
+      await checkout.getByText("Imported commit", { exact: true }).waitFor();
+      assert.equal(await workspaceField.inputValue(), fixtureCheckout.workspace);
+      assert.equal(await titleField.inputValue(), "fresh-project");
+      for (const detail of [fixtureCheckout.origin, branch, fixtureCheckout.commit, fixtureCheckout.workspace])
+        await checkout.getByText(detail, { exact: true }).waitFor();
+      assert.equal(await consent.isChecked(), false);
+      assert.equal(await activate.isEnabled(), false);
+
+      await consent.check();
+      await activate.click();
+      await secondReceived.promise;
+      const manualWorkspace = join(root, "manually-chosen-workspace");
+      await workspaceField.fill(manualWorkspace);
+      await titleField.fill("Chosen project title");
+      secondRelease.resolve();
+      await checkout.getByText(/Existing checkout reopened\. Your workspace field has changed/).waitFor();
+      assert.equal(await workspaceField.inputValue(), manualWorkspace);
+      assert.equal(await titleField.inputValue(), "Chosen project title");
+
+      await consent.check();
+      await activate.click();
+      await checkout.getByText("The checkout receipt did not match the approved repository and branch.", { exact: true }).waitFor();
+      assert.equal(await workspaceField.inputValue(), manualWorkspace);
+      assert.equal(await checkout.locator("dl").isVisible(), false);
+      assert.deepEqual(submissions.slice(1), [{ url, branch, approved: true }, { url, branch, approved: true }]);
+      assert.deepEqual(posts, [apiPath, apiPath, apiPath]);
+      assert.equal(projectFaux.state.callCount, callsBefore);
+      assert.ok(!(await checkout.textContent())?.includes(token));
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+    } finally {
+      firstRelease.resolve();
+      secondRelease.resolve();
+      page.off("request", recordCheckoutPost);
+      await page.unroute(checkoutRoute);
+    }
+  }
   const teamAccess = page.locator(".coding-projects details").filter({
     has: page.getByText("Team browser access", { exact: true }),
   });
@@ -1929,6 +2029,7 @@ try {
     await readonlyCoding.goto(server.url + "#coding/" + project.id);
     assert.equal(await readonlyCoding.locator("#brain").inputValue(), readonlyBrain);
     const readonlyDeployment = await openDeployment(readonlyCoding);
+    assert.equal(await readonlyCoding.getByText("Prepare GitHub checkout", { exact: true }).count(), 0);
     await readonlyDeployment.getByText(image, { exact: true }).waitFor();
     await readonlyDeployment.getByText("bridge", { exact: true }).waitFor();
     assert.equal(await readonlyDeployment.getByRole("button", { name: "Run offline worker check", exact: true }).count(), 0);
@@ -2182,6 +2283,7 @@ try {
   try {
     const reviewerPage = await openTeam(reviewer.token);
     await reviewerPage.getByRole("button", { name: /project-task-progress/ }).click();
+    assert.equal(await reviewerPage.getByText("Prepare GitHub checkout", { exact: true }).count(), 0);
     const copiedByMember = await copyRunReport(reviewerPage, "project-browser", "project-task-progress", [...projectPrivateText, reviewer.token, evaluationKey]);
     assert.deepEqual(copiedByMember.report, projectReport.report);
     const teamReview = reviewerPage.locator("[data-run-review]");

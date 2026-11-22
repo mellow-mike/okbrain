@@ -29,6 +29,7 @@ import {
   GitHubError, githubRemotes, githubToken, githubUrl, type GitHubFetch, type GitHubPullReceipt,
 } from "./github.ts";
 import { githubBranchRef, githubCreatePatchCommit, githubCreatePatchRef, githubPreparePatchBranch } from "./github-branch.ts";
+import { createCodingGitHubCheckout } from "./github-checkout.ts";
 import { excludedPath, selectRepositoryContext } from "./repository-context.ts";
 import { validateCodingProjectProfile, type CodingProjectProfile } from "./project-profile.ts";
 import { launchProjectProviderCheck, launchProjectWorker, ProjectProviderCheckDisallowed, ProjectWorkerInterrupted } from "./project-worker.ts";
@@ -267,6 +268,7 @@ export class CodingProjectControl {
   #patchInFlight = false;
   #workerCheckInFlight = false;
   #providerCheckInFlight: AbortController | undefined;
+  #checkoutInFlight: AbortController | undefined;
   readonly #gates = new Map<string, Promise<void>>();
   readonly #requests = new Set<Promise<unknown>>();
   #retentionTimer: ReturnType<typeof setInterval> | undefined;
@@ -424,6 +426,7 @@ export class CodingProjectControl {
     this.#closing = true;
     clearInterval(this.#retentionTimer);
     this.#providerCheckInFlight?.abort();
+    this.#checkoutInFlight?.abort();
     const active = [...this.#active.values()];
     for (const { stop } of active) stop?.();
     await Promise.allSettled([...active.map(({ promise }) => promise), ...this.#requests, this.#retentionSweep]);
@@ -532,7 +535,33 @@ export class CodingProjectControl {
     if (!actor.owner) throw new ProjectControlError("Only the local okbrain operator can change project settings.", 403);
   }
 
-  async #addProject(body: Json, actor: Actor) {
+  async #checkout(body: Json, actor: Actor, canWrite: () => boolean) {
+    if (!actor.owner) throw new ProjectControlError("GitHub checkout setup is available to the local okbrain operator.", 403);
+    const writable = () => !this.#closing && canWrite();
+    if (!writable()) throw new ProjectControlError("Open a writable brain to prepare a GitHub checkout.", 403);
+    if (body.approved !== true || Object.keys(body).some((key) => !["url", "branch", "login", "token", "approved"].includes(key)))
+      throw new ProjectControlError("Confirm the GitHub repository and branch before preparing a checkout.");
+    if (this.#checkoutInFlight) throw new ProjectControlError("A GitHub checkout is already being prepared. Try again when it finishes.", 409);
+    const cancel = new AbortController();
+    const deadline = AbortSignal.timeout(50_000);
+    const signal = AbortSignal.any([cancel.signal, deadline]);
+    const { url, branch, login, token } = body;
+    this.#checkoutInFlight = cancel;
+    try {
+      return await createCodingGitHubCheckout({ url, branch, login, token }, {
+        directory: join(this.#directory, "checkouts"), canWrite: writable, signal,
+      });
+    } catch (error) {
+      if (!writable()) throw new ProjectControlError("The brain mount changed or is read-only.", 403);
+      if (deadline.aborted) throw new ProjectControlError("Preparing the GitHub checkout took too long. Try again or select an existing local checkout.", 409);
+      if (error instanceof GitHubError) throw new ProjectControlError(error.message, error.status);
+      throw error;
+    } finally {
+      this.#checkoutInFlight = undefined;
+    }
+  }
+
+  async #addProject(body: Json, actor: Actor, canWrite: () => boolean) {
     this.#requireOwner(actor);
     const title = field(body, "title", 128);
     const path = field(body, "workspace", 4096);
@@ -554,6 +583,7 @@ export class CodingProjectControl {
     if (thinking !== null && !catalog.thinkingLevels.includes(thinking))
       throw new ProjectControlError("Choose a reasoning level supported by this model.");
     const apiKey = body.apiKey === undefined ? null : field(body, "apiKey", 4096);
+    if (this.#closing || !canWrite()) throw new ProjectControlError("The brain mount changed or is read-only.", 403);
     const id = randomUUID();
     this.#db.transaction(() => {
       this.#write("INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1932,7 +1962,8 @@ export class CodingProjectControl {
         !path.endsWith("/evaluation-inspect") && !path.endsWith("/source-inspect") && !path.endsWith("/branch-comparison-inspect") &&
         !path.endsWith("/github-issue"))
       throw new ProjectControlError("This server is attached to a read-only brain mount.", 403);
-    if (path === "/projects" && method === "POST") return this.#addProject(body, actor);
+    if (path === "/projects" && method === "POST") return this.#addProject(body, actor, canWrite);
+    if (path === "/github-checkouts" && method === "POST") return this.#checkout(body, actor, canWrite);
     const match = /^\/projects\/([a-f0-9-]{36})\/([a-z-]+)$/.exec(path);
     if (!match) throw new ProjectControlError("Coding endpoint not found.", 404);
     const project = this.#project(match[1]!, actor);

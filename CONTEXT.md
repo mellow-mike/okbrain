@@ -120,6 +120,10 @@ The benchmark CLI and app share the six pinned Vite tasks and evidence
 locations. Reserved app study IDs bind the task, citation targets, retrieval
 recipe, clean Git revision, and timed preview to each new trial.
 GitHub activity and compare handoff use a bound project remote.
+The local operator can prepare one shallow GitHub branch checkout in private
+Coding app data before registering a project. A transient Contents-read
+credential authenticates only an explicitly approved fetch. The saved local
+copy can reopen by repository and branch, including across server restarts.
 An explicitly selected issue is read from that remote and displayed as text.
 Using it in Coding fills an editable draft in a fresh session and clears
 prior source approval. The normal preview and approval bind the later send.
@@ -418,6 +422,8 @@ rejects on any warning class — doctor is the only strict surface.
   notes by default, with explicit inclusion controls on those surfaces.
   The local Review queue includes private notes. Optional AI annotations use
   public queue and recent-note metadata from the bundle.
+  Clip tag suggestions use a bounded vocabulary from current public Markdown.
+  Saving a Review decision updates metadata without refreshing vectors.
 
 ### Conversation exports
 

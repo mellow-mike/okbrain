@@ -4,7 +4,7 @@
 // against a stub chat server (no network in CI). Both must degrade to their
 // deterministic base behavior on any AI failure.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -153,6 +153,78 @@ describe("clipUrl autoTag hook", () => {
     expect(called).toBe(0);
     expect(r.autoTags).toEqual([]);
   });
+});
+
+test("okb clip --auto-tag sends bounded current public vocabulary and works without an index", async () => {
+  const root = await mkdtemp(join(tmpdir(), "okb-clip-vocabulary-"));
+  const indexed = join(root, "indexed");
+  const unindexed = join(root, "unindexed");
+  const article = "https://192.0.2.21/vocabulary";
+  const model = "http://127.0.0.1:9345/chat/completions";
+  const prompts: string[] = [];
+  const attrs = new Map(Object.entries({
+    OKB_CHAT_PROVIDER: "ollama", OKB_CHAT_BASE_URL: "http://127.0.0.1:9345", NO_PROXY: "192.0.2.21", no_proxy: "192.0.2.21",
+  }).map(([key, value]) => [key, { previous: process.env[key], value }]));
+  for (const [key, { value }] of attrs) process.env[key] = value;
+  const transport = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url === article) return new Response(
+      '<html><head><title>Vocabulary Article</title></head><body><article><h1>Vocabulary Article</h1><p>' +
+      'This article describes growing a collection of orchids in a shared greenhouse. '.repeat(12) + '</p></article></body></html>',
+      { headers: { "content-type": "text/html" } });
+    if (url === model) {
+      const request = JSON.parse(String(init?.body)) as { messages: ChatMessage[] };
+      prompts.push(request.messages.map(({ content }) => content).join("\n"));
+      return Response.json({ choices: [{ message: { content: "fixture-topic" } }] });
+    }
+    throw new Error("Unexpected transport in Clip vocabulary fixture.");
+  }, { preconnect: () => {} }));
+  const markdown = (tags: string[], privateFlag = false) =>
+    `---\ntype: note\ntitle: Vocabulary source\ntags: ${JSON.stringify(tags)}\n` +
+    (privateFlag ? "db_only: true\n" : "") + "---\nOnly tags from eligible notes may be used.\n";
+  try {
+    await mkdir(join(indexed, "db_only"), { recursive: true });
+    await mkdir(unindexed);
+    await writeFile(join(indexed, "00-public.md"), markdown(["old-public-tag", "shared-tag"]));
+    await writeFile(join(indexed, "db_only", "folder.md"), markdown(["private-folder-tag", "shared-tag"]));
+    await writeFile(join(indexed, "flagged.md"), markdown(["private-flagged-tag"]));
+    await writeFile(join(indexed, "deleted.md"), markdown(["stale-deleted-tag"]));
+    await writeFile(join(indexed, "unreadable.md"), markdown(["stale-broken-tag"]));
+    await writeFile(join(indexed, "zz-vocabulary.md"), markdown(Array.from({ length: 100 }, (_, i) => `bounded-${i}-${"x".repeat(55)}`)));
+    expect((await okb(["index", "--bundle", indexed])).code).toBe(0);
+    await writeFile(join(indexed, "00-public.md"), markdown(["current-public-tag", "shared-tag", "inbox"]));
+    await writeFile(join(indexed, "flagged.md"), markdown(["private-flagged-tag"], true));
+    await writeFile(join(indexed, "unreadable.md"), "---\ntype: [unclosed\n---\nUnavailable note.\n");
+    await rm(join(indexed, "deleted.md"));
+
+    const clipped = await okb(["clip", article, "--auto-tag", "--json", "--bundle", indexed]);
+    expect(clipped.code).toBe(0);
+    const saved = JSON.parse(clipped.stdout) as { id: string; autoTags: string[] };
+    expect(saved.autoTags).toEqual(["fixture-topic"]);
+    expect(fmTags((await readConceptPermissive(indexed, saved.id)).doc.frontmatter.tags)).toEqual(["fixture-topic", "inbox"]);
+    expect(prompts).toHaveLength(1);
+    const vocabulary = /^Existing tags: (.+)$/mu.exec(prompts[0]!)?.[1];
+    expect(vocabulary).toContain("current-public-tag");
+    expect(vocabulary).toContain("shared-tag");
+    expect(vocabulary).toContain("bounded-0-");
+    expect(vocabulary?.length).toBeLessThanOrEqual(2048);
+    for (const omitted of ["old-public-tag", "private-folder-tag", "private-flagged-tag", "stale-deleted-tag", "stale-broken-tag", "inbox"])
+      expect(vocabulary).not.toContain(omitted);
+
+    const firstClip = await okb(["clip", article, "--auto-tag", "--json", "--bundle", unindexed]);
+    expect(firstClip.code).toBe(0);
+    expect(JSON.parse(firstClip.stdout).autoTags).toEqual(["fixture-topic"]);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).not.toContain("Existing tags:");
+    expect(prompts[1]).toContain("Vocabulary Article");
+  } finally {
+    transport.mockRestore();
+    for (const [key, { previous }] of attrs) {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 describe("engine listTags", () => {

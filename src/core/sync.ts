@@ -30,8 +30,51 @@ interface GitResult {
   stderr: string;
 }
 
+async function runAbortableGit(cwd: string, args: string[], input: string | undefined, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<GitResult> {
+  signal.throwIfAborted();
+  const group = process.platform !== "win32";
+  const child = Bun.spawn(["git", ...args], {
+    cwd, env, detached: group, stdin: input === undefined ? "ignore" : Buffer.from(input),
+    stdout: "pipe", stderr: "pipe", maxBuffer: 16 * 1024 * 1024, killSignal: "SIGKILL",
+  });
+  let stopping: Promise<void> | undefined;
+  const kill = () => {
+    try { if (child.exitCode === null) child.kill("SIGKILL"); } catch { /* Git already exited. */ }
+  };
+  const stop = () => {
+    if (group) {
+      try { process.kill(-child.pid, "SIGKILL"); } catch { kill(); }
+    } else if (child.exitCode === null) {
+      stopping ??= (async () => {
+        try {
+          const system = env.SystemRoot ?? env.SYSTEMROOT ?? env.WINDIR ?? env.windir;
+          if (system) {
+            const command = Bun.spawn([join(system, "System32", "taskkill.exe"), "/PID", String(child.pid), "/T", "/F"], {
+              stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 3000, killSignal: "SIGKILL",
+            });
+            await command.exited;
+          }
+        } catch { /* Fall back to the known child handle. */ }
+        finally { kill(); }
+      })();
+    }
+  };
+  signal.addEventListener("abort", stop, { once: true });
+  if (signal.aborted) stop();
+  try {
+    const [code, stdout, stderr] = await Promise.all([child.exited, child.stdout.text(), child.stderr.text()]);
+    signal.throwIfAborted();
+    return { code, stdout, stderr };
+  } catch (error) {
+    stop();
+    await stopping;
+    await child.exited;
+    throw error;
+  } finally { signal.removeEventListener("abort", stop); }
+}
+
 /** Spawn git by argv. Never throws on nonzero exit — callers decide. */
-export function runGit(cwd: string, args: string[], input?: string, extraEnv?: NodeJS.ProcessEnv): Promise<GitResult> {
+export function runGit(cwd: string, args: string[], input?: string, extraEnv?: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<GitResult> {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const [key, value] of Object.entries(extraEnv ?? {})) {
     if (value === undefined) delete env[key];
@@ -40,6 +83,7 @@ export function runGit(cwd: string, args: string[], input?: string, extraEnv?: N
   env.GIT_TERMINAL_PROMPT = "0";
   // The selected brain, rather than inherited Git plumbing, determines the repository.
   for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CONFIG"]) delete env[key];
+  if (signal) return runAbortableGit(cwd, args, input, env, signal);
   return new Promise((done, fail) => {
     const child = execFile(
       "git",
@@ -196,8 +240,8 @@ async function configValues(root: string, key: string, local = false): Promise<s
   return result.stdout.split("\0").slice(0, -1);
 }
 
-async function originURLs(root: string, push = false, env?: NodeJS.ProcessEnv): Promise<string[]> {
-  const result = await runGit(root, ["remote", "get-url", "--all", ...(push ? ["--push"] : []), "origin"], undefined, env);
+async function originURLs(root: string, push = false, env?: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<string[]> {
+  const result = await runGit(root, ["remote", "get-url", "--all", ...(push ? ["--push"] : []), "origin"], undefined, env, signal);
   return result.code === 0 ? result.stdout.trimEnd().split(/\r?\n/u) : [];
 }
 
@@ -251,8 +295,8 @@ export function managedOriginConfig(origin: string): [string, string][] {
 
 const changedOriginError = () => new SyncError("Git configuration changes the fetch or push destination. Review the Git URL rules before connecting this remote.");
 
-async function verifyOriginDestination(root: string, url: string, env?: NodeJS.ProcessEnv): Promise<void> {
-  const endpoints = await Promise.all([originURLs(root, false, env), originURLs(root, true, env)]);
+async function verifyOriginDestination(root: string, url: string, env?: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<void> {
+  const endpoints = await Promise.all([originURLs(root, false, env, signal), originURLs(root, true, env, signal)]);
   if (endpoints.some((values) => values.length !== 1 || values[0] !== url))
     throw changedOriginError();
 }
@@ -397,11 +441,13 @@ export async function syncGitHubCredential(root: string, input: SyncGitHubCreden
 export async function managedGitTransport(
   root: string, origin: string, args: ["fetch" | "push", ...string[]], credential: GitHubSyncCredential | null,
   processOptions: NodeJS.ProcessEnv = {},
+  options: { signal?: AbortSignal; authorize?: () => void | Promise<void> } = {},
 ): Promise<GitResult> {
   const protocol = { ...processOptions, GIT_ALLOW_PROTOCOL: "https" };
   if (!credential) {
-    await verifyOriginDestination(root, origin, protocol);
-    return runGit(root, ["-c", `http.${origin}.followRedirects=false`, ...args], undefined, protocol);
+    await verifyOriginDestination(root, origin, protocol, options.signal);
+    if (options.authorize) await options.authorize();
+    return runGit(root, ["-c", `http.${origin}.followRedirects=false`, ...args], undefined, protocol, options.signal);
   }
   if (credential.origin !== origin) throw new SyncError("The saved GitHub credential belongs to a different origin.");
   const hooks = await mkdtemp(join(tmpdir(), "okb-sync-hooks-"));
@@ -409,9 +455,10 @@ export async function managedGitTransport(
     const { args: authArgs, env } = gitHubSyncTransport(credential, hooks);
     // Check the destinations using the same configuration environment as the
     // transport, with no credential present in the verification processes.
-    await verifyOriginDestination(root, origin, { ...protocol, ...env, GIT_ALLOW_PROTOCOL: "https", OKB_SYNC_AUTH_HEADER: undefined });
+    await verifyOriginDestination(root, origin, { ...protocol, ...env, GIT_ALLOW_PROTOCOL: "https", OKB_SYNC_AUTH_HEADER: undefined }, options.signal);
+    if (options.authorize) await options.authorize();
     try {
-      const result = await runGit(root, [...authArgs, ...args], undefined, { ...protocol, ...env, GIT_ALLOW_PROTOCOL: "https" });
+      const result = await runGit(root, [...authArgs, ...args], undefined, { ...protocol, ...env, GIT_ALLOW_PROTOCOL: "https" }, options.signal);
       if (result.code === 0) return { code: 0, stdout: "", stderr: "" };
     } catch { /* A child error can contain request diagnostics. */ }
     const action = args[0] === "push" ? "push failed (changes are committed locally)" : "fetch failed";
