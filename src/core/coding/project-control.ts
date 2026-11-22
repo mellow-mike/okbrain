@@ -12,7 +12,7 @@ import {
 } from "./approved-patch.ts";
 import {
   cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, getCodingSessionStatus, getSavedCodingRequestInput, hasCodingCredential,
-  listCodingModels, previewCodingAttachments, previewCodingContextReset, resetCodingContext, runCodingSession,
+  listCodingModels, parseCodingHandoff, previewCodingAttachments, previewCodingContextReset, resetCodingContext, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions,
 } from "./durable.ts";
 import { CodingEvaluationError, CodingEvaluations, parseEvaluation, presentEvidence } from "./evaluation.ts";
@@ -745,7 +745,7 @@ export class CodingProjectControl {
     )) throw new ProjectControlError("Finish, resume, or cancel active work in this session before starting fresh context.", 409);
     if (this.#get("SELECT 1 FROM session_deletions WHERE project = ? AND session = ?", project.id, session))
       throw new ProjectControlError("This session is being deleted.", 409);
-    const identity = this.#session(project, { session });
+    const identity = { ...this.#session(project, { session }), handoff: parseCodingHandoff(body.handoff) };
     const { stateDir, models, workspaceBinding } = this.#dependencies(project, actor);
     const dependencies = { stateDir, models, workspaceBinding, allowEnvKey: false };
     if (preview) return previewCodingContextReset(identity, dependencies);

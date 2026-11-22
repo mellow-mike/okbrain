@@ -48,6 +48,7 @@ const maxAttachments = 12;
 const sessionNamePattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const requestIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const contextVersionPattern = /^[a-f0-9]{64}$/u;
+export const maxCodingHandoffBytes = 2048;
 export const maxLiveAnswerLength = 8192;
 const instructions = [
   "Help with authorized software work using the task and the supplied source files.",
@@ -57,6 +58,7 @@ const instructions = [
 ].join(" ");
 
 export class CodingError extends Error {}
+export class CodingHandoffError extends CodingError { readonly code = "INVALID_SETTINGS"; }
 export class CodingSessionBusyError extends CodingError {}
 export class CodingSessionMissingError extends CodingError {}
 export class CodingSessionDeletingError extends CodingError {}
@@ -92,8 +94,8 @@ export type CodingSessionStatusOptions = CodingSessionIdentity & {
   includeSavedSource?: boolean;
 };
 
-export type CodingContextResetPreview = { version: string };
-export type CodingContextResetResult = CodingContextResetPreview & { reset: true; replayed?: true };
+export type CodingContextResetPreview = { version: string; handoff?: string };
+export type CodingContextResetResult = { reset: true; version: string; replayed?: true };
 
 export type SavedCodingSource = { source: "files"; files: { path: string; content: string }[] }
   | ({ source: "repository" } & RepositoryContextSelection);
@@ -524,52 +526,77 @@ function withContextResetSession<T>(
   });
 }
 
-async function codingContextVersion(session: string, root: Conversation, dependencies: CodingDependencies): Promise<string> {
+export function parseCodingHandoff(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.isWellFormed()) throw new CodingHandoffError("Enter the handoff note as UTF-8 text.");
+  const note = value.replace(/\r\n?/gu, "\n");
+  if (Buffer.byteLength(note) > maxCodingHandoffBytes) {
+    throw new CodingHandoffError(`Keep the handoff note within ${maxCodingHandoffBytes} UTF-8 bytes.`);
+  }
+  return note.trim() ? note : undefined;
+}
+
+async function codingContextVersion(
+  session: string, root: Conversation, dependencies: CodingDependencies, handoff: string | undefined,
+): Promise<string> {
   const transcript = join(codingStateRoot(dependencies), sessionDirectoryName(session), "transcript.sqlite");
   const { dev, ino, birthtimeNs } = await lstat(transcript, { bigint: true });
   const { items: [entry] } = await root.entries({}, 1, undefined, context);
   // Immutable entries advance the revision. File identity distinguishes a recreated transcript whose entry IDs start over.
-  return createHash("sha256").update(JSON.stringify([dev.toString(), ino.toString(), birthtimeNs.toString(), session, entry ?? null]))
+  const version = createHash("sha256").update(JSON.stringify([dev.toString(), ino.toString(), birthtimeNs.toString(), session, entry ?? null]))
     .digest("hex");
+  return handoff === undefined ? version : createHash("sha256").update(JSON.stringify(["okbrain/context-handoff/v1", version, handoff])).digest("hex");
 }
 
-function previewContextReset(options: CodingSessionIdentity | string, dependencies: CodingDependencies): Promise<CodingContextResetPreview> {
+async function previewContextReset(
+  options: CodingSessionIdentity | string, dependencies: CodingDependencies, handoffInput?: string,
+): Promise<CodingContextResetPreview> {
+  const handoff = parseCodingHandoff(handoffInput);
   return withContextResetSession(options, dependencies, async (session, root) => ({
-    version: await codingContextVersion(session, root, dependencies),
+    version: await codingContextVersion(session, root, dependencies, handoff),
+    ...(handoff === undefined ? {} : { handoff }),
   }));
 }
 
 class ContextResetAuthorizationError extends CodingError {}
 
-async function requireResetReceipt(storage: SqliteStorage, root: Conversation, record: SubmissionRecord) {
+async function requireResetReceipt(storage: SqliteStorage, root: Conversation, record: SubmissionRecord, handoffMessage: string | undefined) {
   const marker = record.type === "write" && record.status === "done" && record.entry !== undefined
     ? (await storage.entry(root.id, record.entry, context))?.entry : undefined;
   if (!marker || !ResetEntry.is(marker) || marker.head !== marker.id) throw new CodingError("The saved context reset could not be verified.");
+  const message = marker.model?.[0];
+  const matches = handoffMessage === undefined ? marker.model === undefined || marker.model.length === 0
+    : marker.model?.length === 1 && message?.role === "user" && message.content === handoffMessage && Number.isFinite(message.timestamp);
+  if (!matches) throw new CodingError("The handoff note does not match the approved context reset. Preview it again.");
 }
 
 async function resetContext(
-  options: CodingSessionIdentity | string, version: string, dependencies: CodingDependencies, authorize?: () => void,
+  options: CodingSessionIdentity | string, version: string, dependencies: CodingDependencies, authorize?: () => void, handoffInput?: string,
 ): Promise<CodingContextResetResult> {
   if (typeof version !== "string" || version.length !== 64 || !contextVersionPattern.test(version)) {
     throw new CodingError("Preview the current coding session context before resetting it.");
   }
+  const handoff = parseCodingHandoff(handoffInput);
+  // The label keeps JSON notes distinct from the application's repository request envelope.
+  const handoffMessage = handoff === undefined ? undefined : `Handoff note:\n${handoff}`;
   try {
     return await withContextResetSession(options, dependencies, async (session, root, storage) => {
       // The prefix is outside the app's public request ID namespace. A retry can only read this version's receipt.
       const requestId = `@okbrain.context-reset.${version}`;
       const prior = await storage.submissionByRequest(root.id, requestId, context);
       if (prior) {
-        await requireResetReceipt(storage, root, prior);
+        await requireResetReceipt(storage, root, prior, handoffMessage);
         return { reset: true, version, replayed: true };
       }
-      if (version !== await codingContextVersion(session, root, dependencies)) {
-        throw new CodingError("The coding session context changed. Preview it again before resetting it.");
+      if (version !== await codingContextVersion(session, root, dependencies, handoff)) {
+        throw new CodingError("The coding session context changed or the handoff note differs. Preview it again before resetting it.");
       }
       try { authorize?.(); }
       catch (cause) { throw new ContextResetAuthorizationError("The context reset is no longer authorized.", { cause }); }
       // The lease and idle check prevent Pi from queuing this passive reset behind other work.
-      const submission = await root.submit({ type: "write", requestId, entry: { kind: ResetEntry.kind, head: "self" } }, context);
-      await requireResetReceipt(storage, root, await submission.status(context));
+      const model = handoffMessage === undefined ? {} : { model: [{ role: "user" as const, content: handoffMessage, timestamp: Date.now() }] };
+      const submission = await root.submit({ type: "write", requestId, entry: { kind: ResetEntry.kind, head: "self", ...model } }, context);
+      await requireResetReceipt(storage, root, await submission.status(context), handoffMessage);
       return { reset: true, version };
     });
   } catch (error) {
@@ -580,28 +607,31 @@ async function resetContext(
 
 /** Preview the current revision of an existing, idle project's Pi conversation. */
 export function previewCodingContextReset(
-  options: CodingSessionIdentity, dependencies: CodingDependencies = {},
+  { handoff, ...options }: CodingSessionIdentity & { handoff?: string }, dependencies: CodingDependencies = {},
 ): Promise<CodingContextResetPreview> {
-  return previewContextReset(options, dependencies);
+  return previewContextReset(options, dependencies, handoff);
 }
 
 /** Start fresh model context while preserving all saved requests and their receipts. */
 export function resetCodingContext(
-  { version, ...options }: CodingSessionIdentity & { version: string }, dependencies: CodingDependencies = {}, authorize?: () => void,
+  { version, handoff, ...options }: CodingSessionIdentity & { version: string; handoff?: string },
+  dependencies: CodingDependencies = {}, authorize?: () => void,
 ): Promise<CodingContextResetResult> {
-  return resetContext(options, version, dependencies, authorize);
+  return resetContext(options, version, dependencies, authorize, handoff);
 }
 
 /** Preview an existing standalone conversation with the identity recorded in that session. */
-export function previewStandaloneCodingContextReset(session: string, dependencies: CodingDependencies = {}): Promise<CodingContextResetPreview> {
-  return previewContextReset(session, dependencies);
+export function previewStandaloneCodingContextReset(
+  session: string, dependencies: CodingDependencies = {}, handoff?: string,
+): Promise<CodingContextResetPreview> {
+  return previewContextReset(session, dependencies, handoff);
 }
 
 /** Reset a standalone conversation using its saved identity and the same exclusive lease. */
 export function resetStandaloneCodingContext(
-  session: string, version: string, dependencies: CodingDependencies = {}, authorize?: () => void,
+  session: string, version: string, dependencies: CodingDependencies = {}, authorize?: () => void, handoff?: string,
 ): Promise<CodingContextResetResult> {
-  return resetContext(session, version, dependencies, authorize);
+  return resetContext(session, version, dependencies, authorize, handoff);
 }
 
 async function savedUserContent(storage: SqliteStorage, submission: SubmissionRecord, entryContext = context): Promise<string | undefined> {

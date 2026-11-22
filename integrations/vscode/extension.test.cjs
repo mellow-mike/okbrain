@@ -12,6 +12,7 @@ function activateExtension(vscode, connection, options = {}) {
   const file = require.resolve('./extension.cjs');
   const module = { exports: {} };
   vscode.workspace.onDidChangeWorkspaceFolders ??= () => {};
+  vscode.window.onDidChangeActiveTextEditor ??= () => {};
   runInNewContext(readFileSync(file, 'utf8'), {
     module,
     URL,
@@ -509,7 +510,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   assert.deepEqual(errors, []);
 });
 
-test('owner starts fresh context only after confirming the preview for the current idle session', async () => {
+test('owner starts fresh context with the exact optional handoff only after confirming the current idle session', async () => {
   const project = { id: 'fixture', title: 'Project fixture' };
   const first = { session: 'original', id: 'request-one', status: 'done', admitted: true };
   const other = { session: 'other', id: 'request-two', status: 'done', admitted: true };
@@ -519,12 +520,17 @@ test('owner starts fresh context only after confirming the preview for the curre
   const commands = new Map();
   const title = 'Start fresh context';
   const folder = { uri: { scheme: 'file', fsPath: '/fixture' } };
+  const inspectedEditor = { document: { uri: { scheme: 'untitled' } } };
+  const handoff = '  Review cache ownership before editing <new> & `old`.  ';
   let selected = first;
   let chooseReset = true;
-  let mode = 'decline';
+  let mode = 'cancel-input';
   let version = 0;
   let availableActions;
   let foldersChanged;
+  let editorChanged;
+  let inputPrompts = 0;
+  let confirmations = 0;
   const invoke = () => commands.get('okbrain.runs')();
   const vscode = {
     commands: { registerCommand: (name, run) => commands.set(name, run) },
@@ -538,17 +544,43 @@ test('owner starts fresh context only after confirming the preview for the curre
       async openTextDocument(value) { return value; },
     },
     window: {
+      activeTextEditor: inspectedEditor,
+      onDidChangeActiveTextEditor(listener) { editorChanged = listener; },
       async showTextDocument() {},
       async showQuickPick(items, options) {
         if (options.placeHolder === 'Choose a request to inspect') return items.find((item) => item.label === selected.id);
         availableActions = Array.from(items, (item) => item.label);
         return chooseReset ? items.find((item) => item.label === title) : undefined;
       },
+      async showInputBox(options) {
+        inputPrompts++;
+        assert.equal(options.prompt, 'Optional handoff for the next request');
+        assert.match(options.placeHolder, /One line/);
+        assert.equal(options.validateInput(handoff), null);
+        assert.match(options.validateInput('two\nlines'), /single line/);
+        assert.equal(options.validateInput('é'.repeat(1024)), null);
+        assert.match(options.validateInput('é'.repeat(1025)), /2,048 UTF-8 bytes/);
+        if (mode === 'cancel-input') return undefined;
+        if (mode === 'editor-changed-in-input') {
+          this.activeTextEditor = undefined;
+          editorChanged(undefined);
+          this.activeTextEditor = inspectedEditor;
+          editorChanged(inspectedEditor);
+        }
+        if (mode === 'blank') return '';
+        return mode === 'whitespace-only' ? '  ' : handoff;
+      },
       async showWarningMessage(message, options, button) {
+        confirmations++;
         assert.match(message, /session original\?/);
         assert.match(message, /Saved runs stay available/);
         assert.equal(options.modal, true);
         assert.equal(button, 'Start Fresh Context');
+        if (mode === 'blank' || mode === 'whitespace-only') assert.equal('detail' in options, false);
+        else {
+          assert.equal(options.detail, handoff);
+          assert.match(message, /The next request you start.*include the handoff shown below/);
+        }
         if (mode === 'decline') return undefined;
         if (mode === 'other-inspection') {
           chooseReset = false;
@@ -560,6 +592,12 @@ test('owner starts fresh context only after confirming the preview for the curre
           foldersChanged();
           vscode.workspace.workspaceFolders = [folder];
           foldersChanged();
+        }
+        if (mode === 'editor-changed') {
+          this.activeTextEditor = { document: { uri: { scheme: 'file', fsPath: '/fixture/other.ts' } } };
+          editorChanged(this.activeTextEditor);
+          this.activeTextEditor = inspectedEditor;
+          editorChanged(inspectedEditor);
         }
         return button;
       },
@@ -577,32 +615,62 @@ test('owner starts fresh context only after confirming the preview for the curre
     if (action === 'inspect') return { run: data.requestId === first.id ? first : other,
       pi: { pendingRequestIds: mode === 'pending' ? ['still-running'] : [] } };
     calls.push([action, JSON.parse(JSON.stringify(data))]);
-    if (action === 'reset-context-preview') return { version: `preview-${++version}` };
+    if (action === 'reset-context-preview') return { version: `preview-${++version}`,
+      ...(mode === 'preview-dropped-note' || data.handoff === undefined ? {} : {
+        handoff: mode === 'preview-altered-note' ? data.handoff.trim() : data.handoff,
+      }) };
     assert.equal(action, 'reset-context');
     if (mode === 'network-failure') throw new Error('Connection lost');
     return { reset: true, version: data.version };
   } });
 
   await invoke();
-  assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }]]);
+  assert.deepEqual(calls, []);
+  assert.equal(confirmations, 0);
+  mode = 'editor-changed-in-input';
+  await invoke();
+  assert.deepEqual(calls, []);
+  assert.equal(confirmations, 0);
+  mode = 'decline';
+  await invoke();
+  const withNote = { session: first.session, handoff };
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote]]);
   assert.deepEqual(notices, []);
   mode = 'pending';
   await invoke();
   assert.ok(!availableActions.includes(title));
+  assert.equal(inputPrompts, 3);
   assert.deepEqual(calls, []);
   mode = 'other-inspection';
   await invoke();
-  assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }]]);
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote]]);
   chooseReset = true;
   selected = first;
   mode = 'workspace-changed';
   await invoke();
-  assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }]]);
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote]]);
+  mode = 'editor-changed';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote]]);
+  for (mode of ['preview-dropped-note', 'preview-altered-note']) {
+    await invoke();
+    assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote]]);
+    assert.deepEqual(errors.splice(0), ['Could not preview the handoff for this session. Update okbrain or leave the handoff blank.']);
+  }
   mode = 'approve';
   await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote],
+    ['reset-context', { ...withNote, version: 'preview-7' }]]);
+  mode = 'blank';
+  await invoke();
   assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }],
-    ['reset-context', { session: first.session, version: 'preview-4' }]]);
+    ['reset-context', { session: first.session, version: 'preview-8' }]]);
+  mode = 'whitespace-only';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }],
+    ['reset-context', { session: first.session, version: 'preview-9' }]]);
   assert.match(notices[0], /Saved runs remain/);
+  assert.ok(notices.every((message) => !message.includes(handoff)));
   mode = 'network-failure';
   await invoke();
   assert.deepEqual(calls.map(([action]) => action), ['reset-context-preview', 'reset-context']);

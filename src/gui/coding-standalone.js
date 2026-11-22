@@ -97,7 +97,7 @@
     let inspected;
     const resetPanel = grid.querySelector('[data-context-reset]');
     const setResetSession = resetPanel ? mountContextReset(resetPanel, {
-      prefix, detached,
+      prefix, detached, provider: () => providerName(binding?.provider),
       clearConsent() {
         controls.approvedSourceLookup.checked = false;
         invalidate();

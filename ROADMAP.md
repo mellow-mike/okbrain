@@ -61,6 +61,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   compaction, and recorded provider usage including cache counters.
 - [x] Start fresh Pi context in idle sessions from the Mac app, web app, and
   editor. Preserve earlier requests, source snapshots, and review decisions.
+- [x] Carry an optional owner-authored handoff into fresh Pi context from the
+  apps and editor. Bind confirmation to the reviewed note and active context.
 - [x] Support Gemini through Pi AI. Show Pi Durable session usage by model
   and separate the main conversation from package review children.
 - [x] Surface bounded Pi Durable answer text during runs in browser and editor
@@ -808,6 +810,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ---
 
 ## Progress Log
+
+- 2026-11-22 — Added optional reviewed handoffs to Pi context resets in the
+  Mac and web apps and the VS Code and Cursor extension.
 Newest first. One line per session: what changed + what's next.
 - 2026-11-22 — Added explicit team listener startup persistence, bind recovery,
   and reserved-port isolation across okbrain server restarts.

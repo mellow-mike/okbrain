@@ -912,15 +912,25 @@ try {
   const startFresh = contextReset.getByRole("button", { name: "Start fresh context", exact: true });
   const approveFresh = contextReset.getByRole("checkbox", { name: "Clear active context and keep saved run history", exact: true });
   const resetContext = contextReset.getByRole("button", { name: "Reset context", exact: true });
-  async function verifyContextReset(prefix: string, session: string) {
+  const handoffInput = contextReset.getByRole("textbox", { name: "Handoff note (optional)", exact: true });
+  async function verifyContextReset(prefix: string, session: string, expectedHandoff?: string) {
+    const input = { session, ...(expectedHandoff === undefined ? {} : { handoff: expectedHandoff }) };
     const check = page.waitForResponse((response) => new URL(response.url()).pathname === prefix + "/reset-context-preview");
     await startFresh.click();
     const preview = await check;
     assert.ok(preview.ok(), await preview.text());
-    assert.deepEqual(preview.request().postDataJSON(), { session });
-    const { version } = (await preview.json()).result;
+    assert.deepEqual(preview.request().postDataJSON(), input);
+    const { version, handoff } = (await preview.json()).result;
     assert.ok(version);
+    assert.equal(handoff, expectedHandoff);
     await approveFresh.waitFor();
+    const notePreview = contextReset.locator("[data-reset-handoff]");
+    assert.equal(await notePreview.isVisible(), expectedHandoff !== undefined);
+    if (expectedHandoff !== undefined) {
+      assert.equal(await notePreview.textContent(), expectedHandoff);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+      await contextReset.getByText("The note will accompany the next request in this session to OpenAI.", { exact: true }).waitFor();
+    }
     assert.equal(await approveFresh.isChecked(), false);
     assert.equal(await resetContext.isEnabled(), false);
     await approveFresh.check();
@@ -928,10 +938,11 @@ try {
     await resetContext.click();
     const result = await commit;
     assert.ok(result.ok(), await result.text());
-    assert.deepEqual(result.request().postDataJSON(), { session, version });
+    assert.deepEqual(result.request().postDataJSON(), { ...input, version });
     assert.equal((await result.json()).result.reset, true);
     await contextReset.getByText("Active context cleared. Saved history is still available.", { exact: true }).waitFor();
     assert.equal(await approveFresh.isVisible(), false);
+    assert.equal(await contextReset.locator("[data-reset-note] textarea").inputValue(), "");
   }
   await startFresh.click();
   await approveFresh.check();
@@ -1228,7 +1239,25 @@ try {
   await approveFresh.check();
   await contextReset.getByRole("button", { name: "Cancel reset", exact: true }).click();
   assert.equal(await approveFresh.isVisible(), false);
-  await verifyContextReset("/api/coding" + projectPath, "project-browser");
+  const callsBeforeHandoff = projectFaux.state.callCount;
+  await contextReset.getByText("Add a handoff note", { exact: true }).click();
+  await handoffInput.fill("é".repeat(1025));
+  assert.equal(await startFresh.isDisabled(), true);
+  await handoffInput.fill("Discard this first draft.");
+  await page.route("**" + projectPath + "/reset-context-preview", (route) => route.fulfill({
+    json: { result: { version: "a".repeat(64) } },
+  }), { times: 1 });
+  await startFresh.click();
+  await contextReset.getByText("The preview did not match your handoff note. Preview this session again before resetting.", { exact: true }).waitFor();
+  assert.equal(await approveFresh.isVisible(), false);
+  await startFresh.click();
+  await approveFresh.check();
+  assert.equal(await resetContext.isEnabled(), true);
+  const handoff = `  Keep the patch under review.\nVerify café fixture ${"x".repeat(512)} before merging.  `;
+  await handoffInput.fill(handoff);
+  await approveFresh.waitFor({ state: "hidden" });
+  await verifyContextReset("/api/coding" + projectPath, "project-browser", handoff);
+  assert.equal(projectFaux.state.callCount, callsBeforeHandoff);
   assert.equal(await projectResponse.textContent(), projectAnswer);
   await reviewPatch.click();
   const proposalChoice = page.getByRole("combobox", { name: "Proposed diff", exact: true });

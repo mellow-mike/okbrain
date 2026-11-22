@@ -168,9 +168,11 @@ Use `--json` to capture a machine-readable result. A `done` result carries the a
 
 ### Start fresh context
 
-In **Run history** for a project, or in a saved **Standalone session**, select an idle session and choose **Start fresh context**. Review the session name and confirm **Reset context**. In VS Code or Cursor, open a finished run from **okbrain: Inspect and Review Coding Runs** and choose **Start fresh context**. These controls are available to the local owner in a writable workspace.
+In **Run history** for a project, or in a saved **Standalone session**, select an idle session. To carry forward a decision or next step, open **Add a handoff note** and enter up to 2,048 UTF-8 bytes. Choose **Start fresh context**, review the session and the exact note, and confirm **Reset context**. To start with an empty conversation, leave the note blank.
 
-Pi excludes earlier turns from subsequent model requests in this session. The workspace, provider, and model stay bound to the session, and saved tasks, sources, answers, reviews, and usage remain available in its run history. Resetting uses no provider call. Finish, resume, or cancel unsettled work first. If the context changes during confirmation, preview it again. [Pi Durable context reset](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md#reset-and-handoff)
+In VS Code or Cursor, open a finished run from **okbrain: Inspect and Review Coding Runs** and choose **Start fresh context**. Enter an optional single-line handoff, then review the session and note before choosing **Start Fresh Context**. These controls are available to the local owner in a writable workspace.
+
+Pi excludes earlier turns from subsequent model requests in this session. An approved handoff becomes the first message in the fresh context and accompanies the next request sent to the bound provider and model. The workspace binding and saved tasks, sources, answers, reviews, and usage remain available. Resetting uses no provider call. Finish, resume, or cancel unsettled work first. If the note or active context changes during confirmation, preview it again. [Pi Durable context reset](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md#reset-and-handoff)
 
 ## Inspect context and usage
 

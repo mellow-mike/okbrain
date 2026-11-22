@@ -635,9 +635,14 @@
     };
   }
 
-  function mountContextReset(panel, { prefix, detached, clearConsent, refresh }) {
-    panel.innerHTML = '<div data-context-reset-entry><button type="button">Start fresh context</button></div>' +
+  function mountContextReset(panel, { prefix, detached, provider, clearConsent, refresh }) {
+    panel.innerHTML = '<details data-reset-note><summary>Add a handoff note</summary><div class="stack coding-form">' +
+      '<label class="field"><span>Handoff note (optional)</span><textarea rows="4" maxlength="4096" aria-describedby="context-reset-note-limit"></textarea></label>' +
+      '<p class="muted" id="context-reset-note-limit"></p></div></details>' +
+      '<div data-context-reset-entry><button type="button">Start fresh context</button></div>' +
       '<div data-reset-confirmation hidden><div class="stack"><p data-reset-session></p>' +
+      '<div data-reset-handoff-review hidden><h5>Handoff note to send</h5><p data-reset-destination></p>' +
+      '<pre class="source-markdown" data-reset-handoff></pre></div>' +
       '<label class="row"><input type="checkbox"><span>Clear active context and keep saved run history</span></label>' +
       '<div class="row"><button type="button" data-reset-apply disabled>Reset context</button>' +
       '<button type="button" data-reset-cancel>Cancel reset</button></div></div></div>' +
@@ -649,66 +654,100 @@
     const apply = confirmation.querySelector('[data-reset-apply]');
     const cancel = confirmation.querySelector('[data-reset-cancel]');
     const scope = confirmation.querySelector('[data-reset-session]');
+    const noteDetails = panel.querySelector('[data-reset-note]');
+    const note = noteDetails.querySelector('textarea');
+    const byteCount = noteDetails.querySelector('p');
+    const handoffReview = confirmation.querySelector('[data-reset-handoff-review]');
+    const handoffText = handoffReview.querySelector('[data-reset-handoff]');
+    const destination = handoffReview.querySelector('[data-reset-destination]');
+    const noteLimit = 2048;
+    const encoder = new TextEncoder();
     const feedback = panel.querySelector('[role="status"]');
     let session = null;
     let preview = null;
     let revision = 0;
-    let busy = false;
+    let phase = '';
 
     function update() {
+      const bytes = encoder.encode(note.value).byteLength;
+      const busy = !!phase;
+      byteCount.textContent = bytes + ' / ' + noteLimit + ' UTF-8 bytes' + (bytes > noteLimit ? '. Shorten the note to continue.' : '');
+      note.setAttribute('aria-invalid', String(bytes > noteLimit));
       panel.hidden = !session;
       entry.hidden = !!preview;
       confirmation.hidden = !preview;
-      start.disabled = approval.disabled = cancel.disabled = busy;
+      start.disabled = busy || bytes > noteLimit;
+      approval.disabled = cancel.disabled = busy;
+      note.disabled = phase === 'applying';
       apply.disabled = busy || !preview || !approval.checked;
     }
     function clear() {
       revision++;
       preview = null;
       approval.checked = false;
-      busy = false;
+      phase = '';
+      handoffText.textContent = '';
       update();
+    }
+    function discard() {
+      note.value = '';
+      noteDetails.open = false;
+      clear();
     }
     function current(expected, attempt) {
       return !detached() && panel.isConnected && session === expected && revision === attempt;
     }
     start.addEventListener('click', async () => {
-      if (busy || !session || detached()) return;
+      if (start.disabled || !session || detached()) return;
       const expected = session;
+      const draft = note.value;
       const attempt = ++revision;
-      busy = true;
+      phase = 'previewing';
       update();
       report(feedback);
       feedback.textContent = 'Checking session context…';
       try {
-        const { version } = await coding(prefix + '/reset-context-preview', { session: expected });
-        if (!current(expected, attempt)) return;
+        const { version, handoff } = await coding(prefix + '/reset-context-preview', {
+          session: expected, ...(draft ? { handoff: draft } : {}),
+        });
+        if (!current(expected, attempt) || note.value !== draft) return;
         if (typeof version !== 'string' || !version) throw new Error('Could not preview this session’s active context.');
-        preview = { session: expected, version };
+        if (handoff !== (draft.trim() ? draft : undefined)) throw new Error('The preview did not match your handoff note. Preview this session again before resetting.');
+        preview = { draft, request: { session: expected, version, ...(handoff === undefined ? {} : { handoff }) } };
         scope.textContent = 'Future requests in ' + expected + ' will start with fresh context. Saved requests, source snapshots, and responses stay in Run history.';
+        handoffReview.hidden = handoff === undefined;
+        if (handoff !== undefined) {
+          handoffText.textContent = handoff;
+          destination.textContent = 'The note will accompany the next request in this session to ' + (provider() || 'the session’s provider') + '.';
+        }
         report(feedback);
       } catch (error) {
         if (current(expected, attempt)) report(feedback, error);
       } finally {
         if (current(expected, attempt)) {
-          busy = false;
+          phase = '';
           update();
           if (preview) approval.focus();
         }
       }
     });
+    note.addEventListener('input', () => {
+      if (phase === 'applying') return;
+      clear();
+      report(feedback);
+    });
     approval.addEventListener('change', update);
     cancel.addEventListener('click', () => {
-      if (busy) return;
-      clear();
+      if (phase) return;
+      discard();
       report(feedback);
       start.focus();
     });
     apply.addEventListener('click', async () => {
-      if (apply.disabled || !preview || detached() || preview.session !== session) return;
-      const approved = preview;
+      if (apply.disabled || !preview || detached() || preview.request.session !== session || preview.draft !== note.value) return;
+      const approved = preview.request;
       const attempt = ++revision;
-      busy = true;
+      phase = 'applying';
       update();
       report(feedback);
       feedback.textContent = 'Resetting active context…';
@@ -716,7 +755,7 @@
         clearConsent(approved.session);
         await coding(prefix + '/reset-context', approved);
         if (!current(approved.session, attempt)) return;
-        clear();
+        discard();
         feedback.textContent = 'Active context cleared. Saved history is still available.';
         start.focus();
         await refresh();
@@ -731,7 +770,7 @@
     return (next) => {
       if (session === next) return;
       session = next;
-      clear();
+      discard();
       report(feedback);
     };
   }
@@ -752,7 +791,7 @@
     const setSavedSourceRun = mountSavedSource(panel.querySelector('[data-saved-request-source]'), prefix, detached);
     const resetPanel = panel.querySelector('[data-context-reset]');
     const setResetSession = resetPanel ? mountContextReset(resetPanel, {
-      prefix, detached, clearConsent: clearResetConsent, refresh,
+      prefix, detached, provider: () => project.providerLabel, clearConsent: clearResetConsent, refresh,
     }) : null;
     let selected = null;
     let timer;

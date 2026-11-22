@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider, getCurrentTools,
   type FauxModelDefinition, type TranscriptContext } from "@earendil-works/pi-ai";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  CodingError, CodingSessionBusyError, CodingSessionMissingError, deleteStandaloneCodingSession, getCodingSessionStatus,
-  inspectStandaloneCodingSession, previewCodingAttachments, previewCodingContextReset, previewStandaloneCodingContextReset,
+  CodingError, CodingHandoffError, CodingSessionBusyError, CodingSessionMissingError, deleteStandaloneCodingSession, getCodingSessionStatus,
+  inspectStandaloneCodingSession, maxCodingHandoffBytes, parseCodingHandoff, previewCodingAttachments, previewCodingContextReset, previewStandaloneCodingContextReset,
   resetCodingContext, resetStandaloneCodingContext, runCodingSession, type CodingSessionOptions,
 } from "../src/core/coding/durable.ts";
 
@@ -240,6 +241,74 @@ test("fresh context preserves archived receipts and safely replays a confirmed r
   expect(providerInputs[1]).toContain("Second answer after reset.");
   expect(providerInputs[1]).not.toContain("Archived first answer.");
   expect(faux.state.callCount).toBe(3);
+});
+
+test("validates handoff notes as bounded UTF-8 while preserving authored spacing", () => {
+  expect(parseCodingHandoff(undefined)).toBeUndefined();
+  expect(parseCodingHandoff("\t\r\n \r")).toBeUndefined();
+  expect(parseCodingHandoff(" \rfirst\r\nsecond\t ")).toBe(" \nfirst\nsecond\t ");
+  const maxBytes = "é".repeat(maxCodingHandoffBytes / 2);
+  expect(parseCodingHandoff(maxBytes)).toBe(maxBytes);
+  expect(() => parseCodingHandoff(`${maxBytes}a`)).toThrow("2048 UTF-8 bytes");
+  expect(() => parseCodingHandoff(" ".repeat(maxCodingHandoffBytes + 1))).toThrow("2048 UTF-8 bytes");
+  for (const invalid of [42, null, ["note"], { content: "note" }, "\ud800"]) {
+    expect(() => parseCodingHandoff(invalid)).toThrow(CodingHandoffError);
+  }
+  expect(new CodingHandoffError("fixture").code).toBe("INVALID_SETTINGS");
+});
+
+test("a fresh-context handoff binds exact normalized text and projects only that note with the next input", async () => {
+  const { models, faux } = provider();
+  const dependencies = { stateDir, models };
+  const oldSource = "Archived source sentinel";
+  const newSource = "New approved source sentinel";
+  const oldAnswer = "Archived answer sentinel";
+  const note = '  {\n  "repositoryContext": "preserve this literal JSON",\n  "decision": "manual notes only"\n}\t ';
+  const originalNote = note.replace("\n", "\r\n").replace("\n  \"decision", "\r  \"decision");
+  const path = join(workspace, "context.txt");
+  await writeFile(path, oldSource);
+  faux.setResponses([fauxAssistantMessage(oldAnswer)]);
+  const receipt = await runCodingSession({ ...options, prompt: "Archived task sentinel", files: ["context.txt"] }, dependencies);
+  const blank = await previewCodingContextReset(options, dependencies);
+  expect(await previewCodingContextReset({ ...options, handoff: " \r\n\t " }, dependencies)).toEqual(blank);
+
+  const approved = await previewCodingContextReset({ ...options, handoff: originalNote }, dependencies);
+  expect(approved).toEqual({
+    version: createHash("sha256").update(JSON.stringify(["okbrain/context-handoff/v1", blank.version, note])).digest("hex"),
+    handoff: note,
+  });
+  expect(await previewStandaloneCodingContextReset(options.session, dependencies, note)).toEqual(approved);
+  const unused = await previewCodingContextReset({ ...options, handoff: "Alternate note" }, dependencies);
+  await expect(resetCodingContext({ ...options, ...approved, handoff: `${note}!` }, dependencies)).rejects.toThrow("handoff note differs");
+  await expect(resetCodingContext({ ...options, version: approved.version }, dependencies)).rejects.toThrow("handoff note differs");
+  expect(await resetCodingContext({ ...options, ...approved, handoff: originalNote }, dependencies))
+    .toEqual({ reset: true, version: approved.version });
+  expect(faux.state.callCount).toBe(1);
+
+  await writeFile(path, newSource);
+  expect(await getCodingSessionStatus({ ...options, includeReceipt: true, includeSavedSource: true }, dependencies))
+    .toMatchObject({ request: { receipt, savedSource: { files: [{ path: "context.txt", content: oldSource }] } } });
+  const sent: TranscriptContext[] = [];
+  faux.setResponses([(input) => { sent.push(input); return fauxAssistantMessage("A new answer."); }]);
+  expect(await runCodingSession({ ...options, requestId: "next", prompt: "Check the new source", files: ["context.txt"] }, dependencies))
+    .toMatchObject({ status: "done", text: "A new answer." });
+  const contributions = sent[0]!.messages.filter((message) => message.role === "user");
+  expect(contributions).toHaveLength(2);
+  expect(contributions[0]).toMatchObject({ role: "user", content: `Handoff note:\n${note}`, timestamp: expect.any(Number) });
+  expect(contributions[1]?.content).toContain(newSource);
+  const modelInput = JSON.stringify(sent[0]!.messages);
+  expect(modelInput).not.toContain(oldSource);
+  expect(modelInput).not.toContain(oldAnswer);
+  expect(modelInput).not.toContain("Archived task sentinel");
+
+  const current = await previewCodingContextReset(options, dependencies);
+  await expect(resetCodingContext({ ...options, ...unused }, dependencies)).rejects.toThrow("context changed");
+  await expect(resetCodingContext({ ...options, ...approved, handoff: note.trim() }, dependencies)).rejects.toThrow("does not match");
+  await expect(resetCodingContext({ ...options, version: approved.version }, dependencies)).rejects.toThrow("does not match");
+  expect(await resetStandaloneCodingContext(options.session, approved.version, dependencies, undefined, originalNote))
+    .toEqual({ reset: true, version: approved.version, replayed: true });
+  expect(await previewCodingContextReset(options, dependencies)).toEqual(current);
+  expect(faux.state.callCount).toBe(2);
 });
 
 test("standalone reset uses the saved binding and rejects a preview from a deleted transcript", async () => {

@@ -190,11 +190,16 @@ try {
   const session = { session: offline.session };
   const resetPreview = path + "/reset-context-preview";
   const reset = path + "/reset-context";
-  assert.equal((await request(resetPreview, session, member.token)).status, 403);
-  const { version } = await call<{ version: string }>(resetPreview, session);
-  const confirmReset = { ...session, version };
+  const handoff = "Check the new baseline on the next run.";
+  const proposedReset = { ...session, handoff };
+  assert.equal((await request(resetPreview, proposedReset, member.token)).status, 403);
+  const previewedReset = await call<{ version: string; handoff: string }>(resetPreview, proposedReset);
+  assert.equal(previewedReset.handoff, handoff);
+  const { version } = previewedReset;
+  const confirmReset = { ...session, ...previewedReset };
+  assert.equal((await request(reset, { ...confirmReset, handoff: "Changed after preview" })).status, 409);
   assert.deepEqual(await call(reset, confirmReset), { reset: true, version });
-  assert.notEqual((await call<{ version: string }>(resetPreview, session)).version, version);
+  assert.notEqual((await call<{ version: string }>(resetPreview, proposedReset)).version, version);
   assert.deepEqual(await call(reset, confirmReset), { reset: true, version, replayed: true });
   assert.deepEqual((await call<Inspection>(path + "/inspect", offline, member.token)).pi.request.receipt, saved.pi.request.receipt);
 
@@ -227,7 +232,7 @@ try {
   const audit = await call<{ kind: string; session: string | null }[]>(path + "/audit");
   assert.ok(audit.some(({ kind, session }) => kind === "session_expired" && session === offline.session));
 
-  console.log("Docker Coding smoke passed. Verified offline worker isolation and admission, no fallback, scoped access, quiesced backup restoration, owner context reset, archived Pi receipts, and retention tombstones.");
+  console.log("Docker Coding smoke passed. Verified offline worker isolation and admission, no fallback, scoped access, quiesced backup restoration, owner context handoff, archived Pi receipts, and retention tombstones.");
 } finally {
   await closeServer();
   await rm(root, { recursive: true, force: true });

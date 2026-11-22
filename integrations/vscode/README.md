@@ -25,6 +25,6 @@ Open a trusted local workspace and start the okbrain macOS app or the local web 
 
 With the registered project folder open, choose **okbrain: Preview Saved Request Preset** from the Command Palette. Select a preset and session, then choose whether Pi can look up lines within the selected excerpts. Review the saved task and the fresh repository excerpts before choosing **Send Request**. Create or edit presets in the okbrain Coding workspace.
 
-Choose **Start fresh context** from a finished run’s actions to leave earlier turns out of future requests in that session. Confirm the session in the editor. Saved runs, sources, review decisions, and usage remain available.
+Choose **Start fresh context** from a finished run’s actions to leave earlier turns out of future requests in that session. Enter a single-line note under **Optional handoff for the next request** to keep a decision or next step, or press Enter to leave it blank. Review the session and exact note, then confirm **Start Fresh Context**. The note accompanies the next request to the session’s provider. Saved runs, sources, review decisions, and usage remain available.
 
 The local server enforces project scope and binds the approved preview to the source bytes. Requests use the project model and any active session history. Editor review records a decision in okbrain. On an accepted result, choose **Prepare GitHub pull request in okbrain** to open the web workflow. There you can publish an applied patch on a new branch and create a GitHub pull request.

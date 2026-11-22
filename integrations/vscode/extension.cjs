@@ -12,6 +12,7 @@ const openingSources = new Map();
 let inspection = 0;
 let presetReview = 0;
 let workspaceRevision = 0;
+let editorRevision = 0;
 let teamRevision = 0;
 let teamChange = 0;
 let secretWrites = Promise.resolve();
@@ -362,14 +363,28 @@ async function reviewRepositoryRequest(connection, project, { name, prompt, sess
 
 async function resetOwnerContext(connection, project, session, isCurrent) {
   if (!isCurrent()) return;
-  const preview = await connection.api(pathFor(project, 'reset-context-preview'), { session });
+  const draft = await vscode.window.showInputBox({ prompt: 'Optional handoff for the next request',
+    placeHolder: 'One line, or press Enter to leave it blank', ignoreFocusOut: true,
+    validateInput: (value) => /[\r\n\u2028\u2029]/u.test(value) ? 'Use a single line for the handoff.'
+      : Buffer.byteLength(value) > 2048 ? 'Keep the handoff within 2,048 UTF-8 bytes.' : null });
+  if (draft === undefined || !isCurrent()) return;
+  const handoff = draft.trim() ? draft : undefined;
+  const preview = await connection.api(pathFor(project, 'reset-context-preview'), { session, ...(handoff === undefined ? {} : { handoff }) });
   if (!isCurrent()) return;
   if (typeof preview?.version !== 'string' || !preview.version) throw new Error('Could not preview this session’s context.');
+  const approved = preview.handoff;
+  if (approved !== handoff) {
+    throw new Error('Could not preview the handoff for this session. Update okbrain or leave the handoff blank.');
+  }
+  const options = { modal: true, ...(approved === undefined ? {} : { detail: approved }) };
   const confirmed = await vscode.window.showWarningMessage(
-    `Start fresh context for session ${session}? Saved runs stay available. The next request will start without earlier turns.`,
-    { modal: true }, 'Start Fresh Context');
+    `Start fresh context for session ${session}? Saved runs stay available. ` +
+      'The next request you start will begin without earlier turns.' +
+      (approved === undefined ? '' : ' It will include the handoff shown below.'),
+    options, 'Start Fresh Context');
   if (confirmed !== 'Start Fresh Context' || !isCurrent()) return;
-  const result = await connection.api(pathFor(project, 'reset-context'), { session, version: preview.version });
+  const result = await connection.api(pathFor(project, 'reset-context'), { session, version: preview.version,
+    ...(approved === undefined ? {} : { handoff: approved }) });
   if (!isCurrent()) return;
   if (!result?.reset) throw new Error('The session did not confirm the context reset. Refresh Run history before trying again.');
   await vscode.window.showInformationMessage(`Started fresh context for ${session}. Saved runs remain in Run history.`);
@@ -382,7 +397,6 @@ async function inspectRun(connection, project, selected) {
   const resetWorkspace = workspaceRevision;
   const folders = () => JSON.stringify(localWorkspaceFolders().map(({ uri }) => uri.fsPath));
   const startingFolders = folders();
-  const canResetContext = () => !team && isCurrent() && trustedEditor() && resetWorkspace === workspaceRevision && startingFolders === folders();
   const identity = { session: selected.session, requestId: selected.id };
   const { run, pi, admissionMissing, liveAnswer, taskProgress } = await connection.api(pathFor(project, 'inspect'), identity);
   if (!isCurrent()) return;
@@ -405,6 +419,10 @@ async function inspectRun(connection, project, selected) {
   else await showText(contents);
 
   if (!isCurrent()) return;
+  const resetEditor = editorRevision;
+  const startingEditor = vscode.window.activeTextEditor;
+  const canResetContext = () => !team && isCurrent() && trustedEditor() && resetWorkspace === workspaceRevision &&
+    startingFolders === folders() && resetEditor === editorRevision && startingEditor === vscode.window.activeTextEditor;
   const choices = [{ label: 'Refresh', action: 'refresh' }, { label: 'Open in okbrain', action: 'open' }];
   if (run.status !== 'running' && (run.admitted || pi?.request || (run.status === 'interrupted' && !admissionMissing)))
     choices.push({ label: 'View saved request source', action: 'source-inspect' });
@@ -453,6 +471,7 @@ function activate(context) {
   }));
   context.subscriptions.push(context.secrets.onDidChange(({ key }) => { if (key === teamSecret) ++teamRevision; }));
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => { ++workspaceRevision; }));
+  context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => { ++editorRevision; }));
   const register = (command, action) => context.subscriptions.push(vscode.commands.registerCommand(command, async () => {
     try {
       if (!trustedEditor()) throw new Error('Open a trusted local folder to use okbrain Coding.');

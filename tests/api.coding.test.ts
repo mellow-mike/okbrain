@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createApiServer, type ApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
-import { listCodingModels, maxLiveAnswerLength, runCodingSession, type CodingLiveAnswer, type CodingSessionStatusResult, type SavedCodingRequestInput } from "../src/core/coding/durable.ts";
+import { listCodingModels, maxLiveAnswerLength, runCodingSession, type CodingContextResetPreview, type CodingContextResetResult, type CodingLiveAnswer, type CodingSessionStatusResult, type SavedCodingRequestInput } from "../src/core/coding/durable.ts";
 import type { CodingTaskProgress } from "../src/core/coding/task-progress.ts";
 import type { TeamPreferences, TeamStatus } from "../src/core/coding/team-listener.ts";
 import { loadConfig, saveConfig } from "../src/core/config.ts";
@@ -403,7 +403,7 @@ test("project run presets share request drafts and require fresh source approval
   }
 });
 
-test("a project owner can start fresh context while keeping saved runs and review decisions", async () => {
+test("a project owner can review a handoff while keeping archived runs and review decisions", async () => {
   const { root, workspace, stateDir } = await fixture("okb-project-context-reset-");
   const models = createModels();
   const faux = fauxProvider({ provider: "openai", models: [{ id: "context-reset-fixture" }] });
@@ -415,6 +415,7 @@ test("a project owner can start fresh context while keeping saved runs and revie
   const earlierTask = "Review the original attachment before the reset.";
   const earlierAnswer = "Original project answer before reset.";
   const newTask = "Review only the current task after reset.";
+  const handoff = "Use the stricter acceptance threshold.\n  Prioritize the explicit requirements. ";
   try {
     const { call, request } = apiClient(api.url);
     const project = await call<Project>("/projects", { workspace, title: "Context reset", scopes: ["src"], provider: "openai", model: "context-reset-fixture" });
@@ -422,8 +423,8 @@ test("a project owner can start fresh context while keeping saved runs and revie
     const refresh = path + "/reset-context-preview";
     const reset = path + "/reset-context";
     const member = await call<{ token: string }>(path + "/members", { name: "context-reviewer" });
-    expect((await request(refresh, { session }, member.token)).status).toBe(403);
-    expect((await request(reset, { session, version: "a".repeat(64) }, member.token)).status).toBe(403);
+    expect((await request(refresh, { session, handoff }, member.token)).status).toBe(403);
+    expect((await request(reset, { session, handoff, version: "a".repeat(64) }, member.token)).status).toBe(403);
     expect((await request(reset, { session, version: "unreviewed" })).status).toBe(400);
 
     const source = { source: "files", files: ["src/example.ts"] };
@@ -437,7 +438,9 @@ test("a project owner can start fresh context while keeping saved runs and revie
       waitFor(() => client.call<Inspection>(path + "/inspect", identity), ({ run }) => run.status !== "running");
     expect((await wait({ call, request }, first)).pi?.request?.receipt?.text).toBe(earlierAnswer);
     await call(path + "/review", { ...first, decision: "accepted" }, member.token);
-    const originalVersion = (await call<{ version: string }>(refresh, { session })).version;
+    expect((await request(refresh, { session, handoff: null })).status).toBe(400);
+    expect((await request(refresh, { session, handoff: "é".repeat(1025) })).status).toBe(400);
+    const originalVersion = (await call<{ version: string }>(refresh, { session, handoff })).version;
 
     const second = { session, requestId: "newer-before-reset" };
     const noFiles = { source: "files", files: [] };
@@ -448,19 +451,25 @@ test("a project owner can start fresh context while keeping saved runs and revie
     }]);
     await call(path + "/run", { ...second, ...noFiles, prompt: "A follow-up before reset.", previewId: noFilesPreview.id, approved: true });
     expect((await wait({ call, request }, second)).run.status).toBe("done");
-    expect((await request(reset, { session, version: originalVersion })).status).toBe(409);
-    const currentVersion = (await call<{ version: string }>(refresh, { session })).version;
-    expect(currentVersion).not.toBe(originalVersion);
+    expect((await request(reset, { session, handoff, version: originalVersion })).status).toBe(409);
+    const approved = await call<{ version: string; handoff: string }>(refresh, { session, handoff: handoff.replace("\n", "\r\n") });
+    expect(approved.handoff).toBe(handoff);
+    expect(approved.version).not.toBe(originalVersion);
+    const approval = { session, ...approved };
+    const blank = await call<{ version: string }>(refresh, { session });
+    expect(approved.version).not.toBe(blank.version);
+    expect((await request(reset, { session, version: approved.version })).status).toBe(409);
+    expect((await request(reset, { ...approval, handoff: "Changed after preview" })).status).toBe(409);
 
     await api.stop();
     api = open(true);
     const readonly = apiClient(api.url);
-    expect((await readonly.request(refresh, { session })).status).toBe(403);
-    expect((await readonly.request(reset, { session, version: currentVersion })).status).toBe(403);
+    expect((await readonly.request(refresh, { session, handoff })).status).toBe(403);
+    expect((await readonly.request(reset, approval)).status).toBe(403);
     await api.stop();
     api = open();
     const fresh = apiClient(api.url);
-    expect(await fresh.call(reset, { session, version: currentVersion })).toMatchObject({ reset: true, version: currentVersion });
+    expect(await fresh.call<CodingContextResetResult>(reset, approval)).toEqual({ reset: true, version: approved.version });
     expect(faux.state.callCount).toBe(2);
     expect(await fresh.call<Inspection>(path + "/inspect", first, member.token)).toMatchObject({
       run: { status: "done", review: "accepted" }, pi: { request: { receipt: { text: earlierAnswer } } },
@@ -473,16 +482,19 @@ test("a project owner can start fresh context while keeping saved runs and revie
     faux.setResponses([(input) => {
       const sent = JSON.stringify(input.messages);
       expect(sent).toContain(newTask);
+      expect(input.messages).toContainEqual(expect.objectContaining({ role: "user", content: "Handoff note:\n" + handoff }));
       for (const archived of [earlierTask, earlierAnswer, "Newer answer before reset.", "export const answer = 42"]) expect(sent).not.toContain(archived);
       return fauxAssistantMessage("Fresh response.");
     }]);
     await fresh.call(path + "/run", { ...third, ...noFiles, prompt: newTask, previewId: noFilesPreview.id, approved: true });
     expect((await wait(fresh, third)).pi?.request?.receipt?.text).toBe("Fresh response.");
     const current = await fresh.call<{ version: string }>(refresh, { session });
-    expect(await fresh.call(reset, { session, version: currentVersion })).toMatchObject({ reset: true, version: currentVersion, replayed: true });
+    expect((await fresh.request(reset, { ...approval, handoff: "Changed after reset" })).status).toBe(409);
+    expect(await fresh.call<CodingContextResetResult>(reset, approval)).toEqual({ reset: true, version: approved.version, replayed: true });
     expect(await fresh.call<{ version: string }>(refresh, { session })).toEqual(current);
     expect(faux.state.callCount).toBe(3);
     const audit = await fresh.call<{ kind: string; session?: string }[]>(path + "/audit");
+    expect(JSON.stringify(audit)).not.toContain("Use the stricter acceptance threshold.");
     expect(audit.filter(({ kind }) => kind === "context_reset" || kind === "context_reset_approved").map(({ kind }) => kind))
       .toEqual(["context_reset", "context_reset_approved"]);
   } finally {
@@ -508,9 +520,17 @@ test("a local standalone context reset preserves the earlier CLI run and fixed i
     await runCodingSession({ ...identity, requestId: first.requestId, prompt: "Original CLI evidence review.", files: ["src/example.ts"] }, { stateDir, models });
     const { version } = await call<{ version: string }>(path + "/reset-context-preview", { session: identity.session });
     const approval = { session: identity.session, version };
+    expect(await call<CodingContextResetPreview>(path + "/reset-context-preview", { session: identity.session, handoff: "  \r\n\t" })).toEqual({ version });
     expect((await apiClient(readonly.url).request(path + "/reset-context", approval)).status).toBe(403);
     expect((await request(path + "/reset-context", { ...approval, version: "a".repeat(64) })).status).toBe(409);
     expect(await call(path + "/reset-context", approval)).toMatchObject({ reset: true, version });
+    const note = { session: identity.session, handoff: "Resume at the integration test." };
+    const handoff = await call<{ version: string; handoff: string }>(path + "/reset-context-preview", note);
+    expect(handoff.handoff).toBe(note.handoff);
+    expect(handoff.version).not.toBe(version);
+    expect((await request(path + "/reset-context", { ...note, version })).status).toBe(409);
+    expect(await call<CodingContextResetResult>(path + "/reset-context", { session: identity.session, ...handoff }))
+      .toEqual({ reset: true, version: handoff.version });
     expect(faux.state.callCount).toBe(1);
     expect(await call(path + "/inspect", first)).toMatchObject({
       identity: { ...identity, workspace: expect.any(String) },

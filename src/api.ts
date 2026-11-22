@@ -16,7 +16,7 @@ import { BrowserPlanInputError, createBrowserPlan, type BrowserPlan } from "./co
 import type { PlanOptions } from "./core/ai/chatgpt-plan.ts";
 import { providerKeyStatus, setProviderKey } from "./core/ai/local-keys.ts";
 import { AiError, providersFor } from "./core/ai/gateway.ts";
-import { CodingError, CodingSessionMissingError } from "./core/coding/durable.ts";
+import { CodingError, CodingHandoffError, CodingSessionMissingError } from "./core/coding/durable.ts";
 import { CodingProjectProfileError } from "./core/coding/project-profile.ts";
 import { codingProjectCatalogPath, CodingProjectControl, ProjectControlError, readCodingTeamStartup, readCodingTeamStartupPort, type ProjectControlOptions } from "./core/coding/project-control.ts";
 import { RepositoryContextError } from "./core/coding/repository-context.ts";
@@ -904,6 +904,7 @@ async function codingRequest(req: Request, url: URL, opts: ServeState, cors: Hdr
     if (error instanceof StandaloneControlError) return json(error.status, errBody(error), headers);
     if (error instanceof CodingSessionMissingError) return json(404, errBody(error), headers);
     if (error instanceof UploadTooLarge) return json(413, errBody(error), headers);
+    if (error instanceof CodingHandoffError) return json(400, errBody(error), headers);
     if (error instanceof CodingError || error instanceof RepositoryContextError) return json(409, errBody(error), headers);
     if (error instanceof CodingProjectProfileError) return json(400, errBody(error), headers);
     if (error instanceof ConfigError) return json(400, errBody(error), headers);

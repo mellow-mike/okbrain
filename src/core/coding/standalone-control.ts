@@ -3,7 +3,7 @@ import { gatewayEnvironment, providerKeyStatus } from "../ai/local-keys.ts";
 import {
   cancelCodingRequest, canonicalWorkspace, CodingError, CodingSessionBusyError, CodingSessionDeletingError, CodingSessionMissingError,
   deleteStandaloneCodingSession, inspectStandaloneCodingSession,
-  listCodingModels, listStandaloneCodingRequests, listStandaloneCodingSessions, prepareCodingInput,
+  listCodingModels, listStandaloneCodingRequests, listStandaloneCodingSessions, parseCodingHandoff, prepareCodingInput,
   previewCodingAttachments, previewStandaloneCodingContextReset, resetStandaloneCodingContext, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions, type CodingSessionResult,
 } from "./durable.ts";
@@ -128,10 +128,11 @@ export class StandaloneCodingControl {
     if (path === "/reset-context-preview" || path === "/reset-context") {
       if (current?.view.status === "running")
         throw new StandaloneControlError("Wait for this session to finish or cancel its run before starting fresh context.", 409);
-      if (path === "/reset-context-preview") return previewStandaloneCodingContextReset(session, this.dependencies);
+      const handoff = parseCodingHandoff(input.handoff);
+      if (path === "/reset-context-preview") return previewStandaloneCodingContextReset(session, this.dependencies, handoff);
       const version = string(input, "version", 64);
       if (!/^[a-f0-9]{64}$/u.test(version)) throw new StandaloneControlError("Preview the active context before confirming a reset.");
-      return resetStandaloneCodingContext(session, version, this.dependencies, () => this.#checkWrite(canWrite));
+      return resetStandaloneCodingContext(session, version, this.dependencies, () => this.#checkWrite(canWrite), handoff);
     }
     if (path === "/delete-session") {
       if (input.confirm !== session) throw new StandaloneControlError("Type the session name to confirm transcript deletion.");
