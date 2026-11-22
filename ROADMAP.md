@@ -39,6 +39,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   Show publication destinations and recover interrupted text conflicts in place.
 - [x] Save and remove a private, repository-scoped GitHub credential for
   app-managed personal HTTPS sync from the Mac or web app.
+- [x] Restore a shared GitHub brain onto a second device from the Mac or web
+  app, validate the bundle, and rebuild local search and graph data.
 
 ### Stage 8 — Enterprise coding
 
@@ -799,6 +801,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added in-app GitHub brain restore with local checkout validation,
+  selected-branch tracking, opt-in credential storage, and offline indexing.
 - 2026-11-22 — Added project run presets for recurring task, query, and profile
   combinations. Preserved per-request approval across the apps and editor.
 - 2026-11-22 — Connected accepted Pi responses to patch review in the apps

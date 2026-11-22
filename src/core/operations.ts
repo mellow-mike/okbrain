@@ -15,7 +15,7 @@ import { CHATGPT_USAGE, createChatgptPlan, type ChatgptPlanStatus } from "./ai/c
 import { gatewayEnvironment } from "./ai/local-keys.ts";
 import { focusedMap, MAP_SOURCES } from "./graph/focus.ts";
 import { openInBrowser } from "./browser.ts";
-import { changeBrainMount } from "./brain-mounts.ts";
+import { changeBrainMount, restoreBrainMount } from "./brain-mounts.ts";
 import type { CodingSessionResult, CodingSessionStatusResult } from "./coding/durable.ts";
 import { CodingProjectProfileError, parseCodingProjectProfile } from "./coding/project-profile.ts";
 import type { RepositoryContextManifest, RepositoryContextSelection, RepositoryContextOptions } from "./coding/repository-context.ts";
@@ -25,7 +25,7 @@ import { watchBundleInForeground, type BundleWatchStatus } from "./engine/bundle
 import { buildIndex, updateIndexFor, withIndexWrite, type IndexStats } from "./engine/index-build.ts";
 import type { Awaitable, IndexEngine, IndexVectors, Neighbor } from "./engine/interface.ts";
 import { readCacheSettings, setCacheSettings } from "./engine/cache-settings.ts";
-import { localBundleWatchBackend } from "./context.ts";
+import { localBundleWatchBackend, openLocalContext } from "./context.ts";
 import { EngineError } from "./engine/sqlite.ts";
 import { suggestLinks, type LinkSuggestion } from "./graph/link-suggest.ts";
 import { extractTargets } from "./graph/links.ts";
@@ -94,7 +94,7 @@ import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken, publis
 import { computeStats, type BrainStats } from "./stats.ts";
 import { JobLockError, runJobs, type Job, type JobResult } from "./jobs/worker.ts";
 import {
-  protectUnsharedNote, syncBundle, syncRebaseInProgress, syncSettings, syncStatus, withSyncRepository, type SyncResult, type SyncStatus,
+  protectUnsharedNote, sameDir, syncBundle, syncRebaseInProgress, syncSettings, syncStatus, withSyncRepository, type SyncResult, type SyncStatus,
 } from "./sync.ts";
 import { syncRecovery } from "./sync-recovery.ts";
 import { buildVizGraph, exportViz, type VizExport, type VizGraph } from "./viz/export.ts";
@@ -748,6 +748,27 @@ export async function runNotionSource(ctx: OpContext, connector: NotionSource, a
 export function runBrainMountChange(ctx: OpContext, input: Record<string, unknown>) {
   checkOpScope({ name: "brain mount settings", scope: "admin" }, ctx);
   return changeBrainMount(input);
+}
+
+/** Restore a shared bundle through the same local mount administration boundary. */
+export async function runBrainRestore(
+  ctx: OpContext, input: Record<string, unknown>, canWrite: () => boolean, servedBundle: string,
+) {
+  checkOpScope({ name: "restore brain from GitHub", scope: "admin" }, ctx);
+  const result = await restoreBrainMount(servedBundle, input, canWrite);
+  try {
+    const mounted = resolveBrain(result.brain.name);
+    if (!canWrite() || mounted.readonly || !sameDir(mounted.path, result.path))
+      throw new Error("The mount changed after restore.");
+    const restored = openLocalContext(result.path, true, false);
+    restored.ctx.brain = mounted.name;
+    try { await runOp(getOp("index")!, restored.ctx, {}); }
+    finally { await restored.close(); }
+  } catch {
+    const message = "The brain was restored. Choose Re-index in Settings to make it searchable.";
+    result.warning = result.warning ? `${result.warning} ${message}` : message;
+  }
+  return result;
 }
 
 /** The settings edit only local config. All network rules remain in pullFeed. */

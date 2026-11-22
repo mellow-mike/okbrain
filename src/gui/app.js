@@ -2144,11 +2144,40 @@ async function renderBrainMounts(parent, readonly, seq) {
     if (stale(seq)) return;
     if (showHome) { location.hash = '#home'; return; }
     await route();
-    if (location.hash === '#settings') {
+    if (location.hash === '#settings' && BRAIN === next) {
       var notice = document.getElementById('brain-mount-feedback');
-      if (notice) notice.textContent = message;
+      if (notice) {
+        if (typeof message === 'string') notice.textContent = message;
+        else notice.replaceChildren(message);
+      }
       document.getElementById('brain-mount-heading')?.focus();
     }
+  }
+
+  function restoredReceipt(result) {
+    var receipt = document.createElement('div');
+    receipt.className = 'stack notice';
+    receipt.innerHTML = '<p data-restored-title></p><dl class="kv">' +
+      '<dt>Repository</dt><dd><code data-restored-origin></code></dd>' +
+      '<dt>Branch</dt><dd><code data-restored-branch></code></dd>' +
+      '<dt>Folder</dt><dd><code data-restored-path></code></dd>' +
+      '<dt>Commit</dt><dd><code data-restored-commit></code></dd></dl>' +
+      (result.credentialSaved ? '<p>GitHub credential saved for this brain.</p>' : '') +
+      (result.warning ? '<p data-restored-warning></p>' : '') +
+      '<div class="row"><button type="button">Open restored brain</button></div>';
+    receipt.querySelector('[data-restored-title]').textContent = 'Restored ' + result.brain.name + '.';
+    receipt.querySelector('[data-restored-origin]').textContent = result.origin;
+    receipt.querySelector('[data-restored-branch]').textContent = result.branch;
+    receipt.querySelector('[data-restored-path]').textContent = result.path;
+    receipt.querySelector('[data-restored-commit]').textContent = result.commit;
+    if (result.warning) receipt.querySelector('[data-restored-warning]').textContent = result.warning;
+    receipt.querySelector('button').addEventListener('click', function () {
+      var picker = document.getElementById('brain');
+      if (!Array.from(picker.options).some(function (option) { return option.value === result.brain.name && !option.disabled; })) return;
+      picker.value = result.brain.name;
+      picker.dispatchEvent(new Event('change'));
+    });
+    return receipt;
   }
 
   async function change(button, input, next, message) {
@@ -2188,7 +2217,20 @@ async function renderBrainMounts(parent, readonly, seq) {
       '</select></label></div><label class="field"><span>Absolute folder path</span>' +
       '<input name="path" maxlength="4096" required autocomplete="off" spellcheck="false"></label>' +
       '<p class="muted">Create accepts a new path or an empty folder.</p>' + profileField() + accessField(false) + aiFields() +
-      '<div class="row"><button type="submit" class="primary">Add brain folder</button></div></form></details>');
+      '<div class="row"><button type="submit" class="primary">Add brain folder</button></div></form></details>' +
+      '<details class="card brain-mount-card" data-mount-restore-panel><summary>Restore from GitHub</summary>' +
+      '<form class="stack brain-mount-body" data-mount-restore autocomplete="off">' +
+      '<label class="field"><span>Restored brain name</span><input name="mountName" maxlength="64" required spellcheck="false"></label>' +
+      '<label class="field"><span>Existing parent folder</span><input name="parent" maxlength="4096" required spellcheck="false" placeholder="Absolute folder path"></label>' +
+      '<label class="field"><span>GitHub HTTPS URL</span><input type="url" name="url" maxlength="2048" required spellcheck="false" placeholder="https://github.com/owner/repository.git"></label>' +
+      '<label class="field"><span>Branch</span><input name="branch" value="main" maxlength="255" required spellcheck="false"></label>' +
+      '<p class="muted">Restore creates a new folder inside the selected parent.</p>' +
+      '<details data-restore-auth><summary>Private repository</summary><div class="stack brain-mount-body">' +
+      '<label class="field"><span>GitHub login</span><input name="login" maxlength="39" spellcheck="false"></label>' +
+      '<label class="field"><span>GitHub personal access token</span><input type="password" name="token" maxlength="267" autocomplete="new-password" spellcheck="false"></label>' +
+      '<label class="row"><input type="checkbox" name="saveCredential" disabled> Save credential for future sync</label>' +
+      '</div></details><div class="row"><button type="submit" class="primary">Restore brain</button></div>' +
+      '<div role="status"></div></form></details>');
 
   list.querySelectorAll('[data-mount]').forEach(function (row) {
     var mount = mounts[Number(row.dataset.mount)];
@@ -2224,6 +2266,60 @@ async function renderBrainMounts(parent, readonly, seq) {
       path: add.elements.path.value, readonly: add.elements.readOnly.checked, retrievalProfile: add.elements.retrievalProfile.value, ai: readAiDefaults(add),
     };
     change(add.querySelector('button[type=submit]'), input, function (result) { return result.name; }, 'Brain folder added.');
+  });
+  var restore = list.querySelector('[data-mount-restore]');
+  if (!restore) return;
+  var restorePanel = restore.closest('[data-mount-restore-panel]');
+  var restoreAuth = restore.querySelector('[data-restore-auth]');
+  var restoreToken = restore.elements.token;
+  var rememberCredential = restore.elements.saveCredential;
+  var restoreFeedback = restore.querySelector('[role="status"]');
+  var restoreControls = restore.querySelectorAll('input, button');
+  function clearRestoreCredential() {
+    restoreToken.value = '';
+    rememberCredential.checked = false;
+    rememberCredential.disabled = true;
+  }
+  restoreToken.addEventListener('input', function () {
+    rememberCredential.disabled = !restoreToken.value;
+    if (rememberCredential.disabled) rememberCredential.checked = false;
+  });
+  [restorePanel, restoreAuth].forEach(function (details) {
+    details.addEventListener('toggle', function () { if (!details.open) clearRestoreCredential(); });
+  });
+  restore.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    if (busy || stale(seq) || selected !== BRAIN) return;
+    var login = restoreAuth.open ? restore.elements.login.value.trim() : '';
+    var token = restoreAuth.open ? restoreToken.value : '';
+    if (Boolean(login) !== Boolean(token)) {
+      restoreFeedback.innerHTML = errorBox(new Error('Enter both the GitHub login and token for a private repository.'));
+      (login ? restoreToken : restore.elements.login).focus();
+      return;
+    }
+    var input = {
+      action: 'restore', name: restore.elements.mountName.value, parent: restore.elements.parent.value,
+      url: restore.elements.url.value, branch: restore.elements.branch.value,
+      ...(token ? { login: login, token: token, saveCredential: rememberCredential.checked } : {}),
+    };
+    clearRestoreCredential();
+    busy = true;
+    restoreControls.forEach(function (control) { control.disabled = true; });
+    restoreFeedback.textContent = 'Restoring the GitHub branch…';
+    try {
+      var response = await fetch('/api/brains', {
+        method: 'POST', cache: 'no-store', headers: headers({ 'content-type': 'application/json' }), body: JSON.stringify(input),
+      });
+      var payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || response.statusText);
+      if (!stale(seq) && selected === BRAIN) await finish(selected, restoredReceipt(payload.result));
+    } catch (error) {
+      if (!stale(seq) && selected === BRAIN) restoreFeedback.innerHTML = errorBox(error);
+    } finally {
+      busy = false;
+      restoreControls.forEach(function (control) { control.disabled = false; });
+      clearRestoreCredential();
+    }
   });
 }
 

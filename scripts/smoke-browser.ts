@@ -330,6 +330,100 @@ try {
   await privateGitHub.getByText("GitHub credential removed.", { exact: true }).waitFor();
   assert.equal(await privateGitHub.getByRole("button", { name: "Remove GitHub credential", exact: true }).isVisible(), false);
 
+  const restorePanel = mounts.locator("[data-mount-restore-panel]");
+  const restoreName = restorePanel.getByLabel("Restored brain name", { exact: true });
+  const restoreToken = restorePanel.getByLabel("GitHub personal access token", { exact: true });
+  const rememberRestore = restorePanel.getByRole("checkbox", { name: "Save credential for future sync", exact: true });
+  const restoreButton = restorePanel.getByRole("button", { name: "Restore brain", exact: true });
+  const restoreOrigin = "https://github.com/fixture-owner/backup.git";
+  const restoredPath = join(root, "restored-notes");
+  const retainedPath = join(root, "retained-notes");
+  const restoreCommit = "d".repeat(40);
+  const restoreRequest = Promise.withResolvers<void>();
+  const releaseRestore = Promise.withResolvers<void>();
+  const restores: unknown[] = [];
+  const restoreRoute = "**/api/brains";
+  await page.route(restoreRoute, async (route) => {
+    const request = route.request();
+    if (request.method() !== "POST") { await route.continue(); return; }
+    const input = request.postDataJSON() as Record<string, unknown>;
+    assert.equal(request.headers()["x-okb-brain"], "field-notes");
+    restores.push(input);
+    if (restores.length === 1) {
+      restoreRequest.resolve();
+      await releaseRestore.promise;
+      await route.fulfill({ status: 409, json: {
+        error: `The validated checkout is at ${retainedPath}. Use Register an existing folder to add it after checking the mount settings.`,
+      } });
+      return;
+    }
+    await mkdir(restoredPath);
+    await writeFile(join(restoredPath, "restored-note.md"), "---\ntype: note\ntitle: Restored note\ndescription: Offline fixture\n---\nRestored source.\n");
+    const registered = await fetch(new URL("api/brains/mounts", server.url), {
+      method: "POST",
+      headers: { "x-okb-token": server.token, "x-okb-brain": "field-notes", "content-type": "application/json" },
+      body: JSON.stringify({ action: "register", name: input.name, path: restoredPath, readonly: false }),
+    });
+    assert.ok(registered.ok, await registered.text());
+    await route.fulfill({ json: { result: {
+      brain: { name: input.name, path: restoredPath, readonly: false }, path: restoredPath,
+      origin: restoreOrigin, branch: input.branch, commit: restoreCommit, credentialSaved: true,
+      warning: "Re-index this restored brain to refresh search and graph.",
+    } } });
+  });
+  try {
+    await restorePanel.getByText("Restore from GitHub", { exact: true }).click();
+    await restoreName.fill("retained-notes");
+    await restorePanel.getByLabel("Existing parent folder", { exact: true }).fill(root);
+    await restorePanel.getByLabel("GitHub HTTPS URL", { exact: true }).fill(restoreOrigin);
+    await restorePanel.getByLabel("Branch", { exact: true }).fill("backup/reviewed");
+    await restorePanel.getByText("Private repository", { exact: true }).click();
+    assert.equal(await restoreToken.getAttribute("type"), "password");
+    assert.equal(await restoreToken.inputValue(), "");
+    assert.equal(await rememberRestore.isEnabled(), false);
+    await restorePanel.getByLabel("GitHub login", { exact: true }).fill("fixture-owner");
+    await restoreToken.fill(fakeGitHubTokens[0]!);
+    await restoreButton.click();
+    await restoreRequest.promise;
+    assert.equal(await restoreToken.inputValue(), "");
+    assert.equal(await restoreButton.isEnabled(), false);
+    releaseRestore.resolve();
+    await restorePanel.getByText(/Use Register an existing folder/).waitFor();
+    assert.equal(await restoreName.inputValue(), "retained-notes");
+    assert.equal(await restoreToken.inputValue(), "");
+
+    await restoreName.fill("restored-notes");
+    await restoreToken.fill(fakeGitHubTokens[1]!);
+    await rememberRestore.check();
+    await restoreButton.click();
+    await mounts.getByText("Restored restored-notes.", { exact: true }).waitFor();
+    assert.equal(await mounts.locator("[data-restored-branch]").textContent(), "backup/reviewed");
+    assert.equal(await mounts.locator("[data-restored-path]").textContent(), restoredPath);
+    assert.equal(await mounts.locator("[data-restored-commit]").textContent(), restoreCommit);
+    await mounts.getByText("GitHub credential saved for this brain.", { exact: true }).waitFor();
+    await mounts.getByText("Re-index this restored brain to refresh search and graph.", { exact: true }).waitFor();
+    assert.equal(await page.locator("#brain").inputValue(), "field-notes");
+    assert.deepEqual(restores, [
+      { action: "restore", name: "retained-notes", parent: root, url: restoreOrigin, branch: "backup/reviewed",
+        login: "fixture-owner", token: fakeGitHubTokens[0], saveCredential: false },
+      { action: "restore", name: "restored-notes", parent: root, url: restoreOrigin, branch: "backup/reviewed",
+        login: "fixture-owner", token: fakeGitHubTokens[1], saveCredential: true },
+    ]);
+  } finally {
+    releaseRestore.resolve();
+    await page.unroute(restoreRoute);
+  }
+  await mounts.getByRole("button", { name: "Open restored brain", exact: true }).click();
+  await page.waitForFunction((name) => document.querySelector("#brain")?.value === name && document.querySelector("dl.kv")?.textContent?.includes(name),
+    "restored-notes");
+  const restoredCard = mounts.locator("[data-mount]").filter({ hasText: "restored-notes" });
+  await restoredCard.getByText("restored-notes", { exact: true }).click();
+  await restoredCard.getByRole("button", { name: "Remove mount", exact: true }).click();
+  await mounts.getByText("Mount removed. Its files are still in the folder.", { exact: true }).waitFor();
+  assert.match(await Bun.file(join(restoredPath, "restored-note.md")).text(), /Restored source/);
+  await page.locator("#brain").selectOption("field-notes");
+  await page.waitForFunction(() => document.querySelector("dl.kv")?.textContent?.includes("field-notes"));
+
   await page.getByLabel("Local port", { exact: true }).fill("0");
   await page.getByRole("button", { name: "Start MCP HTTP" }).click();
   await page.getByText("MCP HTTP started.", { exact: true }).waitFor();

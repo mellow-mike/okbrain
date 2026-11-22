@@ -1,11 +1,13 @@
 import { mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { providersFor } from "./ai/gateway.ts";
-import { brainAiFields, ConfigError, listBrains, loadConfig, readBrainAiDefaults, saveConfig, type BrainAiDefaults, type OkbConfig } from "./config.ts";
+import { restoreGitHubBrain } from "./brain-restore.ts";
+import { brainAiFields, configDir, ConfigError, dataDir, listBrains, loadConfig, readBrainAiDefaults, resolveBrain, saveConfig, type BrainAiDefaults, type OkbConfig } from "./config.ts";
 import { serialize } from "./okf/document.ts";
 import { OKF_VERSION } from "./okf/indexmd.ts";
 import { PROFILES } from "./retrieval/profiles.ts";
+import { sameDir, syncGitHubCredential } from "./sync.ts";
 
 export class BrainMountError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -141,4 +143,71 @@ export function changeBrainMount(input: Record<string, unknown>): { name: string
     ...(typeof retrievalProfile === "string" && retrievalProfile ? { retrievalProfile } : {}), ...(ai ? { ai } : {}) };
   saveConfig({ ...cfg, brains });
   return { name, removed: false };
+}
+
+const activeRestores = new Set<string>();
+
+function containsFolder(root: string, path: string): boolean {
+  const within = relative(existingDirectory(root) ?? root, path);
+  return !isAbsolute(within) && within !== ".." && !within.startsWith(`..${sep}`);
+}
+
+export async function restoreBrainMount(
+  servedBundle: string, input: Record<string, unknown>, allowed: () => boolean,
+) {
+  const name = mountName(input.name);
+  const parent = existingDirectory(folderPath(input.parent));
+  if (!parent) throw new BrainMountError("The destination parent folder was not found.", 404);
+  const { url, branch, login, token, saveCredential } = input;
+  if (typeof url !== "string" || typeof branch !== "string") throw new ConfigError("Enter the GitHub repository URL and branch.");
+  if ((login !== undefined && typeof login !== "string") || (token !== undefined && typeof token !== "string"))
+    throw new ConfigError("Enter a GitHub login and token as text.");
+  const githubLogin = login?.trim() || undefined;
+  const githubToken = token?.trim() || undefined;
+  if (Boolean(githubLogin) !== Boolean(githubToken))
+    throw new ConfigError("Enter both a GitHub login and token for a private repository.");
+  if ((saveCredential !== undefined && typeof saveCredential !== "boolean") || (saveCredential && !githubToken))
+    throw new ConfigError("Enter a GitHub token before saving it for future sync.");
+  if (activeRestores.has(name) || listBrains().some((mount) => mount.name === name))
+    throw new BrainMountError("Another mount or restore already uses this name.", 409);
+
+  const canRestore = (): boolean => {
+    if (!allowed()) return false;
+    const roots = [servedBundle, configDir(), dataDir(), ...listBrains().map(({ path }) => path)];
+    if (roots.some((root) => containsFolder(root, parent)))
+      throw new BrainMountError("Choose a parent outside your brain folders and okbrain application data.", 409);
+    return true;
+  };
+
+  activeRestores.add(name);
+  try {
+    if (!canRestore()) throw new BrainMountError("The selected brain changed or is read-only.", 403);
+    const restored = await restoreGitHubBrain({ name, parent, url, branch, login: githubLogin, token: githubToken }, canRestore);
+    try {
+      if (!canRestore()) throw new BrainMountError("The selected brain changed or is read-only.", 403);
+      changeBrainMount({ action: "register", name, path: restored.path, readonly: false });
+    } catch (error) {
+      const status = error instanceof BrainMountError ? error.status : 409;
+      throw new BrainMountError(`The validated checkout is at ${restored.path}. Use Register an existing folder to add it after checking the mount settings.`, status);
+    }
+
+    const canUseRestored = () => {
+      if (!allowed()) return false;
+      const brain = resolveBrain(name);
+      return !brain.readonly && sameDir(brain.path, restored.path);
+    };
+    let credentialSaved = false;
+    let warning: string | undefined;
+    if (saveCredential) {
+      try {
+        await syncGitHubCredential(restored.path, { action: "save", login: githubLogin, token: githubToken }, canUseRestored);
+        credentialSaved = true;
+      } catch {
+        warning = "The brain was restored. Save the token under Git sync to use it for future sync.";
+      }
+    }
+    return { ...restored, brain: { name, path: restored.path, readonly: false }, credentialSaved, warning };
+  } finally {
+    activeRestores.delete(name);
+  }
 }

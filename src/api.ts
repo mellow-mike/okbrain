@@ -38,6 +38,7 @@ import {
   OpError,
   operations,
   runBrainMountChange,
+  runBrainRestore,
   runConversationUpload,
   runNotionSource,
   runOp,
@@ -336,7 +337,18 @@ async function brainMountRequest(req: Request, url: URL, opts: ServeState, cors:
     const scope = scopeOf(req, url, opts);
     const local = open(scope);
     try {
-      return json(200, { result: runBrainMountChange(local.ctx, body as Record<string, unknown>) }, headers);
+      const input = body as Record<string, unknown>;
+      if (url.pathname === "/api/brains") {
+        if (input.action !== "restore") return json(400, { error: "Choose Restore from GitHub." }, headers);
+        const canWrite = () => {
+          try {
+            const current = scopeOf(req, url, opts);
+            return current.bundle === scope.bundle && !current.readonly;
+          } catch { return false; }
+        };
+        return json(200, { result: await runBrainRestore(local.ctx, input, canWrite, opts.bundle) }, headers);
+      }
+      return json(200, { result: runBrainMountChange(local.ctx, input) }, headers);
     } finally {
       await local.close();
     }
@@ -903,7 +915,8 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     if (req.headers.has("origin") && !cors)
       return json(403, { error: "Source actions must come from the local app." });
   }
-  if (url.pathname === "/api/brains/mounts") return brainMountRequest(req, url, opts, cors ?? {});
+  if (url.pathname === "/api/brains/mounts" || (req.method === "POST" && url.pathname === "/api/brains"))
+    return brainMountRequest(req, url, opts, cors ?? {});
   if (url.pathname === "/api/rss-settings") return rssSettings(req, url, opts, cors);
   if (url.pathname === "/api/brains/watch" && opts.watches) return bundleWatchRequest(req, url, opts, cors);
   if (req.method === "GET" && url.pathname === "/api/brains") {
@@ -1020,6 +1033,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
         if (path === "/api/ask/stream") server.timeout(req, 0);
         if (path.startsWith("/api/coding/")) server.timeout(req, 65);
         if (path === "/api/op/sync" || path === "/api/op/sync_recovery") server.timeout(req, 260);
+        if (path === "/api/brains" && req.method === "POST") server.timeout(req, 150);
         return handleRequest(req, { bundle, servedBrain: opts.servedBrain, watches, port: server.port!, token, readonly, plan, coding, standalone, team, notion, mcp });
       },
     });

@@ -70,7 +70,7 @@ export function runGit(cwd: string, args: string[], input?: string, extraEnv?: N
 }
 
 /** Run git and throw a SyncError (with git's own message) on failure. */
-export async function git(cwd: string, args: string[], input?: string, env?: Record<string, string>): Promise<string> {
+export async function git(cwd: string, args: string[], input?: string, env?: NodeJS.ProcessEnv): Promise<string> {
   const r = await runGit(cwd, args, input, env);
   if (r.code !== 0)
     throw new SyncError(`git ${args[0]} failed: ${gitDiagnostic(r)}`);
@@ -237,12 +237,16 @@ function newOrigin(value: unknown): string {
   return url.href;
 }
 
-function originForSetup(value: unknown): string {
+export function originForSetup(value: unknown): string {
   const origin = newOrigin(value);
   const page = origin.replace(/\/$/u, "");
   if (syncGitHubRepository(page)) return page;
   const clone = page + ".git";
   return syncGitHubRepository(clone) ? clone : origin;
+}
+
+export function managedOriginConfig(origin: string): [string, string][] {
+  return [["remote.origin.url", origin], ["remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], ["okbrain.syncRemote", origin]];
 }
 
 const changedOriginError = () => new SyncError("Git configuration changes the fetch or push destination. Review the Git URL rules before connecting this remote.");
@@ -327,7 +331,7 @@ export async function syncSettings(root: string, input: SyncSettingsInput): Prom
     } else if (input.action === "origin") {
       if (current.originConfigured) throw new SyncError("This brain already has an origin. Change an existing remote with Git.");
       const url = originForSetup(input.url);
-      entries = [["remote.origin.url", url], ["remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], ["okbrain.syncRemote", url]];
+      entries = managedOriginConfig(url);
       if (current.repository === "new") await verifyProposedOrigin(canonical, url);
     } else {
       throw new SyncError("Choose a Git settings action.");
@@ -392,10 +396,11 @@ export async function syncGitHubCredential(root: string, input: SyncGitHubCreden
 /** Run a managed fetch or push against its approved origin. */
 export async function managedGitTransport(
   root: string, origin: string, args: ["fetch" | "push", ...string[]], credential: GitHubSyncCredential | null,
+  processOptions: NodeJS.ProcessEnv = {},
 ): Promise<GitResult> {
-  const protocol = { GIT_ALLOW_PROTOCOL: "https" };
+  const protocol = { ...processOptions, GIT_ALLOW_PROTOCOL: "https" };
   if (!credential) {
-    await verifyOriginDestination(root, origin);
+    await verifyOriginDestination(root, origin, protocol);
     return runGit(root, ["-c", `http.${origin}.followRedirects=false`, ...args], undefined, protocol);
   }
   if (credential.origin !== origin) throw new SyncError("The saved GitHub credential belongs to a different origin.");
@@ -404,9 +409,9 @@ export async function managedGitTransport(
     const { args: authArgs, env } = gitHubSyncTransport(credential, hooks);
     // Check the destinations using the same configuration environment as the
     // transport, with no credential present in the verification processes.
-    await verifyOriginDestination(root, origin, { ...env, ...protocol, OKB_SYNC_AUTH_HEADER: undefined });
+    await verifyOriginDestination(root, origin, { ...protocol, ...env, GIT_ALLOW_PROTOCOL: "https", OKB_SYNC_AUTH_HEADER: undefined });
     try {
-      const result = await runGit(root, [...authArgs, ...args], undefined, { ...env, ...protocol });
+      const result = await runGit(root, [...authArgs, ...args], undefined, { ...protocol, ...env, GIT_ALLOW_PROTOCOL: "https" });
       if (result.code === 0) return { code: 0, stdout: "", stderr: "" };
     } catch { /* A child error can contain request diagnostics. */ }
     const action = args[0] === "push" ? "push failed (changes are committed locally)" : "fetch failed";
@@ -481,9 +486,10 @@ export async function verifyPrivatePaths(root: string, marked: ReadonlySet<strin
     throw new SyncError("Git history contains a private note path. Review the repository before syncing.");
 }
 
-export async function verifyPrivateDirectoryHistory(root: string): Promise<void> {
-  const found = await git(root, ["log", "--all", "--full-history", "-1", "--format=%H", "--", ":(glob,icase)**/db_only/**"]);
-  if (found.trim()) throw new SyncError("Git history contains a db_only directory. Review the repository history before syncing.");
+export async function verifyPrivateDirectoryHistory(root: string, env?: NodeJS.ProcessEnv): Promise<void> {
+  const found = await runGit(root, ["log", "--all", "--full-history", "-1", "--format=%H", "--", ":(glob,icase)**/db_only/**"], undefined, env);
+  if (found.code !== 0) throw new SyncError("Unable to check the repository history for private paths.");
+  if (found.stdout.trim()) throw new SyncError("Git history contains a db_only directory. Review the repository history before syncing.");
 }
 
 export async function verifyNoPrivateStagedNotes(root: string): Promise<void> {

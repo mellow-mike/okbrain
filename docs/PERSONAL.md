@@ -160,6 +160,14 @@ Sync keeps untracked `db_only/` files out of Git and omits private note metadata
 
 If Git pauses a rebase, open the conflict in **Git sync**. For regular UTF-8 files up to 256 KiB, compare the saved local commit with the upstream version, then choose a version or edit merged text. After resolving each conflict, continue the rebase. You may also abort the rebase to restore the original branch, which discards conflict-resolution edits from that rebase. Review the result before using **Sync now** to publish it. The app refreshes the existing keyword and graph index after the rebase finishes. [Git rebase](https://git-scm.com/docs/git-rebase)
 
+### Restore a brain from GitHub
+
+On the second device, open **Settings → Brain folders → Restore from GitHub** from a writable brain. Enter a mount name, the path to an existing parent folder on this device, the GitHub repository’s HTTPS URL, and the branch. okbrain creates a new checkout inside that parent and checks it as an Open Knowledge Format bundle before adding it to your brain list.
+
+For a private repository, enter a GitHub login and a fine-grained token with **Contents** read access for that repository. To keep the token on this device, select **Save credential for future sync**. Future pushes need **Contents** write access. The checkout tracks the selected branch so you can continue in **Git sync**. [GitHub personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+
+Select **Open restored brain** when the checkout is ready. The app rebuilds local keyword search and the graph from the checkout. Restore brings over the notes shared on GitHub. Keep a separate local backup of private drafts and other data that lives only on the first device.
+
 ### Export notes to Markdown or Obsidian
 
 From a writable brain, open **Settings → Markdown and Obsidian export**. Enter the absolute path to a new folder outside the brain. The new folder's parent must already exist. Choose **Export Markdown**, then use Obsidian's **Open folder as vault** or open the files in any Markdown editor.

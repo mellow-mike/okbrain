@@ -301,6 +301,11 @@ rejects on any warning class — doctor is the only strict surface.
   brain and app-managed origin. Direct local sync passes it to the Git fetch
   and push subprocesses with HTTPS verification and redirects disabled.
   The browser reads only its saved status and repository binding.
+- The owner can restore a shared GitHub branch as a new local brain folder.
+  The app fetches into a fresh repository, validates the tracked tree and
+  bundle, sets its upstream, and registers the checkout. Local indexing runs
+  after registration. Retaining a private-repository token for later sync
+  requires the owner to select that option during restore.
 - Seeding is append-only "ensure these lines exist" (user lines are never
   rewritten): `.gitignore` gets `.okb/`, `/viz.html`, `db_only/`;
   `.gitattributes` gets `* text=auto eol=lf` — Windows `autocrlf` must never

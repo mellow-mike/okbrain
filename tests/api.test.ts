@@ -6,7 +6,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventSourceParserStream } from "eventsource-parser/stream";
@@ -437,6 +437,31 @@ describe("server routes for the GUI", () => {
     expect(bm.port).toBe(api.port);
     expect(bm.bookmarklet).toContain(`token=${TOKEN}`);
     expect(bm.bookmarklet).toContain(`:${api.port}/clip`);
+  });
+
+  test("restoring a GitHub brain requires a writable local owner and a separate destination", async () => {
+    const saved = loadConfig();
+    const parent = await mkdtemp(join(tmpdir(), "okb-restore-parent-"));
+    const draft = { action: "restore", name: "Shared", parent, url: "https://github.com/example/brain.git", branch: "main" };
+    const restore = (body: unknown, headers: Record<string, string> = {}, token: string | null = TOKEN) =>
+      call("api/brains", { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }, token);
+    try {
+      saveConfig({ ...saved, brains: { Reference: { path: parent, readonly: true } } });
+      expect((await restore(draft, { authorization: `Bearer ${TOKEN}` }, null)).status).toBe(401);
+      expect((await restore(draft, { origin: "https://remote.example" })).status).toBe(403);
+      expect((await restore(draft, { "content-type": "text/plain" })).status).toBe(415);
+      expect((await restore(draft, { "x-okb-brain": "Reference" })).status).toBe(403);
+      expect((await restore(draft)).status).toBe(409);
+      expect((await restore({ ...draft, parent: bundle })).status).toBe(409);
+      expect((await restore({ ...draft, parent: "relative" })).status).toBe(400);
+      expect((await restore({ ...draft, saveCredential: true })).status).toBe(400);
+      expect((await restore({ ...draft, name: "Reference" })).status).toBe(409);
+      expect(loadConfig().brains).toEqual({ Reference: { path: parent, readonly: true } });
+      expect(await readdir(parent)).toEqual([]);
+    } finally {
+      saveConfig(saved);
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 
   test("x-okb-brain scopes a request to a configured mount (read-only policy included)", async () => {
