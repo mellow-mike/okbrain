@@ -90,7 +90,7 @@ okb serve --open
 okb export-viz
 ```
 
-The local GUI can browse, search, and edit conversation drafts in its selected bundle. `okb sync` keeps untracked `db_only/` files out of Git and omits private note metadata from the shared root index and log. When managing the bundle directly with Git, verify that `db_only/` is ignored and untracked. `okb export-viz` omits notes under `db_only/` by default. Pass `--include-private` only when you want the generated HTML to contain those notes and their contents.
+The local GUI can browse, search, and edit conversation drafts in its selected bundle. `okb sync` keeps untracked `db_only/` files out of Git and omits private note metadata from the shared root index and log. When managing the bundle directly with Git, verify that `db_only/` is ignored and untracked. **Settings → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`.
 
 ## Connect an MCP client
 

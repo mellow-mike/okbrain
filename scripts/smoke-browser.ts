@@ -56,6 +56,12 @@ try {
   await page.keyboard.press("Enter");
 
   await page.getByRole("searchbox", { name: "Search notes", exact: true }).focus();
+  const semantic = page.getByRole("checkbox", { name: "Use configured semantic retrieval" });
+  assert.equal(await semantic.isChecked(), false);
+  await semantic.check();
+  await page.getByRole("combobox", { name: "Retrieval profile" }).selectOption("lean");
+  await semantic.uncheck();
+  await page.getByRole("searchbox", { name: "Search notes", exact: true }).focus();
   await page.keyboard.type("orchid");
   await page.keyboard.press("Enter");
   await page.getByRole("link", { name: "Offline orchid propagation", exact: true }).waitFor();
@@ -71,6 +77,7 @@ try {
   await page.getByRole("link", { name: "Ask with ChatGPT", exact: true }).click();
   await page.getByText("Connect an eligible account to continue.").waitFor();
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
+  assert.equal(await page.getByRole("checkbox", { name: "Include private drafts in graph export" }).isChecked(), false);
   const keys = page.locator("#provider-keys");
   await keys.getByRole("combobox", { name: "API provider" }).selectOption("openai");
   await keys.getByLabel("API key", { exact: true }).fill("fixture-key-for-browser-smoke");

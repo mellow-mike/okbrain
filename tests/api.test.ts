@@ -358,6 +358,10 @@ describe("server routes for the GUI", () => {
 
       const write = await call("api/op/capture", { method: "POST", body: JSON.stringify({ text: "nope" }), headers: { "x-okb-brain": "ref" } });
       expect(write.status).toBe(403); // read-only mount
+      const privateExport = await call("api/op/export_viz", {
+        method: "POST", body: JSON.stringify({ "include-private": true }), headers: { "x-okb-brain": "ref" },
+      });
+      expect(privateExport.status).toBe(403);
       const upload = await call("api/conversations/upload?provider=chatgpt", {
         method: "POST", body: "[]", headers: { "x-okb-brain": "ref", "content-type": "application/json" },
       });

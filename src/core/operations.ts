@@ -1321,6 +1321,7 @@ export const operations: readonly Operation[] = [
     handler: (ctx, p) => {
       const includePrivate = p["include-private"] === true;
       if (includePrivate && !ctx.trusted) throw new OpError("Private HTML exports require a trusted caller.", "untrusted");
+      if (includePrivate && ctx.readonly) throw new OpError("Private HTML exports require a writable brain.", "refused");
       return exportViz(ctx.bundle, { includePrivate });
     },
     render: (r) => {

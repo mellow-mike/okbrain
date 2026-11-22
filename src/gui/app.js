@@ -1010,10 +1010,18 @@ function renderSearch(initialQ) {
     '<form id="sf" class="stack">' +
     '<label class="field"><span>Search notes</span><input id="sq" type="search" placeholder="Search by keyword…" required></label>' +
     '<div class="row"><button class="primary">Search</button>' +
-    '<label><input id="s-semantic" type="checkbox"> Use configured semantic retrieval</label></div></form>' +
+    '<label><input id="s-semantic" type="checkbox"> Use configured semantic retrieval</label>' +
+    '<label class="field" id="s-profile-field" hidden><span>Retrieval profile</span>' +
+    '<select id="s-profile"><option value="">Configured default</option><option>lean</option>' +
+    '<option>balanced</option><option>max</option></select></label></div></form>' +
     '<div id="sout" class="list" aria-live="polite"></div></div>';
   var out = document.getElementById('sout');
   var qEl = document.getElementById('sq');
+  var semantic = document.getElementById('s-semantic');
+  var profile = document.getElementById('s-profile');
+  semantic.addEventListener('change', function () {
+    document.getElementById('s-profile-field').hidden = !semantic.checked;
+  });
   document.getElementById('sf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var q = qEl.value.trim();
@@ -1023,7 +1031,8 @@ function renderSearch(initialQ) {
       return;
     }
     Okb.working(out, 'searching');
-    var params = { query: q, 'keyword-only': !document.getElementById('s-semantic').checked };
+    var params = { query: q, 'keyword-only': !semantic.checked };
+    if (semantic.checked && profile.value) params.profile = profile.value;
     try {
       var hits = await api('search', params);
       out.innerHTML = hits.length
@@ -1947,8 +1956,10 @@ async function renderSettings(_arg, seq) {
     '<div id="enr-out"></div>' +
     '<h3>Maintenance</h3><div class="row">' +
     '<button id="mx-index">Re-index</button><button id="mx-embed">Embed</button>' +
-    '<button id="mx-doctor">Doctor</button><button id="mx-viz">Export viz.html</button>' +
+    '<button id="mx-doctor">Doctor</button>' +
     '<button id="mx-rebuild" class="danger">Rebuild (wipe + reindex)</button></div>' +
+    '<div class="row"><button id="mx-viz">Export viz.html</button>' +
+    (st.readonly ? '' : '<label><input id="mx-viz-private" type="checkbox"> Include private drafts in graph export</label>') + '</div>' +
     '<div class="row"><span class="muted">Jobs:</span>' +
     ['index', 'embed', 'rss', 'review', 'doctor'].map(function (j) {
       return '<label class="row" style="gap:4px"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
@@ -2032,7 +2043,11 @@ async function renderSettings(_arg, seq) {
   document.getElementById('mx-embed').addEventListener('click', function () { maint('embed', 'embedding'); });
   document.getElementById('mx-doctor').addEventListener('click', function () { maint('doctor', 'checking', {}, doctorSummary); });
   document.getElementById('mx-viz').addEventListener('click', function () {
-    maint('export_viz', 'exporting', {}, function (r) { return '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>'; });
+    var includePrivate = Boolean(document.getElementById('mx-viz-private')?.checked);
+    if (includePrivate && !confirm('The exported HTML will contain private draft text. Export it?')) return;
+    maint('export_viz', 'exporting', { 'include-private': includePrivate }, function (r) {
+      return '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>';
+    });
   });
   document.getElementById('mx-rebuild').addEventListener('click', function () {
     if (!confirm('Rebuild wipes the derived index and rebuilds it from the bundle. Continue?')) return;
