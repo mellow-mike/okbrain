@@ -15,7 +15,36 @@ export interface Edge {
 }
 
 // Inline markdown link/image targets: the `(...)` after `](`.
-export const LINK = /\]\(([^)]*)\)/g;
+export const LINK = /\]\(([^)\0]*)\)/g;
+
+/** Mask fenced code while preserving newlines and offsets into the original Markdown. */
+export function markdownOutsideCode(body: string): string {
+  const fencePattern = /^ {0,3}(`{3,}|~{3,})([^\n]*)/;
+  if (!/^ {0,3}(?:`{3,}|~{3,})/m.test(body)) return body;
+  let fence: string | undefined;
+  return body.split("\n").map((line) => {
+    const match = fencePattern.exec(line);
+    if (!fence) {
+      if (!match || (match[1]!.startsWith("`") && match[2]!.includes("`"))) return line;
+      fence = match[1]!;
+    } else if (match && match[1]!.startsWith(fence) && match[2]!.trim() === "") {
+      fence = undefined;
+    }
+    // NULs prevent an opening link before the fence from matching past it.
+    return "\0".repeat(line.length);
+  }).join("\n");
+}
+
+/** Rewrite link destinations in Markdown while leaving fenced code byte-for-byte intact. */
+export function rewriteBodyLinks(body: string, rewrite: (match: string, target: string) => string): string {
+  const parts: string[] = [];
+  let offset = 0;
+  for (const m of markdownOutsideCode(body).matchAll(LINK)) {
+    parts.push(body.slice(offset, m.index), rewrite(m[0], m[1]!));
+    offset = m.index + m[0].length;
+  }
+  return offset === 0 ? body : parts.join("") + body.slice(offset);
+}
 
 // Split a raw target into its destination (unwrapping `<...>`) and whatever
 // trails it (` "title"` and, for wrapped targets, anything after `>`).
@@ -79,7 +108,7 @@ export function resolvePathField(
  * Destinations needing it (spaces, parens) are `<...>`-wrapped. Idempotent.
  */
 export function normalizeLinks(srcId: string, body: string): string {
-  return body.replace(LINK, (match, raw: string) => {
+  return rewriteBodyLinks(body, (match, raw) => {
     const id = resolveLinkTarget(srcId, raw);
     if (id === null) return match;
     const { dest, suffix } = splitTarget(raw);
@@ -92,7 +121,7 @@ export function normalizeLinks(srcId: string, body: string): string {
 /** All resolved internal link target ids in a body, deduped, in first-seen order. */
 export function extractTargets(srcId: string, body: string): string[] {
   const seen = new Set<string>();
-  for (const m of body.matchAll(LINK)) {
+  for (const m of markdownOutsideCode(body).matchAll(LINK)) {
     const id = resolveLinkTarget(srcId, m[1]!);
     if (id !== null) seen.add(id);
   }

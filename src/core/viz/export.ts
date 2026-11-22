@@ -10,7 +10,7 @@
 
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { buildEdges, LINK, resolveLinkTarget, type Edge } from "../graph/links.ts";
+import { buildEdges, resolveLinkTarget, rewriteBodyLinks, type Edge } from "../graph/links.ts";
 import { listConcepts, readConceptPermissive } from "../okf/bundle.ts";
 import {
   fmGenerated,
@@ -27,6 +27,7 @@ import {
   type Status,
   type TrustTier,
 } from "../okf/document.ts";
+import { inDbOnlyDir } from "../okf/paths.ts";
 import okbJs from "./okb.js" with { type: "text" };
 import renderJs from "./render.js" with { type: "text" };
 import safeMarkdownJs from "./safe-markdown.js" with { type: "text" };
@@ -63,7 +64,7 @@ export interface VizGraph {
  * anchors; external, broken, and non-`.md` links are left untouched. Pure.
  */
 export function rewireLinks(srcId: string, body: string, known: Set<string>): string {
-  return body.replace(LINK, (match, target: string) => {
+  return rewriteBodyLinks(body, (match, target) => {
     const id = resolveLinkTarget(srcId, target);
     return id !== null && known.has(id)
       ? `](#concept:${encodeURIComponent(id)})`
@@ -71,8 +72,8 @@ export function rewireLinks(srcId: string, body: string, known: Set<string>): st
   });
 }
 
-export async function buildVizGraph(root: string): Promise<VizGraph> {
-  const ids = await listConcepts(root);
+export async function buildVizGraph(root: string, { includePrivate = true } = {}): Promise<VizGraph> {
+  const ids = (await listConcepts(root)).filter((id) => includePrivate || !inDbOnlyDir(id));
   const known = new Set(ids);
   const nodes: VizNode[] = [];
   const docs: { id: string; body: string; frontmatter: Record<string, unknown> }[] = [];
@@ -108,8 +109,8 @@ export interface VizExport {
 }
 
 /** Export the bundle's graph to `<root>/viz.html` (fixed path by design). */
-export async function exportViz(root: string): Promise<VizExport> {
-  const graph = await buildVizGraph(root);
+export async function exportViz(root: string, { includePrivate = false } = {}): Promise<VizExport> {
+  const graph = await buildVizGraph(root, { includePrivate });
   const path = join(root, "viz.html");
   await writeFile(path, renderHtml(graph), "utf8");
   return { path, nodes: graph.nodes.length, edges: graph.edges.length };

@@ -23,6 +23,7 @@ import { log } from "./log.ts";
 import { suggestTags } from "./ingest/autotag.ts";
 import { captureNote } from "./ingest/capture.ts";
 import { clipUrl, type ClipOptions, type ClipResult } from "./ingest/clip.ts";
+import { importConversations, isConversationProvider, type ConversationImportResult } from "./ingest/conversations.ts";
 import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
 import { FeedError, pullFeed, type RssPullResult } from "./ingest/rss.ts";
@@ -955,6 +956,44 @@ export const operations: readonly Operation[] = [
     },
   },
   {
+    name: "import_conversations",
+    cliName: "import-conversations",
+    summary: "Import text from a local ChatGPT or Claude export as private drafts",
+    scope: "write",
+    localOnly: true,
+    params: [
+      { name: "path", type: "string", required: true, positional: true, description: "one extracted conversations JSON file" },
+      { name: "provider", type: "string", required: true, description: "export format: chatgpt or claude" },
+      { name: "dry-run", type: "boolean", description: "preview without writing draft notes" },
+    ],
+    handler: async (ctx, p) => {
+      const provider = p.provider;
+      if (!isConversationProvider(provider)) throw new OpError("Choose chatgpt or claude as the export provider.", "bad_params");
+      const result = await writing(() => importConversations(ctx.bundle, {
+        provider,
+        path: p.path as string,
+        dryRun: p["dry-run"] === true,
+      }));
+      if (result.imported.length > 0 && ctx.hasIndex()) {
+        try {
+          for (const id of result.imported) await updateIndexFor(ctx.bundle, id, ctx.engine());
+        } catch {
+          log.warn("Conversation drafts were saved. Run `okb index` to refresh the keyword and graph index.");
+        }
+      }
+      return result;
+    },
+    render: (r) => {
+      const { imported, planned, skipped } = r as ConversationImportResult;
+      return [
+        ...imported.map((id) => `imported ${id}`),
+        ...planned.map((id) => `would import ${id}`),
+        ...skipped.map(({ row, id, reason }) => `skipped row ${row}${id ? ` (${id})` : ""} — ${reason}`),
+        `${imported.length} imported, ${planned.length} planned, ${skipped.length} skipped`,
+      ].join("\n");
+    },
+  },
+  {
     name: "graph_data",
     cliName: "graph-data",
     summary: "The whole graph (nodes + edges) as data — for the GUI and agents",
@@ -974,8 +1013,12 @@ export const operations: readonly Operation[] = [
     cliName: "export-viz",
     summary: "Write a self-contained HTML graph viewer to <bundle>/viz.html",
     scope: "read",
-    params: [],
-    handler: (ctx) => exportViz(ctx.bundle),
+    params: [{ name: "include-private", type: "boolean", description: "embed private db_only notes in the HTML" }],
+    handler: (ctx, p) => {
+      const includePrivate = p["include-private"] === true;
+      if (includePrivate && !ctx.trusted) throw new OpError("Private HTML exports require a trusted caller.", "untrusted");
+      return exportViz(ctx.bundle, { includePrivate });
+    },
     render: (r) => {
       const v = r as VizExport;
       return `wrote ${v.path} (${v.nodes} concepts, ${v.edges} links)`;

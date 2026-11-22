@@ -6,7 +6,7 @@
 // shared phrase→relation vocabulary drives both this classifier and the
 // relational query detector (core/retrieval/relational.ts).
 
-import { LINK, resolveLinkTarget } from "./links.ts";
+import { LINK, markdownOutsideCode, resolveLinkTarget } from "./links.ts";
 
 /** Phrase → relation. Ordered; longest phrase wins on query detection. */
 export const REL_VOCAB: readonly { phrase: string; rel: string }[] = [
@@ -84,6 +84,7 @@ function relAt(
  * first-seen (the first occurrence's relation wins, matching edge dedupe).
  */
 export function classifyTargets(srcId: string, body: string): TypedTarget[] {
+  body = markdownOutsideCode(body);
   const headings: { index: number; rel: string | null }[] = [];
   for (const m of body.matchAll(HEADING_RE))
     headings.push({ index: m.index, rel: headingRel(m[1]!) });

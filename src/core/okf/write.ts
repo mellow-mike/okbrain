@@ -8,7 +8,7 @@
 // when their v0.2 counterpart is written. Each write also regenerates
 // index.md up the touched dir chain and appends a log.md entry (Stage 1.2).
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { dirname, posix } from "node:path";
 import { resolveActor } from "../config.ts";
 import { normalizeLinks } from "../graph/links.ts";
@@ -79,6 +79,13 @@ export interface WriteResult {
   noop?: boolean;
 }
 
+interface WriteOptions {
+  /** Leave an existing concept alone, including one created by a concurrent import. */
+  createOnly?: boolean;
+  /** The caller will regenerate the affected index branch after a batch. */
+  deferIndex?: boolean;
+}
+
 /** Emitted instant format: ISO 8601 UTC, second precision. */
 export const nowTimestamp = (): string =>
   new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -136,6 +143,7 @@ const event = (e: ActorEvent): ActorEvent =>
 export async function writeConcept(
   root: string,
   input: WriteConceptInput,
+  options: WriteOptions = {},
 ): Promise<WriteResult> {
   const path = idToAbsPath(root, input.id); // validates the id
   if (isReservedName(posix.basename(input.id) + ".md"))
@@ -145,6 +153,10 @@ export async function writeConcept(
 
   let existing;
   try {
+    if (options.createOnly) {
+      await lstat(path);
+      return { id: input.id, path, created: false, noop: true };
+    }
     existing = await readConceptPermissive(root, input.id);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
@@ -232,12 +244,22 @@ export async function writeConcept(
     if (asIs === existing.raw) return { id: input.id, path, created: false, noop: true };
   }
 
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, serialize({ frontmatter: fm, body }), "utf8");
+  const privateConcept = inDbOnlyDir(input.id);
+  await mkdir(dirname(path), { recursive: true, mode: privateConcept ? 0o700 : undefined });
+  try {
+    await writeFile(path, serialize({ frontmatter: fm, body }), {
+      encoding: "utf8",
+      flag: options.createOnly ? "wx" : "w",
+      mode: privateConcept ? 0o600 : undefined,
+    });
+  } catch (e) {
+    if (!options.createOnly || (e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    return { id: input.id, path, created: false, noop: true };
+  }
   const dir = posix.dirname(input.id);
-  await regenerateIndexes(root, dir === "." ? "" : dir);
+  if (!options.deferIndex) await regenerateIndexes(root, dir === "." ? "" : dir);
   const kind = existing === undefined ? "Creation" : "Update";
-  if (!inDbOnlyDir(input.id) && !input.metadataOnly)
+  if (!privateConcept && !input.metadataOnly)
     // Private concepts never leak titles into the committed root log.md;
     // metadata-only stamps aren't content changes worth a log entry.
     await appendLog(root, kind, input.id, fm.title as string, fm.description as string);

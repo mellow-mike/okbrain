@@ -1,0 +1,40 @@
+[
+  {
+    "conversation_id": "e9cca8e5-c08d-498f-877a-dcaac3d76056",
+    "title": "Library planning",
+    "create_time": 1724083200,
+    "update_time": 1724086800,
+    "current_node": "response",
+    "mapping": {
+      "root": { "parent": null, "message": null },
+      "request": {
+        "parent": "root",
+        "message": {
+          "author": { "role": "user" },
+          "content": {
+            "parts": ["I am planning a neighborhood library.", { "asset_pointer": "file-service://image" }]
+          }
+        }
+      },
+      "alternative": {
+        "parent": "request",
+        "message": { "author": { "role": "assistant" }, "content": { "parts": ["Discarded response"] } }
+      },
+      "hidden": {
+        "parent": "request",
+        "message": {
+          "author": { "role": "assistant" },
+          "metadata": { "is_visually_hidden_from_conversation": true },
+          "content": { "parts": ["Hidden message"] }
+        }
+      },
+      "response": {
+        "parent": "hidden",
+        "message": {
+          "author": { "role": "assistant" },
+          "content": { "parts": ["Make space for [local history](../../history.md).\n\n~~~md\n![photo](https://example.test/photo.png)\n~~~"] }
+        }
+      }
+    }
+  }
+]
