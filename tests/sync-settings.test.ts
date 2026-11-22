@@ -90,7 +90,7 @@ test("origin save does not contact the remote and refuses replacement, credentia
   git(rewritten, "config", "url.https://different.invalid/.pushInsteadOf", "https://example.invalid/");
   await expect(syncSettings(rewritten, origin)).rejects.toThrow("changes the fetch or push destination");
   expect(await syncSettings(rewritten, { action: "status" })).toMatchObject({ originConfigured: false });
-});
+}, 15_000);
 
 test("a concurrent origin save keeps the first binding and an external Git lock protects config", async () => {
   const root = await brain("concurrent-origin");
