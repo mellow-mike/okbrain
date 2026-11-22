@@ -5,7 +5,7 @@
 // server — no live network in CI.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,8 +15,10 @@ import { runCli } from "../src/cli.ts";
 import { loadConfig, saveConfig } from "../src/core/config.ts";
 import { createGateway } from "../src/core/ai/gateway.ts";
 import type { focusedMap } from "../src/core/graph/focus.ts";
+import { parse } from "../src/core/okf/document.ts";
 import { OKF_VERSION } from "../src/core/okf/indexmd.ts";
 import { operations } from "../src/core/operations.ts";
+import type { AskResult } from "../src/core/retrieval/ask.ts";
 import { VERSION } from "../src/core/version.ts";
 import {
   bookmarkletJs,
@@ -754,15 +756,37 @@ describe("clip endpoint (bookmarklet)", () => {
 
 describe("SSE ask stream (stub chat server)", () => {
   let chat: ReturnType<typeof Bun.serve>;
+  let chatCalls = 0;
+
+  async function completedAnswer(response: Response): Promise<AskResult & { draftReceipt?: string }> {
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const reader = response.body!.pipeThrough(new TextDecoderStream()).pipeThrough(new EventSourceParserStream()).getReader();
+    let result: (AskResult & { draftReceipt?: string }) | undefined;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        expect(value.event).not.toBe("error");
+        const data = JSON.parse(value.data);
+        if (value.event === "done") result = data.result;
+        else expect(data).not.toHaveProperty("draftReceipt");
+      }
+    } finally { reader.releaseLock(); }
+    expect(result).toBeDefined();
+    return result!;
+  }
 
   beforeAll(() => {
     chat = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch: () =>
-        Response.json({
+      fetch: () => {
+        chatCalls++;
+        return Response.json({
           choices: [{ message: { content: "Databases are in [notes/alpha]." } }],
-        }),
+        });
+      },
     });
     process.env.OKB_CHAT_PROVIDER = "ollama";
     process.env.OKB_CHAT_BASE_URL = `http://127.0.0.1:${chat.port}`;
@@ -786,12 +810,103 @@ describe("SSE ask stream (stub chat server)", () => {
     expect([...order]).toEqual([...order].sort((a, b) => a - b));
     expect(text).toContain('"id":"notes/alpha"');
     expect(text).toContain("Databases are in");
+    expect(text).not.toContain('"draftReceipt"');
   });
 
   test("a missing question fails before the stream starts (plain 400)", async () => {
     const r = await call("api/ask/stream");
     expect(r.status).toBe(400);
     expect(((await r.json()) as { error: string }).error).toContain("question");
+  });
+
+  test("saves only the exact completed Ask answer to its writable brain and preserves edits on retry", async () => {
+    const saved = loadConfig();
+    const other = await mkdtemp(join(tmpdir(), "okb-ask-other-brain-"));
+    const brain = "AskDraftHome";
+    const otherBrain = "AskDraftOther";
+    const configure = (path: string, readonly = false) => saveConfig({ ...saved, brains: {
+      ...saved.brains, [brain]: { path, readonly }, [otherBrain]: { path: other },
+    } });
+    const ask = async (question: string) => completedAnswer(await call("api/ask/stream", {
+      method: "POST", headers: { "content-type": "application/json", "x-okb-brain": brain }, body: JSON.stringify({ question }),
+    }));
+    const save = (body: unknown, options: { target?: string; name?: string; headers?: Record<string, string>; token?: string | null } = {}) =>
+      fetch((options.target ?? base) + "api/ask/private-draft", {
+        method: "POST", headers: { "content-type": "application/json", "x-okb-brain": options.name ?? brain,
+          ...(options.token === null ? {} : { "x-okb-token": options.token ?? TOKEN }), ...options.headers },
+        body: JSON.stringify(body),
+      });
+    const answerDirectory = join(bundle, "db_only", "answers");
+    try {
+      configure(bundle);
+      const before = chatCalls;
+      const result = await ask("databases");
+      expect(result).toMatchObject({ answer: "Databases are in [notes/alpha].", provider: "ollama",
+        citations: [{ id: "notes/alpha", title: "Alpha" }] });
+      expect(typeof result.draftReceipt).toBe("string");
+      const fallback = await ask("okbrainanswernoresultgzcixm");
+      expect(fallback).toMatchObject({ provider: null, model: null, citations: [] });
+      expect(fallback.draftReceipt).toBeUndefined();
+      expect(chatCalls).toBe(before + 1);
+      expect(existsSync(answerDirectory)).toBe(false);
+      const payload = { receipt: result.draftReceipt!, question: "databases", answer: result.answer,
+        citations: result.citations, provider: result.provider, model: result.model };
+      for (const changes of [
+        { question: "other databases" }, { answer: "An unapproved answer." },
+        { citations: [...payload.citations, { id: "notes/other", title: "Other" }] },
+        { citations: [{ id: "notes/alpha", title: "Changed citation title" }] },
+        { provider: "openai" }, { model: result.model + "-new" }, { receipt: payload.receipt + "x" },
+      ]) expect((await save({ ...payload, ...changes })).status).toBe(409);
+      expect((await save(payload, { token: null, headers: { authorization: `Bearer ${TOKEN}` } })).status).toBe(401);
+      expect((await save(payload, { headers: { origin: "https://other.example" } })).status).toBe(403);
+      expect((await save(payload, { name: otherBrain })).status).toBe(409);
+      configure(other);
+      expect((await save(payload)).status).toBe(409);
+      expect(existsSync(join(other, "db_only"))).toBe(false);
+      configure(bundle, true);
+      expect((await save(payload)).status).toBe(403);
+      expect((await ask("databases")).draftReceipt).toBeUndefined();
+      configure(bundle);
+      const restarted = createApiServer({ bundle, port: 0, token: TOKEN });
+      try { expect((await save(payload, { target: restarted.url })).status).toBe(409); }
+      finally { await restarted.stop(); }
+      expect(existsSync(answerDirectory)).toBe(false);
+      const callsBeforeSave = chatCalls;
+
+      const responses = await Promise.all([save(payload), save(payload)]);
+      const drafts = await Promise.all(responses.map(async (response) => {
+        expect(response.status).toBe(200);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        return ((await response.json()) as { result: { id: string; created: boolean } }).result;
+      }));
+      const id = drafts[0]!.id;
+      expect(id).toMatch(/^db_only\/answers\/[0-9a-f]{32}$/u);
+      expect(drafts[1]!.id).toBe(id);
+      expect(drafts.map(({ created }) => created).sort()).toEqual([false, true]);
+      const file = Bun.file(join(bundle, `${id}.md`));
+      const draft = parse(await file.text());
+      expect(draft.frontmatter).toMatchObject({
+        type: "note", status: "draft", db_only: true, tags: ["inbox", "ask"],
+        generated: { by: `${result.provider}/${result.model}`, at: expect.any(String) },
+        sources: [{ title: "Alpha", resource: "/notes/alpha.md" }],
+        ask_receipt: { id: id.split("/").at(-1), provider: result.provider, model: result.model },
+      });
+      expect(draft.body.trimEnd()).toBe(`## Question\n\ndatabases\n\n## Answer\n\n${result.answer}`);
+      expect(await Bun.file(join(bundle, "index.md")).text()).not.toContain(id);
+
+      expect((await post("write_concept", { id, body: draft.body + "\nAn owner edit to keep." })).status).toBe(200);
+      const edited = await file.text();
+      expect(edited).toContain("An owner edit to keep.");
+      expect(await (await save(payload)).json()).toEqual({ result: { id, created: false } });
+      expect(await file.text()).toBe(edited);
+      expect((await post("delete_concept", { id })).status).toBe(200);
+      expect((await save(payload)).status).toBe(410);
+      expect(await file.exists()).toBe(false);
+      expect(chatCalls).toBe(callsBeforeSave);
+    } finally {
+      saveConfig(saved);
+      await rm(other, { recursive: true, force: true });
+    }
   });
 
   test("browser POST and CLI streaming both receive text before provider completion", async () => {
@@ -837,7 +952,9 @@ describe("SSE ask stream (stub chat server)", () => {
       const answer = await reader.read();
       expect(answer.value?.event).toBe("answer");
       expect(JSON.parse(answer.value!.data).citations).toEqual([{ id: "notes/alpha", title: "Alpha" }]);
-      expect((await reader.read()).value?.event).toBe("done");
+      const done = (await reader.read()).value;
+      expect(done?.event).toBe("done");
+      expect(JSON.parse(done!.data).result.draftReceipt).toEqual(expect.any(String));
       expect(await cli).toBe(0);
       expect(chunks.join("")).toContain("Databases [notes/alpha]\n\nsources:");
       expect(calls).toBe(2);

@@ -13,7 +13,8 @@ import type { CodingRunReport } from "../src/core/coding/run-report.ts";
 import { loadConfig } from "../src/core/config.ts";
 import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/core/engine/cache-settings.ts";
 import { extractTargets } from "../src/core/graph/links.ts";
-import { fmGenerated, parse, serialize } from "../src/core/okf/document.ts";
+import { fmGenerated, fmSources, parse, serialize } from "../src/core/okf/document.ts";
+import type { AskResult } from "../src/core/retrieval/ask.ts";
 import { githubBranchBrowserFixture } from "./github-branch-browser-fixture.ts";
 
 const root = await mkdtemp(join(tmpdir(), "okbrain-browser-smoke-"));
@@ -218,6 +219,10 @@ try {
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin });
   const copyAskLabel = "Copy answer with citations";
   const copyAsk = page.getByRole("button", { name: copyAskLabel, exact: true });
+  const saveAsk = page.getByRole("button", { name: "Save as private draft", exact: true });
+  const confirmAskDraft = page.getByRole("button", { name: "Save private draft", exact: true });
+  const openAskDraft = page.getByRole("link", { name: "Open saved draft", exact: true });
+  const askDraftRoute = "**/api/ask/private-draft";
   async function verifyAskCopy(expected: string, citations: string[]) {
     await copyAsk.click();
     await page.getByText("Answer Markdown copied.", { exact: true }).waitFor();
@@ -226,18 +231,74 @@ try {
     assert.deepEqual(extractTargets("db_only/copy-test", copied), citations);
     await verifyClipboardFallback(page, copyAskLabel, "Use your copy shortcut to copy the selected answer Markdown.", "Answer Markdown", expected);
   }
-  await page.getByRole("textbox", { name: "Question", exact: true }).fill("orchid");
-  await page.getByRole("button", { name: "Ask", exact: true }).click();
-  await page.locator("#askout", { hasText: "**Local answer**" }).waitFor();
-  await page.getByRole("button", { name: "Stop", exact: true }).waitFor();
-  assert.equal(await copyAsk.count(), 0);
-  finishAnswer.resolve();
-  await page.locator("#askout strong", { hasText: "Local answer" }).waitFor();
-  await page.locator("#asksrc").getByRole("link", { name: "Offline orchid propagation", exact: true }).waitFor();
-  const modelCallsAfterAnswer = modelFixtureCalls;
-  await verifyAskCopy("## Question\n\n> orchid\n\n## Verified citations\n\n- [Offline orchid propagation](/" + answerSource + ".md)\n\n" +
-    "## Answer\n\n**Local answer**" + localAnswerTail(), [answerSource]);
-  assert.equal(modelFixtureCalls, modelCallsAfterAnswer);
+  type SaveAskRequest = Pick<AskResult, "answer" | "citations" | "provider" | "model"> & { receipt: string; question: string };
+  const draftRequests: SaveAskRequest[] = [];
+  const savedDrafts: { id: string; created: boolean }[] = [];
+  let saveAttempts = 0;
+  await page.route(askDraftRoute, async (route) => {
+    saveAttempts++;
+    draftRequests.push(route.request().postDataJSON());
+    const response = await route.fetch();
+    const payload = await response.json();
+    if (!response.ok()) return route.fulfill({ response, json: payload });
+    savedDrafts.push(payload.result);
+    if (saveAttempts === 1) return route.fulfill({ status: 503, json: { error: "Fixture lost the saved response." } });
+    await route.fulfill({ response, json: payload });
+  });
+  try {
+    await page.getByRole("textbox", { name: "Question", exact: true }).fill("orchid");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+    await page.locator("#askout", { hasText: "**Local answer**" }).waitFor();
+    await page.getByRole("button", { name: "Stop", exact: true }).waitFor();
+    assert.equal(await copyAsk.count(), 0);
+    assert.equal(await saveAsk.count(), 0);
+    finishAnswer.resolve();
+    await page.locator("#askout strong", { hasText: "Local answer" }).waitFor();
+    await page.locator("#asksrc").getByRole("link", { name: "Offline orchid propagation", exact: true }).waitFor();
+    const modelCallsAfterAnswer = modelFixtureCalls;
+    await verifyAskCopy("## Question\n\n> orchid\n\n## Verified citations\n\n- [Offline orchid propagation](/" + answerSource + ".md)\n\n" +
+      "## Answer\n\n**Local answer**" + localAnswerTail(), [answerSource]);
+    await saveAsk.click();
+    await page.getByText(/Save the question, answer, and verified citations in .* as a private draft\./).waitFor();
+    assert.equal(saveAttempts, 0);
+    await page.locator("#ask-copy").getByRole("button", { name: "Cancel", exact: true }).click();
+    assert.equal(await confirmAskDraft.count(), 0);
+    assert.equal(saveAttempts, 0);
+    await saveAsk.press("Enter");
+    assert.equal(await confirmAskDraft.evaluate((button) => button === document.activeElement), true);
+    await confirmAskDraft.click();
+    await page.getByText("Fixture lost the saved response.", { exact: true }).waitFor();
+    await confirmAskDraft.click();
+    await openAskDraft.waitFor();
+    await page.getByText(/Private draft already saved\./).waitFor();
+    assert.equal(saveAttempts, 2);
+    const localAsk = draftRequests[0]!;
+    assert.deepEqual(draftRequests, [localAsk, localAsk]);
+    assert.deepEqual(Object.keys(localAsk).sort(), ["answer", "citations", "model", "provider", "question", "receipt"]);
+    assert.ok(localAsk.receipt);
+    assert.equal(localAsk.question, "orchid");
+    assert.equal(localAsk.answer, "**Local answer**" + localAnswerTail());
+    assert.deepEqual(localAsk.citations, [{ id: answerSource, title: "Offline orchid propagation" }]);
+    const saved = savedDrafts[0]!;
+    assert.match(saved.id, /^db_only\//);
+    assert.deepEqual(savedDrafts, [{ id: saved.id, created: true }, { id: saved.id, created: false }]);
+    assert.equal(await openAskDraft.getAttribute("href"), "#concept/" + encodeURIComponent(saved.id));
+    const draft = parse(await Bun.file(join(bundle, ...saved.id.split("/")) + ".md").text());
+    assert.equal(draft.frontmatter.status, "draft");
+    assert.equal(draft.frontmatter.db_only, true);
+    assert.equal(fmGenerated(draft.frontmatter)?.by, localAsk.provider + "/" + localAsk.model);
+    assert.deepEqual(fmSources(draft.frontmatter).map(({ resource, title }) => ({ resource, title })),
+      [{ resource: "/" + answerSource + ".md", title: "Offline orchid propagation" }]);
+    assert.match(draft.body, /## Question[\s\S]*orchid[\s\S]*## Answer/);
+    assert.ok(draft.body.includes(localAsk.answer));
+    await openAskDraft.click();
+    await page.locator(".concept-head").getByRole("heading", { name: String(draft.frontmatter.title), exact: true }).waitFor();
+    const removedDraft = await fetch(new URL("api/op/delete_concept", server.url), {
+      method: "POST", headers: { "x-okb-token": server.token, "content-type": "application/json" }, body: JSON.stringify({ id: saved.id }),
+    });
+    assert.ok(removedDraft.ok, await removedDraft.text());
+    assert.equal(modelFixtureCalls, modelCallsAfterAnswer);
+  } finally { await page.unroute(askDraftRoute); }
   await nav.getByRole("link", { name: "Review", exact: true }).click();
   await page.getByRole("button", { name: /Reviewed/ }).first().waitFor();
   await page.getByLabel("Queue size", { exact: true }).fill("1");
@@ -354,10 +415,12 @@ try {
   await page.getByRole("link", { name: "Ask with ChatGPT", exact: true }).click();
   await page.getByText("Connect an eligible account to continue.").waitFor();
   assert.equal(await copyAsk.count(), 0);
+  assert.equal(await saveAsk.count(), 0);
   const planRoute = "**/api/plan/*";
   const planCalls: string[] = [];
   const planAnswerStarted = Promise.withResolvers<void>();
   const finishPlanAnswer = Promise.withResolvers<void>();
+  let planAnswers = 0;
   const planQuestion = "What did we save?\nKeep the **answer** grounded.";
   const planTitle = "Orchid [field notes] *spring*";
   const planId = "orchids (lab)#%";
@@ -377,17 +440,27 @@ try {
         sources: [{ ...planCitation, text: "Exact original excerpt." }, { id: "unverified/other-note", title: "Unused", text: "Uncited excerpt." }],
       }; break;
       case "answer":
+        planAnswers++;
         planAnswerStarted.resolve();
         await finishPlanAnswer.promise;
         result = {
-          answer: planMarkdown, citations: [planCitation, { id: "../../unsafe", title: "Unsafe citation" }],
+          answer: planMarkdown, citations: planAnswers === 1 ? [planCitation, { id: "../../unsafe", title: "Unsafe citation" }] : [planCitation],
           context: [planCitation, { id: "unverified/other-note", title: "Unused" }],
-          provider: "chatgpt-plan", model: "plan-model-fixture",
+          provider: "chatgpt-plan", model: "plan-model-fixture", draftReceipt: "plan-draft-fixture",
         };
         break;
       default: throw new Error("Unexpected plan request " + action);
     }
     await route.fulfill({ json: { result } });
+  });
+  let planSaves = 0;
+  await page.route(askDraftRoute, async (route) => {
+    planSaves++;
+    assert.deepEqual(route.request().postDataJSON(), {
+      receipt: "plan-draft-fixture", question: planQuestion, answer: planMarkdown,
+      citations: [planCitation], provider: "chatgpt-plan", model: "plan-model-fixture",
+    });
+    await route.fulfill({ json: { result: { id: "db_only/answers/plan-draft-fixture", created: true } } });
   });
   try {
     await page.reload();
@@ -397,18 +470,34 @@ try {
     const sendPlan = page.getByRole("button", { name: "Send question and excerpts", exact: true });
     await sendPlan.waitFor();
     assert.equal(await copyAsk.count(), 0);
+    assert.equal(await saveAsk.count(), 0);
     await sendPlan.click();
     await planAnswerStarted.promise;
     assert.equal(await copyAsk.count(), 0);
+    assert.equal(await saveAsk.count(), 0);
     finishPlanAnswer.resolve();
     await verifyAskCopy("## Question\n\n> What did we save?\n> Keep the **answer** grounded.\n\n## Verified citations\n\n" +
       "- [Orchid \\[field notes\\] \\*spring\\*](/orchids%20%28lab%29%23%25.md)\n\n## Answer\n\n" + planMarkdown, [planId]);
+    await saveAsk.click();
+    await confirmAskDraft.waitFor();
     await planInput.fill("Another question");
     assert.equal(await copyAsk.count(), 0);
-    assert.deepEqual(planCalls, ["status", "models", "preview", "answer"]);
+    assert.equal(await confirmAskDraft.count(), 0);
+    assert.equal(planSaves, 0);
+    await planInput.fill(planQuestion);
+    await page.getByRole("button", { name: "Preview sources", exact: true }).click();
+    await sendPlan.click();
+    await saveAsk.click();
+    assert.equal(planSaves, 0);
+    await confirmAskDraft.click();
+    await openAskDraft.waitFor();
+    assert.equal(await openAskDraft.getAttribute("href"), "#concept/db_only%2Fanswers%2Fplan-draft-fixture");
+    assert.equal(planSaves, 1);
+    assert.deepEqual(planCalls, ["status", "models", "preview", "answer", "preview", "answer"]);
   } finally {
     finishPlanAnswer.resolve();
     await page.unroute(planRoute);
+    await page.unroute(askDraftRoute);
     await rm(planNote, { force: true });
   }
   await nav.getByRole("link", { name: "Settings", exact: true }).click();

@@ -8,6 +8,7 @@ import { createChatgptPlan, type ChatgptPlanStatus, type PlanOptions } from "./c
 
 interface Preview {
   bundle: string;
+  draftBrain?: string;
   account: string;
   model: string;
   question: string;
@@ -79,7 +80,7 @@ export function createBrowserPlan(options: Pick<PlanOptions, "path" | "fetch"> =
     async models(value: unknown) {
       return plan.models(await selectAccount(value));
     },
-    async preview(ctx: OpContext, input: Record<string, unknown>) {
+    async preview(ctx: OpContext, input: Record<string, unknown>, draftBrain?: string) {
       const account = await selectAccount(input.account);
       const model = required(input.model, "Model", 150);
       const question = required(input.question, "Question", 8000);
@@ -89,7 +90,8 @@ export function createBrowserPlan(options: Pick<PlanOptions, "path" | "fetch"> =
       for (const [id, preview] of previews) if (preview.expires <= Date.now()) previews.delete(id);
       if (previews.size >= 16) previews.delete(previews.keys().next().value!);
       const id = randomUUID();
-      previews.set(id, { account, question, model, context, includePrivate, bundle: ctx.bundle, expires: Date.now() + 10 * 60_000 });
+      previews.set(id, { account, question, model, context, includePrivate, bundle: ctx.bundle, draftBrain,
+        expires: Date.now() + 10 * 60_000 });
       const sources = await Promise.all(context.context.map(async (citation, i) => ({
         ...citation, text: context.blocks[i], private: includePrivate && await isPrivateConceptAt(ctx.bundle, citation.id),
       })));
@@ -110,7 +112,7 @@ export function createBrowserPlan(options: Pick<PlanOptions, "path" | "fetch"> =
         recordCitedNotes(ctx, result.citations.map(({ id }) => id));
         return result;
       });
-      return preview.answer;
+      return { result: await preview.answer, question: preview.question, draftBrain: preview.draftBrain };
     },
     close() {
       signIn?.controller.abort();

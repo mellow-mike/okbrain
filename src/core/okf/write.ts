@@ -86,6 +86,8 @@ export interface WriteResult {
 interface WriteOptions {
   /** Leave an existing concept alone, including one created by a concurrent import. */
   createOnly?: boolean;
+  /** Recheck a reviewed create-only write before staging and publication. */
+  authorize?: () => void | Promise<void>;
   /** The caller will regenerate the affected index branch after a batch. */
   deferIndex?: boolean;
   /** Apply a reviewed write only if the concept still has these exact bytes. */
@@ -304,12 +306,16 @@ export async function writeConcept(
   }
 
   const privateConcept = isPrivateConcept(input.id, fm);
+  const authorize = options.createOnly ? options.authorize : undefined;
+  await authorize?.();
   await mkdir(dirname(path), { recursive: true, mode: privateConcept ? 0o700 : undefined });
   const serialized = serialize({ frontmatter: fm, body });
   const mode = privateConcept ? 0o600 : undefined;
   if (options.createOnly) {
     // Publish complete bytes without ever replacing a concurrent writer's note.
-    if (!await publishConcept(path, serialized, mode)) return { id: input.id, path, created: false, noop: true };
+    const confirmed = authorize && (async () => { await authorize(); return true; });
+    if (!await publishConcept(path, serialized, mode, undefined, confirmed))
+      return { id: input.id, path, created: false, noop: true };
   } else if (options.expected !== undefined) {
     const info = await lstat(path);
     if (!info.isFile() || !await publishConcept(path, serialized, mode ?? (info.mode & 0o777), options.expected))

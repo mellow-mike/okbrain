@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,8 +9,10 @@ import { runCli } from "../src/cli.ts";
 import { createApiServer } from "../src/api.ts";
 import type { BrowserPlan } from "../src/core/ai/browser-plan.ts";
 import { createChatgptPlan } from "../src/core/ai/chatgpt-plan.ts";
+import { parse } from "../src/core/okf/document.ts";
 import { writeConcept } from "../src/core/okf/write.ts";
 import { getOp } from "../src/core/operations.ts";
+import type { AskResult } from "../src/core/retrieval/ask.ts";
 
 const grantScope = "openid resource.invoke chatgpt.tokens.use.direct offline_access";
 const input = [{ role: "user" as const, content: "Summarize my notes" }];
@@ -25,6 +28,7 @@ async function fakeProvider(path: string) {
   let initialLifetime = 3600;
   let refreshes = 0;
   let responseMode: "completed" | "partial" | "limited" = "completed";
+  let answerText = "An answer";
   let revoked = false;
   let onAnswer = (body: unknown) => expect(body).toEqual({ model: "visible", input, stream: true, store: false });
   const requests: { path: string; method: string }[] = [];
@@ -74,7 +78,7 @@ async function fakeProvider(path: string) {
     const end = responseMode === "limited"
       ? { type: "response.failed", response: { error: { code: "subscription_sharing_usage_limit_exceeded" } } }
       : { type: "response.completed" };
-    const events: object[] = [{ type: "response.output_text.delta", delta: "An answer" }];
+    const events: object[] = [{ type: "response.output_text.delta", delta: answerText }];
     if (responseMode !== "partial") events.push(end);
     return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {
       headers: { "Content-Type": "text/event-stream" },
@@ -108,6 +112,7 @@ async function fakeProvider(path: string) {
     wrongNonce: () => { nonceMismatch = true; },
     omitPermission: () => { scopes = "openid"; },
     response: (mode: typeof responseMode) => { responseMode = mode; },
+    answerText: (text: string) => { answerText = text; },
   };
 }
 
@@ -119,7 +124,8 @@ describe("ChatGPT plan", () => {
     const token = "browser-consent-token";
     const server = createApiServer({ bundle: root, port: 0, token, chatgpt: { path, fetch: provider.transport as typeof fetch } });
     type Action = "status" | "connect" | "sign-in" | "models" | "preview" | "answer" | "disconnect";
-    type Output<A extends Action> = Awaited<ReturnType<BrowserPlan[A extends "sign-in" ? "signIn" : A]>>;
+    type Output<A extends Action> = A extends "answer" ? AskResult & { draftReceipt?: string } :
+      Awaited<ReturnType<BrowserPlan[A extends "sign-in" ? "signIn" : A]>>;
     const call = async <A extends Action>(action: A, data?: Record<string, unknown>): Promise<Output<A>> => {
       const response = await fetch(`${server.url}api/plan/${action}`, {
         method: data === undefined ? "GET" : "POST", headers: { "x-okb-token": token },
@@ -164,10 +170,38 @@ describe("ChatGPT plan", () => {
         expect(json).not.toContain("flagged-snapshot");
         expect(json).not.toContain("newer-snapshot");
       });
+      provider.answerText("An answer [notes/published].");
       const results = await Promise.all([call("answer", { id: preview.id }), call("answer", { id: preview.id })]);
-      expect(results[0]?.answer).toBe("An answer");
-      expect(results[1]).toEqual(results[0]);
+      const answer = results[0];
+      expect(answer).toMatchObject({ answer: "An answer [notes/published].", provider: "chatgpt-plan", model: "visible",
+        citations: [{ id: "notes/published", title: "databases public-snapshot" }] });
+      expect(typeof answer.draftReceipt).toBe("string");
+      expect(results[1]).toEqual(answer);
       expect(provider.requests.filter(({ path }) => path === "/v1/responses")).toHaveLength(1);
+      expect(existsSync(join(root, "db_only", "answers"))).toBe(false);
+      const requestsBeforeDraft = provider.requests.length;
+      const draftPayload = { receipt: answer.draftReceipt, question: input.question, answer: answer.answer,
+        provider: answer.provider, model: answer.model, citations: answer.citations };
+      const saveDraft = (body: unknown) => fetch(`${server.url}api/ask/private-draft`, {
+        method: "POST", headers: { "x-okb-token": token, "content-type": "application/json" }, body: JSON.stringify(body),
+      });
+      const tampered = await saveDraft({ ...draftPayload, provider: "openai" });
+      expect({ status: tampered.status, body: await tampered.json() }).toMatchObject({ status: 409, body: { error: expect.any(String) } });
+      const saved = await saveDraft(draftPayload);
+      expect(saved.status).toBe(200);
+      expect(saved.headers.get("cache-control")).toBe("no-store");
+      const { result: draft } = await saved.json() as { result: { id: string; created: boolean } };
+      expect(draft).toEqual({ id: expect.stringMatching(/^db_only\/answers\/[0-9a-f]{32}$/u), created: true });
+      const stored = await Bun.file(join(root, `${draft.id}.md`)).text();
+      const document = parse(stored);
+      expect(document.frontmatter).toMatchObject({
+        db_only: true, generated: { by: "chatgpt-plan/visible" },
+        sources: [{ title: "databases public-snapshot", resource: "/notes/published.md" }],
+      });
+      expect(document.body.trimEnd()).toBe("## Question\n\ndatabases\n\n## Answer\n\nAn answer [notes/published].");
+      for (const secret of ["first-access", "first-refresh", "person@example.test", answer.draftReceipt!]) expect(stored).not.toContain(secret);
+      expect(await (await saveDraft(draftPayload)).json()).toEqual({ result: { id: draft.id, created: false } });
+      expect(provider.requests).toHaveLength(requestsBeforeDraft);
       const next = await call("preview", input);
       await writeConcept(root, { id: "notes/published", metadataOnly: true, extra: { db_only: true } });
       await expect(call("answer", { id: next.id })).rejects.toThrow(/Preview sources again/);

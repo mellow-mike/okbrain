@@ -14,6 +14,12 @@ configurable retrieval, and inspectable links.
 Both Ask routes can copy a completed answer as Markdown with the submitted
 question and a separate list of verified bundle-root citation links.
 Clipboard fallback keeps the copy visible and selectable in the current app.
+The local app can explicitly save a completed result as a canonical private
+Markdown draft. A short-lived server signature binds the exact question,
+answer, provider, model, verified citations, and mounted brain. Successful
+saves are create-only, keep their original generator and source metadata, and
+refresh the local search index. The approval lives in the current server
+instance and retrying it preserves edits or reports a removed draft.
 
 The coding workflow keeps operational state in Pi Durable storage in the
 user's application data. Each named session binds to a canonical workspace

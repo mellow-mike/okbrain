@@ -84,6 +84,7 @@ import {
   attestComputation, computationRuntime, ComputationError, compute, configureComputation, previewComputation, verifyComputation,
 } from "./okf/computation.ts";
 import { TOOL_ACTOR } from "./version.ts";
+import { saveAskDraft, type AskDraftInput, type AskDraftResult } from "./retrieval/ask-draft.ts";
 import { askBrain, publicHits, type AskResult } from "./retrieval/ask.ts";
 import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./retrieval/embed.ts";
 import { hybridRetrieve, type HybridArms, type HybridHit } from "./retrieval/hybrid.ts";
@@ -687,6 +688,14 @@ async function refreshPrivateImportIndex(ctx: OpContext, ids: string[]): Promise
   } catch {
     log.warn("Private drafts were saved. Rebuild search to refresh the keyword and graph index.");
   }
+}
+
+/** Browser-only Ask saving. The owner adapter authenticates the completed answer before dispatch. */
+export async function runAskDraftSave(ctx: OpContext, draft: AskDraftInput, authorize?: () => void): Promise<AskDraftResult> {
+  checkOpScope({ name: "Ask draft save", scope: "write" }, ctx);
+  const result = await writing(() => saveAskDraft(ctx.bundle, draft, authorize));
+  if (result.created) await refreshPrivateImportIndex(ctx, [result.id]);
+  return result;
 }
 
 /** Scoped browser upload workflow. The CLI operation only accepts local paths. */

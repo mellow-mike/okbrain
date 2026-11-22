@@ -1,4 +1,4 @@
-/* global headers, errorBox, esc, view, STATUS, R, conceptLink, citationLinks, mountAnswerCopy */
+/* global headers, errorBox, esc, view, STATUS, R, conceptLink, citationLinks, answerViewCurrent, mountAnswerActions */
 'use strict';
 
 async function planApi(action, data) {
@@ -151,7 +151,8 @@ function renderAccounts() {
   void refresh();
 }
 
-async function renderPlanAsk() {
+async function renderPlanAsk(_arg, seq) {
+  var sameView = answerViewCurrent(seq);
   view.innerHTML = '<div class="stack"><h2>Ask with ChatGPT</h2><p><a href="#accounts">Manage ChatGPT accounts</a> · ' +
     '<a href="#ask">Ask with your configured provider</a></p><div id="plan-ask-setup" role="status">Checking account…</div>' +
     '<form id="plan-question" class="stack" hidden><label class="field"><span>Question</span><textarea name="question" maxlength="8000" required></textarea></label>' +
@@ -168,19 +169,21 @@ async function renderPlanAsk() {
   var generation = 0;
   try {
     var status = await planApi('status');
+    if (!sameView()) return;
     if (!status.connected || !status.sharing || !status.account) {
       setup.textContent = 'Connect an eligible account to continue.';
       return;
     }
     account = status.account;
     var models = await planApi('models', { account: account });
+    if (!sameView()) return;
     if (!models.length) { setup.textContent = 'No text models are available for this plan.'; return; }
     setup.innerHTML = '<p>Plan account <strong>' + esc(status.email || account) + '</strong> · ' + esc(account) + '</p>';
     form.elements.model.innerHTML = models.map(function (model) {
       return '<option value="' + esc(model.slug) + '">' + esc(model.name) + '</option>';
     }).join('');
     form.hidden = false;
-  } catch (error) { setup.innerHTML = errorBox(error); return; }
+  } catch (error) { if (sameView()) setup.innerHTML = errorBox(error); return; }
   function clearAnswer() {
     answer.replaceChildren();
     copy.hidden = true;
@@ -189,6 +192,7 @@ async function renderPlanAsk() {
   form.addEventListener('input', function () { generation++; preview.replaceChildren(); clearAnswer(); });
   form.addEventListener('submit', async function (event) {
     event.preventDefault();
+    if (!sameView()) return;
     var current = ++generation;
     clearAnswer();
     preview.textContent = 'Searching the local index…';
@@ -196,7 +200,7 @@ async function renderPlanAsk() {
     try {
       var result = await planApi('preview', { account: account, model: fields.get('model'),
         question: fields.get('question'), includePrivate: fields.has('includePrivate') });
-      if (!form.isConnected || current !== generation) return;
+      if (!sameView() || current !== generation) return;
       if (!result.sources.length) { preview.textContent = 'No matching sources. Try another question or add notes.'; return; }
       preview.innerHTML = '<h3>Sources to send</h3><p>OpenAI will receive your question and the excerpts below through ' +
         esc(result.account) + ' using ' + esc(result.model) + '.</p>' +
@@ -207,18 +211,20 @@ async function renderPlanAsk() {
         }).join('') + '<div><button class="primary" type="button">Send question and excerpts</button></div>';
       var send = preview.querySelector('button');
       send.addEventListener('click', async function () {
+        if (!sameView() || current !== generation) return;
         send.disabled = true;
         answer.textContent = 'Waiting for ChatGPT…';
         try {
           var response = await planApi('answer', { id: result.id });
-          if (!form.isConnected || current !== generation) return;
+          if (!sameView() || current !== generation) return;
           answer.innerHTML = '<div class="md">' + R.renderMarkdown(response.answer) + '</div>' +
             (response.citations.length ? '<h3>Citations</h3><div>' + citationLinks(response.citations) + '</div>' : '');
-          mountAnswerCopy(copy, String(fields.get('question')).trim(), response);
+          mountAnswerActions(copy, String(fields.get('question')).trim(), response,
+            function () { return sameView() && current === generation; });
         } catch (error) {
-          if (current === generation) answer.innerHTML = errorBox(error);
+          if (sameView() && current === generation) answer.innerHTML = errorBox(error);
         }
       });
-    } catch (error) { if (current === generation) preview.innerHTML = errorBox(error); }
+    } catch (error) { if (sameView() && current === generation) preview.innerHTML = errorBox(error); }
   });
 }

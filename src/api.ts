@@ -33,12 +33,16 @@ import { MAX_CONVERSATION_EXPORT_BYTES } from "./core/ingest/conversations.ts";
 import { createNotionSource, NotionSourceError, type NotionSource, type NotionSourceOptions } from "./core/ingest/notion-source.ts";
 import { isOfflineSourceKind, MAX_OFFLINE_FILE_BYTES, MAX_SOURCE_FILES, MAX_SOURCE_ROWS, MAX_SOURCE_UPLOAD_BYTES } from "./core/ingest/personal-sources.ts";
 import { OKF_VERSION } from "./core/okf/indexmd.ts";
+import { AskDraftError } from "./core/retrieval/ask-draft.ts";
+import { AskDraftReceiptError, AskDraftReceipts, maxAskDraftRequestBytes } from "./core/retrieval/ask-draft-receipts.ts";
+import type { AskResult } from "./core/retrieval/ask.ts";
 import {
   checkOpCall,
   getOp,
   maintenanceApprovals,
   OpError,
   operations,
+  runAskDraftSave,
   runBrainMountChange,
   runBrainRestore,
   runConversationUpload,
@@ -244,6 +248,7 @@ interface ServeState {
   token: string;
   readonly: boolean;
   plan?: BrowserPlan;
+  askDrafts?: AskDraftReceipts;
 }
 
 /** The bundle a request addresses: the served one, or a named brain mount. */
@@ -561,7 +566,17 @@ async function rssSettings(req: Request, url: URL, opts: ServeState, cors?: Hdrs
   }
 }
 
-async function browserPlan(req: Request, path: string, plan: BrowserPlan, scope: Scope, cors: Hdrs): Promise<Response> {
+function askDraftBrain(scope: Scope): { bundle: string; binding: string } | undefined {
+  try {
+    const bundle = realpathSync.native(scope.bundle);
+    const info = statSync(bundle, { bigint: true });
+    if (info.isDirectory()) return { bundle, binding: JSON.stringify([
+      scope.brain ?? scope.servedBrain ?? null, bundle, String(info.dev), String(info.ino),
+    ]) };
+  } catch { /* An unavailable brain cannot receive an answer draft approval. */ }
+}
+
+async function browserPlan(req: Request, path: string, plan: BrowserPlan, scope: Scope, cors: Hdrs, drafts?: AskDraftReceipts): Promise<Response> {
   const headers = { ...cors, "cache-control": "no-store" };
   try {
     if (req.method === "GET" && path === "status") return json(200, { result: await plan.status() }, headers);
@@ -581,10 +596,13 @@ async function browserPlan(req: Request, path: string, plan: BrowserPlan, scope:
       case "models": return json(200, { result: await plan.models(body.account) }, headers);
       case "preview":
       case "answer": {
+        const binding = drafts && !scope.readonly ? askDraftBrain(scope)?.binding : undefined;
         const local = open(scope);
         try {
-          const result = await (path === "preview" ? plan.preview(local.ctx, body) : plan.answer(local.ctx, body.id));
-          return json(200, { result }, headers);
+          if (path === "preview") return json(200, { result: await plan.preview(local.ctx, body, binding) }, headers);
+          const { result, question, draftBrain } = await plan.answer(local.ctx, body.id);
+          const draftReceipt = binding && binding === draftBrain ? drafts?.issue(binding, question, result) : undefined;
+          return json(200, { result: draftReceipt ? { ...result, draftReceipt } : result }, headers);
         } finally { await local.close(); }
       }
       default: return json(404, { error: "not found" }, headers);
@@ -641,9 +659,10 @@ function sse(local: LocalContext, request: Request,
   });
 }
 
-async function askStream(req: Request, url: URL, scope: Scope, cors: Hdrs): Promise<Response> {
+async function askStream(req: Request, url: URL, scope: Scope, cors: Hdrs, drafts?: AskDraftReceipts): Promise<Response> {
   const op = getOp("ask")!;
   let raw: Record<string, unknown> = {};
+  const binding = drafts && !scope.readonly && req.method === "POST" ? askDraftBrain(scope)?.binding : undefined;
   const local = open(scope);
   try {
     if (req.method === "POST") {
@@ -664,10 +683,53 @@ async function askStream(req: Request, url: URL, scope: Scope, cors: Hdrs): Prom
       }
     }
     const params = checkOpCall(op, local.ctx, raw);
-    return sse(local, req, (send, signal) => op.stream!(local.ctx, params, send, signal), cors);
+    return sse(local, req, async (send, signal) => {
+      const result = await op.stream!(local.ctx, params, send, signal) as AskResult;
+      const draftReceipt = binding ? drafts?.issue(binding, params.question as string, result) : undefined;
+      return draftReceipt ? { ...result, draftReceipt } : result;
+    }, cors);
   } catch (e) {
     await local.close();
     return json(e instanceof UploadTooLarge ? 413 : errStatus(e), errBody(e), cors);
+  }
+}
+
+async function saveAskDraft(req: Request, url: URL, opts: ServeState, scope: Scope, cors?: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+    return json(401, { error: "missing or invalid local app token" }, headers);
+  if (req.headers.has("origin") && !cors) return json(403, { error: "Open Ask from the local app." }, headers);
+  if (req.method !== "POST") return json(405, { error: "Method not allowed." }, headers);
+  if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+    return json(415, { error: "Send the completed answer as JSON." }, headers);
+  const readonlyError = () => new AskDraftReceiptError("Open a writable brain to save private drafts.", 403);
+  const changedError = () => new AskDraftReceiptError("The selected brain changed. Ask again before saving.", 409);
+  try {
+    if (scope.readonly) throw readonlyError();
+    const brain = askDraftBrain(scope);
+    if (!brain) throw changedError();
+    const authorize = () => {
+      let current: Scope;
+      try { current = scopeOf(req, url, opts); } catch { throw changedError(); }
+      if (current.readonly) throw readonlyError();
+      if (askDraftBrain(current)?.binding !== brain.binding) throw changedError();
+    };
+    const content = await readUpload(req, maxAskDraftRequestBytes, "The completed answer is too large to save as a draft.");
+    let body: unknown;
+    try { body = JSON.parse(content.toString("utf8")); }
+    catch { throw new AskDraftReceiptError("Send the completed answer as a JSON object.", 400); }
+    authorize();
+    const result = await opts.askDrafts!.save(body, brain.binding, async (draft) => {
+      const local = open({ ...scope, bundle: brain.bundle });
+      try { return await runAskDraftSave(local.ctx, draft, authorize); }
+      finally { await local.close(); }
+    });
+    return json(200, { result }, headers);
+  } catch (error) {
+    if (error instanceof AskDraftReceiptError || error instanceof AskDraftError) return json(error.status, errBody(error), headers);
+    const status = error instanceof UploadTooLarge ? 413 : errStatus(error);
+    return json(status, status === 500 ? { error: "Could not save the private draft. Verify the brain folder is writable and try again." }
+      : errBody(error), headers);
   }
 }
 
@@ -1039,10 +1101,12 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   if (notion && opts.notion) return notionRequest(req, notion[1]!, scope, opts.notion, cors ?? {});
   if (url.pathname === "/api/mcp/http" && opts.mcp) return managedMcpRequest(req, opts, scope, cors);
 
+  if (url.pathname === "/api/ask/private-draft" && opts.askDrafts) return saveAskDraft(req, url, opts, scope, cors);
+
   if (url.pathname === "/api/ask/stream" && (req.method === "GET" || req.method === "POST")) {
     if (req.method === "POST" && (!tokenMatches(req.headers.get("x-okb-token"), opts.token) || (req.headers.has("origin") && !cors)))
       return json(403, { error: "Open Ask from the local app." });
-    return askStream(req, url, scope, cors ?? {});
+    return askStream(req, url, scope, cors ?? {}, opts.askDrafts);
   }
 
   if ((url.pathname.startsWith("/api/plan/") && opts.plan) || url.pathname === "/api/provider-keys") {
@@ -1050,7 +1114,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
       return json(401, { error: "missing or invalid local app token" }, cors);
     if (req.headers.has("origin") && !cors) return json(403, { error: "Requests must come from the local app." });
     if (url.pathname === "/api/provider-keys") return providerKeys(req, scope, cors ?? {});
-    return browserPlan(req, url.pathname.slice("/api/plan/".length), opts.plan!, scope, cors ?? {});
+    return browserPlan(req, url.pathname.slice("/api/plan/".length), opts.plan!, scope, cors ?? {}, opts.askDrafts);
   }
 
   if (req.method === "GET") {
@@ -1107,6 +1171,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
   }
   const token = opts.token ?? ensureServeToken();
   const plan = createBrowserPlan(opts.chatgpt);
+  const askDrafts = new AskDraftReceipts();
   const notion = createNotionSource(opts.notion);
   const mcp = new ManagedMcpHttp();
   const watches = new Map<string | null, BundleWatcher>();
@@ -1189,7 +1254,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
   }
   const port = server.port!;
   state = { bundle, servedBrain: opts.servedBrain, watches, maintenance, maintenanceAllowed,
-    port, token, readonly, plan, coding, standalone, team, notion, mcp };
+    port, token, readonly, plan, askDrafts, coding, standalone, team, notion, mcp };
   if (!readonly) maintenance.start();
   if (!readonly && existsSync(codingProjectCatalogPath(opts.coding?.stateDir))) {
     try { coding(); } catch { /* Leave personal routes available. The Coding API reports catalog errors. */ }

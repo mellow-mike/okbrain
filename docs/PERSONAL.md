@@ -107,6 +107,8 @@ Select **Restore default chat endpoint** or **Restore default embedding endpoint
 
 In **Ask** or **Ask with ChatGPT**, choose **Copy answer with citations** after the answer completes. The copied Markdown includes your question, the original answer, and a list of verified links that resolve from anywhere in the same brain. If clipboard access is unavailable, the app selects the Markdown so you can copy it manually.
 
+To keep a completed answer in a writable brain, choose **Save as private draft**, review the destination, and select **Save private draft**. Open it from **Open saved draft** or **Inbox**. The Markdown note under `db_only/answers/` contains the question and answer, records the provider and model that generated it, and lists verified citations as sources. Saving updates local search using the completed answer. The approval is valid for 30 minutes in the same running okbrain server. Retrying the save opens the same draft and preserves any edits to it.
+
 In **Settings → Enrichment**, enter comma-separated **Allowed hosts**, **Allowed path prefixes**, and **Denied path prefixes** to set the crawler’s scope. The crawler checks these settings before each request, including redirects. Denied path prefixes take precedence.
 
 Clip, RSS, and enrichment connect to a checked address at each redirect. HTTPS still verifies the original hostname. If you configure an environment proxy with `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`, use HTTPS source URLs for hostname-based sites routed through it. The app matches `NO_PROXY` against the original source address.

@@ -51,6 +51,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   the tag and type when returning from a note.
 - [x] Copy a completed answer and verified bundle citation links from both
   Ask routes, with selectable Markdown when clipboard access is unavailable.
+- [x] Save a completed answer from either Ask route as a private Markdown
+  draft with model attribution and verified sources. Recover a lost save response.
 
 ### Stage 8 — Enterprise coding
 
@@ -853,6 +855,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added private Ask drafts with model attribution and verified
+  citations. Tested explicit save, lost-response recovery, and mount binding.
 - 2026-11-22 — Added reviewed GitHub issue drafts in Coding and portable
   Markdown copy with verified citations in both personal Ask routes.
 - 2026-11-22 — Added exact tag browsing, local repository requests in the

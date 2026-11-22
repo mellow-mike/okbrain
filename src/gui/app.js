@@ -1209,7 +1209,12 @@ function citationLinks(citations) {
   }).join(' ');
 }
 
-function mountAnswerCopy(parent, question, result) {
+function answerViewCurrent(seq) {
+  var brain = BRAIN, bundle = STATUS?.bundle, hash = location.hash;
+  return function () { return !stale(seq) && brain === BRAIN && bundle === STATUS?.bundle && hash === location.hash; };
+}
+
+function mountAnswerActions(parent, question, result, current) {
   if (!parent.isConnected || typeof result.answer !== 'string' || !result.answer.trim() || !Array.isArray(result.citations)) return;
   var citations = result.citations.flatMap(function (citation) {
     if (typeof citation?.id !== 'string') return [];
@@ -1236,15 +1241,15 @@ function mountAnswerCopy(parent, question, result) {
   var source = fallback.querySelector('textarea');
   var attempt = 0;
   copy.addEventListener('click', async function () {
-    var current = ++attempt;
+    var copyAttempt = ++attempt;
     try {
       await navigator.clipboard.writeText(markdown);
-      if (!copy.isConnected || current !== attempt) return;
+      if (!copy.isConnected || copyAttempt !== attempt) return;
       fallback.hidden = true;
       source.value = '';
       status.textContent = 'Answer Markdown copied.';
     } catch {
-      if (!copy.isConnected || current !== attempt) return;
+      if (!copy.isConnected || copyAttempt !== attempt) return;
       source.value = markdown;
       fallback.hidden = false;
       source.focus();
@@ -1252,6 +1257,66 @@ function mountAnswerCopy(parent, question, result) {
       status.textContent = 'Use your copy shortcut to copy the selected answer Markdown.';
     }
   });
+  if (typeof result.draftReceipt === 'string' && result.draftReceipt && STATUS?.readonly === false && current()) {
+    return mountAnswerDraft(parent, copy.parentElement, question, result, current);
+  }
+}
+
+function mountAnswerDraft(parent, actions, question, result, current) {
+  var name = STATUS.brain || basename(STATUS.bundle);
+  var consentId = parent.id + '-consent';
+  var descriptionId = consentId + '-description';
+  actions.insertAdjacentHTML('beforeend', '<button type="button" data-save-answer aria-controls="' + consentId +
+    '" aria-expanded="false">Save as private draft</button>');
+  parent.firstElementChild.insertAdjacentHTML('beforeend', '<div id="' + consentId + '" hidden><div class="card stack">' +
+    '<p id="' + descriptionId + '">Save the question, answer, and verified citations in <strong>' + esc(name) +
+    '</strong> as a private draft.</p><div class="row">' +
+    '<button type="button" class="primary" aria-describedby="' + descriptionId + '">Save private draft</button>' +
+    '<button type="button">Cancel</button></div></div></div><div data-answer-draft-status role="status"></div>');
+  var open = actions.querySelector('[data-save-answer]');
+  var consent = parent.querySelector('#' + consentId);
+  var [save, cancel] = consent.querySelectorAll('button');
+  var feedback = parent.querySelector('[data-answer-draft-status]');
+  var saving = false;
+  function active() { return open.isConnected && current() && STATUS?.readonly === false; }
+  function setConsent(expanded) {
+    consent.hidden = !expanded;
+    open.setAttribute('aria-expanded', String(expanded));
+    feedback.replaceChildren();
+    (expanded ? save : open).focus();
+  }
+  open.addEventListener('click', function () { if (active() && consent.hidden) setConsent(true); });
+  cancel.addEventListener('click', function () { if (active() && !saving) setConsent(false); });
+  save.addEventListener('click', async function () {
+    if (!active() || consent.hidden || saving) return;
+    saving = open.disabled = save.disabled = cancel.disabled = true;
+    feedback.textContent = 'Saving private draft…';
+    try {
+      var response = await fetch('/api/ask/private-draft', {
+        method: 'POST', headers: headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ receipt: result.draftReceipt, question: question, answer: result.answer,
+          citations: result.citations, provider: result.provider, model: result.model }),
+      });
+      if (!active()) return;
+      var payload = await response.json();
+      if (!active()) return;
+      if (!response.ok) throw new Error(payload.error || 'Could not save the private draft.');
+      var draft = payload.result;
+      if (typeof draft?.id !== 'string' || !draft.id) throw new Error('The app did not receive the saved draft. Try saving again.');
+      var restoreFocus = document.activeElement === document.body || consent.contains(document.activeElement);
+      consent.hidden = true;
+      open.remove();
+      feedback.textContent = draft.created ? 'Private draft saved. ' : 'Private draft already saved. ';
+      feedback.insertAdjacentHTML('beforeend', conceptLink(draft.id, 'Open saved draft'));
+      if (restoreFocus) feedback.querySelector('a').focus();
+    } catch (error) {
+      if (active()) feedback.textContent = error.message || 'Could not save the private draft.';
+    } finally {
+      saving = open.disabled = save.disabled = cancel.disabled = false;
+      if (active() && document.activeElement === document.body) save.focus();
+    }
+  });
+  return function () { open.remove(); consent.remove(); feedback.remove(); };
 }
 
 async function readAnswerEvents(response, receive) {
@@ -1284,6 +1349,7 @@ async function readAnswerEvents(response, receive) {
 }
 
 function renderAsk(_arg, seq) {
+  var current = answerViewCurrent(seq);
   view.innerHTML =
     '<div class="stack"><h2>Ask your brain</h2>' +
     '<p><a href="#ask-plan">Ask with a ChatGPT plan</a></p>' +
@@ -1300,12 +1366,21 @@ function renderAsk(_arg, seq) {
   var copyEl = document.getElementById('ask-copy');
   var statusEl = document.getElementById('askstatus');
   var submit = document.getElementById('asksend');
+  var form = document.getElementById('askf');
   var stop = document.getElementById('askstop');
+  var inputRevision = 0;
+  var invalidateDraft;
   stop.addEventListener('click', function () { activeAsk?.abort(); });
-  document.getElementById('askf').addEventListener('submit', async function (e) {
+  form.addEventListener('input', function () {
+    inputRevision++;
+    invalidateDraft?.();
+    invalidateDraft = undefined;
+  });
+  form.addEventListener('submit', async function (e) {
     e.preventDefault();
     var q = document.getElementById('askq').value.trim();
-    if (!q || activeAsk) return;
+    if (!q || activeAsk || !current()) return;
+    var version = inputRevision;
     var request = new AbortController();
     activeAsk = request;
     submit.disabled = true;
@@ -1318,6 +1393,7 @@ function renderAsk(_arg, seq) {
     srcEl.replaceChildren();
     copyEl.hidden = true;
     copyEl.replaceChildren();
+    invalidateDraft = undefined;
     var profile = document.getElementById('askp').value;
     Okb.busy(true);
     try {
@@ -1327,7 +1403,7 @@ function renderAsk(_arg, seq) {
           'include-private': document.getElementById('ask-private').checked }), signal: request.signal,
       });
       await readAnswerEvents(response, function (event, data) {
-        if (stale(seq)) return;
+        if (!current()) return;
         if (event === 'context') {
           statusEl.textContent = 'Writing the answer…';
           ctxEl.innerHTML = data.length ? '<span class="muted">Reading</span> ' + citationLinks(data) : '';
@@ -1339,12 +1415,12 @@ function renderAsk(_arg, seq) {
           outEl.classList.remove('ask-partial');
           outEl.innerHTML = R.renderMarkdown(result.answer);
           if (result.citations.length) srcEl.innerHTML = '<h3>Sources</h3>' + citationLinks(result.citations);
-          mountAnswerCopy(copyEl, q, result);
+          invalidateDraft = mountAnswerActions(copyEl, q, result, function () { return current() && version === inputRevision; });
           Okb.settle(outEl);
         }
       });
     } catch (error) {
-      if (!stale(seq)) statusEl.textContent = request.signal.aborted ? 'Answer stopped.' : error.message;
+      if (current()) statusEl.textContent = request.signal.aborted ? 'Answer stopped.' : error.message;
     } finally {
       if (activeAsk === request) activeAsk = null;
       submit.disabled = false;
