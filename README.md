@@ -13,9 +13,13 @@ questions with sources. Use a local model, a provider API key, or an eligible
 ChatGPT plan. The CLI, local web app, and MCP server share the same knowledge
 store. You can rebuild search and the graph from the files.
 
-For coding, start a Pi Durable session with a project directory and explicit
-file context. Ask for a review or a proposed change, then resume using the same
-request ID if your process stops. The current coding workflow runs locally.
+In the local web app, open **Sources** to preview a ChatGPT or Claude export
+and import conversations as private drafts. You can start with a note or
+import and search your knowledge before setting up a model.
+
+For coding, attach files or preview budgeted excerpts from specific projects
+in a Git repository. Start a local Pi Durable session, inspect its context and
+token usage, and resume with the same request ID after an interruption.
 See the [personal guide](docs/PERSONAL.md) and [coding guide](docs/CODING.md).
 
 > [!NOTE]
@@ -40,8 +44,9 @@ to it. okbrain inverts that: the markdown *is* the database.
 - **Local knowledge.** Notes, the graph, keyword search, and conversation
   imports work offline. Choose when a hosted model receives your context.
 - **One operations contract.** The CLI (`okb`), local web app (`okb serve`),
-  and MCP server (`okb mcp`) share the knowledge operations. Account sign-in,
-  filesystem conversation imports, and coding sessions run from the CLI.
+  and MCP server (`okb mcp`) share the knowledge operations. The browser can
+  preview and import conversation files you select. Account sign-in, imports
+  by filesystem path, and coding sessions run from the CLI.
 - **Hybrid retrieval.** Keyword (FTS5/BM25) + semantic vectors (sqlite-vec) +
   graph expansion + typed-edge relational recall, fused into one ranking.
   `okb ask` answers with citations post-verified against your actual notes.
@@ -216,7 +221,7 @@ Global flags: `--json`, `--bundle <path>`, `--brain <name>`, `--version`.
 | claims | `take` · `resolve` · `calibrate` |
 | maintain | `index` · `rebuild` · `embed` · `doctor` · `upgrade` · `stats` · `jobs` · `sync` |
 | serve | `serve` · `bookmarklet` · `mcp` |
-| coding | `code run` |
+| coding | `code context` · `code run` · `code status` |
 | setup | `init` · `brains` · `version` |
 
 ### Provenance and trust
@@ -269,7 +274,8 @@ conformance check), Browse (every concept with status, trust tier, staleness),
 a Concept reader (provenance, footnote attribution, links to / cited by,
 verify / deprecate / delete), an editor with the v0.2 fields and a sources
 editor, the live graph, search, ask, review, inbox, add (capture, clip, feeds,
-import, the bookmarklet), claims, stats, and settings (your actor, providers,
+import, the bookmarklet), Sources (conversation previews and private draft
+import), claims, stats, and settings (your actor, providers,
 sync, enrichment, maintenance including jobs and the v0.2 upgrade, MCP setup,
 a brain switcher). It is dark-first ink on a ground — colour only marks
 state and concept types, your notes read in Literata while okbrain speaks in

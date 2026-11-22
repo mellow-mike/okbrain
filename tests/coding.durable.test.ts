@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { createModels, fauxAssistantMessage, fauxProvider, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, getCurrentTools,
+  type FauxModelDefinition, type TranscriptContext } from "@earendil-works/pi-ai";
 import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { CodingError, runCodingSession, type CodingSessionOptions } from "../src/core/coding/durable.ts";
+import { CodingError, getCodingSessionStatus, runCodingSession, type CodingSessionOptions } from "../src/core/coding/durable.ts";
 
 let testDirectory: string;
 let workspace: string;
@@ -26,9 +27,9 @@ beforeEach(async () => {
 
 afterEach(async () => { await rm(testDirectory, { force: true, recursive: true }); });
 
-function provider() {
+function provider(limits: Omit<FauxModelDefinition, "id"> = {}) {
   const models = createModels();
-  const faux = fauxProvider({ provider: options.provider, models: [{ id: options.model }] });
+  const faux = fauxProvider({ provider: options.provider, models: [{ id: options.model, ...limits }] });
   models.setProvider(faux.provider);
   return { models, faux };
 }
@@ -47,11 +48,13 @@ test("persists a coding conversation and its answer across separate harness open
     return fauxAssistantMessage("The constant is defined in example.ts.");
   }]);
   const result = await runCodingSession({ ...options, prompt: "Review this file", files: ["example.ts"] }, { stateDir, models });
-  expect(result).toEqual({
+  expect(result).toMatchObject({
     session: options.session,
     requestId: options.requestId,
     status: "done",
     text: "The constant is defined in example.ts.",
+    stopReason: "stop",
+    usage: { input: expect.any(Number), output: expect.any(Number), totalTokens: expect.any(Number) },
   });
   if (process.platform !== "win32") expect((await stat(sessionDirectory)).mode & 0o777).toBe(0o700);
   const messages = requests[0]?.messages ?? [];
@@ -80,6 +83,54 @@ test("persists a coding conversation and its answer across separate harness open
     .rejects.toThrow("different workspace or model");
 });
 
+test("uses Pi threshold compaction locally and keeps old answers and committed usage accessible", async () => {
+  const { models, faux } = provider({ contextWindow: 3200, maxTokens: 400 });
+  const dependencies = { stateDir, models };
+  const expired = "old-source-body".repeat(390);
+  const retained = "current-source-body".repeat(300);
+  await writeFile(join(workspace, "old.ts"), expired);
+  await writeFile(join(workspace, "current.ts"), retained);
+  await expect(getCodingSessionStatus(options, dependencies)).rejects.toThrow("No coding session");
+  faux.setResponses([
+    (_input, stream) => {
+      expect(stream?.maxTokens).toBe(400);
+      return fauxAssistantMessage("Initial review details.");
+    },
+    (input) => {
+      const messages = JSON.stringify(input.messages);
+      expect(messages).not.toContain(expired);
+      expect(messages).toContain(retained);
+      expect(messages).toContain("Older coding turns are retained locally");
+      expect(messages).toContain("Initial review details");
+      expect(messages).toContain("old.ts");
+      return fauxAssistantMessage("Follow-up review.", { stopReason: "length" });
+    },
+  ]);
+  const first = await runCodingSession({ ...options, prompt: "Review old source", files: ["old.ts"] }, dependencies);
+  const second = await runCodingSession({
+    ...options, requestId: "follow-up", prompt: "Review current source", files: ["current.ts"],
+  }, dependencies);
+  if (first.status !== "done" || second.status !== "done") throw new Error("The requests should succeed");
+  expect(second.stopReason).toBe("length");
+  expect(await runCodingSession(options, dependencies)).toEqual(first);
+  expect(await getCodingSessionStatus(options, dependencies)).toMatchObject({
+    pendingRequestIds: [],
+    request: { requestId: options.requestId, status: "done", usage: first.usage },
+    context: { historyCompacted: true, limitTokens: 2400, maxOutputTokens: 400, modelWindowTokens: 3200 },
+    usage: { models: { "openai/test-model": { totalTokens: first.usage.totalTokens + second.usage.totalTokens } } },
+  });
+  expect(faux.state.callCount).toBe(2);
+});
+
+test("refuses a new request that cannot fit the model budget before admission", async () => {
+  const { models, faux } = provider({ contextWindow: 3200, maxTokens: 400 });
+  const dependencies = { stateDir, models };
+  await expect(runCodingSession({ ...options, prompt: "text ".repeat(2000) }, dependencies))
+    .rejects.toThrow("new coding request exceeds the 2400-token input budget");
+  await expect(runCodingSession(options, dependencies)).rejects.toThrow("No saved request");
+  expect(faux.state.callCount).toBe(0);
+});
+
 test("rejects attachments outside the workspace and caps selected text before calling the model", async () => {
   const { models, faux } = provider();
   const request = { ...options, prompt: "Review this file" };
@@ -106,6 +157,9 @@ test("rejects attachments outside the workspace and caps selected text before ca
 
 test("resumes an interrupted Pi Durable request using the original attachment bytes", async () => {
   const { models, faux } = provider();
+  const priorOptions = { ...options, requestId: "completed" };
+  faux.setResponses([fauxAssistantMessage("A saved answer.")]);
+  const prior = await runCodingSession({ ...priorOptions, prompt: "Review the plan" }, { stateDir, models });
   const attachment = join(workspace, "original.txt");
   await writeFile(attachment, "original bytes");
   const script = `
@@ -142,6 +196,12 @@ test("resumes an interrupted Pi Durable request using the original attachment by
   }
 
   await rm(attachment);
+  expect(await runCodingSession(priorOptions, { stateDir, models })).toEqual(prior);
+  expect(await getCodingSessionStatus(options, { stateDir, models })).toMatchObject({
+    pendingRequestIds: [options.requestId],
+    request: { requestId: options.requestId, status: "placed" },
+  });
+  expect(faux.state.callCount).toBe(1);
   faux.setResponses([(input) => {
     expect(JSON.stringify(input.messages)).toContain("original bytes");
     return fauxAssistantMessage("Recovered from the saved request.");
@@ -150,5 +210,5 @@ test("resumes an interrupted Pi Durable request using the original attachment by
     status: "done",
     text: "Recovered from the saved request.",
   });
-  expect(faux.state.callCount).toBe(1);
+  expect(faux.state.callCount).toBe(2);
 }, 15_000);

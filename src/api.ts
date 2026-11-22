@@ -18,12 +18,14 @@ import { openLocalContext, type LocalContext } from "./core/context.ts";
 import { defaultDbPath, EngineError } from "./core/engine/sqlite.ts";
 import { SyncError } from "./core/sync.ts";
 import { defaultVectorsPath } from "./core/engine/vectors.ts";
+import { MAX_CONVERSATION_EXPORT_BYTES } from "./core/ingest/conversations.ts";
 import { OKF_VERSION } from "./core/okf/indexmd.ts";
 import {
   checkOpCall,
   getOp,
   OpError,
   operations,
+  runConversationUpload,
   runOp,
   type Operation,
 } from "./core/operations.ts";
@@ -101,7 +103,7 @@ export function corsHeaders(
     return undefined;
   return {
     "access-control-allow-origin": origin!,
-    "access-control-allow-headers": "content-type, x-okb-token, x-okb-brain, authorization",
+    "access-control-allow-headers": "content-type, x-okb-token, x-okb-brain, x-okb-preview, authorization",
     "access-control-allow-methods": "GET, POST, OPTIONS",
   };
 }
@@ -267,6 +269,50 @@ async function clipNav(url: URL, scope: Scope): Promise<Response> {
   }
 }
 
+class ConversationUploadTooLarge extends Error {
+  constructor() { super("Choose a conversations JSON file up to 128 MiB."); }
+}
+
+async function readConversationUpload(req: Request): Promise<Uint8Array> {
+  if (Number(req.headers.get("content-length")) > MAX_CONVERSATION_EXPORT_BYTES)
+    throw new ConversationUploadTooLarge();
+  const reader = req.body?.getReader();
+  if (!reader) throw new OpError("Choose an extracted conversations JSON file.", "bad_params");
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_CONVERSATION_EXPORT_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new ConversationUploadTooLarge();
+      }
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks, size);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function conversationUpload(req: Request, url: URL, scope: Scope, cors: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+    return json(415, { error: "Choose an extracted conversations JSON file." }, headers);
+  const local = open(scope);
+  try {
+    const result = await runConversationUpload(local.ctx, url.searchParams.get("provider"), req.headers.get("x-okb-preview"),
+      () => readConversationUpload(req));
+    return json(200, { result }, headers);
+  } catch (e) {
+    return json(e instanceof ConversationUploadTooLarge ? 413 : errStatus(e), errBody(e), headers);
+  } finally {
+    local.close();
+  }
+}
+
 /** What the GUI needs to describe the server it talks to (no mount paths beyond the active bundle). */
 function status(scope: Scope, o: ServeState): unknown {
   const local = open(scope);
@@ -346,6 +392,8 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   }
 
   const m = /^\/api\/op\/([a-z_]+)$/.exec(url.pathname);
+  if (req.method === "POST" && url.pathname === "/api/conversations/upload")
+    return conversationUpload(req, url, scope, cors ?? {});
   if (m && req.method === "POST") {
     const op = operations.find((o) => o.name === m[1] && !o.localOnly);
     if (!op) return json(404, { error: `unknown op: ${m[1]}` }, cors);

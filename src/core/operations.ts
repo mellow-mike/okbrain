@@ -13,7 +13,8 @@ import { runMcpHttp, runMcpStdio } from "../mcp/server.ts";
 import { AiError, createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
 import { CHATGPT_USAGE, createChatgptPlan, type ChatgptPlanStatus } from "./ai/chatgpt-plan.ts";
 import { openInBrowser } from "./browser.ts";
-import type { CodingSessionResult } from "./coding/durable.ts";
+import type { CodingSessionResult, CodingSessionStatusResult } from "./coding/durable.ts";
+import type { RepositoryContextManifest, RepositoryContextSelection } from "./coding/repository-context.ts";
 import { listBrains, loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { calibration, CLAIM_TYPE, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
 import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
@@ -25,7 +26,13 @@ import { log } from "./log.ts";
 import { suggestTags } from "./ingest/autotag.ts";
 import { captureNote } from "./ingest/capture.ts";
 import { clipUrl, type ClipOptions, type ClipResult } from "./ingest/clip.ts";
-import { importConversations, isConversationProvider, type ConversationImportResult } from "./ingest/conversations.ts";
+import {
+  importConversations,
+  importConversationUpload,
+  isConversationProvider,
+  type ConversationImportResult,
+  type ConversationUploadResult,
+} from "./ingest/conversations.ts";
 import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
 import { FeedError, pullFeed, type RssPullResult } from "./ingest/rss.ts";
@@ -141,6 +148,47 @@ export class OpError extends Error {
   ) {
     super(message);
   }
+}
+
+const codingWorkspace = { name: "workspace", type: "string", required: true, description: "local workspace directory" } satisfies ParamSpec;
+const codingSessionParams: ParamSpec[] = [
+  codingWorkspace,
+  { name: "session", type: "string", required: true, description: "persistent session name" },
+  { name: "provider", type: "string", required: true, description: "Pi provider: openai or anthropic" },
+  { name: "model", type: "string", required: true, description: "model ID in Pi's provider catalog" },
+];
+const repositorySelectionParams: ParamSpec[] = [
+  { name: "projects", type: "string", description: "comma-separated workspace-relative project directories, or . for the workspace" },
+  { name: "query", type: "string", description: "paths or keywords to look for in tracked source" },
+  { name: "context-tokens", type: "int", description: "estimated token budget for repository excerpts (default 4096)" },
+];
+
+function codingSessionParamsFrom(p: Record<string, unknown>) {
+  return { workspace: p.workspace as string, session: p.session as string, provider: p.provider as string, model: p.model as string };
+}
+
+function repositorySelectionFrom(p: Record<string, unknown>) {
+  return {
+    projects: (p.projects as string).split(",").map((project) => project.trim()),
+    query: p.query as string,
+    tokenBudget: p["context-tokens"] as number | undefined,
+  };
+}
+
+function renderRepositoryContext(manifest: RepositoryContextManifest, excerpts?: RepositoryContextSelection["excerpts"]): string {
+  const limits = Object.entries(manifest.limitsReached).filter(([, reached]) => reached).map(([name]) => ({
+    trackedPaths: "tracked path cap", scannedFiles: "scan cap", fileBytes: "per-file read cap", selectedFiles: "excerpt cap", tokenBudget: "token budget",
+  })[name]);
+  const lines = [
+    `Context ID ${manifest.id}`,
+    `Projects ${manifest.projects.join(", ")}`,
+    `${manifest.estimatedTokens}/${manifest.tokenBudget} estimated excerpt tokens. Scanned ${manifest.scannedFiles} of ${manifest.candidateFiles} eligible files.`,
+    ...manifest.files.map(({ path, startLine, endLine }) => `${path}:${startLine}-${endLine}`),
+  ];
+  if (!manifest.files.length) lines.push("No excerpts selected.");
+  if (limits.length) lines.push(`Limits reached: ${limits.join(", ")}. Narrow the scope or query to improve coverage.`);
+  for (const excerpt of excerpts ?? []) lines.push(`\n--- ${excerpt.path}:${excerpt.startLine}-${excerpt.endLine} ---`, excerpt.content);
+  return stripVTControlCharacters(lines.join("\n"));
 }
 
 /** OKF v0.2 signals derived from a concept's frontmatter (one rule set, every surface). */
@@ -502,6 +550,37 @@ async function writing<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+async function refreshConversationIndex(ctx: OpContext, ids: string[]): Promise<void> {
+  if (ids.length === 0 || !ctx.hasIndex()) return;
+  try {
+    const engine = ctx.engine();
+    for (const id of ids) await updateIndexFor(ctx.bundle, id, engine);
+  } catch {
+    log.warn("Conversation drafts were saved. Run `okb index` to refresh the keyword and graph index.");
+  }
+}
+
+/** Scoped browser upload workflow. The CLI operation only accepts local paths. */
+export async function runConversationUpload(
+  ctx: OpContext,
+  provider: unknown,
+  preview: string | null,
+  read: () => Promise<Uint8Array>,
+): Promise<ConversationUploadResult & { preview: string }> {
+  checkOpScope({ name: "conversation upload", scope: "write" }, ctx);
+  if (!isConversationProvider(provider)) throw new OpError("Choose ChatGPT or Claude as the export provider.", "bad_params");
+  const raw = await read();
+  const receipt = new Bun.CryptoHasher("sha256")
+    .update(JSON.stringify([ctx.bundle, provider]))
+    .update(raw)
+    .digest("hex");
+  if (preview !== null && preview !== receipt)
+    throw new OpError("The file, provider, or brain changed. Preview this import again.", "bad_params");
+  const result = await writing(() => importConversationUpload(ctx.bundle, raw, { provider, dryRun: preview === null }));
+  await refreshConversationIndex(ctx, result.imported);
+  return { ...result, preview: receipt };
+}
+
 export const operations: readonly Operation[] = [
   {
     name: "search",
@@ -627,6 +706,33 @@ export const operations: readonly Operation[] = [
     render: (r) => ((r as { slug: string; name: string }[]).map((m) => `${m.slug} — ${m.name}`).join("\n")) || "No models available.",
   },
   {
+    name: "code_context",
+    cliName: "code context",
+    summary: "Preview task-relevant excerpts from tracked project files without calling a model",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [
+      codingWorkspace,
+      ...repositorySelectionParams.map((param) => param.type === "string" ? { ...param, required: true } : param),
+      { name: "show-content", type: "boolean", description: "include the excerpt text in the preview" },
+    ],
+    handler: async (_ctx, p) => {
+      const { selectRepositoryContext, RepositoryContextError } = await import("./coding/repository-context.ts");
+      try {
+        const { manifest, excerpts } = await selectRepositoryContext({ workspace: p.workspace as string, ...repositorySelectionFrom(p) });
+        return p["show-content"] ? { manifest, excerpts } : { manifest };
+      } catch (error) {
+        if (error instanceof RepositoryContextError) throw new OpError(error.message, "refused");
+        throw error;
+      }
+    },
+    render: (r) => {
+      const { manifest, excerpts } = r as { manifest: RepositoryContextManifest; excerpts?: RepositoryContextSelection["excerpts"] };
+      return renderRepositoryContext(manifest, excerpts);
+    },
+  },
+  {
     name: "code_run",
     cliName: "code run",
     summary: "Start or resume a Pi Durable coding request for human review",
@@ -634,27 +740,29 @@ export const operations: readonly Operation[] = [
     localOnly: true,
     bundleIndependent: true,
     params: [
-      { name: "workspace", type: "string", required: true, description: "local directory for the coding session" },
-      { name: "session", type: "string", required: true, description: "persistent session name" },
+      ...codingSessionParams,
       { name: "request-id", type: "string", required: true, description: "stable ID for one request or retry" },
-      { name: "provider", type: "string", required: true, description: "Pi provider: openai or anthropic" },
-      { name: "model", type: "string", required: true, description: "model ID in Pi's provider catalog" },
       { name: "prompt", type: "string", description: "coding task (omit when resuming a saved request)" },
       { name: "files", type: "string", description: "comma-separated workspace-relative text files to attach" },
+      ...repositorySelectionParams,
+      { name: "context-id", type: "string", description: "ID issued by `okb code context` for the same selection" },
     ],
     handler: async (_ctx, p) => {
+      const usesRepository = p.projects !== undefined || p.query !== undefined || p["context-tokens"] !== undefined || p["context-id"] !== undefined;
+      if (p.prompt === undefined && (p.files !== undefined || usesRepository))
+        throw new OpError("Use source selection flags with a new request prompt.", "bad_params");
+      if (usesRepository && (p.projects === undefined || p.query === undefined || p["context-id"] === undefined))
+        throw new OpError("Use --projects, --query, and --context-id together. Get the ID from `okb code context`.", "bad_params");
+      if (usesRepository && p.files !== undefined)
+        throw new OpError("Choose either --files or a previewed repository context.", "bad_params");
       const { CodingError, runCodingSession } = await import("./coding/durable.ts");
-      if (p.files !== undefined && p.prompt === undefined)
-        throw new OpError("Use --files with a new request prompt.", "bad_params");
       try {
         return await runCodingSession({
-          workspace: p.workspace as string,
-          session: p.session as string,
+          ...codingSessionParamsFrom(p),
           requestId: p["request-id"] as string,
-          provider: p.provider as string,
-          model: p.model as string,
           prompt: p.prompt as string | undefined,
           files: (p.files as string | undefined)?.split(",").map((file) => file.trim()),
+          repository: usesRepository ? { ...repositorySelectionFrom(p), id: p["context-id"] as string } : undefined,
         });
       } catch (error) {
         if (error instanceof CodingError) throw new OpError(error.message, "refused");
@@ -663,10 +771,56 @@ export const operations: readonly Operation[] = [
     },
     render: (r) => {
       const result = r as CodingSessionResult;
-      const text = result.status === "done" ? result.text : `Request ${result.requestId} unanswered: ${result.reason}`;
+      if (result.status === "unanswered") return stripVTControlCharacters(`Request ${result.requestId} unanswered: ${result.reason}`);
+      const text = result.stopReason === "length" ? `${result.text}\n\nThe model reached its output limit.` : result.text;
       return stripVTControlCharacters(text);
     },
     exitCode: (r) => (r as CodingSessionResult).status === "done" ? 0 : 1,
+  },
+  {
+    name: "code_status",
+    cliName: "code status",
+    summary: "Inspect saved request status, model context, and recorded usage without a model call",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [
+      ...codingSessionParams,
+      { name: "request-id", type: "string", description: "inspect one saved request, including its source selection" },
+    ],
+    handler: async (_ctx, p) => {
+      const { CodingError, getCodingSessionStatus } = await import("./coding/durable.ts");
+      try {
+        return await getCodingSessionStatus({ ...codingSessionParamsFrom(p), requestId: p["request-id"] as string | undefined });
+      } catch (error) {
+        if (error instanceof CodingError) throw new OpError(error.message, "refused");
+        throw error;
+      }
+    },
+    render: (r) => {
+      const result = r as CodingSessionStatusResult;
+      const { context, request, usage } = result;
+      const lines = [
+        `Session ${result.session} (${result.provider}/${result.model})`,
+        `Pending requests: ${result.pendingRequestIds.join(", ") || "none"}`,
+        context.limitTokens === undefined
+          ? `Estimated active context: ${context.estimatedTokens} tokens. Model window unavailable.`
+          : `Estimated active context: ${context.estimatedTokens}/${context.limitTokens} tokens (${context.maxOutputTokens} reserved for output; model window ${context.modelWindowTokens}).`,
+      ];
+      if (context.historyCompacted) lines.push("Older turns are compacted in the active context. The original transcript is retained.");
+      const renderUsage = (label: string, tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }) =>
+        `${label}: ${tokens.totalTokens} total tokens (${tokens.input} input, ${tokens.output} output, ${tokens.cacheRead} cache read, ${tokens.cacheWrite} cache write).`;
+      const sessionUsage = usage.models[`${result.provider}/${result.model}`];
+      if (sessionUsage) lines.push(renderUsage("Session usage", sessionUsage));
+      else lines.push("Session usage: no provider usage recorded.");
+      if (request) {
+        lines.push(`Request ${request.requestId}: ${request.status}${request.reason ? ` (${request.reason})` : ""}.`);
+        if (request.stopReason === "length") lines.push("The model reached its output limit.");
+        if (request.usage) lines.push(renderUsage("Request usage", request.usage));
+        if (request.repositoryContext) lines.push(renderRepositoryContext(request.repositoryContext));
+      }
+      return stripVTControlCharacters(lines.join("\n"));
+    },
   },
   {
     name: "read_concept",
@@ -1018,13 +1172,7 @@ export const operations: readonly Operation[] = [
         path: p.path as string,
         dryRun: p["dry-run"] === true,
       }));
-      if (result.imported.length > 0 && ctx.hasIndex()) {
-        try {
-          for (const id of result.imported) await updateIndexFor(ctx.bundle, id, ctx.engine());
-        } catch {
-          log.warn("Conversation drafts were saved. Run `okb index` to refresh the keyword and graph index.");
-        }
-      }
+      await refreshConversationIndex(ctx, result.imported);
       return result;
     },
     render: (r) => {
@@ -1976,12 +2124,7 @@ function coerce(spec: ParamSpec, v: unknown): unknown {
   );
 }
 
-/** Validate trust and params per the op's declaration (every adapter's gate). */
-export function checkOpCall(
-  op: Operation,
-  ctx: OpContext,
-  raw: Record<string, unknown>,
-): Record<string, unknown> {
+function checkOpScope(op: Pick<Operation, "name" | "scope">, ctx: OpContext): void {
   if (!ctx.trusted && op.scope !== "read")
     throw new OpError(
       `op ${op.name} (scope ${op.scope}) is not available to untrusted callers`,
@@ -1992,6 +2135,15 @@ export function checkOpCall(
       `this brain is mounted read-only — op ${op.name} (scope ${op.scope}) is refused`,
       "refused",
     );
+}
+
+/** Validate trust and params per the op's declaration (every adapter's gate). */
+export function checkOpCall(
+  op: Operation,
+  ctx: OpContext,
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  checkOpScope(op, ctx);
   for (const key of Object.keys(raw))
     if (!op.params.some((s) => s.name === key))
       throw new OpError(`unknown parameter: ${key}`, "bad_params");

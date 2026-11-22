@@ -14,10 +14,16 @@ configurable retrieval, and inspectable links.
 
 The coding workflow keeps operational state in Pi Durable storage in the
 user's application data. Each named session binds to a canonical workspace
-and a provider/model pair. Requests attach explicit text snapshots, carry a
-stable ID, and return an answer for human review. This pilot exposes a local
-CLI. Team identities, worker isolation, approvals, repository credentials,
-and governance belong to the enterprise control plane on the roadmap.
+and a provider/model pair. Requests carry stable IDs and return answers for
+human review. Source context can be attached explicitly or selected from
+tracked files under caller-chosen Git project directories. Selection reports
+file and line ranges, an estimated excerpt budget, scan limits, and a digest
+of the selected bytes. Admission checks the digest and saves the exact
+selection. Recovery reads the saved input. The local CLI reports Pi Durable
+status, active context estimates, and recorded provider and cache usage.
+Compaction reduces active context while preserving the original transcript.
+Team identities, worker isolation, approvals, repository credentials, and
+governance belong to the enterprise control plane on the roadmap.
 
 ---
 
@@ -753,7 +759,9 @@ account and coding commands that operate independently of a selected brain.
 | `okb ask <question>` | read | Retrieval-augmented answer with citations |
 | `okb ask-plan <question>` | read (localOnly) | Cited answer using ChatGPT plan usage and local retrieval |
 | `okb chatgpt connect` / `status` / `use` / `models` / `disconnect` | read (localOnly) | Per-user ChatGPT account and consent management |
+| `okb code context` | read (localOnly) | Preview scoped Git excerpts and estimate the context budget |
 | `okb code run` | read (localOnly) | Start or resume a Pi Durable coding request |
+| `okb code status` | read (localOnly) | Inspect request state, active context, and persisted usage |
 | `okb read <id>` | read | Frontmatter, body, and derived signals (status/trust/stale) |
 | `okb list [--detail] [--type] [--tag] [--status]` | read | Concept ids, or a browse listing with signals |
 | `okb graph <id> [--depth N]` | read | Neighborhood with `→`/`←`/`↔` direction tags (incl. provenance edges) |
@@ -788,11 +796,13 @@ over the registry, trusted like the CLI but defended like a network surface:
   generic `Operation.stream` hook: events `context` → `answer` → `done` or
   `error`; the gateway doesn't stream tokens yet, so `answer` arrives whole
   — Backlog), `GET /clip` (bookmarklet), `GET /` + `/gui/*` (the app and its
-  vendored assets). Three small dedicated routes cover what `localOnly` ops
-  provide on the host without exposing them as ops: `GET /api/status`
+  vendored assets). Dedicated routes include `GET /api/status`
   (version, OKF version, active bundle path, brain, read-only, index/vector
   presence, actor, port), `GET /api/brains` (mount **names** + policy —
-  never mount paths, per the 5.2 decision), `GET /api/bookmarklet`.
+  never mount paths, per the 5.2 decision), `GET /api/bookmarklet`, and
+  `POST /api/conversations/upload`. The upload accepts browser-selected JSON
+  bytes, checks the write policy, and binds confirmation to the bytes,
+  provider, and active brain. The path-based import stays CLI-only.
 - **Brain scoping:** a request may name a configured mount with the
   `x-okb-brain` header (or `?brain=` for SSE); the request then runs against
   that bundle with its read-only policy, so the GUI's brain switcher never
@@ -814,7 +824,7 @@ A vanilla single-page app (`src/gui/`: index.html + app.js + style.css +
 fonts/) — no framework, no build step; api.ts serves the files and Bun text
 imports embed them into the compiled binary (the viz-vendor pattern; the
 fonts via `file` imports). Presentation only: every data access is a
-`/api/op/*` call or one of the three status routes. Hash routing, each route
+`/api/op/*` call or one of the dedicated local routes above. Hash routing, each route
 a page turn; look, type and motion from the design system (Look & feel,
 below); responsive down to phone widths (the sidebar becomes a top bar).
 Every non-`localOnly` op has a home
@@ -827,7 +837,7 @@ Views:
 - **Home** — the habit-forming front page: tiles (`stats`), quick `capture`,
   today's review queue with Reviewed/Snooze, inbox preview, recently
   changed (`list_concepts --detail`), one-click `doctor` with the v0.2
-  signal summary, and a "build index" prompt when there is none.
+  signal summary, and an import and search setup panel when there is no index.
 - **Browse** — every concept (`list_concepts --detail`) with type, status,
   trust tier, staleness, tags; client-side filter and sort.
 - **Concept** — the reader: title and description (the lead) over the
@@ -850,6 +860,8 @@ Views:
   verified citations link to the reader.
 - **Add** — quick `capture`, `clip` (with auto-tag opt-in), `rss` (one URL
   or every configured feed), bulk `import`, and the bookmarklet.
+- **Sources** — preview browser-selected ChatGPT and Claude exports, import
+  private drafts, and find web capture and AI-account setup.
 - **Review** / **Inbox** — card stacks with reasons / unread items;
   Reviewed ✓, Snooze, Mark read, Suggest links, Open, Graph.
 - **Claims** — `calibrate` dashboard, `take` form, per-claim `resolve`.
@@ -1072,6 +1084,11 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-11-22 — **Preview scoped coding context before admission.** Keep the
+  Git scan bounded and reveal its selected source and limits before sending
+  a request. Persist the selected text for durable recovery. Use Pi's native
+  compaction with a local recap and read its persisted usage ledger. Personal
+  onboarding starts with capture or offline source import before AI setup.
 - 2026-11-22 — **Two product workflows.** Preserve the open bundle and OKF
   compatibility for personal knowledge. Add explicit ChatGPT plan usage,
   local conversation imports, and more efficient mapping. Use Pi Durable

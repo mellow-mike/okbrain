@@ -10,7 +10,7 @@ import { TOOL_ACTOR } from "../version.ts";
 import { clip } from "./capture.ts";
 
 const PROVIDERS = { chatgpt: "ChatGPT", claude: "Claude" } as const;
-const MAX_EXPORT_BYTES = 128 * 1024 * 1024;
+export const MAX_CONVERSATION_EXPORT_BYTES = 128 * 1024 * 1024;
 export type ConversationProvider = keyof typeof PROVIDERS;
 
 export function isConversationProvider(value: unknown): value is ConversationProvider {
@@ -24,10 +24,24 @@ export interface ConversationImportInput {
   dryRun?: boolean;
 }
 
+type ConversationImportOptions = Omit<ConversationImportInput, "path">;
+
 export interface ConversationImportResult {
   imported: string[];
   planned: string[];
   skipped: { row: number; id?: string; reason: string }[];
+}
+
+interface ConversationDraft {
+  row: number;
+  id: string;
+  title: string;
+  messages: number;
+  createdAt?: string;
+}
+
+export interface ConversationUploadResult extends ConversationImportResult {
+  drafts: ConversationDraft[];
 }
 
 interface Message {
@@ -150,13 +164,12 @@ function renderTranscript(messages: Message[]): string {
   }).join("\n\n");
 }
 
-async function readExport(path: string): Promise<unknown[]> {
+async function readExport(path: string): Promise<Uint8Array> {
   const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
-  let raw: Buffer;
   try {
     const stat = await file.stat();
     if (!stat.isFile()) throw new OkfWriteError("conversation export must be an extracted JSON file");
-    if (stat.size > MAX_EXPORT_BYTES) throw new OkfWriteError("conversation export exceeds the 128 MiB file limit");
+    if (stat.size > MAX_CONVERSATION_EXPORT_BYTES) throw new OkfWriteError("conversation export exceeds the 128 MiB file limit");
     // Read one extra byte to detect growth after sizing without an unbounded read.
     const buffer = Buffer.allocUnsafe(stat.size + 1);
     let size = 0;
@@ -166,13 +179,18 @@ async function readExport(path: string): Promise<unknown[]> {
       size += bytesRead;
     }
     if (size !== stat.size) throw new OkfWriteError("conversation export changed while being read");
-    raw = buffer.subarray(0, size);
+    return buffer.subarray(0, size);
   } finally {
     await file.close();
   }
+}
+
+function parseExport(raw: Uint8Array): unknown[] {
+  if (raw.byteLength > MAX_CONVERSATION_EXPORT_BYTES)
+    throw new OkfWriteError("conversation export exceeds the 128 MiB file limit");
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw.toString("utf8").replace(/^\uFEFF/, ""));
+    parsed = JSON.parse(new TextDecoder().decode(raw));
   } catch {
     throw new OkfWriteError("conversation export is invalid JSON; choose the extracted conversations JSON file");
   }
@@ -207,13 +225,34 @@ async function checkDestination(root: string, dir: string): Promise<void> {
 /** Import local text transcripts and preserve their original provider provenance. */
 export async function importConversations(
   root: string,
-  { provider, path, actor, dryRun }: ConversationImportInput,
+  { path, ...options }: ConversationImportInput,
 ): Promise<ConversationImportResult> {
+  const result: ConversationImportResult = { imported: [], planned: [], skipped: [] };
+  await importExport(root, options, () => readExport(path), result);
+  return result;
+}
+
+/** Import bytes selected in the GUI without granting access to host paths. */
+export async function importConversationUpload(
+  root: string,
+  raw: Uint8Array,
+  options: ConversationImportOptions,
+): Promise<ConversationUploadResult> {
+  const result: ConversationUploadResult = { imported: [], planned: [], skipped: [], drafts: [] };
+  await importExport(root, options, () => raw, result);
+  return result;
+}
+
+async function importExport(
+  root: string,
+  { provider, actor, dryRun }: ConversationImportOptions,
+  read: () => Uint8Array | Promise<Uint8Array>,
+  result: ConversationImportResult & { drafts?: ConversationDraft[] },
+): Promise<void> {
   if (!isConversationProvider(provider)) throw new OkfWriteError("conversation provider must be chatgpt or claude");
   const dir = `db_only/conversations/${provider}`;
   await checkDestination(root, dir);
-  const rows = await readExport(path);
-  const result: ConversationImportResult = { imported: [], planned: [], skipped: [] };
+  const rows = parseExport(await read());
   const seen = new Set<string>();
   try {
     for (const [index, row] of rows.entries()) {
@@ -230,36 +269,39 @@ export async function importConversations(
       }
       seen.add(id);
       if (dryRun) {
-        if (await exists(idToAbsPath(root, id))) result.skipped.push({ row: index + 1, id, reason: "concept already exists" });
-        else result.planned.push(id);
-        continue;
+        if (await exists(idToAbsPath(root, id))) {
+          result.skipped.push({ row: index + 1, id, reason: "concept already exists" });
+          continue;
+        }
+        result.planned.push(id);
+      } else {
+        const date = createdAt?.slice(0, 10);
+        const written = await writeConcept(root, {
+          id,
+          type: "conversation",
+          title,
+          description: `${PROVIDERS[provider]} conversation${date ? ` from ${date}` : ""}.`,
+          tags: ["conversation", provider],
+          status: "draft",
+          body: renderTranscript(messages),
+          actor: actor ?? TOOL_ACTOR,
+          sources: [{
+            id: "export",
+            resource: `${provider}-export:conversation`,
+            conversation_id: sourceId,
+            created_at: createdAt,
+            last_modified: updatedAt,
+          }],
+        }, { createOnly: true, deferIndex: true });
+        if (!written.created) {
+          result.skipped.push({ row: index + 1, id, reason: "concept already exists" });
+          continue;
+        }
+        result.imported.push(id);
       }
-      const date = createdAt?.slice(0, 10);
-      const written = await writeConcept(root, {
-        id,
-        type: "conversation",
-        title,
-        description: `${PROVIDERS[provider]} conversation${date ? ` from ${date}` : ""}.`,
-        tags: ["conversation", provider],
-        status: "draft",
-        body: renderTranscript(messages),
-        actor: actor ?? TOOL_ACTOR,
-        sources: [{
-          id: "export",
-          resource: `${provider}-export:conversation`,
-          conversation_id: sourceId,
-          created_at: createdAt,
-          last_modified: updatedAt,
-        }],
-      }, { createOnly: true, deferIndex: true });
-      if (!written.created) {
-        result.skipped.push({ row: index + 1, id, reason: "concept already exists" });
-        continue;
-      }
-      result.imported.push(id);
+      result.drafts?.push({ row: index + 1, id, title, messages: messages.length, createdAt });
     }
   } finally {
     if (result.imported.length > 0) await regenerateIndexes(root, dir);
   }
-  return result;
 }

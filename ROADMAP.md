@@ -20,9 +20,15 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Add explicit local ChatGPT sign-in and cited questions through
   eligible plans, with separately selected account, model list, and sign-out.
 - [x] Reduce graph reads during link suggestions and incremental provenance refresh.
-- [ ] Add a GUI for source and account management, including per-source controls.
-- [ ] Add incremental conversation reconciliation with review, and add
-  more supported provider integrations.
+- [x] Add browser onboarding and a Sources view for local ChatGPT and Claude
+  exports, with selected-file preview and private draft import.
+- [ ] Make the first capture, search, and review flow discoverable from a fresh
+  install. Test with keyboard navigation, a narrow viewport, and offline use.
+- [ ] Add per-source import history and incremental reconciliation with review.
+  Prioritize browser bookmarks and Markdown and Notion exports next, followed
+  by read-only live connections with provider-supported consent and scopes.
+- [ ] Add browser account management and source visibility for hosted answers,
+  with explicit account, model, and sign-out controls.
 - [ ] Add focused maps for questions and projects, with filtering and graph
   explanations that remain usable on large bundles.
 
@@ -32,12 +38,21 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   SQLite persistence with a deterministic test provider.
 - [x] Ship local coding sessions with a workspace and attachment scope,
   request IDs, and reviewable responses.
+- [x] Preview bounded, deterministic excerpts from explicitly scoped Git
+  projects. Bind the reviewed selection to its source bytes at admission and
+  recover from the stored snapshot.
+- [x] Expose local request status, active context estimates, Pi Durable history
+  compaction, and recorded provider usage including cache counters.
+- [ ] Benchmark context quality, preview latency, and tokens per accepted result
+  against explicit attachments on large-repository tasks. Add versioned project
+  profiles, rebuildable symbol and dependency indexes, and measured prefix reuse.
 - [ ] Add tenant/project authorization, isolated workers, per-project
-  credentials, and a run status and cancellation surface.
+  credentials, and team run status and cancellation.
 - [ ] Verify failure and replay semantics in deployment, with audit events,
   retention, and change review and approvals.
 - [ ] Add approved execution and repository integration after the control
-  plane and worker boundaries are verified.
+  plane and worker boundaries are verified. Evaluate scoped child conversations
+  for independent packages with combined usage and a human-reviewed handoff.
 
 Stages 0–6 and the logs below are historical records.
 
@@ -727,6 +742,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added local source onboarding and private export previews, and
+  added scoped coding context previews, Pi Durable compaction, and usage inspection.
+  Next milestones are evaluated monorepo indexing and personal source management.
 - 2026-11-22 — Established the personal and enterprise workflows, added
   local conversation import and ChatGPT plan usage, reduced graph reads,
   and shipped the local Pi Durable pilot. Next milestones are account and

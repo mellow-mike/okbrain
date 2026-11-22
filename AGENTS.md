@@ -12,7 +12,7 @@ okbrain has two workflows. The personal brain helps people capture, map, and rev
 
 - Declare commands in `src/core/operations.ts` and keep CLI, local API, and MCP adapters thin. Check caller trust and brain mount policy before writing. `localOnly` commands stay out of API and MCP discovery and dispatch.
 - Keep sign-in and subscription use explicit. Account credentials belong in per-user application data. The personal plan route uses local retrieval and sends only the selected context to its provider. Preserve the existing API-key and local-model gateway behavior.
-- Keep coding sessions separate from personal bundles. The current Pi Durable runner accepts explicit workspace files and persists the conversation and request state in per-user application data. Treat those transcripts as sensitive. Preserve stable request IDs, workspace and model binding, and the human review boundary.
+- Keep coding sessions separate from personal bundles. The Pi Durable runner accepts explicit files or operator-previewed excerpts from scoped, tracked workspace files. Confirm the selection before admission, and use saved source bytes on recovery. Treat the transcript and its per-user application data as sensitive. Preserve stable request IDs, workspace and model binding, and the human review boundary.
 - Use cross-platform path handling and argument-array subprocess calls. If code opens Bun SQLite, use the shared macOS SQLite setup before the first connection.
 
 ## Verify and document changes

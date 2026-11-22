@@ -146,7 +146,7 @@ describe("request guards", () => {
     expect(page).toContain(`window.OKB_TOKEN = "${TOKEN}"`);
     for (const link of [
       "#home", "#browse", "#graph", "#search", "#ask", "#review", "#inbox",
-      "#add", "#edit", "#claims", "#stats", "#settings",
+      "#add", "#sources", "#edit", "#claims", "#stats", "#settings",
     ])
       expect(page).toContain(`href="${link}"`);
   });
@@ -224,6 +224,7 @@ describe("op routes", () => {
     expect(ops.some((o) => o.name === "write_concept")).toBe(true);
     expect(ops.some((o) => o.name === "serve")).toBe(false);
     expect(ops.some((o) => o.name === "bookmarklet")).toBe(false);
+    expect(ops.filter((o) => o.name.startsWith("code_"))).toEqual([]);
   });
 
   test("POST /api/op/search returns hits", async () => {
@@ -259,6 +260,8 @@ describe("op routes", () => {
     expect((await post("nonsense", {})).status).toBe(404);
     expect((await post("serve", {})).status).toBe(404);
     expect((await post("bookmarklet", {})).status).toBe(404);
+    for (const name of ["code_context", "code_run", "code_status"])
+      expect((await post(name, {})).status).toBe(404);
     const bad = await post("search", { nope: 1 });
     expect(bad.status).toBe(400);
     expect(((await bad.json()) as { error: string }).error).toContain("unknown parameter");
@@ -303,6 +306,10 @@ describe("server routes for the GUI", () => {
 
       const write = await call("api/op/capture", { method: "POST", body: JSON.stringify({ text: "nope" }), headers: { "x-okb-brain": "ref" } });
       expect(write.status).toBe(403); // read-only mount
+      const upload = await call("api/conversations/upload?provider=chatgpt", {
+        method: "POST", body: "[]", headers: { "x-okb-brain": "ref", "content-type": "application/json" },
+      });
+      expect(upload.status).toBe(403);
       // An engine-backed read on the never-indexed mount is a precondition failure, not a server fault.
       const unindexed = await call("api/op/graph_neighbors", { method: "POST", body: JSON.stringify({ id: "beta" }), headers: { "x-okb-brain": "ref" } });
       expect(unindexed.status).toBe(409);
@@ -312,6 +319,43 @@ describe("server routes for the GUI", () => {
       saveConfig(saved);
       await rm(ref, { recursive: true, force: true });
     }
+  });
+
+  test("browser-selected conversation exports preview locally before create-only import", async () => {
+    const endpoint = "api/conversations/upload?provider=chatgpt";
+    const archive = await Bun.file(join(import.meta.dir, "fixtures", "chatgpt-conversations.json")).text();
+    const request = { method: "POST", body: archive, headers: { "content-type": "application/json" } };
+    expect((await call(endpoint, request, null)).status).toBe(401);
+    expect((await post("import_conversations", { path: "conversations.json", provider: "chatgpt" })).status).toBe(404);
+    expect((await call(endpoint, { ...request, headers: { "content-type": "text/plain" } })).status).toBe(415);
+
+    const preview = await call(endpoint, request);
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("cache-control")).toBe("no-store");
+    const { result } = (await preview.json()) as {
+      result: { preview: string; planned: string[]; imported: string[]; drafts: unknown[] };
+    };
+    expect(result.planned).toHaveLength(1);
+    expect(result.imported).toEqual([]);
+    const id = result.planned[0]!;
+    expect(result.drafts).toEqual([{ id, row: 1, title: "Library planning", messages: 2, createdAt: "2024-08-19T16:00:00.000Z" }]);
+    expect((await post("read_concept", { id })).status).toBe(404);
+
+    const confirm = { ...request, headers: { ...request.headers, "x-okb-preview": result.preview } };
+    expect((await call(endpoint, { ...confirm, body: "[]" })).status).toBe(400);
+    expect((await call("api/conversations/upload?provider=claude", confirm)).status).toBe(400);
+    const done = await call(endpoint, confirm);
+    expect(done.status).toBe(200);
+    expect(await done.json()).toMatchObject({ result: { imported: [id], planned: [], drafts: result.drafts } });
+    const draft = await post("read_concept", { id });
+    expect(await draft.json()).toMatchObject({ result: { frontmatter: { type: "conversation", status: "draft" }, body: expect.stringContaining("neighborhood library") } });
+    const search = await post("search", { query: "neighborhood library", profile: "lean" });
+    expect(await search.json()).toMatchObject({ result: [expect.objectContaining({ id })] });
+    expect(readFileSync(join(bundle, "index.md"), "utf8")).not.toContain("Library planning");
+
+    expect(await (await call(endpoint, confirm)).json()).toMatchObject({
+      result: { imported: [], skipped: [{ row: 1, id, reason: "concept already exists" }] },
+    });
   });
 
   test("delete_concept removes the file, the index row, and logs a Deletion", async () => {

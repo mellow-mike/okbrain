@@ -2,6 +2,12 @@
 
 An okbrain bundle is a directory of Markdown notes with Open Knowledge Format metadata. Start with your own notes or use the bundled example. Run the commands below from your brain directory, or select it with `okb --bundle /path/to/brain`.
 
+## Start in the web app
+
+Open your brain with `okb serve --open`. On **Home**, capture a quick note or choose **Import conversations**. Select **Enable search** to build a local keyword and graph index. **Browse** can open notes before the index is built.
+
+Use **Sources** to import conversations, find web capture and RSS tools, or get to AI settings. The brain name at the top of the conversation form identifies where drafts will be saved. If you have multiple brains mounted, select a writable brain before importing.
+
 ## Ask questions with your ChatGPT plan
 
 Sign in through your browser, choose your ChatGPT account and workspace, and grant plan usage. OpenAI offers this integration for eligible ChatGPT Plus and Pro subscribers. The connection authorizes inference for okbrain. To bring over your ChatGPT history, use the export workflow below. [OpenAI’s Sign in with ChatGPT guide](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt)
@@ -26,6 +32,10 @@ Model calls use the selected account's ChatGPT plan allowance or available credi
 
 Request a data export from ChatGPT or Claude and extract the archive locally. Find the conversations JSON file inside it. If the export splits conversations across JSON files, run the importer once for each file. [Export ChatGPT data](https://help.openai.com/en/articles/7260999-exporting-your-chatgpt-history-and-data), [Export Claude data](https://support.claude.com/en/articles/9450526-export-your-claude-data)
 
+In the web app, open **Sources → Conversation exports**, choose the provider, pick the JSON file, and select **Preview import**. Review the draft titles, message counts, and skipped rows, then select **Import drafts**. The local okbrain server reads the selected file and writes the notes into the active brain. **Browse conversation drafts** opens the imported notes. For large archives, the page shows the first 50 rows of each list and the total counts.
+
+Use the terminal for the full row report or when the web app is closed.
+
 ```bash
 okb import-conversations ~/Downloads/chatgpt/conversations.json --provider chatgpt --dry-run
 okb import-conversations ~/Downloads/chatgpt/conversations.json --provider chatgpt
@@ -36,7 +46,7 @@ okb list --type conversation --status draft --detail
 okb search 'spaced repetition'
 ```
 
-The import accepts one JSON file up to 128 MiB. The preview reports which records would become notes and gives skip reasons by row. The import runs locally and writes text transcripts as `conversation` drafts under `db_only/conversations/<provider>/`. It includes user and assistant text from the selected ChatGPT branch or the Claude message list, plus source provenance. Attachments and hidden messages stay in the original export. Existing notes keep their contents when you import the same provider conversation again, including when a newer archive contains additional turns.
+Both import flows accept one JSON file up to 128 MiB and write text transcripts as `conversation` drafts under `db_only/conversations/<provider>/`. The import includes user and assistant text from the selected ChatGPT branch or the Claude message list, plus source provenance. Attachments and hidden messages stay in the original export. Existing notes keep their contents when you import the same provider conversation again, including when a newer archive contains additional turns.
 
 `okb index` builds or repairs the local keyword and graph index. Import refreshes an existing index and leaves embeddings for a separate `okb embed` run. If you configure a remote embedding provider, that run can send note text to it. The regular `okb search` command can also use configured remote embedding and reranking providers when those retrieval arms are available.
 

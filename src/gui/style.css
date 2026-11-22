@@ -157,6 +157,20 @@ div.error::before { content: "Error"; display: block; margin-bottom: var(--space
 .card .suggest:not(:empty) { margin-top: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--line); }
 .card.compact { padding: var(--space-2) var(--space-3); }
 
+.start-panel, .source-panel { display: grid; gap: var(--space-3); }
+.start-panel { max-width: 800px; }
+.start-panel h3, .start-panel .row, .source-panel h3, .source-panel .row { margin: 0; }
+.source-page > h2 { margin-bottom: 0; }
+.source-panel p, .start-panel p { color: var(--ink-2); }
+.source-links { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+.source-panel input[type="file"] { min-width: 0; width: 100%; padding-inline: var(--space-2); }
+.source-panel input[type="file"]::file-selector-button { margin: 4px var(--space-2) 4px 0; font: inherit; }
+.source-panel [hidden], #source-status:empty, #source-result:empty, #h-build-out:empty { display: none; }
+.source-rows { padding-left: var(--space-6); overflow-wrap: anywhere; }
+.source-rows li + li { margin-top: var(--space-1); }
+.source-panel summary { cursor: pointer; }
+.source-panel details .source-rows { margin-top: var(--space-2); }
+
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
          background: var(--plane); border: 1px solid var(--line); border-radius: var(--radius-md); overflow: hidden; }
 .tile { padding: var(--space-3) var(--space-4); box-shadow: 1px 0 0 var(--line), 0 1px 0 var(--line); }

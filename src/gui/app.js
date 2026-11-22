@@ -2,7 +2,7 @@
 // no framework — served as-is by api.ts and embedded into the compiled
 // binary via Bun text imports. Every data access goes through /api/op/* (the
 // ops contract) or one of the small server routes (status, brain mounts,
-// bookmarklet); this file is presentation only. Rendering helpers shared
+// bookmarklet, conversation upload); this file is presentation only. Rendering helpers shared
 // with the static viewer come from render.js (window.okbRender); theme,
 // motion and the graph palette from the design system's okb.js (window.Okb).
 
@@ -192,7 +192,7 @@ document.addEventListener('keydown', function (e) {
 var routes = {
   home: renderHome, browse: renderBrowse, concept: renderConcept, edit: renderEdit,
   editor: renderEdit, graph: renderGraph, search: renderSearch, ask: renderAsk,
-  add: renderAdd, review: renderReview, inbox: renderInbox, claims: renderClaims,
+  add: renderAdd, sources: renderSources, review: renderReview, inbox: renderInbox, claims: renderClaims,
   stats: renderStats, settings: renderSettings,
 };
 
@@ -231,7 +231,10 @@ function route() {
     repaint = null;
     document.querySelectorAll('#nav > a').forEach(function (a) { // not the wordmark's link
       var target = a.getAttribute('data-nav') || a.getAttribute('href').slice(1);
-      a.classList.toggle('active', target === name || (name === 'editor' && target === 'edit'));
+      var active = target === name || (name === 'editor' && target === 'edit');
+      a.classList.toggle('active', active);
+      if (active) a.setAttribute('aria-current', 'page');
+      else a.removeAttribute('aria-current');
     });
     view.className = name === 'graph' ? 'bare' : '';
     view.scrollTop = 0;
@@ -300,11 +303,12 @@ function wireCards(listEl, handle) {
 
 async function renderHome(_arg, seq) {
   var name = STATUS ? (STATUS.brain || basename(STATUS.bundle)) : 'your brain';
+  var readonly = STATUS && STATUS.readonly;
   view.innerHTML =
     '<div class="stack wide"><h2 class="display">' + esc(name) + '</h2>' +
     '<div id="h-index"></div><div id="h-tiles"></div>' +
-    '<form id="h-cap" class="row"><input id="h-cap-text" style="flex:1" placeholder="Capture a thought… (lands in inbox/)">' +
-    '<button class="primary">Capture</button><span id="h-cap-msg" class="muted"></span></form>' +
+    (readonly ? '' : '<form id="h-cap" class="row"><input id="h-cap-text" style="flex:1" aria-label="Quick note" placeholder="Capture a thought…">' +
+    '<button class="primary">Capture</button><span id="h-cap-msg" class="muted" role="status"></span></form>') +
     '<div class="split"><div><h3>Worth another look</h3><div id="h-review" class="list"></div></div>' +
     '<div><h3>Inbox</h3><div id="h-inbox" class="list"></div></div>' +
     '<div><h3>Recently changed</h3><div id="h-recent"></div></div></div>' +
@@ -313,17 +317,31 @@ async function renderHome(_arg, seq) {
     '<div id="h-doctor-out"></div></div>';
 
   if (STATUS && !STATUS.hasIndex) {
-    document.getElementById('h-index').innerHTML =
-      '<div class="notice">This brain has no search index yet — search, graph, review and stats need one. ' +
-      '<button id="h-build" class="primary small">Build index</button></div>';
+    if (readonly) document.getElementById('h-index').innerHTML =
+      '<div class="notice">This read-only brain has no local search index. <a href="#browse">Browse its notes</a>.</div>';
+    else document.getElementById('h-index').innerHTML =
+      '<section class="card start-panel" aria-labelledby="h-start"><h3 id="h-start">Get started</h3>' +
+      '<p>Capture a quick note or import conversations you want to keep. Enable search to find them in this brain.</p>' +
+      '<div class="row"><a href="#sources">Import conversations</a>' +
+      '<button id="h-build" class="primary small" type="button">Enable search</button></div><div id="h-build-out" role="status"></div></section>';
+  }
+  if (document.getElementById('h-build')) {
     document.getElementById('h-build').addEventListener('click', async function () {
       this.disabled = true;
-      try { await appWork(api('index', {})); await refreshStatus(); route(); }
-      catch (e) { setHtml('h-index', errorBox(e)); }
+      working('h-build-out', 'building the local index');
+      try {
+        await appWork(api('index', {}));
+        await refreshStatus();
+        if (!stale(seq)) route();
+      } catch (e) {
+        if (!stale(seq)) setHtml('h-build-out', errorBox(e));
+        this.disabled = false;
+      }
     });
   }
 
-  document.getElementById('h-cap').addEventListener('submit', async function (e) {
+  var capture = document.getElementById('h-cap');
+  if (capture) capture.addEventListener('submit', async function (e) {
     e.preventDefault();
     var text = document.getElementById('h-cap-text').value.trim();
     if (!text) return;
@@ -411,7 +429,7 @@ async function renderHome(_arg, seq) {
             return '<tr><td>' + conceptLink(r.id, r.title) + '<br>' + badges(r) + '</td>' +
               '<td class="nowrap muted">' + dateOf(r.updated) + '</td></tr>';
           }).join('') + '</table>' + (rows.length > 8 ? '<p class="muted"><a href="#browse">browse all ' + rows.length + '…</a></p>' : '')
-        : '<div class="empty">No concepts yet — capture something above or <a href="#edit">write one</a>.</div>';
+        : '<div class="empty">No notes yet.' + (readonly ? '' : ' Capture one above or <a href="#sources">import conversations</a>.') + '</div>';
     } catch (e) { el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
   }
 
@@ -422,8 +440,12 @@ async function renderHome(_arg, seq) {
     catch (e) { out.innerHTML = errorBox(e); }
   });
 
-  loadTiles();
-  loadReviewPreview();
+  if (STATUS && STATUS.hasIndex) {
+    loadTiles();
+    loadReviewPreview();
+  } else {
+    setHtml('h-review', '<div class="empty">Review suggestions appear once this brain is indexed.</div>');
+  }
   loadInboxPreview(true);
   loadRecent();
 }
@@ -445,7 +467,7 @@ function doctorSummary(r) {
 
 // ---- browse --------------------------------------------------------------
 
-async function renderBrowse(_arg, seq) {
+async function renderBrowse(initialType, seq) {
   view.innerHTML =
     '<div class="stack wide"><h2>Browse</h2>' +
     '<div class="toolbar"><input id="b-q" type="search" placeholder="Filter title / id / tags…">' +
@@ -462,6 +484,7 @@ async function renderBrowse(_arg, seq) {
   setTypes(rows.map(function (r) { return r.type; }));
   var types = [];
   rows.forEach(function (r) { if (types.indexOf(r.type) < 0) types.push(r.type); });
+  if (initialType && types.indexOf(initialType) < 0) types.push(initialType);
   types.sort();
   var typeSel = document.getElementById('b-type');
   types.forEach(function (t) {
@@ -470,6 +493,7 @@ async function renderBrowse(_arg, seq) {
     o.textContent = t || '(untyped)';
     typeSel.appendChild(o);
   });
+  if (initialType) typeSel.value = initialType;
   function draw() {
     var q = document.getElementById('b-q').value.trim().toLowerCase();
     var type = typeSel.value, status = document.getElementById('b-status').value;
@@ -1106,6 +1130,7 @@ function showBookmarklet() {
 function renderAdd() {
   view.innerHTML =
     '<div class="stack"><h2>Add to your brain</h2>' +
+    '<p>To bring over chats from ChatGPT or Claude, <a href="#sources">import conversations</a>.</p>' +
     '<h3>Quick capture</h3>' +
     '<form id="capf" class="stack">' +
     '<label class="field"><span>Note (first line becomes the title)</span>' +
@@ -1199,6 +1224,126 @@ function renderAdd() {
           .concat([r.imported.length + ' imported, ' + r.skipped.length + ' skipped']).join('\n')) + '</div>');
     } catch (err) { out('imp-out', errorBox(err)); }
   });
+}
+
+// ---- sources ------------------------------------------------------------
+
+async function uploadConversations(file, provider, preview) {
+  var requestHeaders = headers({ 'content-type': 'application/json' });
+  if (preview) requestHeaders['x-okb-preview'] = preview;
+  var res = await fetch('/api/conversations/upload?provider=' + encodeURIComponent(provider), {
+    method: 'POST', headers: requestHeaders, body: file,
+  });
+  if (res.status === 413) throw new Error('Choose a conversations JSON file up to 128 MiB.');
+  var body = await res.json();
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body.result;
+}
+
+function renderSources(_arg, seq) {
+  var brain = BRAIN;
+  var name = STATUS ? (STATUS.brain || basename(STATUS.bundle)) : 'the selected brain';
+  var readonly = STATUS && STATUS.readonly;
+  view.innerHTML =
+    '<div class="stack source-page"><h2>Sources</h2>' +
+    '<section class="card source-panel" aria-labelledby="source-chats"><h3 id="source-chats">Conversation exports</h3>' +
+    '<p>Save ChatGPT or Claude conversations to <strong>' + esc(name) + '</strong> as private drafts. ' +
+    'Extract your export and select one conversations JSON file up to 128 MiB. The app reads it locally.</p>' +
+    '<div class="source-links"><a href="https://help.openai.com/en/articles/7260999-exporting-your-chatgpt-history-and-data" target="_blank" rel="noopener noreferrer">How to export from ChatGPT</a>' +
+    '<a href="https://support.claude.com/en/articles/9450526-export-your-claude-data" target="_blank" rel="noopener noreferrer">How to export from Claude</a></div>' +
+    (readonly ? '<p class="notice">Choose a writable brain to import conversations.</p>' :
+    '<form id="source-form" class="source-panel"><div class="grid">' +
+    '<label class="field"><span>Export provider</span><select id="source-provider"><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option></select></label>' +
+    '<label class="field"><span>Conversations file</span><input id="source-file" type="file" accept=".json,application/json" required></label></div>' +
+    '<div class="row"><button id="source-preview" class="primary">Preview import</button>' +
+    '<button id="source-confirm" class="primary" type="button" hidden>Import drafts</button></div>' +
+    '<div id="source-status" role="status"></div><div id="source-result" class="source-panel"></div></form>') +
+    '<a href="#browse/conversation">Browse conversation drafts</a></section>' +
+    '<section class="card source-panel" aria-labelledby="source-web"><h3 id="source-web">Web pages and feeds</h3>' +
+    '<p>Save a page to your inbox, install the browser bookmarklet, or pull an RSS feed.</p><a href="#add">Open capture tools</a></section>' +
+    '<section class="card source-panel" aria-labelledby="source-ai"><h3 id="source-ai">AI accounts</h3>' +
+    '<p>For answers that use an eligible ChatGPT plan, run <code>okb chatgpt connect</code> in a terminal. ' +
+    'After you approve plan usage in your browser, run <code>okb ask-plan</code> with your question.</p>' +
+    '<p>The web app’s Ask screen uses your configured API provider or local model.</p><a href="#settings">Open AI settings</a></section></div>';
+  if (readonly) return;
+
+  var form = document.getElementById('source-form');
+  var fileInput = document.getElementById('source-file');
+  var providerInput = document.getElementById('source-provider');
+  var previewButton = document.getElementById('source-preview');
+  var confirmButton = document.getElementById('source-confirm');
+  var status = document.getElementById('source-status');
+  var result = document.getElementById('source-result');
+  var receipt = null;
+  var busy = false;
+
+  function clearPreview() {
+    receipt = null;
+    confirmButton.hidden = true;
+    previewButton.classList.add('primary');
+    status.innerHTML = '';
+    result.innerHTML = '';
+  }
+
+  function resultList(items, format) {
+    // Long archives can contain thousands of rows. Keep the page responsive.
+    var shown = items.slice(0, 50);
+    return '<ol class="source-rows">' + shown.map(format).join('') + '</ol>' +
+      (shown.length < items.length ? '<p class="muted">Showing the first ' + shown.length + ' of ' + items.length + '.</p>' : '');
+  }
+
+  async function run(commit) {
+    var file = fileInput.files[0];
+    if (busy || !file || stale(seq) || brain !== BRAIN || (commit && !receipt)) return;
+    if (file.size > 128 * 1024 * 1024) {
+      status.innerHTML = errorBox('Choose a conversations JSON file up to 128 MiB.');
+      return;
+    }
+    var selectedReceipt = commit ? receipt : null;
+    clearPreview();
+    busy = true;
+    fileInput.disabled = providerInput.disabled = previewButton.disabled = true;
+    Okb.working(status, commit ? 'importing private drafts' : 'reading export');
+    try {
+      var r = await uploadConversations(file, providerInput.value, selectedReceipt);
+      if (stale(seq) || brain !== BRAIN) return;
+      var count = commit ? r.imported.length : r.planned.length;
+      status.textContent = count + (count === 1 ? ' draft ' : ' drafts ') +
+        (commit ? 'imported' : 'ready to import') + (r.skipped.length ? '. ' + r.skipped.length + ' skipped.' : '.');
+      if (count > 0) {
+        result.innerHTML = resultList(r.drafts, function (draft) {
+          return '<li value="' + esc(draft.row) + '">' + (commit ? conceptLink(draft.id, draft.title) : esc(draft.title)) +
+            '<span class="muted">' + (draft.createdAt ? ' · ' + dateOf(draft.createdAt) : '') + ' · ' +
+            esc(draft.messages) + (draft.messages === 1 ? ' message' : ' messages') + '</span></li>';
+        });
+      }
+      if (r.skipped.length > 0) {
+        result.insertAdjacentHTML('beforeend', '<details' + (count === 0 ? ' open' : '') + '><summary>Skipped conversations</summary>' +
+          resultList(r.skipped, function (row) {
+            return '<li value="' + esc(row.row) + '">' + esc(row.reason) + '</li>';
+          }) + '</details>');
+      }
+      if (commit) {
+        form.reset();
+        if (count > 0 && STATUS && !STATUS.hasIndex)
+          result.insertAdjacentHTML('beforeend', '<p><a href="#home">Enable search on Home</a> to find text in these drafts.</p>');
+      } else if (count > 0) {
+        receipt = r.preview;
+        confirmButton.hidden = false;
+        previewButton.classList.remove('primary');
+      }
+    } catch (err) {
+      if (!stale(seq) && brain === BRAIN) status.innerHTML = errorBox(err);
+    } finally {
+      busy = false;
+      fileInput.disabled = providerInput.disabled = previewButton.disabled = false;
+    }
+  }
+
+  fileInput.addEventListener('change', clearPreview);
+  providerInput.addEventListener('change', clearPreview);
+  form.addEventListener('submit', function (e) { e.preventDefault(); run(false); });
+  confirmButton.addEventListener('click', function () { run(true); });
 }
 
 // ---- claims view (take / resolve / calibrate) ---------------------------
