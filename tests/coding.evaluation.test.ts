@@ -40,11 +40,15 @@ test("opt-in Coding evaluations use saved evidence, separate actors, and durably
   const file = join(workspace, "src", "example.ts");
   await mkdir(join(workspace, "src"), { recursive: true });
   await writeFile(file, content);
+  for (const args of [["init", "--quiet"], ["add", "--", "src/example.ts"]]) {
+    const git = Bun.spawnSync(["git", ...args], { cwd: workspace });
+    if (git.exitCode !== 0) throw new Error(git.stderr.toString());
+  }
   const models = createModels();
   const faux = fauxProvider({ provider: "openai", models: [{ id: "review-model" }] });
   models.setProvider(faux.provider);
   const providerInputs: string[] = [];
-  faux.setResponses([0, 1].map(() => (transcript) => {
+  faux.setResponses(Array.from({ length: 4 }, () => (transcript) => {
     providerInputs.push(JSON.stringify(transcript.messages));
     return fauxAssistantMessage(responseText);
   }));
@@ -119,21 +123,46 @@ test("opt-in Coding evaluations use saved evidence, separate actors, and durably
     expect((await team.request(path + "/evaluation-review", { ...acceptance, ...secondIdentity }, reviewer)).status).toBe(400);
     await team.call(path + "/evaluation-review", { ...secondIdentity, decision: "changes_requested", verified: [] }, reviewer);
 
+    await writeFile(file, content);
+    const strategies = [
+      { strategy: "lexical", selection: { projects: ["src"] } },
+      { strategy: "indexed", selection: { profile: { version: 1, name: "Fixture index", projects: ["src"] } } },
+    ] as const;
+    const repositoryGroups = [];
+    for (const { strategy, selection } of strategies) {
+      const repository = { source: "repository", query: "document", ...selection };
+      const preview = await team.call<{ manifest: Preview }>(path + "/preview", { ...repository, measurePreview: true }, author);
+      const comparison = { session: `evaluation-${strategy}`, requestId: `${strategy}-attempt` };
+      await team.call(path + "/run", { ...run, ...comparison, ...repository, files: undefined, previewId: preview.manifest.id }, author);
+      const tokens = await waitForDone(comparison);
+      expect(tokens).toBeGreaterThan(0);
+      const evidence = await team.call<{ task: string; sources: EvaluationSource[]; evidencePresent: number[] }>(
+        path + "/evaluation-inspect", comparison, reviewer,
+      );
+      expect(evidence).toMatchObject({ task: prompt, evidencePresent: [0],
+        sources: [{ path: "src/example.ts", startLine: 1, endLine: 1, content: content.trimEnd() }] });
+      const accepted = await team.call<Attempt>(path + "/evaluation-review", { ...acceptance, ...comparison }, reviewer);
+      expect(accepted).toMatchObject({ strategy, decision: "accepted", origin: "injected", verified: [0] });
+      repositoryGroups.push(expect.objectContaining({ series: evaluation.series, strategy, origin: "injected",
+        cases: 1, attempts: 1, reviewed: 1, accepted: 1, evidenceExpected: 1, evidenceVerified: 1,
+        previewCount: 1, usageRecorded: 1, tokensPerAccepted: tokens, tokens: expect.objectContaining({ totalTokens: tokens }) }));
+    }
+
     const report = await team.call<Report>(path + "/evaluations", undefined, observer);
-    expect(report.groups).toEqual([expect.objectContaining({
+    expect(report.groups).toHaveLength(3);
+    expect(report.groups).toEqual(expect.arrayContaining([expect.objectContaining({
       series: "fixture-v1", strategy: "files", origin: "injected", attempts: 2, reviewed: 2, accepted: 1,
       cases: 1, evidenceExpected: 2, evidenceVerified: 1, previewCount: 2, usageRecorded: 2,
       meanSourceBytes: Math.round((Buffer.byteLength(JSON.stringify(inspect.sources)) + 2) / 2),
-      tokensPerAccepted: firstTokens + secondTokens,
-    })]);
-    expect(report.groups[0]?.tokens).toMatchObject({ totalTokens: firstTokens + secondTokens });
+      tokensPerAccepted: firstTokens + secondTokens, tokens: expect.objectContaining({ totalTokens: firstTokens + secondTokens }),
+    }), ...repositoryGroups]));
     expect(JSON.stringify(report)).not.toContain("private source marker");
     expect(JSON.stringify(report)).not.toContain(responseText);
     expect(JSON.stringify(report)).not.toContain(prompt);
-    expect(faux.state.callCount).toBe(2);
+    expect(faux.state.callCount).toBe(4);
     expect(await team.call<Inspection>(path + "/inspect", identity, reviewer)).not.toHaveProperty("pi.request.evaluationInput");
     const audit = await owner.call<{ kind: string }[]>(path + "/audit");
-    expect(audit.filter(({ kind }) => kind === "evaluation_accepted")).toHaveLength(1);
+    expect(audit.filter(({ kind }) => kind === "evaluation_accepted")).toHaveLength(3);
     expect(JSON.stringify(audit)).not.toContain("src/example.ts");
 
     await server.stop();
@@ -141,9 +170,10 @@ test("opt-in Coding evaluations use saved evidence, separate actors, and durably
     const restarted = client(server.url);
     expect(report).toMatchObject({ provider: "openai", model: "review-model" });
     expect(await restarted.call<Report>(path + "/evaluations", undefined, observer)).toEqual(report);
-    await restarted.call(path + "/delete-session", { session: "evaluation", confirm: "evaluation" });
+    for (const session of [identity.session, ...strategies.map(({ strategy }) => `evaluation-${strategy}`)])
+      await restarted.call(path + "/delete-session", { session, confirm: session });
     expect(await restarted.call(path + "/evaluations")).toMatchObject({ attempts: [], groups: [] });
-    expect(faux.state.callCount).toBe(2);
+    expect(faux.state.callCount).toBe(4);
   } finally {
     await server.stop();
     await rm(root, { recursive: true, force: true, maxRetries: 3 });

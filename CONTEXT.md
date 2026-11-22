@@ -65,6 +65,10 @@ The saved port is reserved from the owner listener. Bind failures stay visible
 in Coding until the operator retries or clears the preference.
 Project reviewers can explicitly reopen a selected request's saved task and
 source from Pi admission records, including each package's excerpts.
+Evaluation groups count approved source, independently verified citations,
+and recorded usage by strategy and provider origin. An operator can load the
+saved task and rubric for a fresh evaluation session in the app. Each trial
+requires a new source preview and approval.
 GitHub activity and compare handoff use a bound project remote.
 Branch publication binds exact applied patch bytes to a verified GitHub base
 commit. A separate Contents write credential creates a commit and a new ref.

@@ -5,7 +5,7 @@
   const strategyLabels = { files: 'Explicit files', lexical: 'Lexical', indexed: 'Indexed profile', packages: 'Package reviews' };
   const decisions = { accepted: 'Accepted', changes_requested: 'Changes requested' };
   const number = (value) => value === null ? '—' : value.toLocaleString();
-  const reference = ({ path, startLine, endLine }) => path + ':' + startLine + (startLine === endLine ? '' : '–' + endLine);
+  const reference = ({ path, startLine, endLine }, dash = '–') => path + ':' + startLine + (startLine === endLine ? '' : dash + endLine);
 
   function element(tag, text, className) {
     const result = document.createElement(tag);
@@ -35,18 +35,27 @@
     slot.append(details);
     const enroll = details.querySelector('[data-enroll]');
     const fields = details.querySelector('[data-case]');
+    const series = fields.querySelector('[name=evaluation-series]');
+    const task = fields.querySelector('[name=evaluation-task]');
+    const citations = fields.querySelector('textarea');
     const update = () => { fields.hidden = fields.disabled = !enroll.checked; };
     enroll.disabled = readonly;
     enroll.addEventListener('change', update);
     update();
     return {
       enabled: () => enroll.checked,
+      load(saved) {
+        series.value = saved.series;
+        task.value = saved.task;
+        citations.value = saved.evidence.map((item) => reference(item, '-')).join('\n');
+        enroll.checked = true;
+        details.open = true;
+        update();
+      },
       value() {
         if (!enroll.checked) return undefined;
-        const series = fields.querySelector('[name=evaluation-series]').value.trim();
-        const task = fields.querySelector('[name=evaluation-task]').value.trim();
-        const evidence = fields.querySelector('textarea').value.split('\n').map((item) => item.trim()).filter(Boolean);
-        return { series, task, evidence };
+        const evidence = citations.value.split('\n').map((item) => item.trim()).filter(Boolean);
+        return { series: series.value.trim(), task: task.value.trim(), evidence };
       },
     };
   }
@@ -57,7 +66,7 @@
     panel.append(element('h4', heading));
     if (group.origin === 'injected') panel.append(element('p', 'Injected provider measurements', 'muted'));
     panel.append(
-      element('p', group.attempts + ' attempts · ' + group.reviewed + ' reviewed · ' + group.accepted + ' accepted'),
+      element('p', group.attempts + (group.attempts === 1 ? ' attempt · ' : ' attempts · ') + group.reviewed + ' reviewed · ' + group.accepted + ' accepted'),
       element('p', group.cases + (group.cases === 1 ? ' distinct task' : ' distinct tasks'), 'muted'),
       element('p', group.evidenceVerified + '/' + group.evidenceExpected + ' expected citations verified'),
       element('p', 'Preview p50 / p95 ' + number(group.previewP50) + ' / ' + number(group.previewP95) + ' ms · ' + group.previewCount + ' measured', 'muted'),
@@ -69,11 +78,13 @@
     return panel;
   }
 
-  function mount(parent, { prefix, coding, readonly, detached }) {
+  function mount(parent, { prefix, coding, readonly, detached, canLoadCase, loadCase }) {
     const panel = element('details', undefined, 'coding-panel coding-evaluations');
     panel.innerHTML = '<summary>Evaluation results</summary><div class="stack coding-form">' +
       '<div class="row"><button type="button" class="small" data-refresh>Refresh evaluations</button>' +
       '<button type="button" class="small" data-copy disabled>Copy metrics as JSON</button></div>' +
+      '<label class="field" data-metrics-fallback hidden><span>Evaluation metrics JSON</span>' +
+      '<textarea rows="8" readonly spellcheck="false"></textarea></label>' +
       '<div class="stack" data-groups></div><div class="stack coding-runs" data-attempts></div>' +
       '<div class="stack" data-detail></div><p class="coding-feedback" role="status"></p></div>';
     parent.append(panel);
@@ -82,10 +93,14 @@
     const detail = panel.querySelector('[data-detail]');
     const feedback = panel.querySelector('[role=status]');
     const copy = panel.querySelector('[data-copy]');
+    const fallback = panel.querySelector('[data-metrics-fallback]');
+    const jsonField = fallback.querySelector('textarea');
     let report;
     let selected;
     let reportGeneration = 0;
     let detailGeneration = 0;
+    let copyGeneration = 0;
+    let loadingReport = false;
 
     function message(text, error = false) {
       feedback.classList.toggle('error', error);
@@ -94,16 +109,32 @@
 
     const requestIdentity = (attempt) => ({ session: attempt.session, requestId: attempt.requestId });
     const attemptKey = (attempt) => JSON.stringify([attempt.session, attempt.requestId]);
+    const settled = (attempt) => attempt.status === 'done' || attempt.status === 'unanswered';
+
+    function clearMetricsFallback() {
+      ++copyGeneration;
+      fallback.hidden = true;
+      jsonField.value = '';
+    }
 
     async function loadReport() {
       const current = ++reportGeneration;
+      loadingReport = true;
+      const useCase = detail.querySelector('[data-use-evaluation-case]');
+      if (useCase) useCase.disabled = true;
       try {
         const result = await coding(prefix + '/evaluations');
         if (detached() || current !== reportGeneration) return;
+        clearMetricsFallback();
         report = result;
         copy.disabled = !report.groups.length;
         groups.replaceChildren();
         attempts.replaceChildren();
+        if (selected && !report.attempts.some((attempt) => settled(attempt) && attemptKey(attempt) === selected)) {
+          selected = undefined;
+          ++detailGeneration;
+          detail.replaceChildren();
+        }
         if (!report.attempts.length) {
           groups.append(element('p', 'Enroll a new request in Independent evaluation to start measuring.', 'muted'));
           return;
@@ -113,7 +144,7 @@
         for (const attempt of report.attempts) {
           const button = element('button', undefined, 'coding-run');
           button.type = 'button';
-          button.disabled = attempt.status !== 'done' && attempt.status !== 'unanswered';
+          button.disabled = !settled(attempt);
           const labels = element('span');
           labels.append(element('strong', attempt.series + ' / ' + attempt.task),
             element('span', attempt.session + ' · ' + attempt.requestId, 'muted'));
@@ -129,6 +160,12 @@
         }
       } catch (error) {
         if (!detached() && current === reportGeneration) message(error.message, true);
+      } finally {
+        if (!detached() && current === reportGeneration) {
+          loadingReport = false;
+          const button = detail.querySelector('[data-use-evaluation-case]');
+          if (button) button.disabled = false;
+        }
       }
     }
 
@@ -196,35 +233,72 @@
 
     async function openReview(attempt, focus = true) {
       const current = ++detailGeneration;
+      const expected = attemptKey(attempt);
+      const isCurrent = () => !detached() && panel.isConnected && panel.open && selected === expected && current === detailGeneration;
       detail.replaceChildren(element('p', 'Loading saved evaluation source…', 'muted'));
       try {
         const result = await coding(prefix + '/evaluation-inspect', requestIdentity(attempt));
-        if (detached() || current !== detailGeneration) return;
+        if (!isCurrent()) return;
+        if (attemptKey(result.attempt) !== expected || !settled(result.attempt)) throw new Error('Refresh the evaluation before opening this case.');
         const heading = element('h4', result.attempt.task + ' · Evaluation');
         const source = element('details');
         source.append(element('summary', 'Approved source used for this request'));
         if (!result.sources.length) source.append(element('p', 'No source was attached.', 'muted'));
         for (const part of result.sources) source.append(disclosure(reference(part), part.content));
-        detail.replaceChildren(heading, disclosure('Task sent to the provider', result.task),
+        const controls = [heading];
+        if (!readonly && loadCase && canLoadCase?.() && typeof result.task === 'string' && result.task.trim() && result.attempt.evidence.length) {
+          const actions = element('div', undefined, 'row');
+          const button = element('button', 'Use evaluation case', 'small');
+          button.type = 'button';
+          button.dataset.useEvaluationCase = '';
+          button.disabled = loadingReport;
+          button.addEventListener('click', () => {
+            if (!isCurrent() || loadingReport || !button.isConnected || !canLoadCase()) return;
+            const { series, task, evidence } = result.attempt;
+            if (!loadCase({ prompt: result.task, series, task, evidence })) {
+              message('Wait for the current request to finish sending before loading this evaluation case.', true);
+              return;
+            }
+            message('');
+          });
+          actions.append(button);
+          controls.push(actions);
+        }
+        detail.replaceChildren(...controls, disclosure('Task sent to the provider', result.task),
           disclosure('Model response', result.response || result.unansweredReason || 'No response was saved.'), source, reviewForm(result));
         if (focus) {
           heading.tabIndex = -1;
           heading.focus();
         }
       } catch (error) {
-        if (!detached() && current === detailGeneration) detail.replaceChildren(element('p', error.message, 'error'));
+        if (isCurrent()) detail.replaceChildren(element('p', error.message, 'error'));
       }
     }
 
-    panel.addEventListener('toggle', () => { if (panel.open) void loadReport(); });
+    panel.addEventListener('toggle', () => {
+      if (panel.open) void loadReport();
+      else clearMetricsFallback();
+    });
     panel.querySelector('[data-refresh]').addEventListener('click', () => loadReport());
     copy.addEventListener('click', async () => {
-      if (!report) return;
+      if (!report || copy.disabled) return;
+      const current = ++copyGeneration;
+      const isCurrent = () => !detached() && panel.isConnected && panel.open && current === copyGeneration;
       const { provider, model, groups, truncated } = report;
+      const json = JSON.stringify({ provider, model, groups, truncated }, null, 2);
       try {
-        await navigator.clipboard.writeText(JSON.stringify({ provider, model, groups, truncated }, null, 2));
+        await navigator.clipboard.writeText(json);
+        if (!isCurrent()) return;
+        clearMetricsFallback();
         message('Evaluation metrics copied.');
-      } catch (error) { message(error.message, true); }
+      } catch {
+        if (!isCurrent()) return;
+        jsonField.value = json;
+        fallback.hidden = false;
+        jsonField.focus();
+        jsonField.select();
+        message('Clipboard unavailable. Copy the selected evaluation metrics JSON.');
+      }
     });
   }
 

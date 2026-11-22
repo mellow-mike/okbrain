@@ -143,7 +143,9 @@ The Vite suite makes zero provider calls. Its JSON includes an evaluation series
 4. A different authenticated project member opens the attempt under **Evaluation results**. Compare the response against the task and the approved source saved in Pi Durable. Check each citation that the response supports and accept a complete response or request changes. Acceptance requires every expected citation. This assessment is separate from the human review that authorizes a patch.
 5. Compare strategies in **Evaluation results** and copy the aggregate metrics as JSON. The report separates injected test providers from the normal provider path and shows preview p50/p95, verified citations, average serialized approved source bytes, and recorded input, output, cache read, and cache write tokens. The tokens-per-acceptance numerator includes rejected reviewed attempts, and appears when there is at least one acceptance and recorded usage for every reviewed attempt in the group. It excludes pending reviews and provider calls that never recorded usage. The copy action includes aggregate metrics, and deleting an evaluated session also deletes its evaluation records.
 
-An independent reviewer and approved live provider credentials are needed to collect live evidence. All automated checks use an injected fixture provider.
+To repeat a case with another strategy, open a finished attempt and choose **Use evaluation case**. The app fills in the saved task, series, task ID, and expected citations, and generates a fresh session and request ID. Choose the source for this trial, preview it again, and approve the preview before sending. Changing the evaluation fields also requires a fresh preview so its timing can be recorded. If clipboard access is unavailable, copy the selected text from **Evaluation metrics JSON**.
+
+An independent reviewer and approved live provider credentials are needed to collect live evidence. The automated browser check exercises submission and review with separate project tokens and an injected fixture provider.
 
 ### Review independent packages
 

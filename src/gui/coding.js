@@ -555,10 +555,12 @@
     const compactionNotice = form.querySelector('[data-send-compaction-notice]');
     const packageFields = Array.from(form.querySelectorAll('[data-package]'));
     const feedback = form.querySelector('[data-composer-feedback]');
-    const evaluation = window.okbCodingEvaluation.composerOptions(form.querySelector('[data-evaluation-options]'), readonly);
+    const evaluationOptions = form.querySelector('[data-evaluation-options]');
+    const evaluation = window.okbCodingEvaluation.composerOptions(evaluationOptions, readonly);
     let preview = null;
     let revision = 0;
     let busy = false;
+    let evaluationPrompt;
     const pendingCompactions = new Set();
 
     function updateSend() {
@@ -573,6 +575,8 @@
       previewEl.replaceChildren();
       approved.checked = false;
       approve.hidden = true;
+      previewButton.disabled = false;
+      if (feedback.textContent === 'Reading selected source…') report(feedback);
       updateSend();
     }
 
@@ -609,6 +613,7 @@
         } };
       },
       loadDraft: (preset) => {
+        evaluationPrompt = undefined;
         prompt.value = preset.prompt;
         form.elements.query.value = preset.query;
         profile.value = JSON.stringify(preset.profile, null, 2);
@@ -620,6 +625,9 @@
       clearPreview,
     });
 
+    prompt.addEventListener('input', () => { evaluationPrompt = undefined; });
+    evaluationOptions.addEventListener('input', clearPreview);
+    evaluationOptions.addEventListener('change', clearPreview);
     for (const input of [source, projects, tokenBudget, profile, files, session, requestId, prompt, approvedSourceLookup,
       form.elements.query, ...form.querySelectorAll('[data-package] input')])
       input.addEventListener('input', clearPreview);
@@ -635,6 +643,7 @@
     previewButton.addEventListener('click', async () => {
       clearPreview();
       const current = revision;
+      const isCurrent = () => current === revision && !detached();
       previewButton.disabled = true;
       report(feedback);
       feedback.textContent = 'Reading selected source…';
@@ -644,7 +653,7 @@
         if (lookup && selection.source === 'files' && !selection.files.length)
           throw new Error('Choose at least one file to allow approved source lookup.');
         const result = await coding(prefix + '/preview', { ...selection, ...(evaluation.enabled() ? { measurePreview: true } : {}) });
-        if (current !== revision || detached()) return;
+        if (!isCurrent()) return;
         previewContents(previewEl, result);
         if (result.source === 'repository' && !result.excerpts.length) return;
         if (result.source === 'packages' && result.packages.some((part) => !part.excerpts.length)) return;
@@ -657,10 +666,12 @@
         approve.hidden = false;
         approved.focus();
       } catch (error) {
-        report(feedback, error);
+        if (isCurrent()) report(feedback, error);
       } finally {
-        previewButton.disabled = false;
-        if (feedback.textContent === 'Reading selected source…') report(feedback);
+        if (isCurrent()) {
+          previewButton.disabled = false;
+          if (feedback.textContent === 'Reading selected source…') report(feedback);
+        }
       }
     });
 
@@ -672,7 +683,8 @@
       report(feedback);
       try {
         const run = await coding(prefix + '/run', {
-          ...preview.selection, approved: true, previewId: preview.id, prompt: prompt.value,
+          ...preview.selection, approved: true, previewId: preview.id,
+          prompt: evaluationPrompt?.displayed === prompt.value ? evaluationPrompt.saved : prompt.value,
           session: session.value, requestId: requestId.value, evaluation: evaluation.value(),
           ...(preview.lookup ? { approvedSourceLookup: true } : {}),
         });
@@ -705,6 +717,21 @@
       if (name !== session.value.trim()) return;
       approvedSourceLookup.checked = false;
       clearPreview();
+    };
+    panel.canLoadEvaluationCase = () => !readonly && panel.isConnected && !detached();
+    panel.loadEvaluationCase = (saved) => {
+      if (busy || !panel.canLoadEvaluationCase()) return false;
+      evaluation.load(saved);
+      prompt.value = saved.prompt;
+      // Textareas normalize line endings. Keep the saved prompt exact until the user edits it.
+      evaluationPrompt = { saved: saved.prompt, displayed: prompt.value };
+      session.value = 'eval-' + crypto.randomUUID();
+      requestId.value = crypto.randomUUID();
+      approvedSourceLookup.checked = false;
+      clearPreview();
+      report(feedback, undefined, 'Evaluation case loaded. Preview source again before sending.');
+      prompt.focus();
+      return true;
     };
     panel.updateProject(project);
     return (targetSession) => {
@@ -1651,9 +1678,12 @@
       clearConsent: (session) => clearComposerConsent(session),
       markCompactionPending: (session, pending) => composerPanel.setCompactionPending(session, pending),
     });
-    window.okbCodingEvaluation.mount(right, { prefix: projectUrl(project.id), coding, readonly, detached: isDetached });
     const clearComposerConsent = composer(left, project, readonly, isDetached, runs.selectRun, !teamMode && !readonly);
     composerPanel = left.querySelector('.coding-composer');
+    window.okbCodingEvaluation.mount(right, {
+      prefix: projectUrl(project.id), coding, readonly, detached: isDetached,
+      canLoadCase: composerPanel.canLoadEvaluationCase, loadCase: composerPanel.loadEvaluationCase,
+    });
     if (!teamMode) settings(left, project, readonly, composerPanel.updateProject, runs.refresh);
     const github = document.createElement('div');
     github.dataset.codingGithub = '';

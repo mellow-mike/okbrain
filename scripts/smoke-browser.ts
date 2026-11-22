@@ -932,6 +932,24 @@ try {
     assert.equal(await view.evaluate(() => document.documentElement.scrollWidth), 375);
     return { report, json };
   }
+  async function verifyClipboardFallback(view: Page, action: string, message: string, label: string, json: string) {
+    await view.evaluate(() => Object.defineProperty(navigator.clipboard, "writeText", {
+      configurable: true, value: () => Promise.reject(new Error("Clipboard denied")),
+    }));
+    try {
+      await view.getByRole("button", { name: action, exact: true }).click();
+      await view.getByText(message, { exact: true }).waitFor();
+      const fallback = view.getByRole("textbox", { name: label, exact: true });
+      await fallback.waitFor();
+      assert.equal(await fallback.inputValue(), json);
+      assert.deepEqual(await fallback.evaluate((element: HTMLTextAreaElement) => [
+        element.readOnly, element === document.activeElement, element.selectionStart, element.selectionEnd,
+      ]), [true, true, 0, json.length]);
+      assert.equal(await view.evaluate(() => document.documentElement.scrollWidth), 375);
+    } finally {
+      await view.evaluate(() => Reflect.deleteProperty(navigator.clipboard, "writeText"));
+    }
+  }
   const standaloneBudget = waitForBudgetInspection("/standalone", "cli-complete");
   await page.getByRole("link", { name: "Standalone sessions", exact: true }).click();
   await page.getByRole("heading", { name: "Standalone sessions", exact: true }).waitFor();
@@ -950,22 +968,8 @@ try {
   await page.getByRole("button", { name: "Copy response", exact: true }).click();
   await page.getByText("Response copied.", { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "Saved CLI answer.");
-  await page.evaluate(() => Object.defineProperty(navigator.clipboard, "writeText", {
-    configurable: true, value: () => Promise.reject(new Error("Clipboard denied")),
-  }));
-  try {
-    await page.getByRole("button", { name: "Copy run report", exact: true }).click();
-    await page.getByText("Copy the selected JSON using your browser or system Copy command.", { exact: true }).waitFor();
-    const fallback = page.getByRole("textbox", { name: "Run report JSON", exact: true });
-    await fallback.waitFor();
-    assert.equal(await fallback.inputValue(), standaloneReport.json);
-    assert.deepEqual(await fallback.evaluate((element: HTMLTextAreaElement) => [
-      element.readOnly, element === document.activeElement, element.selectionStart, element.selectionEnd,
-    ]), [true, true, 0, standaloneReport.json.length]);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
-  } finally {
-    await page.evaluate(() => Reflect.deleteProperty(navigator.clipboard, "writeText"));
-  }
+  await verifyClipboardFallback(page, "Copy run report", "Copy the selected JSON using your browser or system Copy command.",
+    "Run report JSON", standaloneReport.json);
   await page.route("**/api/coding/standalone/inspect", async (route) => {
     const response = await route.fetch();
     const payload = await response.json();
@@ -1415,29 +1419,209 @@ try {
   await projectResponse.waitFor();
   await refreshProjectRuns.click();
   await copyProjectReport.waitFor();
-  const reportMember = await codingFixture<{ token: string }>(projectPath + "/members", { name: "report-reviewer" });
-  const reportTeam = await codingFixture<{ url: string }>("/team", { action: "start", port: 0 });
-  const teamReportPage = await browser.newPage({ viewport: { width: 375, height: 700 }, reducedMotion: "reduce", locale: "en-US" });
-  try {
-    const reportOrigin = new URL(reportTeam.url).origin;
-    await teamReportPage.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: reportOrigin });
-    teamReportPage.setDefaultTimeout(8000);
-    teamReportPage.on("pageerror", (error) => errors.push(error.message));
-    await teamReportPage.route("**/*", async (route) => {
-      if (new URL(route.request().url()).origin === reportOrigin) await route.continue();
+  const evaluationKey = "project-browser-evaluation-fixture-only";
+  await codingFixture(projectPath + "/credential", { apiKey: evaluationKey });
+  const reviewer = await codingFixture<{ token: string; actor: string }>(projectPath + "/members", { name: "evaluation-reviewer" });
+  const author = await codingFixture<{ token: string; actor: string }>(projectPath + "/members", { name: "evaluation-author" });
+  const team = await codingFixture<{ url: string }>("/team", { action: "start", port: 0 });
+  const teamOrigin = new URL(team.url).origin;
+  const teamBrowser = browser;
+  const teamPages: Page[] = [];
+  async function openTeam(token: string) {
+    const view = await teamBrowser.newPage({ viewport: { width: 375, height: 700 }, reducedMotion: "reduce", locale: "en-US" });
+    teamPages.push(view);
+    await view.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: teamOrigin });
+    view.setDefaultTimeout(8000);
+    view.on("pageerror", (error) => errors.push(error.message));
+    await view.route("**/*", async (route) => {
+      if (new URL(route.request().url()).origin === teamOrigin) await route.continue();
       else {
         outbound.push(route.request().url());
         await route.abort();
       }
     });
-    await teamReportPage.goto(reportTeam.url);
-    await teamReportPage.getByLabel("Project token", { exact: true }).fill(reportMember.token);
-    await teamReportPage.getByRole("button", { name: "Open project", exact: true }).click();
-    await teamReportPage.getByRole("button", { name: /project-task-progress/ }).click();
-    const copiedByMember = await copyRunReport(teamReportPage, "project-browser", "project-task-progress", [...projectPrivateText, reportMember.token]);
+    await view.goto(team.url);
+    await view.getByLabel("Project token", { exact: true }).fill(token);
+    await view.getByRole("button", { name: "Open project", exact: true }).click();
+    return view;
+  }
+  try {
+    const reviewerPage = await openTeam(reviewer.token);
+    await reviewerPage.getByRole("button", { name: /project-task-progress/ }).click();
+    const copiedByMember = await copyRunReport(reviewerPage, "project-browser", "project-task-progress", [...projectPrivateText, reviewer.token, evaluationKey]);
     assert.deepEqual(copiedByMember.report, projectReport.report);
+
+    const authorPage = await openTeam(author.token);
+    assert.notEqual(authorPage.context(), reviewerPage.context());
+    const series = "browser-measurement";
+    const caseId = "verify-marker";
+    const caseCaption = series + " / " + caseId;
+    const evidence = "browser.ts:1";
+    const caseTask = "Check the saved evaluation approval marker and cite browser.ts line 1.";
+    const caseAnswer = "The approved marker is in sourceMarker (browser.ts:1).";
+    const evalSession = "browser-evaluation";
+    const authorComposer = authorPage.locator(".coding-composer");
+    const approvalName = "Approve sending the task, selected text, and active session history to OpenAI.";
+    const authorSend = authorComposer.getByRole("button", { name: "Send request", exact: true });
+    const authorPosts: string[] = [];
+    authorPage.on("request", (request) => {
+      if (request.method() === "POST") authorPosts.push(new URL(request.url()).pathname);
+    });
+    await authorComposer.getByLabel("Task", { exact: true }).fill(caseTask);
+    await authorComposer.getByLabel("Session", { exact: true }).fill(evalSession);
+    const evalRequestId = await authorComposer.getByLabel("Request ID", { exact: true }).inputValue();
+    await authorComposer.getByRole("combobox", { name: "Source", exact: true }).selectOption("files");
+    await authorComposer.getByLabel("Files inside the permitted directories", { exact: true }).fill("browser.ts");
+    await authorComposer.getByText("Independent evaluation", { exact: true }).click();
+    await authorComposer.getByRole("checkbox", { name: "Include this request in a measurement series" }).check();
+    await authorComposer.getByLabel("Series ID", { exact: true }).fill(series);
+    await authorComposer.getByLabel("Task ID", { exact: true }).fill(caseId);
+    await authorComposer.getByLabel("Expected citations", { exact: true }).fill(evidence);
+    assert.equal(await authorSend.isEnabled(), false);
+    const previewCase = authorPage.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding" + projectPath + "/preview");
+    await authorComposer.getByRole("button", { name: "Preview source", exact: true }).click();
+    const evaluatedPreview = await previewCase;
+    assert.ok(evaluatedPreview.ok(), await evaluatedPreview.text());
+    assert.deepEqual(evaluatedPreview.request().postDataJSON(), { source: "files", files: ["browser.ts"], measurePreview: true });
+    const { id: previewId } = (await evaluatedPreview.json()).result;
+    await authorComposer.getByText("browser.ts", { exact: true }).click();
+    assert.equal(await authorComposer.locator("[data-preview-content] pre").textContent(), branchBefore);
+    assert.equal(await authorSend.isEnabled(), false);
+    assert.ok(!authorPosts.includes("/api/coding" + projectPath + "/run"));
+    const callsBeforeEvaluation = projectFaux.state.callCount;
+    projectFaux.setResponses([(input) => {
+      const selected = JSON.stringify(input.messages);
+      assert.ok(selected.includes(caseTask) && selected.includes("approved browser source"));
+      return fauxAssistantMessage(caseAnswer);
+    }]);
+    await authorComposer.getByRole("checkbox", { name: approvalName, exact: true }).check();
+    const sendCase = authorPage.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding" + projectPath + "/run");
+    await authorSend.click();
+    const submittedCase = await sendCase;
+    assert.ok(submittedCase.ok(), await submittedCase.text());
+    assert.equal((await submittedCase.json()).result.actor, author.actor);
+    assert.deepEqual(submittedCase.request().postDataJSON(), {
+      source: "files", files: ["browser.ts"], previewId, approved: true, prompt: caseTask,
+      session: evalSession, requestId: evalRequestId, evaluation: { series, task: caseId, evidence: [evidence] },
+    });
+    const savedCaseAnswer = authorPage.locator(".coding-activity [data-answer]");
+    await savedCaseAnswer.waitFor();
+    assert.equal(await savedCaseAnswer.textContent(), caseAnswer);
+    assert.equal(projectFaux.state.callCount, callsBeforeEvaluation + 1);
+
+    const authorResults = authorPage.locator(".coding-evaluations");
+    await authorResults.getByText("Evaluation results", { exact: true }).click();
+    await authorResults.getByRole("button", { name: caseCaption }).click();
+    await authorResults.getByText("A different authenticated project member can record this evaluation.", { exact: true }).waitFor();
+    assert.equal(await authorResults.getByRole("checkbox", { name: evidence, exact: true }).isDisabled(), true);
+    assert.equal(await authorResults.getByRole("button", { name: "Save independent evaluation", exact: true }).count(), 0);
+
+    const reviewerPosts: string[] = [];
+    reviewerPage.on("request", (request) => {
+      if (request.method() === "POST") reviewerPosts.push(new URL(request.url()).pathname);
+    });
+    const editedSource = "export const sourceMarker = 'workspace edited after evaluation';\n";
+    await writeFile(file, editedSource);
+    try {
+      const results = reviewerPage.locator(".coding-evaluations");
+      await results.getByText("Evaluation results", { exact: true }).click();
+      await results.getByRole("button", { name: caseCaption }).click();
+      const details = results.locator("[data-detail]");
+      await details.getByText("Task sent to the provider", { exact: true }).click();
+      await details.getByText(caseTask, { exact: true }).waitFor();
+      await details.getByText("Model response", { exact: true }).click();
+      await details.getByText(caseAnswer, { exact: true }).waitFor();
+      await details.getByText("Approved source used for this request", { exact: true }).click();
+      await details.locator("summary").filter({ hasText: /^browser\.ts:1$/u }).click();
+      await details.getByText(branchBefore.trim(), { exact: true }).waitFor();
+      assert.equal(await details.getByText(editedSource.trim(), { exact: true }).count(), 0);
+
+      const decision = details.getByRole("combobox", { name: "Evaluation decision", exact: true });
+      const accept = decision.locator('option[value="accepted"]');
+      const save = details.getByRole("button", { name: "Save independent evaluation", exact: true });
+      assert.equal(await accept.isDisabled(), true);
+      assert.equal(await save.isEnabled(), false);
+      await details.getByRole("checkbox", { name: evidence, exact: true }).check();
+      assert.equal(await accept.isEnabled(), true);
+      await decision.selectOption("accepted");
+      const reviewCase = reviewerPage.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding" + projectPath + "/evaluation-review");
+      await save.click();
+      const reviewedCase = await reviewCase;
+      assert.ok(reviewedCase.ok(), await reviewedCase.text());
+      assert.deepEqual(reviewedCase.request().postDataJSON(), { session: evalSession, requestId: evalRequestId, decision: "accepted", verified: [0] });
+      await details.getByText("Accepted by " + reviewer.actor, { exact: true }).waitFor();
+      const metrics = results.locator("[data-groups] article");
+      await metrics.getByText("Injected provider measurements", { exact: true }).waitFor();
+      await metrics.getByText("1 attempt · 1 reviewed · 1 accepted", { exact: true }).waitFor();
+      await metrics.getByText("1/1 expected citations verified", { exact: true }).waitFor();
+      await results.getByRole("button", { name: "Copy metrics as JSON", exact: true }).click();
+      await results.getByText("Evaluation metrics copied.", { exact: true }).waitFor();
+      const metricsJson = await reviewerPage.evaluate(() => navigator.clipboard.readText());
+      for (const privateText of [caseTask, caseAnswer, branchBefore.trim(), editedSource.trim(), author.token, reviewer.token, server.token, evaluationKey, workspace]) {
+        assert.ok(!metricsJson.includes(JSON.stringify(privateText).slice(1, -1)), "Evaluation metrics exposed private input or credentials.");
+      }
+      const metricsReport = JSON.parse(metricsJson);
+      assert.deepEqual(Object.keys(metricsReport).sort(), ["groups", "model", "provider", "truncated"]);
+      assert.equal(metricsReport.model, "browser-project-fixture");
+      assert.equal(metricsReport.provider, "openai");
+      assert.equal(metricsReport.groups.length, 1);
+      const [group] = metricsReport.groups;
+      assert.deepEqual({ series: group.series, strategy: group.strategy, origin: group.origin, attempts: group.attempts, accepted: group.accepted },
+        { series, strategy: "files", origin: "injected", attempts: 1, accepted: 1 });
+      assert.equal(group.evidenceVerified, 1);
+      assert.equal(group.previewCount, 1);
+      assert.ok(group.tokensPerAccepted > 0);
+      await verifyClipboardFallback(reviewerPage, "Copy metrics as JSON", "Clipboard unavailable. Copy the selected evaluation metrics JSON.",
+        "Evaluation metrics JSON", metricsJson);
+
+      const reviewerComposer = reviewerPage.locator(".coding-composer");
+      const reviewerSend = reviewerComposer.getByRole("button", { name: "Send request", exact: true });
+      const reviewerPreview = reviewerComposer.getByRole("button", { name: "Preview source", exact: true });
+      const reviewerApproval = reviewerComposer.getByRole("checkbox", { name: approvalName, exact: true });
+      const priorSession = await reviewerComposer.getByLabel("Session", { exact: true }).inputValue();
+      const priorRequest = await reviewerComposer.getByLabel("Request ID", { exact: true }).inputValue();
+      await reviewerComposer.getByRole("combobox", { name: "Source", exact: true }).selectOption("files");
+      await reviewerComposer.getByLabel("Task", { exact: true }).fill("An unrelated draft with no files.");
+      await reviewerPreview.click();
+      await reviewerApproval.check();
+      assert.equal(await reviewerSend.isEnabled(), true);
+      const postsBeforeReuse = reviewerPosts.length;
+      await details.getByRole("button", { name: "Use evaluation case", exact: true }).click();
+      await reviewerComposer.getByText("Evaluation case loaded. Preview source again before sending.", { exact: true }).waitFor();
+      assert.equal(await reviewerComposer.getByLabel("Task", { exact: true }).inputValue(), caseTask);
+      assert.equal(await reviewerComposer.getByLabel("Series ID", { exact: true }).inputValue(), series);
+      assert.equal(await reviewerComposer.getByLabel("Task ID", { exact: true }).inputValue(), caseId);
+      assert.equal(await reviewerComposer.getByLabel("Expected citations", { exact: true }).inputValue(), evidence);
+      const reusedSession = await reviewerComposer.getByLabel("Session", { exact: true }).inputValue();
+      const reusedRequest = await reviewerComposer.getByLabel("Request ID", { exact: true }).inputValue();
+      assert.ok(reusedSession !== priorSession && reusedSession !== evalSession);
+      assert.ok(reusedRequest !== priorRequest && reusedRequest !== evalRequestId);
+      assert.equal(await reviewerComposer.getByLabel("Files inside the permitted directories", { exact: true }).inputValue(), "");
+      await reviewerApproval.waitFor({ state: "hidden" });
+      assert.equal(await reviewerSend.isEnabled(), false);
+      assert.equal(reviewerPosts.length, postsBeforeReuse);
+      await reviewerComposer.getByLabel("Files inside the permitted directories", { exact: true }).fill("browser.ts");
+      const repeatPreview = reviewerPage.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding" + projectPath + "/preview");
+      await reviewerPreview.click();
+      const repeatedPreview = await repeatPreview;
+      assert.ok(repeatedPreview.ok(), await repeatedPreview.text());
+      assert.deepEqual(repeatedPreview.request().postDataJSON(), { source: "files", files: ["browser.ts"], measurePreview: true });
+      assert.equal((await repeatedPreview.json()).result.files[0].content, editedSource);
+      await reviewerApproval.waitFor();
+      assert.equal(await reviewerApproval.isChecked(), false);
+      assert.equal(await reviewerSend.isEnabled(), false);
+      await reviewerApproval.check();
+      assert.equal(await reviewerSend.isEnabled(), true);
+      await reviewerComposer.getByLabel("Task ID", { exact: true }).fill(caseId + "-edited");
+      await reviewerApproval.waitFor({ state: "hidden" });
+      assert.equal(await reviewerSend.isEnabled(), false);
+      assert.equal(projectFaux.state.callCount, callsBeforeEvaluation + 1);
+      assert.ok(!reviewerPosts.some((path) => /\/(?:run|resume)$/u.test(path)));
+    } finally {
+      await writeFile(file, branchBefore);
+    }
   } finally {
-    await teamReportPage.close();
+    await Promise.all(teamPages.map((view) => view.close()));
     await codingFixture("/team", { action: "stop" });
   }
   assert.deepEqual(proposalRequests, []);

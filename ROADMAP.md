@@ -91,6 +91,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   indexed excerpt recall from 20.0% to 53.3% with the same source boundaries.
 - [x] Record opt-in evaluations against saved previews, compare strategy usage,
   and let a different project member review the captured evidence and outcome.
+- [x] Reuse saved evaluation cases in new sessions from the Mac and web apps.
+  Verify the author, reviewer, and injected-provider metrics in separate browsers.
 - [ ] Measure live provider usage and tokens per accepted result with
   independent human review of citations and outcomes.
 - [x] Add project authorization, expiring member tokens, dedicated worker
@@ -819,6 +821,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added evaluation case reuse and tested the author-to-reviewer
+  workflow in two browser sessions with an injected provider.
 - 2026-11-22 — Added machine-readable Coding run reports to the Mac app, web
   app, and editor, including scoped team run inspection.
 - 2026-11-22 — Applied personal enrichment’s host and path scope to every
