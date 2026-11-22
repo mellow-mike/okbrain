@@ -165,6 +165,7 @@ export async function syncRebaseInProgress(root: string): Promise<boolean> {
 }
 
 function displayRemote(value: string): string {
+  if (/^[a-z][a-z\d+.-]*::/iu.test(value)) return "Configured Git remote";
   if (/^[a-z][a-z\d+.-]*:\/\//iu.test(value)) {
     const url = URL.parse(value);
     if (!url) return "Configured Git remote";
@@ -174,7 +175,9 @@ function displayRemote(value: string): string {
     url.hash = "";
     return url.href;
   }
-  return value.replace(/^[^/\\\s@]+@(?=[^/\\\s:]+:)/u, "");
+  const hostPath = value.replace(/^[^/\\\s@]+@(?=[^/\\\s:]+:)/u, "");
+  return /^[a-z0-9.-]+:[^:\s]/iu.test(hostPath) && !/^[a-z]:[/\\]/iu.test(hostPath)
+    ? hostPath.replace(/[?#].*$/u, "") : hostPath;
 }
 
 function gitDiagnostic(result: GitResult): string {
@@ -464,7 +467,6 @@ function originDisplay(values: string[]) {
   if (!values.length) return null;
   return values.map((value) => {
     if (value === "origin") return value; // Git's literal fallback for a remote without a URL.
-    if (/^[a-z][a-z0-9+.-]*::/iu.test(value)) return "Configured Git remote";
     return /^[a-z][a-z0-9+.-]*:\/\//iu.test(value) || /^(?:[^@\s]+@)?[a-z0-9.-]+:[^:\s]/iu.test(value)
       ? displayRemote(value) : "Configured Git remote";
   }).join(", ");

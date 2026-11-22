@@ -138,7 +138,7 @@ test("replacing and disconnecting origin preserve refs, commits, and unrelated G
   await syncSettings(root, identity);
   await syncBundle(root);
   git(root, "remote", "add", "origin", "https://old-principal:old-secret@example.invalid/team/brain.git?token=old-query#old-fragment");
-  git(root, "remote", "set-url", "--push", "origin", "https://old-push@example.invalid/team/write.git");
+  git(root, "remote", "set-url", "--push", "origin", "old-push@example.invalid:team/write.git?token=old-scp-query#old-scp-fragment");
   git(root, "remote", "add", "backup", "https://backup.example.invalid/brain.git");
   git(root, "config", "okbrain.syncRemote", upstream);
   git(root, "config", "remote.origin.prune", "true");
@@ -159,7 +159,7 @@ test("replacing and disconnecting origin preserve refs, commits, and unrelated G
   const preview = await syncSettings(root, replace);
   expect(preview).toEqual({
     approval: expect.stringMatching(/^[a-f0-9]{64}$/u), change: "replace",
-    current: { origin: upstream, fetch: upstream, push: "https://example.invalid/team/write.git" },
+    current: { origin: upstream, fetch: upstream, push: "example.invalid:team/write.git" },
     proposed: { origin: to, fetch: to, push: to },
   });
   expect(JSON.stringify(preview)).not.toContain("old-");
