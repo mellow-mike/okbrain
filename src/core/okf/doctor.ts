@@ -7,7 +7,7 @@
 
 import { readFile } from "node:fs/promises";
 import { join, posix } from "node:path";
-import { extractTargets, resolvePathField } from "../graph/links.ts";
+import { extractTargets, markdownOutsideCode, resolvePathField } from "../graph/links.ts";
 import { listMdFiles } from "./bundle.ts";
 import {
   fmSources,
@@ -74,7 +74,7 @@ const COMPUTATION_TYPE = "attested computation";
 function checkLog(path: string, body: string, findings: Finding[]): void {
   let prev: string | undefined;
   let misordered = false;
-  for (const m of body.matchAll(H2)) {
+  for (const m of markdownOutsideCode(body).matchAll(H2)) {
     const h = m[1]!;
     if (!DATE.test(h)) {
       findings.push({

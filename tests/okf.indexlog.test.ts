@@ -44,13 +44,14 @@ describe("generateIndexMd", () => {
 
   test("preserves H1 and intro; regenerates all ## sections", async () => {
     await writeConcept(root, { id: "d/a", type: "note", title: "A", description: "d1" });
+    const intro = "Hand-written intro.\n\n```markdown\n# Sample title\n## Sample section\n```";
     await writeFile(
       join(root, "d", "index.md"),
-      "# My notes\n\nHand-written intro.\nSecond line.\n\n## stale\n\n- [gone](/nope.md)\n",
+      `${intro}\n\n# My notes\n\n## stale\n\n- [gone](/nope.md)\n`,
     );
     await generateIndexMd(root, "d");
     const body = await read("d", "index.md");
-    expect(body).toStartWith("# My notes\n\nHand-written intro.\nSecond line.\n\n## note\n");
+    expect(body).toStartWith(`# My notes\n\n${intro}\n\n## note\n`);
     expect(body).not.toContain("stale");
   });
 
@@ -77,6 +78,14 @@ describe("generateIndexMd", () => {
 });
 
 describe("appendLog", () => {
+  test("appends after fenced examples and validates only actual date sections", async () => {
+    const example = "~~~markdown\n## Sample heading\n## 2099-12-31\n~~~";
+    await writeFile(join(root, "log.md"), `# Log\n\n## ${todayUtc()}\n\n${example}\n`);
+    await appendLog(root, "Creation", "notes/x", "X");
+    expect(await read("log.md")).toBe(`# Log\n\n## ${todayUtc()}\n\n${example}\n\n**Creation**: [X](/notes/x.md)\n`);
+    expect((await runDoctor(root)).findings.filter(({ check }) => check.startsWith("log-"))).toEqual([]);
+  });
+
   test("creates log.md with # Log and a dated Creation entry", async () => {
     await appendLog(root, "Creation", "notes/x", "X", "made it");
     expect(await read("log.md")).toBe(

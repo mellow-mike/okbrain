@@ -26,6 +26,10 @@ declare module "*/coding.js" {
   const text: string;
   export default text;
 }
+declare module "*/coding-evaluation.js" {
+  const text: string;
+  export default text;
+}
 declare module "*/github.js" {
   const text: string;
   export default text;
@@ -46,4 +50,8 @@ declare module "*/focused-map.js" {
 declare module "*.woff2" {
   const path: string;
   export default path;
+}
+declare module "*.txt" {
+  const text: string;
+  export default text;
 }

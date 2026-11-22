@@ -24,6 +24,12 @@ export interface ClaimRow {
   resolved: string | null;
 }
 
+export function isClaimDeadline(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+}
+
 const num = (v: unknown): number | null => {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
   return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
@@ -35,23 +41,48 @@ const outcomeOf = (v: unknown): Outcome | null => {
   return v === "void" ? "void" : null;
 };
 
+async function readClaim(root: string, id: string): Promise<ClaimRow | undefined> {
+  const { doc } = await readConceptPermissive(root, id);
+  const fm = doc.frontmatter;
+  if (fmString(fm.type) !== CLAIM_TYPE) return;
+  return {
+    id,
+    title: fmString(fm.title),
+    confidence: num(fm.confidence),
+    resolveBy: fmString(fm.resolve_by) || null,
+    outcome: outcomeOf(fm.outcome),
+    resolved: fmString(fm.resolved) || null,
+  };
+}
+
 /** Every `type: claim` concept in the bundle (permissive read, no index needed). */
 export async function scanClaims(root: string): Promise<ClaimRow[]> {
   const out: ClaimRow[] = [];
   for (const id of await listConcepts(root)) {
-    const { doc } = await readConceptPermissive(root, id);
-    const fm = doc.frontmatter;
-    if (fmString(fm.type) !== CLAIM_TYPE) continue;
-    out.push({
-      id,
-      title: fmString(fm.title),
-      confidence: num(fm.confidence),
-      resolveBy: fmString(fm.resolve_by) || null,
-      outcome: outcomeOf(fm.outcome),
-      resolved: fmString(fm.resolved) || null,
-    });
+    const claim = await readClaim(root, id);
+    if (claim) out.push(claim);
   }
   return out;
+}
+
+function overdueDate(claim: ClaimRow, today: string): string | undefined {
+  if (claim.outcome === null && isClaimDeadline(claim.resolveBy) && claim.resolveBy < today) return claim.resolveBy;
+}
+
+/** Use only the review index's claim IDs, and read their current portable metadata. */
+export async function overdueClaimDates(root: string, ids: string[], now: Date): Promise<Map<string, string>> {
+  const today = now.toISOString().slice(0, 10);
+  const result = new Map<string, string>();
+  for (const id of ids) {
+    try {
+      const claim = await readClaim(root, id);
+      const date = claim && overdueDate(claim, today);
+      if (date) result.set(id, date);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return result;
 }
 
 export interface OpenClaim extends ClaimRow {
@@ -83,7 +114,7 @@ export function calibration(claims: ClaimRow[], now: Date): CalibrationReport {
   const today = now.toISOString().slice(0, 10);
   const open = claims
     .filter((c) => c.outcome === null)
-    .map((c): OpenClaim => ({ ...c, overdue: c.resolveBy !== null && c.resolveBy < today }))
+    .map((c): OpenClaim => ({ ...c, overdue: overdueDate(c, today) !== undefined }))
     .sort((a, b) => Number(b.overdue) - Number(a.overdue) || (a.id < b.id ? -1 : 1));
 
   const scored = claims.filter(

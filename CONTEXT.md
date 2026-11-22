@@ -29,6 +29,10 @@ GitHub activity and compare handoff use a bound project remote.
 The local patch workflow requires an accepted request and a separately approved
 diff. A disposable Git index checks exact worktree data and the project audit
 records the approval and applied result without copying the patch into the audit.
+Linux deployments can select a pinned worker image. The host verifies the
+preview before sending the exact approved data to a container with a single
+session mount. Project retention uses the recovery ledger to expire inactive
+terminal sessions while preserving audit records and refusing expired IDs.
 
 ---
 
@@ -757,7 +761,8 @@ account and coding commands that operate independently of a selected brain.
 ### CLI surface
 | Command | Scope | Purpose |
 |---|---|---|
-| `okb init [--actor …]` | admin | Attach a bundle as default; pick AI providers + your actor; seed root `index.md` |
+| `okb brain-templates` | read | List optional starter guides and their tag vocabularies |
+| `okb init [--actor …] [--template …]` | admin | Set up the bundle and AI providers. Optionally add a starter guide to an empty brain |
 | `okb new <type> <title> <description>` | write | Create a conformant concept at `<type>s/<slug>` |
 | `okb capture [text]` | write | Quick-capture text/stdin → `inbox/` concept |
 | `okb import <path>` | write | Map existing markdown (file/tree) → concepts; dedupe by id |
@@ -784,6 +789,7 @@ account and coding commands that operate independently of a selected brain.
 | `okb inbox` / `inbox read` | read/write | Unread clips and notes |
 | `okb clip` / `okb rss` | write | Web page / feed → cited `references/` concepts |
 | `okb index` / `okb embed` | admin | (Re)build FTS / vectors incrementally |
+| `okb watch` | admin (localOnly) | Refresh keyword search and graph links after external Markdown changes |
 | `okb rebuild --confirm-destructive` | admin | Wipe + regenerate index from bundle |
 | `okb doctor` | read | OKF v0.2 conformance + health report (signals) |
 | `okb upgrade [--dry-run] [--by …]` | write | Migrate v0.1 conventions to v0.2 |
@@ -792,7 +798,7 @@ account and coding commands that operate independently of a selected brain.
 | `okb take` / `resolve` / `calibrate` | write/read | Claims and calibration |
 | `okb brains` | read (localOnly) | List configured brain mounts |
 | `okb serve [--open]` / `okb mcp` / `okb bookmarklet` | admin (localOnly) | Local GUI+API, MCP server, clip bookmarklet |
-| `okb export-viz` | read | Self-contained graph HTML; private notes require explicit opt-in |
+| `okb export-viz` | read | Self-contained graph HTML with optional embedded fonts and explicit consent for private notes |
 | `okb version` / `--version` | — | okbrain's version |
 
 Global flags: `--json` everywhere, `--bundle <path>`, `--brain <name>`
@@ -802,10 +808,11 @@ Global flags: `--json` everywhere, `--bundle <path>`, `--brain <name>`
 The GUI's backend and the bookmarklet's target — a thin adapter generated
 over the registry, trusted like the CLI but defended like a network surface:
 - **Routes:** `GET /api/ops` (public op descriptors), `POST /api/op/<name>`
-  (JSON params → `runOp` → `{ result }`), `GET /api/ask/stream` (SSE via the
-  generic `Operation.stream` hook: events `context` → `answer` → `done` or
-  `error`; the gateway doesn't stream tokens yet, so `answer` arrives whole
-  — Backlog), `GET /clip` (bookmarklet), `GET /` + `/gui/*` (the app and its
+  (JSON params → `runOp` → `{ result }`), `GET` or `POST /api/ask/stream` (SSE via the
+  generic `Operation.stream` hook: `context` → zero or more `delta` events
+  → `answer` → `done`, or `error`). The browser posts the question with
+  local authorization headers and can cancel the synthesis request.
+  `GET /clip` (bookmarklet), `GET /` + `/gui/*` (the app and its
   vendored assets). Dedicated routes include `GET /api/status`
   (version, OKF version, active bundle path, brain, read-only, index/vector
   presence, actor, port), `GET /api/brains` (mount **names** + policy —

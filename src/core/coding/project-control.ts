@@ -3,9 +3,10 @@ import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, rmSync } from "node:fs";
 import { lstat, realpath, rm } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { dataDir, resolveActor } from "../config.ts";
 import { ensureExtensionCapableSqlite } from "../engine/custom-sqlite.ts";
+import { log } from "../log.ts";
 import {
   ApprovedPatchError, approvedPatchBytes, approvedPatchState, patchDigest, withPreparedPatch, type PatchFileReceipt,
 } from "./approved-patch.ts";
@@ -14,6 +15,8 @@ import {
   listCodingModels, previewCodingAttachments, runCodingSession,
   type CodingDependencies, type CodingProvider, type CodingSessionOptions,
 } from "./durable.ts";
+import { CodingEvaluationError, CodingEvaluations, parseEvaluation, presentEvidence } from "./evaluation.ts";
+import { dockerWorkerConfig, type DockerWorkerConfig } from "./docker-worker.ts";
 import { PackageReviewError, previewPackageReviews, validatePackageReviews } from "./package-review.ts";
 import {
   githubActivity, githubComparison, GitHubError, githubRemotes, githubToken, githubUrl,
@@ -50,6 +53,9 @@ const sessionPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const requestPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const now = () => new Date().toISOString();
 const digest = (input: string) => createHash("sha256").update(input).digest("hex");
+const retentionActor = "system:transcript-retention";
+const retentionBatchSize = 24;
+const retentionSweepInterval = 60 * 60 * 1000;
 
 function field(body: Json, name: string, max = 256): string {
   const value = body[name];
@@ -114,24 +120,48 @@ export interface ProjectControlOptions {
   stateDir?: string;
   models?: CodingDependencies["models"];
   githubFetch?: GitHubFetch;
+  workerImage?: string;
+  workerNetwork?: string;
+  retentionAllowed?: () => boolean;
+}
+
+export function codingProjectCatalogPath(stateDir = join(dataDir(), "coding-projects")) {
+  return join(stateDir, "projects.sqlite");
 }
 
 export class CodingProjectControl {
   readonly #directory: string;
   readonly #db: Database;
   readonly #lease: Database;
+  readonly #evaluations: CodingEvaluations;
   readonly #models: CodingDependencies["models"];
   readonly #githubFetch: GitHubFetch;
+  readonly #dockerWorker: DockerWorkerConfig | undefined;
+  readonly #retentionAllowed: () => boolean;
   readonly #active = new Map<string, Running>();
   #patchInFlight = false;
   readonly #gates = new Map<string, Promise<void>>();
   readonly #requests = new Set<Promise<unknown>>();
+  #retentionTimer: ReturnType<typeof setInterval> | undefined;
+  #retentionSweep: Promise<number> | undefined;
   #closing = false;
 
   constructor(options: ProjectControlOptions = {}) {
     this.#models = options.models;
     this.#githubFetch = options.githubFetch ?? fetch;
-    this.#directory = options.stateDir ?? join(dataDir(), "coding-projects");
+    this.#retentionAllowed = options.retentionAllowed ?? (() => true);
+    try {
+      this.#dockerWorker = dockerWorkerConfig(
+        options.workerImage ?? process.env.OKB_CODING_WORKER_IMAGE,
+        options.workerNetwork ?? process.env.OKB_CODING_WORKER_NETWORK,
+      );
+    } catch (error) {
+      if (error instanceof CodingError) throw new ProjectControlError(error.message, 409);
+      throw error;
+    }
+    if (this.#dockerWorker && this.#models) throw new ProjectControlError("Injected providers cannot run in a Docker worker.", 409);
+    const catalog = codingProjectCatalogPath(options.stateDir);
+    this.#directory = dirname(catalog);
     mkdirSync(this.#directory, { recursive: true, mode: 0o700 });
     const directoryInfo = lstatSync(this.#directory);
     if (!directoryInfo.isDirectory()) throw new ProjectControlError("Coding project data must be a directory.", 409);
@@ -141,7 +171,7 @@ export class CodingProjectControl {
     let db: Database | undefined;
     try {
       this.#lease.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
-      db = new Database(join(this.#directory, "projects.sqlite"), { strict: true });
+      db = new Database(catalog, { strict: true });
       db.exec(`
         PRAGMA foreign_keys = ON;
         PRAGMA secure_delete = ON;
@@ -166,8 +196,15 @@ export class CodingProjectControl {
         );
         CREATE INDEX IF NOT EXISTS audit_project_seq ON audit(project, seq DESC);
         CREATE TABLE IF NOT EXISTS session_deletions(
-          project TEXT NOT NULL REFERENCES projects(id), session TEXT NOT NULL, actor TEXT NOT NULL,
+          project TEXT NOT NULL REFERENCES projects(id), session TEXT NOT NULL, actor TEXT NOT NULL, automatic INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY (project, session)
+        );
+        CREATE TABLE IF NOT EXISTS transcript_retention(
+          project TEXT PRIMARY KEY REFERENCES projects(id), days INTEGER NOT NULL CHECK(days BETWEEN 1 AND 365)
+        );
+        CREATE TABLE IF NOT EXISTS expired_requests(
+          project TEXT NOT NULL REFERENCES projects(id), session TEXT NOT NULL, id TEXT NOT NULL,
+          PRIMARY KEY(project, session, id)
         );
         CREATE TABLE IF NOT EXISTS github_projects(
           project TEXT PRIMARY KEY REFERENCES projects(id), remote TEXT NOT NULL, repository TEXT NOT NULL, token TEXT
@@ -184,12 +221,19 @@ export class CodingProjectControl {
       // An interrupted run can be inspected and resumed with the same ID.
       db.exec("UPDATE runs SET status = 'interrupted' WHERE status = 'running'");
       this.#db = db;
+      this.#evaluations = new CodingEvaluations(db);
       if (!this.#all<{ name: string }>("PRAGMA table_info(members)").some((column) => column.name === "expires"))
         db.exec("ALTER TABLE members ADD COLUMN expires TEXT");
-      for (const deletion of this.#all<{ project: string; session: string; actor: string }>("SELECT * FROM session_deletions")) {
+      if (!this.#all<{ name: string }>("PRAGMA table_info(session_deletions)").some((column) => column.name === "automatic"))
+        db.exec("ALTER TABLE session_deletions ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0");
+      for (const deletion of this.#all<{ project: string; session: string; actor: string; automatic: number }>("SELECT * FROM session_deletions")) {
+        if (deletion.automatic && !this.#retentionAllowed()) continue;
         rmSync(this.#sessionDirectory(deletion.project, deletion.session), { recursive: true, force: true });
-        this.#finishDeletion(deletion.project, deletion.session, deletion.actor);
+        this.#finishDeletion(deletion.project, deletion.session, deletion.actor, Boolean(deletion.automatic));
       }
+      this.#retentionTimer = setInterval(() => this.#startRetentionSweep(), retentionSweepInterval);
+      this.#retentionTimer.unref();
+      this.#startRetentionSweep();
     } catch (error) {
       db?.close(true);
       this.#lease.close(true);
@@ -201,9 +245,10 @@ export class CodingProjectControl {
 
   async close() {
     this.#closing = true;
+    clearInterval(this.#retentionTimer);
     const active = [...this.#active.values()];
     for (const { stop } of active) stop?.();
-    await Promise.allSettled([...active.map(({ promise }) => promise), ...this.#requests]);
+    await Promise.allSettled([...active.map(({ promise }) => promise), ...this.#requests, this.#retentionSweep]);
     try {
       this.#db.close(true);
     } finally {
@@ -233,8 +278,17 @@ export class CodingProjectControl {
 
   #readRun(project: string, session: string, id: string): RunRow {
     const row = this.#get<RunRow>("SELECT * FROM runs WHERE project = ? AND session = ? AND id = ?", project, session, id);
-    if (!row) throw new ProjectControlError("No coding request with that ID exists in this session.", 404);
+    if (!row) {
+      this.#checkExpiredRequest(project, session, id);
+      throw new ProjectControlError("No coding request with that ID exists in this session.", 404);
+    }
     return row;
+  }
+
+  #checkExpiredRequest(project: string, session: string, id: string) {
+    if (this.#get("SELECT 1 FROM expired_requests WHERE project = ? AND session = ? AND id = ?", project, session, id)) {
+      throw new ProjectControlError("This request's transcript expired. Use a new request ID to start new work.", 410);
+    }
   }
 
   #runView({ signature: _signature, ...row }: RunRow) {
@@ -247,6 +301,7 @@ export class CodingProjectControl {
       ...settings,
       ...(actor.owner ? { workspace } : {}),
       scopes: JSON.parse(scopes) as string[],
+      workerIsolation: this.#dockerWorker ? "docker" : "process",
       credential: api_key ? "project" : actor.owner && hasCodingCredential(row.provider, { models: this.#models }) ? "environment" : "missing",
     };
   }
@@ -310,15 +365,20 @@ export class CodingProjectControl {
     return actual;
   }
 
-  async #preview(project: ProjectRow, body: Json) {
+  async #preview(project: ProjectRow, body: Json, actor: Actor) {
+    const started = performance.now();
     const source = sourceOptions(project, body);
     const workspace = await this.#workspace(project);
-    if (source.packages) return { source: "packages", ...await previewPackageReviews(workspace, source.packages) };
-    if (source.repository) return { source: "repository", ...await selectRepositoryContext({ workspace, ...source.repository }) };
-    return {
-      source: "files",
-      ...await previewCodingAttachments(workspace, source.files, JSON.parse(project.scopes)),
-    };
+    const result = source.packages
+      ? { source: "packages", ...await previewPackageReviews(workspace, source.packages) }
+      : source.repository
+        ? { source: "repository", ...await selectRepositoryContext({ workspace, ...source.repository }) }
+        : { source: "files", ...await previewCodingAttachments(workspace, source.files, JSON.parse(project.scopes)) };
+    if (body.measurePreview === true) {
+      const id = "manifest" in result ? result.manifest.id : result.id;
+      this.#evaluations.preview(project.id, actor.id, id, performance.now() - started);
+    }
+    return result;
   }
 
   #runParts(body: Json) {
@@ -379,7 +439,7 @@ export class CodingProjectControl {
         const worker = launchProjectWorker({
           options: run, stateDir: dependencies.stateDir!, workspaceBinding: project.workspace,
           apiKey: codingCredential(project.provider, dependencies),
-        }, cancel.signal, admitted);
+        }, cancel.signal, admitted, this.#dockerWorker);
         stop = worker.stop;
         result = worker.result;
       }
@@ -411,11 +471,13 @@ export class CodingProjectControl {
 
   async #start(project: ProjectRow, body: Json, actor: Actor) {
     const run = this.#runParts(body);
+    this.#checkExpiredRequest(project.id, run.session, run.requestId);
     const prompt = field(body, "prompt", 16384);
     if (body.approved !== true) throw new ProjectControlError("Review the preview and confirm the content to send.");
     const previewId = field(body, "previewId", 128);
     const selection = sourceOptions(project, body);
-    const signature = digest(JSON.stringify({ prompt, previewId, selection }));
+    const evaluation = parseEvaluation(body.evaluation, JSON.parse(project.scopes));
+    const signature = digest(JSON.stringify({ prompt, previewId, selection, ...(evaluation ? { evaluation } : {}) }));
     await this.#workspace(project);
     const prior = this.#get<RunRow>("SELECT * FROM runs WHERE project = ? AND session = ? AND id = ?", project.id, run.session, run.requestId);
     if (prior && prior.status !== "failed") {
@@ -438,6 +500,11 @@ export class CodingProjectControl {
         const time = now();
         this.#write("INSERT INTO runs(project, session, id, actor, status, signature, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
           project.id, run.session, run.requestId, actor.id, "running", signature, time, time);
+      }
+      if (evaluation || prior) {
+        const strategy = selection.packages ? "packages" : selection.repository?.profile ? "indexed" : selection.repository ? "lexical" : "files";
+        this.#evaluations.enroll({ project: project.id, ...run }, actor.id, evaluation, prompt,
+          strategy, this.#models ? "injected" : "provider", previewId);
       }
       this.#audit(project.id, "submitted", actor.id, run.session, run.requestId);
     })();
@@ -473,6 +540,36 @@ export class CodingProjectControl {
         return { run: value, admissionMissing: true };
       throw error;
     }
+  }
+
+  async #evaluate(project: ProjectRow, body: Json, actor: Actor, save: boolean) {
+    const run = this.#runParts(body);
+    const identity = { project: project.id, ...run };
+    const attempt = this.#evaluations.get(identity, actor.id);
+    if (!attempt) throw new ProjectControlError("This request was not enrolled in an evaluation.", 404);
+    if (save && !attempt.canReview)
+      throw new ProjectControlError("An independent project member can evaluate a finished run. An existing evaluation belongs to its reviewer.", 403);
+    if (attempt.status !== "done" && attempt.status !== "unanswered")
+      throw new ProjectControlError("Wait for the run to finish before opening its evaluation.", 409);
+    if (this.#active.has(`${project.id}/${run.session}`))
+      throw new ProjectControlError("Wait for the active request in this session before opening the evaluation.", 409);
+    if (this.#get("SELECT session FROM session_deletions WHERE project = ? AND session = ?", project.id, run.session))
+      throw new ProjectControlError("This session is being deleted.", 409);
+    const { request } = await getCodingSessionStatus({
+      ...this.#session(project, run), includeReceipt: !save, includeEvaluationInput: true,
+    }, this.#dependencies(project, actor));
+    if (!request?.evaluationInput) throw new ProjectControlError("The saved evaluation source could not be read.", 409);
+    const { sources, task } = request.evaluationInput;
+    if (!save) return {
+      attempt, task, sources, evidencePresent: presentEvidence(attempt.evidence, sources),
+      response: request.receipt?.status === "done" ? request.receipt.text : null,
+      unansweredReason: request.reason ?? null,
+    };
+    return this.#db.transaction(() => {
+      const { result, changed } = this.#evaluations.save(identity, actor.id, body.decision, body.verified, sources, request.usage);
+      if (changed) this.#audit(project.id, "evaluation_" + result.decision, actor.id, run.session, run.requestId);
+      return result;
+    })();
   }
 
   async #resume(project: ProjectRow, body: Json, actor: Actor) {
@@ -534,6 +631,7 @@ export class CodingProjectControl {
     this.#db.transaction(() => {
       this.#write("UPDATE applied_patches SET status = 'applied', applied = ? WHERE project = ? AND session = ? AND request_id = ?",
         applied, project.id, row.session, row.id);
+      this.#write("UPDATE runs SET updated = ? WHERE project = ? AND session = ? AND id = ?", applied, project.id, row.session, row.id);
       this.#audit(project.id, "patch_applied", actor.id, row.session, row.id);
     })();
     return applied;
@@ -598,12 +696,34 @@ export class CodingProjectControl {
     return join(this.#directory, `project-${project}`, `session-${session}`);
   }
 
-  #finishDeletion(project: string, session: string, actor: string) {
+  #finishDeletion(project: string, session: string, actor: string, automatic: boolean) {
     this.#db.transaction(() => {
+      if (automatic) this.#write(`INSERT OR IGNORE INTO expired_requests(project, session, id)
+        SELECT project, session, id FROM runs WHERE project = ? AND session = ?`, project, session);
       this.#write("DELETE FROM runs WHERE project = ? AND session = ?", project, session);
       this.#write("DELETE FROM session_deletions WHERE project = ? AND session = ?", project, session);
-      this.#audit(project, "session_deleted", actor, session);
+      this.#audit(project, automatic ? "session_expired" : "session_deleted", actor, session);
     })();
+  }
+
+  async #removeSession(project: string, session: string, actor: string, automatic: boolean) {
+    const key = `${project}/${session}`;
+    if (this.#active.has(key)) throw new ProjectControlError("Wait for this session to finish or cancel its run before deleting it.", 409);
+    const deletion = this.#db.transaction(() => {
+      const pending = this.#get<{ actor: string; automatic: number }>(
+        "SELECT actor, automatic FROM session_deletions WHERE project = ? AND session = ?", project, session,
+      );
+      if (pending) return pending;
+      this.#write("INSERT INTO session_deletions(project, session, actor, automatic) VALUES (?, ?, ?, ?)", project, session, actor, Number(automatic));
+      this.#audit(project, "session_deletion_requested", actor, session);
+      return { actor, automatic: Number(automatic) };
+    })();
+    const cancel = new AbortController();
+    const promise = rm(this.#sessionDirectory(project, session), { recursive: true, force: true })
+      .then(() => this.#finishDeletion(project, session, deletion.actor, Boolean(deletion.automatic)))
+      .finally(() => this.#active.delete(key));
+    this.#active.set(key, { cancel, promise });
+    await promise;
   }
 
   async #deleteSession(project: ProjectRow, body: Json, actor: Actor) {
@@ -611,19 +731,74 @@ export class CodingProjectControl {
     const session = field(body, "session", 64);
     if (!sessionPattern.test(session) || body.confirm !== session)
       throw new ProjectControlError("Type the session name to confirm transcript deletion.");
-    const key = `${project.id}/${session}`;
-    if (this.#active.has(key)) throw new ProjectControlError("Wait for this session to finish or cancel its run before deleting it.", 409);
-    this.#db.transaction(() => {
-      this.#write("INSERT OR IGNORE INTO session_deletions(project, session, actor) VALUES (?, ?, ?)", project.id, session, actor.id);
-      this.#audit(project.id, "session_deletion_requested", actor.id, session);
-    })();
-    const cancel = new AbortController();
-    const promise = rm(this.#sessionDirectory(project.id, session), { recursive: true, force: true })
-      .then(() => this.#finishDeletion(project.id, session, actor.id))
-      .finally(() => this.#active.delete(key));
-    this.#active.set(key, { cancel, promise });
-    await promise;
+    await this.#removeSession(project.id, session, actor.id, false);
     return { session, deleted: true };
+  }
+
+  #retentionCandidates(project: string | null, session: string | null = null) {
+    return this.#all<{ project: string; session: string }>(`
+      SELECT runs.project, runs.session FROM runs
+      JOIN transcript_retention ON transcript_retention.project = runs.project
+      LEFT JOIN coding_evaluations ON coding_evaluations.project = runs.project
+        AND coding_evaluations.session = runs.session AND coding_evaluations.request_id = runs.id
+      WHERE (? IS NULL OR runs.project = ?) AND (? IS NULL OR runs.session = ?)
+        AND NOT EXISTS (SELECT 1 FROM applied_patches
+          WHERE applied_patches.project = runs.project AND applied_patches.session = runs.session
+            AND applied_patches.status = 'prepared')
+      GROUP BY runs.project, runs.session
+      HAVING MAX(runs.status IN ('running', 'interrupted')) = 0
+        AND MAX(julianday(MAX(runs.updated, COALESCE(runs.reviewed, runs.updated), COALESCE(coding_evaluations.reviewed, runs.updated))))
+          <= julianday(?) - transcript_retention.days
+      ORDER BY MAX(runs.updated), runs.project, runs.session LIMIT ?
+    `, project, project, session, session, now(), retentionBatchSize);
+  }
+
+  async #expireTranscripts(projectId: string | null) {
+    if (this.#closing || !this.#retentionAllowed()) return 0;
+    let removed = 0;
+    for (const { project, session } of this.#retentionCandidates(projectId)) {
+      const row = this.#get<ProjectRow>("SELECT * FROM projects WHERE id = ?", project);
+      if (!row) continue;
+      try {
+        const expired = await this.#withSession(row, { session }, async () => {
+          if (this.#closing || !this.#retentionAllowed() || this.#active.has(`${project}/${session}`)
+              || !this.#retentionCandidates(project, session).length) return false;
+          await this.#removeSession(project, session, retentionActor, true);
+          return true;
+        });
+        if (expired) removed++;
+      } catch {
+        log.warn("Coding transcript could not be expired. The server will retry the deletion.", { project, session });
+      }
+    }
+    return removed;
+  }
+
+  #startRetentionSweep() {
+    if (this.#retentionSweep || this.#closing) return;
+    this.#retentionSweep = this.#expireTranscripts(null);
+    void this.#retentionSweep.catch(() => log.warn("The coding transcript retention sweep failed. It will run again in an hour."))
+      .finally(() => { this.#retentionSweep = undefined; });
+  }
+
+  async #retention(project: ProjectRow, method: string, body: Json, actor: Actor) {
+    this.#requireOwner(actor);
+    if (method === "GET") {
+      return { days: this.#get<{ days: number }>("SELECT days FROM transcript_retention WHERE project = ?", project.id)?.days ?? null,
+        active: this.#retentionAllowed() };
+    }
+    const days = body.days;
+    if (days !== null && (typeof days !== "number" || !Number.isInteger(days) || days < 1 || days > 365)) {
+      throw new ProjectControlError("Choose 1–365 days or keep transcripts until you delete them.");
+    }
+    if (!this.#retentionAllowed()) throw new ProjectControlError("Automatic transcript retention is unavailable on this server.", 403);
+    this.#db.transaction(() => {
+      if (days === null) this.#write("DELETE FROM transcript_retention WHERE project = ?", project.id);
+      else this.#write(`INSERT INTO transcript_retention(project, days) VALUES (?, ?)
+        ON CONFLICT(project) DO UPDATE SET days = excluded.days`, project.id, days);
+      this.#audit(project.id, days === null ? "retention_disabled" : "retention_enabled", actor.id);
+    })();
+    return { days, active: true, removed: days === null ? 0 : await this.#expireTranscripts(project.id) };
   }
 
   #credentials(project: ProjectRow, body: Json, actor: Actor) {
@@ -738,7 +913,10 @@ export class CodingProjectControl {
     method: string, path: string, body: Json, localOwner: boolean, token: string | null, readonly: boolean,
   ): Promise<unknown> {
     if (this.#closing) throw new ProjectControlError("The coding server is shutting down.", 409);
-    const request = this.#dispatch(method, path, body, localOwner, token, readonly);
+    const request = this.#dispatch(method, path, body, localOwner, token, readonly).catch((error: unknown) => {
+      if (error instanceof CodingEvaluationError) throw new ProjectControlError(error.message, error.status);
+      throw error;
+    });
     this.#requests.add(request);
     return request.finally(() => { this.#requests.delete(request); });
   }
@@ -752,21 +930,25 @@ export class CodingProjectControl {
       const projects = actor.owner ? this.#all<ProjectRow>("SELECT * FROM projects ORDER BY created DESC") : [this.#project(actor.project!, actor)];
       return projects.map((row) => this.#projectView(row, actor));
     }
-    if (method === "POST" && readonly && !path.endsWith("/preview") && !path.endsWith("/inspect"))
+    if (method === "POST" && readonly && !path.endsWith("/preview") && !path.endsWith("/inspect") && !path.endsWith("/evaluation-inspect"))
       throw new ProjectControlError("This server is attached to a read-only brain mount.", 403);
     if (path === "/projects" && method === "POST") return this.#addProject(body, actor);
     const match = /^\/projects\/([a-f0-9-]{36})\/([a-z-]+)$/.exec(path);
     if (!match) throw new ProjectControlError("Coding endpoint not found.", 404);
     const project = this.#project(match[1]!, actor);
     const action = match[2];
+    if (action === "retention" && (method === "GET" || method === "POST")) return this.#retention(project, method, body, actor);
     if (action?.startsWith("github-")) return this.#github(project, action, method, body, actor);
     if (method === "GET") {
+      if (action === "evaluations") return { provider: project.provider, model: project.model, ...this.#evaluations.report(project.id, actor.id) };
       if (action === "runs") return this.#all<RunRow>("SELECT * FROM runs WHERE project = ? ORDER BY updated DESC LIMIT 200", project.id).map((row) => this.#runView(row));
       if (action === "audit") return this.#all<AuditRow>("SELECT kind, actor, session, request_id, at FROM audit WHERE project = ? ORDER BY seq DESC LIMIT 200", project.id);
       if (action === "members") return this.#members(project, method, body, actor);
     }
     if (method === "POST") {
-      if (action === "preview") return this.#preview(project, body);
+      if (action === "preview") return this.#preview(project, body, actor);
+      if (action === "evaluation-inspect" || action === "evaluation-review")
+        return this.#withSession(project, body, () => this.#evaluate(project, body, actor, action === "evaluation-review"));
       if (action === "run") return this.#withSession(project, body, () => this.#start(project, body, actor));
       if (action === "inspect") return this.#withSession(project, body, () => this.#inspect(project, body, actor));
       if (action === "resume") return this.#withSession(project, body, () => this.#resume(project, body, actor));

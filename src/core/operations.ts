@@ -19,9 +19,10 @@ import { changeBrainMount } from "./brain-mounts.ts";
 import type { CodingSessionResult, CodingSessionStatusResult } from "./coding/durable.ts";
 import { CodingProjectProfileError, parseCodingProjectProfile } from "./coding/project-profile.ts";
 import type { RepositoryContextManifest, RepositoryContextSelection, RepositoryContextOptions } from "./coding/repository-context.ts";
-import { listBrains, loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
-import { calibration, CLAIM_TYPE, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
-import { buildIndex, updateIndexFor, type IndexStats } from "./engine/index-build.ts";
+import { listBrains, loadConfig, resolveBrain, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
+import { calibration, CLAIM_TYPE, isClaimDeadline, overdueClaimDates, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
+import { watchBundleInForeground, type BundleWatchStatus } from "./engine/bundle-watch.ts";
+import { buildIndex, updateIndexFor, withIndexWrite, type IndexStats } from "./engine/index-build.ts";
 import type { Engine, Neighbor, VectorStore } from "./engine/interface.ts";
 import { suggestLinks, type LinkSuggestion } from "./graph/link-suggest.ts";
 import { extractTargets } from "./graph/links.ts";
@@ -68,6 +69,7 @@ import {
 import { regenerateIndexes } from "./okf/indexmd.ts";
 import { appendLog } from "./okf/logmd.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
+import { brainStarterCatalog, createBrainStarter, findBrainStarter } from "./okf/starter.ts";
 import { upgradeBundle, type UpgradeResult } from "./okf/upgrade.ts";
 import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
 import { TOOL_ACTOR } from "./version.ts";
@@ -89,6 +91,8 @@ export type Scope = "read" | "write" | "admin";
 /** What an adapter supplies to run ops: bundle root, trust, and a lazy engine. */
 export interface OpContext {
   bundle: string;
+  /** Named mount selected by a long-running local command. */
+  brain?: string;
   trusted: boolean;
   /** Read-only brain mount (Stage 5): write/admin ops are refused. */
   readonly?: boolean;
@@ -139,7 +143,10 @@ export interface Operation {
     ctx: OpContext,
     params: Record<string, unknown>,
     emit: (event: string, data: unknown) => void,
+    signal?: AbortSignal,
   ): Promise<unknown>;
+  /** Footer for a CLI stream after its answer text has already been printed. */
+  renderStreamFooter?(result: unknown): string;
   /** CLI-only: never exposed over network adapters (local API, MCP). */
   localOnly?: boolean;
   /** Runs against per-user application state rather than a brain mount. */
@@ -269,7 +276,9 @@ const DIR_MARK: Record<Dir, string> = { out: "→", in: "←", both: "↔" };
 
 /** Incrementally refresh written concepts in the derived caches — where they exist. */
 async function reindex(ctx: OpContext, ids: string[]): Promise<void> {
-  if (ctx.hasIndex()) for (const id of ids) await updateIndexFor(ctx.bundle, id, ctx.engine());
+  await withIndexWrite(ctx.bundle, async () => {
+    if (ctx.hasIndex()) for (const id of ids) await updateIndexFor(ctx.bundle, id, ctx.engine());
+  });
   if (!ctx.hasVectors()) return;
   try {
     const emb = gatewayEmbedder(ctx.config().ai ?? {});
@@ -374,20 +383,25 @@ const reviewCfg = (c: OkbConfig) => ({
   weights: { ...defaultReviewConfig.weights, ...c.review?.weights },
 });
 
-const queueFor = (ctx: OpContext, limit?: number): ReviewItem[] => {
+const queueFor = async (ctx: OpContext, limit?: number): Promise<ReviewItem[]> => {
   const cfg = reviewCfg(ctx.config());
   const eng = ctx.engine();
-  return reviewQueue(eng.listReviewRows(), eng.listEdges(), new Date(), {
+  const rows = eng.listReviewRows();
+  const now = new Date();
+  const overdue = cfg.weights.overdueClaim > 0
+    ? await overdueClaimDates(ctx.bundle, rows.filter((row) => row.type === CLAIM_TYPE && row.status !== "deprecated").map(({ id }) => id), now)
+    : undefined;
+  return reviewQueue(rows, eng.listEdges(), now, {
     ...cfg,
     queueSize: limit ?? cfg.queueSize,
-  });
+  }, overdue);
 };
 
 /** Review target: a 1-based queue position (pure integer in range) or a concept id. */
-function resolveReviewTarget(ctx: OpContext, raw: string): string {
+async function resolveReviewTarget(ctx: OpContext, raw: string): Promise<string> {
   if (/^\d+$/.test(raw)) {
     // Rank without the display limit so positions match any `--limit` listing.
-    const q = queueFor(ctx, Number.MAX_SAFE_INTEGER);
+    const q = await queueFor(ctx, Number.MAX_SAFE_INTEGER);
     const n = Number(raw);
     if (n >= 1 && n <= q.length) return q[n - 1]!.id;
   }
@@ -480,6 +494,7 @@ async function runAsk(
   ctx: OpContext,
   p: Record<string, unknown>,
   emit?: (event: string, data: unknown) => void,
+  signal?: AbortSignal,
 ): Promise<AskResult> {
   const profile = profileOf(ctx, p);
   const gw = createGateway(ctx.config().ai ?? {});
@@ -488,7 +503,9 @@ async function runAsk(
     {
       bundle: ctx.bundle,
       arms: hybridArms(ctx),
-      chat: (messages) => gw.chat(messages),
+      chat: (messages) => gw.chat(messages, undefined, { signal }),
+      synthesize: emit && ((messages) => gw.chat(messages, undefined, { signal, onDelta: (text) => emit("delta", { text }) })),
+      signal,
       rerank: (q, hits) => maybeRerank(ctx, q, hits, profile),
       onContext: emit && ((context) => emit("context", context)),
     },
@@ -501,10 +518,12 @@ async function runAsk(
 
 function renderAnswer(result: unknown): string {
   const answer = result as AskResult;
-  const lines = [answer.answer.trim()];
-  if (answer.citations.length > 0)
-    lines.push("", "sources:", ...answer.citations.map((c) => `  ${c.id} — ${c.title}`));
-  return lines.join("\n");
+  return answer.answer.trim() + renderAnswerFooter(answer);
+}
+
+function renderAnswerFooter(result: unknown): string {
+  const { citations } = result as AskResult;
+  return citations.length ? ["", "", "sources:", ...citations.map((c) => `  ${c.id} — ${c.title}`)].join("\n") : "";
 }
 
 function renderChatgptStatus(result: unknown): string {
@@ -574,10 +593,13 @@ async function writing<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function refreshPrivateImportIndex(ctx: OpContext, ids: string[]): Promise<void> {
-  if (ids.length === 0 || !ctx.hasIndex()) return;
+  if (ids.length === 0) return;
   try {
-    const engine = ctx.engine();
-    for (const id of ids) await updateIndexFor(ctx.bundle, id, engine);
+    await withIndexWrite(ctx.bundle, async () => {
+      if (!ctx.hasIndex()) return;
+      const engine = ctx.engine();
+      for (const id of ids) await updateIndexFor(ctx.bundle, id, engine);
+    });
   } catch {
     log.warn("Private drafts were saved. Rebuild search to refresh the keyword and graph index.");
   }
@@ -667,6 +689,7 @@ export const operations: readonly Operation[] = [
         keywordOnly ? { engine: ctx.engine() } : hybridArms(ctx),
         profile,
         (p.limit as number | undefined) ?? 20,
+        true,
       );
       warnVectorSkip(ctx, vectorSkipped);
       return keywordOnly ? hits : maybeRerank(ctx, query, hits, profile);
@@ -674,9 +697,14 @@ export const operations: readonly Operation[] = [
     render: (r) => {
       const hits = r as HybridHit[];
       if (hits.length === 0) return "(no hits)";
-      return hits
-        .map((h) => `${h.score.toFixed(3)}  ${h.id} — ${h.title}  [${h.sources.join("+")}]`)
-        .join("\n");
+      return hits.flatMap((h) => {
+        const title = `${h.score.toFixed(3)}  ${h.id} — ${h.title}  [${h.sources.join("+")}]`;
+        const excerpt = h.keywordExcerpt?.map(({ text, match }) => {
+          const safe = stripVTControlCharacters(text).replace(/\s+/gu, " ");
+          return match ? `[${safe}]` : safe;
+        }).join("");
+        return excerpt ? [title, `       ${excerpt}`] : [title];
+      }).join("\n");
     },
   },
   {
@@ -687,10 +715,12 @@ export const operations: readonly Operation[] = [
     params: [
       { name: "question", type: "string", required: true, positional: true, description: "the question to answer from your notes" },
       { name: "profile", type: "string", description: "retrieval profile: lean|balanced|max (default balanced)" },
+      { name: "stream", type: "boolean", description: "print answer text as it arrives (plain CLI output)" },
     ],
     handler: (ctx, p) => runAsk(ctx, p),
-    stream: (ctx, p, emit) => runAsk(ctx, p, emit),
+    stream: (ctx, p, emit, signal) => runAsk(ctx, p, emit, signal),
     render: renderAnswer,
+    renderStreamFooter: renderAnswerFooter,
   },
   {
     name: "ask_plan",
@@ -1231,17 +1261,18 @@ export const operations: readonly Operation[] = [
       { name: "overwrite", type: "boolean", description: "update concepts whose id already exists (default: skip)" },
     ],
     handler: async (ctx, p) => {
-      const r = await writing(() =>
-        importPath(ctx.bundle, {
+      const imported: string[] = [];
+      try {
+        return await writing(() => importPath(ctx.bundle, {
           path: p.path as string,
           type: p.type as string | undefined,
           dest: p.dest as string | undefined,
           overwrite: p.overwrite as boolean | undefined,
           actor: TOOL_ACTOR,
-        }),
-      );
-      await reindex(ctx, r.imported);
-      return r;
+        }, (id) => imported.push(id)));
+      } finally {
+        if (imported.length > 0) await reindex(ctx, imported);
+      }
     },
     render: (r) => {
       const res = r as ImportResult;
@@ -1317,12 +1348,15 @@ export const operations: readonly Operation[] = [
     cliName: "export-viz",
     summary: "Write a self-contained HTML graph viewer to <bundle>/viz.html",
     scope: "read",
-    params: [{ name: "include-private", type: "boolean", description: "embed private db_only notes in the HTML" }],
+    params: [
+      { name: "include-private", type: "boolean", description: "embed private db_only notes in the HTML" },
+      { name: "fonts", type: "boolean", description: "embed the app's typefaces for offline use" },
+    ],
     handler: (ctx, p) => {
       const includePrivate = p["include-private"] === true;
       if (includePrivate && !ctx.trusted) throw new OpError("Private HTML exports require a trusted caller.", "untrusted");
       if (includePrivate && ctx.readonly) throw new OpError("Private HTML exports require a writable brain.", "refused");
-      return exportViz(ctx.bundle, { includePrivate });
+      return exportViz(ctx.bundle, { includePrivate, fonts: p.fonts === true });
     },
     render: (r) => {
       const v = r as VizExport;
@@ -1335,8 +1369,26 @@ export const operations: readonly Operation[] = [
     summary: "(Re)index the bundle incrementally (unchanged files skipped)",
     scope: "admin",
     params: [],
-    handler: (ctx) => buildIndex(ctx.bundle, ctx.engine(true)),
+    handler: (ctx) => withIndexWrite(ctx.bundle, () => buildIndex(ctx.bundle, ctx.engine(true))),
     render: renderStats,
+  },
+  {
+    name: "watch_index",
+    cliName: "watch",
+    summary: "Watch a writable brain folder and refresh keyword search and graph links",
+    scope: "admin",
+    localOnly: true,
+    params: [],
+    handler: (ctx) => watchBundleInForeground(ctx.bundle, () => {
+      if (!ctx.brain) return true;
+      const mount = resolveBrain(ctx.brain);
+      return mount.path === ctx.bundle && !mount.readonly;
+    }),
+    render: (r) => {
+      const status = r as BundleWatchStatus;
+      return status.error ?? (status.stats ? `watch stopped; last refresh ${renderStats(status.stats)}` : "watch stopped");
+    },
+    exitCode: (r) => (r as BundleWatchStatus).error ? 1 : 0,
   },
   {
     name: "rebuild",
@@ -1352,9 +1404,11 @@ export const operations: readonly Operation[] = [
           "rebuild wipes the derived index; pass --confirm-destructive to proceed",
           "refused",
         );
-      const eng = ctx.engine(true);
-      eng.wipe();
-      return buildIndex(ctx.bundle, eng);
+      return withIndexWrite(ctx.bundle, () => {
+        const eng = ctx.engine(true);
+        eng.wipe();
+        return buildIndex(ctx.bundle, eng);
+      });
     },
     render: renderStats,
   },
@@ -1429,7 +1483,7 @@ export const operations: readonly Operation[] = [
       { name: "profile", type: "string", description: "retrieval profile gating the garnish: lean|balanced|max" },
     ],
     handler: async (ctx, p) => {
-      const q = queueFor(ctx, p.limit as number | undefined);
+      const q = await queueFor(ctx, p.limit as number | undefined);
       if (p.garnish !== true || q.length === 0) return q;
       if (!profileOf(ctx, p).extras) {
         log.warn("garnish is an AI extra — off in the lean profile");
@@ -1474,7 +1528,7 @@ export const operations: readonly Operation[] = [
       { name: "id", type: "string", required: true, positional: true, description: "concept id or queue position" },
     ],
     handler: async (ctx, p) => {
-      const id = resolveReviewTarget(ctx, p.id as string);
+      const id = await resolveReviewTarget(ctx, p.id as string);
       const by = ctx.actor();
       const at = nowTimestamp();
       await writing(() => writeConcept(ctx.bundle, { id, verify: { by, at }, metadataOnly: true }));
@@ -1499,7 +1553,7 @@ export const operations: readonly Operation[] = [
     handler: async (ctx, p) => {
       const days = (p.days as number | undefined) ?? 7;
       if (days < 1) throw new OpError("days must be at least 1", "bad_params");
-      const id = resolveReviewTarget(ctx, p.id as string);
+      const id = await resolveReviewTarget(ctx, p.id as string);
       const snoozeUntil = new Date(Date.now() + days * 86_400_000)
         .toISOString()
         .replace(/\.\d{3}Z$/, "Z");
@@ -1792,7 +1846,7 @@ export const operations: readonly Operation[] = [
       const jobs: Job[] = [
         {
           name: "index",
-          run: async () => renderStats(await buildIndex(ctx.bundle, ctx.engine(true))),
+          run: async () => renderStats(await withIndexWrite(ctx.bundle, () => buildIndex(ctx.bundle, ctx.engine(true)))),
         },
         {
           name: "embed",
@@ -1819,7 +1873,7 @@ export const operations: readonly Operation[] = [
           // means surfacing today's queue in the run report.
           name: "review",
           run: async () => {
-            const q = queueFor(ctx);
+            const q = await queueFor(ctx);
             return q.length === 0
               ? "queue empty"
               : q.map((it, i) => `${i + 1}. ${it.id} (${it.score.toFixed(2)}) — ${it.reasons.join("; ")}`).join("\n");
@@ -1881,7 +1935,7 @@ export const operations: readonly Operation[] = [
       if (confidence < 0 || confidence > 100)
         throw new OpError("confidence must be 0–100", "bad_params");
       const resolveBy = p["resolve-by"] as string | undefined;
-      if (resolveBy !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(resolveBy))
+      if (resolveBy !== undefined && !isClaimDeadline(resolveBy))
         throw new OpError("resolve-by must be a YYYY-MM-DD date", "bad_params");
       const statement = (p.statement as string).trim();
       const r = await writing(async () => {
@@ -2022,7 +2076,9 @@ export const operations: readonly Operation[] = [
       }
       await regenerateIndexes(ctx.bundle, dir);
       await appendLog(ctx.bundle, "Deletion", id, fmString(view.frontmatter.title) || id);
-      if (ctx.hasIndex()) ctx.engine().removeNode(id);
+      await withIndexWrite(ctx.bundle, () => {
+        if (ctx.hasIndex()) ctx.engine().removeNode(id);
+      });
       if (ctx.hasVectors()) ctx.vectors().remove(id);
       return { id, deleted: true };
     },
@@ -2055,11 +2111,21 @@ export const operations: readonly Operation[] = [
     },
   },
   {
+    name: "brain_templates",
+    cliName: "brain-templates",
+    summary: "List starter templates for an empty brain",
+    scope: "read",
+    params: [],
+    handler: async () => brainStarterCatalog,
+    render: () => brainStarterCatalog.map((starter) => `${starter.name} — ${starter.description}`).join("\n"),
+  },
+  {
     name: "init",
     cliName: "init",
-    summary: "Attach this bundle as the default and pick AI providers (config.json)",
+    summary: "Set up a brain, its AI providers, and an optional starter template",
     scope: "admin",
     params: [
+      { name: "template", type: "string", description: `optional starter for an empty brain: ${brainStarterCatalog.map((s) => s.name).join("|")}` },
       { name: "provider", type: "string", description: "chat provider: anthropic|openai|gemini|openrouter|ollama|llamacpp|lmstudio|local" },
       { name: "model", type: "string", description: "chat model (default: the provider's default)" },
       { name: "base-url", type: "string", description: "override the chat endpoint (empty clears the override)" },
@@ -2073,6 +2139,9 @@ export const operations: readonly Operation[] = [
     handler: async (ctx, p) => {
       const local = (v: unknown): string | undefined =>
         v === "local" ? "ollama" : (v as string | undefined);
+      const starter = typeof p.template === "string" ? findBrainStarter(p.template) : undefined;
+      if (p.template !== undefined && !starter)
+        throw new OpError("Choose a starter template listed by okb brain-templates.", "bad_params");
       const cfg = loadConfig();
       if (p.actor !== undefined) cfg.actor = requireActor(p.actor);
       const ai: AiSettings = { ...cfg.ai };
@@ -2125,7 +2194,14 @@ export const operations: readonly Operation[] = [
       ai.embedProvider ??= embed.provider;
       cfg.ai = ai;
       if (p["no-default-bundle"] !== true) cfg.defaultBundle = ctx.bundle;
-      const path = saveConfig(cfg);
+      const guide = starter ? await createBrainStarter(ctx.bundle, starter) : undefined;
+      if (guide && !guide.created)
+        throw new OpError("Start with an empty brain folder that has no notes or conflicting files.", "bad_params");
+      if (guide) await withIndexWrite(ctx.bundle, async () => {
+        if (ctx.hasIndex()) await updateIndexFor(ctx.bundle, guide.id, ctx.engine());
+      });
+      const starterOnly = guide && p["no-default-bundle"] === true && Object.keys(p).length === 2;
+      const path = starterOnly ? null : saveConfig(cfg);
       // A brain starts life conformant: seed the root index.md (okf_version)
       // when the directory has none yet.
       if (!existsSync(idToAbsPath(ctx.bundle, "index"))) await regenerateIndexes(ctx.bundle, "");
@@ -2139,20 +2215,23 @@ export const operations: readonly Operation[] = [
         path,
         defaultBundle: cfg.defaultBundle ?? null,
         actor: ctx.actor(),
+        ...(guide && starter ? { starter: { name: starter.name, id: guide.id } } : {}),
         chat: describe(chat),
         embed: describe(embed),
       };
     },
     render: (r) => {
       const x = r as {
-        path: string;
+        path: string | null;
         defaultBundle: string | null;
         actor: string;
+        starter?: { name: string; id: string };
         chat: { provider: string; model: string; keyStatus: string };
         embed: { provider: string; model: string; keyStatus: string };
       };
       return [
-        `wrote ${x.path}`,
+        ...(x.path ? [`wrote ${x.path}`] : []),
+        ...(x.starter ? [`added ${x.starter.name} starter guide (${x.starter.id}.md)`] : []),
         ...(x.defaultBundle ? [`default bundle: ${x.defaultBundle}`] : []),
         `actor: ${x.actor}`,
         `chat:  ${x.chat.provider} / ${x.chat.model} (${x.chat.keyStatus})`,
@@ -2175,6 +2254,7 @@ export const operations: readonly Operation[] = [
     handler: async (ctx, p) => {
       const { url } = createApiServer({
         bundle: ctx.bundle,
+        servedBrain: ctx.brain,
         port: p.desktop ? 0 : p.port as number | undefined,
         readonly: ctx.readonly === true,
       });

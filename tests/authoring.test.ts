@@ -164,6 +164,24 @@ describe("okb import", () => {
     expect((await concept("a")).body).toContain("two");
   });
 
+  test("refreshes manifests, provenance and search for files saved before an import failure", async () => {
+    expect((await okb(["index"])).code).toBe(0);
+    const invalid = "---\ntype: [unclosed\n---\nExisting bytes\n";
+    await writeFile(join(root, "b.md"), invalid);
+    await writeFile(join(src, "a.md"), "# First result\n\nquartzleaf\n");
+    await writeFile(join(src, "b.md"), "# Replacement\n\nnew content\n");
+
+    const result = await okb(["import", src, "--overwrite"]);
+
+    expect(result.code).toBe(2);
+    expect(await readFile(join(root, "b.md"), "utf8")).toBe(invalid);
+    expect(await readFile(join(root, "index.md"), "utf8")).toContain("[First result](/a.md)");
+    expect(await readFile(join(root, "log.md"), "utf8")).toContain("**Creation**: [First result](/a.md)");
+    const search = await okb(["search", "quartzleaf", "--json"]);
+    expect(search.code).toBe(0);
+    expect(JSON.parse(search.stdout)).toEqual([expect.objectContaining({ id: "a" })]);
+  });
+
   test("in-run slug collisions keep the first source", async () => {
     await writeFile(join(src, "Foo Bar.md"), "# One\n\np\n");
     await writeFile(join(src, "foo-bar.md"), "# Two\n\np\n");

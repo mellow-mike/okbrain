@@ -142,6 +142,19 @@ describe("okb export-viz", () => {
     expect(stdout).toContain("3 concepts, 2 links");
     const out = join(root, "viz.html");
     expect(existsSync(out)).toBe(true);
-    expect(await readFile(out, "utf8")).toContain("okbrain graph");
+    const html = await readFile(out, "utf8");
+    expect(html).toContain("okbrain graph");
+    expect(html).not.toContain("data:font/woff2");
+  });
+
+  test("optionally embeds installed WOFF2 fonts and their license without external URLs", async () => {
+    const code = await runCli(["export-viz", "--bundle", root, "--fonts"], { out: () => {}, err: () => {} });
+    expect(code).toBe(0);
+    const html = await readFile(join(root, "viz.html"), "utf8");
+    const fonts = [...html.matchAll(/data:font\/woff2;base64,([A-Za-z0-9+/=]+)/g)];
+    expect(fonts).toHaveLength(4);
+    expect(fonts.map((font) => Buffer.from(font[1]!, "base64").subarray(0, 4).toString())).toEqual(Array(4).fill("wOF2"));
+    expect(html).toContain("SIL OPEN FONT LICENSE");
+    expect(html).not.toContain("/gui/fonts/");
   });
 });

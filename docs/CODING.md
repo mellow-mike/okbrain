@@ -9,7 +9,7 @@ Use the **Coding** workspace in the Mac app or local web app to review source fi
 3. Describe the task and select tracked excerpts or explicit files. Choose **Preview source**, inspect the actual text, and approve sending it with the task and active conversation history. Sending with a changed file selection requires a fresh preview.
 4. Watch **Run history** for the answer or interruption. Inspect the result and its recorded provider usage before choosing **Accept result** or **Request changes**. An interrupted run can resume with its stored input, or be cancelled. A follow-up uses the same session and a new request ID.
 
-Use **Project settings** to rotate or remove an API key, inspect the audit log, or delete a session and its transcript. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.
+Use **Project settings** to rotate or remove an API key, inspect the audit log, or set transcript retention. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.
 
 ## Give a team member access
 
@@ -101,7 +101,17 @@ The same eight-repetition suite with the current indexed ranking found 64 of 120
 | Subsystem, 12,288 tokens | Lexical | 60.0% | 55.35 / 109.85 ms | 11.5 KB |
 | Subsystem, 12,288 tokens | Current indexed | 53.3% | 34.18 / 86.69 ms | 8.0 KB |
 
-The Vite suite makes zero provider calls. Live provider token use, cache reuse, answer quality, and independent human acceptance remain unmeasured.
+The Vite suite makes zero provider calls. Its JSON includes an evaluation series ID, a fixed prompt, and exact expected file and line references for each task. The live workflow can use that rubric against the same checkout. A completed local preview measures retrieval quality only.
+
+### Evaluate provider runs with independent review
+
+1. Choose a pinned checkout or a stable revision and agree on expected evidence before running the task. Use the same provider, model, prompt, and evidence targets across strategies. Use fresh sessions for independent trials and disclose when measuring repeated turns or cache reuse.
+2. In **Coding → New request → Independent evaluation**, opt the request into a measurement series. Enter the series ID, task ID, and expected workspace-relative citations one per line, such as `src/client.ts:12-18`. Choose the explicit files, lexical excerpts, indexed profile, or independent package review strategy through the usual source controls.
+3. Preview source and approve as usual. Preview timing is recorded when you opt in before previewing. Enrollment and evidence targets stay in the evaluation catalog. The provider receives only the normal approved coding input, and evaluating the result makes no model call. Reuse the same series and task ID to compare strategies with identical prompt and evidence.
+4. A different authenticated project member opens the attempt under **Evaluation results**. Compare the response against the task and the approved source saved in Pi Durable. Check each citation that the response supports and accept a complete response or request changes. Acceptance requires every expected citation. This assessment is separate from the human review that authorizes a patch.
+5. Compare strategies in **Evaluation results** and copy the aggregate metrics as JSON. The report separates injected test providers from the normal provider path and shows preview p50/p95, verified citations, average serialized approved source bytes, and recorded input, output, cache read, and cache write tokens. The tokens-per-acceptance numerator includes rejected reviewed attempts, and appears when there is at least one acceptance and recorded usage for every reviewed attempt in the group. It excludes pending reviews and provider calls that never recorded usage. The copy action includes aggregate metrics, and deleting an evaluated session also deletes its evaluation records.
+
+An independent reviewer and approved live provider credentials are needed to collect live evidence. All automated checks use an injected fixture provider.
 
 ### Review independent packages
 
@@ -141,7 +151,30 @@ Sessions live under `$XDG_DATA_HOME/okbrain/coding` on Linux and macOS, defaulti
 
 The transcript stores prompts, selected source, and responses as local SQLite data. The chosen provider receives the prompt, selected source text, and active conversation history. The source manifest stays local. Protect session directories and backups with the same controls as the source files. For a CLI session, delete its `session-<name>` directory after all invocations have exited.
 
-Browser, Mac and IDE projects use a separate `coding-projects` directory within the same per-user application data. Each project has its own transcript directory. The project database holds the run index, review state, metadata-only audit, hashed team tokens, and any provider credentials the operator saved. A local worker subprocess receives one scoped request and the selected provider credential over its private input pipe. It reports admission and completion separately. Workers run under the server's operating-system account and have no model-facing workspace tools. A server restart leaves unsettled work available by the same request ID. An interrupted provider attempt can still have incurred upstream charges.
+Browser, Mac and IDE projects use a separate `coding-projects` directory within the same per-user application data. Each project has its own transcript directory. The project database holds the run index, review state, metadata-only audit, hashed team tokens, and any provider credentials the operator saved. Workers receive one scoped request and the selected provider credential over their private input pipe. They report admission and completion separately. A server restart leaves unsettled work available by the same request ID. An interrupted provider attempt can still have incurred upstream charges.
+
+### Run isolated workers on Linux
+
+The regular launcher uses a process under the server's operating-system account. A Linux deployment can start each request in a Docker container with a read-only root, a non-root identity, and a private bind mount of the selected session directory. The control plane checks the preview digest against current source before sending the approved snapshot. The worker can then admit it without opening the host workspace. It receives no Docker socket, checkout, personal bundles, other sessions, or project catalog. Resume reads from persisted Pi state and also works when the original checkout has moved or been removed.
+
+Build the image from the same checkout as the host application and set the pinned local image ID in the environment of the okbrain service account. That non-root account must have access to the local Docker socket at `/var/run/docker.sock`. The Coding view shows whether the server uses Docker. If the configured image is unavailable, the run enters an interrupted state and reports the launch error.
+
+```sh
+docker build --file packaging/coding-worker/Dockerfile --tag okbrain-coding-worker:local .
+export OKB_CODING_WORKER_IMAGE=$(docker image inspect --format '{{.Id}}' okbrain-coding-worker:local)
+```
+
+`OKB_CODING_WORKER_NETWORK` selects the deployment's Docker bridge network. The default is `bridge`. A deployment can restrict provider egress through that network. Use `none` for offline verification. Run the following smoke check to exercise the production worker through the local Coding API, inspect the container boundary, and confirm that a missing image never starts a local worker. [Docker runtime controls](https://docs.docker.com/reference/cli/docker/container/run/)
+
+```sh
+bun run packaging/coding-worker/smoke.ts "$OKB_CODING_WORKER_IMAGE"
+```
+
+### Limit transcript retention
+
+In **Project settings → Transcript retention**, set the number of days to keep inactive sessions. Leave the field blank to keep transcripts until you delete them. Saving a limit checks sessions in the selected project immediately. The Coding server also checks at startup and hourly, processing up to 24 expired sessions per check. Activity includes the latest run status, review, or patch application. A running or interrupted request or a pending approved patch protects its entire session.
+
+Expiry removes the session directory and its catalog records through the same recoverable deletion ledger as manual deletion. Metadata for the audit and expired request IDs remains. An expired ID returns an explicit expiration error when retried. If a service uses backups, apply the deployment's retention policy to backup copies separately.
 
 ## Apply a reviewed patch locally
 
@@ -161,4 +194,4 @@ After accepting a coding request, open **Prepare GitHub review**, choose the acc
 
 ## Validation status
 
-The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, review and approved patch replay. A local HTTPS reverse proxy was exercised in Chromium with a project token. Live provider evaluation needs an independently reviewed set of tasks and an approved provider account. Shared deployment needs validation of the target host, worker isolation, and retention policy. [Roadmap](../ROADMAP.md)
+The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, retention, review and approved patch replay. A local HTTPS reverse proxy was exercised in Chromium with a project token. The Linux Docker smoke check exercises the worker filesystem boundary, stale approval, offline Pi admission and fail-closed launch. Live provider evaluation needs an independently reviewed set of tasks and an approved provider account. The intended enterprise host, provider egress, backups and deployment policy still need verification. [Roadmap](../ROADMAP.md)

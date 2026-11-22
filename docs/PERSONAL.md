@@ -6,17 +6,27 @@ An okbrain bundle is a directory of Markdown notes with Open Knowledge Format me
 
 Open **okbrain.app** and choose **File → Open Brain Folder** if you have an existing bundle. **File → Open in Browser** opens the same brain in your browser. To start the local web server without the macOS app, run `okb serve --open` from the bundle directory. [Installation and packaging](../packaging/README.md)
 
-On **Home**, enter a **Quick note**, select **Capture**, and open the saved note. Select **Enable search and review** to build the local index. **Search** uses local keywords by default. Open **Review** to see suggested notes and the reasons they surfaced. These actions work offline. **Browse** can open notes before the index is built.
+On **Home**, enter a **Quick note**, select **Capture**, and open the saved note. Select **Enable search and review** to build the local index. **Search** uses local keywords by default and highlights matches in result excerpts. Open **Review** to see suggested notes and the reasons they surfaced. Overdue claims link directly to the outcome controls. These actions work offline. **Browse** can open notes before the index is built.
+
+In **Review**, you can change the queue size and the number of days to snooze notes. To ask your configured model to relate queue items to recent notes, opt in, select a retrieval profile, and choose **Update queue**. This sends note titles and descriptions to the configured model. The lean profile skips that model call.
+
+Open **Add** to give a capture its own title and tags, include a quote and comment with a web clip, or import a Markdown file or folder from the local server's disk with a default note type.
 
 Open **Focused map** with a question, project, or note. Filter by source, date, or private drafts. Each row explains the link direction and can move the map to the linked note.
 
 Use **Sources** to import conversations, browser bookmarks, Markdown, and Notion export files, find web capture and RSS tools, or get to AI settings. The import forms show which brain receives drafts. If you have multiple brains mounted, select a writable brain before importing.
 
+In **Add → Pull RSS feeds**, enter a feed URL or leave it blank to pull every configured feed. Set **Max new items per feed** to limit the number of new entries saved from each feed in that pull.
+
 ### Manage brain folders
 
 Use **Settings → Brain folders → Add a brain folder** to create a brain in a new or empty directory, or register an existing folder by its absolute path. Create writes a portable OKF index. Registering an existing folder keeps its contents. The new named brain opens immediately and appears in the sidebar picker.
 
+On **Home** in an empty, writable brain, open **Start with a template** to choose **Personal knowledge** or **Projects and decisions**. Each adds one editable `start-here.md` guide with suggested types and tags. You can also begin by capturing a note or importing your own files. The terminal equivalents are `okb brain-templates` to list the starters and `okb init --template personal` or `okb init --template projects` to add one from the bundle folder. Add `--no-default-bundle` to keep your current default brain.
+
 Expand a named mount in **Brain folders** to rename it, set its read-only status, or remove it from the picker. Removing the mount leaves the directory and its contents in place. To change a mount while viewing a read-only brain, switch the sidebar picker to a writable brain first.
+
+If you also edit notes in another app, open **Settings → Watch brain folder** and select **Start watching**. okbrain refreshes keyword search and graph links after saves, moves, and deletions. The watch runs while the macOS app or local server is open. Select **Stop watching** to end it sooner. The terminal equivalent is `okb watch`. Watching a named brain stops if its folder or write permission changes. Embeddings can be refreshed separately with **Settings → Embed**.
 
 ## Ask questions with your ChatGPT plan
 
@@ -44,6 +54,8 @@ okb ask-plan 'What did I conclude about spacing my reviews?'
 Model calls use the selected account's ChatGPT plan allowance or available credits. If permission, usage, or the connection is unavailable when okbrain needs a model, the command returns an error on that route. An empty retrieval result ends before inference. Account credentials are stored per user outside the bundle. `okb chatgpt disconnect` clears the selected connection's local credentials and attempts remote revocation. If revocation fails, remove the connection from ChatGPT. [ChatGPT usage and connection controls](https://chatgpt.com/settings/usage)
 
 `okb ask` and the app's **Ask** screen use the configured AI provider. Choose the provider, model, and optional endpoint in **Settings**. For an API-backed provider, save its key under **Provider API keys**, or supply its environment variable. Saved keys stay in per-user application data. A local model runs without an API key.
+
+**Ask** displays text as the provider returns it and verifies citations when the answer completes. **Stop** cancels the in-flight answer. Providers that return a complete response display it in one piece. Use `okb ask --stream 'your question'` for incremental terminal output. `--json` returns a single completed result.
 
 ## Import conversations
 
@@ -81,7 +93,7 @@ Open **Sources → Live Notion pages**. A Notion workspace owner can create an i
 
 Enter a shared Notion page URL or ID and select **Preview page**. This reads the page text using Notion's Markdown API. The preview indicates when the response omits or truncates blocks. Imported drafts include the source page link. Embedded media and meeting transcripts are excluded. **Save private draft** saves the reviewed snapshot locally, and a later import of changed text creates a separate draft. Select **Disconnect Notion** to remove the local token, and remove the page's shared connection in Notion to revoke its access. [Notion's page Markdown API](https://developers.notion.com/reference/retrieve-page-markdown)
 
-`okb index` builds or repairs the local keyword and graph index. Import refreshes an existing index and leaves embeddings for a separate `okb embed` run. If you configure a remote embedding provider, that run can send note text to it. The regular `okb search` command can also use configured remote embedding and reranking providers when those retrieval arms are available.
+**Settings → Re-index** builds or repairs the local keyword and graph index. Import refreshes an existing index. Use **Settings → Embeddings** to refresh that cache separately. Set **Max notes this run** to cap how many notes are sent for embedding. The provider and model override fields apply to that run. Changing the provider or model rebuilds the vector cache. If you choose a remote embedding provider, the run can send note text to it. The regular `okb search` command can also use configured remote embedding and reranking providers when those retrieval arms are available.
 
 ## Open and share a brain
 
@@ -90,7 +102,7 @@ okb serve --open
 okb export-viz
 ```
 
-The local GUI can browse, search, and edit conversation drafts in its selected bundle. `okb sync` keeps untracked `db_only/` files out of Git and omits private note metadata from the shared root index and log. When managing the bundle directly with Git, verify that `db_only/` is ignored and untracked. **Settings → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`.
+The local GUI can browse, search, and edit conversation drafts in its selected bundle. **Settings → Sync now** accepts an optional commit message and uses an automatic timestamped message when the field is blank. Sync keeps untracked `db_only/` files out of Git and omits private note metadata from the shared root index and log. When managing the bundle directly with Git, verify that `db_only/` is ignored and untracked. **Settings → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`. Select **Embed app fonts in graph export** or pass `--fonts` to include the app's typefaces for offline viewing.
 
 ## Connect an MCP client
 

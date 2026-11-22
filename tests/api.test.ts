@@ -9,7 +9,9 @@ import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventSourceParserStream } from "eventsource-parser/stream";
 import { corsHeaders, createApiServer, hostAllowed, type ApiServer } from "../src/api.ts";
+import { runCli } from "../src/cli.ts";
 import { loadConfig, saveConfig } from "../src/core/config.ts";
 import { createGateway } from "../src/core/ai/gateway.ts";
 import type { focusedMap } from "../src/core/graph/focus.ts";
@@ -189,6 +191,33 @@ describe("request guards", () => {
     } finally {
       await rm(join(bundle, `${secret}.md`), { force: true });
       await rm(join(bundle, "notes", "focus.md"), { force: true });
+      await post("index", {});
+    }
+  });
+
+  test("keyword search returns marked spans for the app and brackets them in CLI output", async () => {
+    const response = await post("search", { query: "databases", "keyword-only": true });
+    expect(response.status).toBe(200);
+    const hits = (await response.json() as { result: { id: string; keywordExcerpt?: { text: string; match: boolean }[] }[] }).result;
+    expect(hits.find((hit) => hit.id === "notes/alpha")?.keywordExcerpt).toContainEqual({ text: "databases", match: true });
+    const cli = await okb(["--bundle", bundle, "search", "databases", "--keyword-only"]);
+    expect(cli.code).toBe(0);
+    expect(cli.stdout).toContain("[databases]");
+  });
+
+  test("an overdue claim appears in Review and stops contributing after settlement", async () => {
+    const accepted = await post("take", { statement: "An old prediction", confidence: 75, "resolve-by": "2001-07-10" });
+    expect(accepted.status).toBe(200);
+    const { result: claim } = await accepted.json() as { result: { id: string } };
+    try {
+      const listed = async () => (await (await post("review_queue", { limit: 50 })).json() as { result: { id: string; overdueClaim?: string; reasons: string[] }[] }).result;
+      expect((await listed()).find((item) => item.id === claim.id)).toMatchObject({ overdueClaim: "2001-07-10" });
+      expect((await listed()).find((item) => item.id === claim.id)?.reasons).toContain("claim due 2001-07-10");
+      expect((await post("resolve", { id: claim.id, outcome: "correct" })).status).toBe(200);
+      expect((await listed()).find((item) => item.id === claim.id)?.overdueClaim).toBeUndefined();
+      expect((await post("take", { statement: "Invalid date", confidence: 75, "resolve-by": "2026-02-30" })).status).toBe(400);
+    } finally {
+      await rm(join(bundle, `${claim.id}.md`), { force: true });
       await post("index", {});
     }
   });
@@ -568,6 +597,60 @@ describe("SSE ask stream (stub chat server)", () => {
     const r = await call("api/ask/stream");
     expect(r.status).toBe(400);
     expect(((await r.json()) as { error: string }).error).toContain("question");
+  });
+
+  test("browser POST and CLI streaming both receive text before provider completion", async () => {
+    const proceed = Promise.withResolvers<void>();
+    let calls = 0;
+    const provider = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      async fetch(request) {
+        const body = await request.json() as { stream?: boolean };
+        expect(body.stream).toBe(true);
+        calls++;
+        const encode = (data: unknown) => new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
+        return new Response(new ReadableStream({
+          async start(controller) {
+            controller.enqueue(encode({ choices: [{ delta: { content: "Databases " } }] }));
+            await proceed.promise;
+            controller.enqueue(encode({ choices: [{ delta: { content: "[notes/alpha]" }, finish_reason: "stop" }] }));
+            controller.close();
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    process.env.OKB_CHAT_BASE_URL = `http://127.0.0.1:${provider.port}`;
+    try {
+      const request = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: "databases" }) };
+      const foreign = await call("api/ask/stream", { ...request, headers: { ...request.headers, origin: "https://other.example" } });
+      expect(foreign.status).toBe(403);
+      const response = await call("api/ask/stream", request);
+      const reader = response.body!.pipeThrough(new TextDecoderStream()).pipeThrough(new EventSourceParserStream()).getReader();
+      expect((await reader.read()).value?.event).toBe("context");
+      expect((await reader.read()).value).toMatchObject({ event: "delta", data: JSON.stringify({ text: "Databases " }) });
+
+      const firstChunk = Promise.withResolvers<void>();
+      const chunks: string[] = [];
+      const cli = runCli(["--bundle", bundle, "ask", "databases", "--stream"], {
+        out(text) { chunks.push(text); firstChunk.resolve(); },
+        err() {},
+      });
+      await firstChunk.promise;
+      expect(chunks).toEqual(["Databases "]);
+      proceed.resolve();
+      expect((await reader.read()).value?.event).toBe("delta");
+      const answer = await reader.read();
+      expect(answer.value?.event).toBe("answer");
+      expect(JSON.parse(answer.value!.data).citations).toEqual([{ id: "notes/alpha", title: "Alpha" }]);
+      expect((await reader.read()).value?.event).toBe("done");
+      expect(await cli).toBe(0);
+      expect(chunks.join("")).toContain("Databases [notes/alpha]\n\nsources:");
+      expect(calls).toBe(2);
+    } finally {
+      proceed.resolve();
+      await provider.stop(true);
+      process.env.OKB_CHAT_BASE_URL = `http://127.0.0.1:${chat.port}`;
+    }
   });
 
   test("a chat failure surfaces as an SSE error event, not a broken response", async () => {

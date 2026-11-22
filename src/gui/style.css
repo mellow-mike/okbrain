@@ -5,16 +5,6 @@
    needs <body class="app">. Motion is the last section. No framework, no
    build step. */
 
-/* The faces ship inside the binary (fonts/README.md): no CDN, no network. */
-@font-face { font-family: "Recursive Sans"; src: url("/gui/fonts/RecursiveSans-VF.woff2") format("woff2");
-             font-weight: 300 800; font-style: normal; font-display: block; }
-@font-face { font-family: "Recursive Mono"; src: url("/gui/fonts/RecursiveMono-VF.woff2") format("woff2");
-             font-weight: 400 700; font-style: normal; font-display: block; }
-@font-face { font-family: Literata; src: url("/gui/fonts/Literata-VF.woff2") format("woff2");
-             font-weight: 400 700; font-style: normal; font-display: block; }
-@font-face { font-family: Literata; src: url("/gui/fonts/Literata-Italic-VF.woff2") format("woff2");
-             font-weight: 400 700; font-style: italic; font-display: block; }
-
 /* ---- theme-scoped weights -------------------------------------------------
    Light type on a dark ground reads heavier, so the dark theme sets running
    text lighter. Recursive is uniwidth: this never moves a line. */
@@ -99,6 +89,10 @@ label.row { cursor: pointer; }
 
 .field { display: flex; flex-direction: column; gap: var(--space-1); }
 .field[hidden] { display: none; }
+#askstop[hidden] { display: none; }
+.ask-partial { white-space: pre-wrap; overflow-wrap: anywhere; }
+.search-excerpt { overflow-wrap: anywhere; }
+.search-excerpt mark { color: var(--accent-ink); background: var(--accent); border-radius: var(--radius-xs); }
 .field > span { font-size: 11px; line-height: 14px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 form .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
 form .grid.three { grid-template-columns: 1fr 1fr 1fr; }

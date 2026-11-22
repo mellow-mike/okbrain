@@ -7,6 +7,7 @@
 // `okb rebuild` runs — recreates the current schema unconditionally.
 
 import { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Status, TrustTier } from "../okf/document.ts";
@@ -19,6 +20,7 @@ import type {
   NodeRecord,
   NodeUpsert,
   ReviewRow,
+  SearchExcerptPart,
   SearchHit,
 } from "./interface.ts";
 
@@ -78,6 +80,22 @@ export function toMatchExpr(query: string): string {
     .join(" ");
 }
 
+function excerptParts(excerpt: string, marker: string): SearchExcerptPart[] {
+  const parts: SearchExcerptPart[] = [];
+  let budget = 320;
+  let match = false;
+  for (const part of excerpt.split(new RegExp(`(${marker}[<>])`, "u"))) {
+    if (part === `${marker}<` || part === `${marker}>`) { match = part.endsWith("<"); continue; }
+    if (part === "") continue;
+    if (budget <= 0) { parts.push({ text: "…", match: false }); break; }
+    const text = part.length > budget ? part.slice(0, budget) + "…" : part;
+    parts.push({ text, match });
+    if (part.length > budget) break;
+    budget -= part.length;
+  }
+  return parts;
+}
+
 interface NodeRow {
   id: string;
   type: string;
@@ -122,8 +140,14 @@ export function openSqliteEngine(dbPath: string): Engine {
   ensureExtensionCapableSqlite();
   if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
   const db = new Database(dbPath, { create: true });
-  db.exec("PRAGMA journal_mode = WAL");
-  let schemaOk = migrate(db);
+  let schemaOk: boolean;
+  try {
+    db.exec("PRAGMA busy_timeout = 1000; PRAGMA journal_mode = WAL");
+    schemaOk = migrate(db);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 
   // Data methods refuse a stale schema so a v1 index can't half-answer.
   const fresh =
@@ -309,15 +333,23 @@ export function openSqliteEngine(dbPath: string): Engine {
       ).all(id, limit),
     })),
 
-    search: fresh((query, limit = 20) => {
+    search: fresh((query, limit = 20, excerpts = false) => {
       const expr = toMatchExpr(query);
       if (expr === "") return [];
       // Column weights (title, body, tags): a title hit should beat a body hit.
+      const rows = `FROM fts JOIN nodes n ON n.rowid = fts.rowid WHERE fts MATCH ? ORDER BY score DESC, n.id LIMIT ?`;
+      const fields = `n.id, n.title, -bm25(fts, 10.0, 1.0, 5.0) AS score`;
+      if (excerpts) {
+        // Markers are per query so source text cannot masquerade as highlighting.
+        const marker = randomUUID();
+        return db.query<SearchHit & { excerpt: string }, [string, string, string, number]>(
+          `SELECT ${fields}, snippet(fts, -1, ?, ?, '…', 18) AS excerpt ${rows}`,
+        ).all(`${marker}<`, `${marker}>`, expr, limit)
+          .map(({ excerpt, ...hit }) => ({ ...hit, keywordExcerpt: excerptParts(excerpt, marker) }));
+      }
       return db
         .query<SearchHit, [string, number]>(
-          `SELECT n.id, n.title, -bm25(fts, 10.0, 1.0, 5.0) AS score
-           FROM fts JOIN nodes n ON n.rowid = fts.rowid
-           WHERE fts MATCH ? ORDER BY score DESC, n.id LIMIT ?`,
+          `SELECT ${fields} ${rows}`,
         )
         .all(expr, limit);
     }),

@@ -7,6 +7,7 @@
 
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join, posix, resolve } from "node:path";
+import { markdownOutsideCode } from "../graph/links.ts";
 import { readConceptPermissive } from "./bundle.ts";
 import { fmString, OkfParseError, parse, serialize } from "./document.ts";
 import { isReservedName } from "./paths.ts";
@@ -39,16 +40,12 @@ async function readExisting(absPath: string): Promise<ExistingIndex | null> {
     if (!(e instanceof OkfParseError)) throw e;
     return null;
   }
-  const at = doc.body.search(/^## /m);
+  const headings = markdownOutsideCode(doc.body);
+  const at = headings.search(/^##[ \t]+/m);
   const head = at === -1 ? doc.body : doc.body.slice(0, at);
-  let h1: string | undefined;
-  const introLines: string[] = [];
-  for (const line of head.split("\n")) {
-    const m = /^# (.+)$/.exec(line);
-    if (!h1 && m) h1 = m[1]!.trim();
-    else introLines.push(line);
-  }
-  const intro = introLines.join("\n").trim();
+  const title = /^#[ \t]+(.+)$/m.exec(headings.slice(0, head.length));
+  const h1 = title?.[1]?.trim();
+  const intro = (title ? head.slice(0, title.index) + head.slice(title.index + title[0].length + 1) : head).trim();
   return { fm: doc.frontmatter, h1, intro: intro || undefined };
 }
 
@@ -113,8 +110,18 @@ export async function generateIndexMd(root: string, dir: string): Promise<void> 
 
 /** Regenerate index.md for a touched dir and every ancestor up to the root. */
 export async function regenerateIndexes(root: string, dir: string): Promise<void> {
-  for (let d = dir; ; d = posix.dirname(d) === "." ? "" : posix.dirname(d)) {
-    await generateIndexMd(root, d); // deepest first, so parents see fresh intros
-    if (d === "") return;
+  await regenerateIndexBranches(root, [dir]);
+}
+
+/** Regenerate each touched directory and ancestor once, with children before parents. */
+export async function regenerateIndexBranches(root: string, dirs: Iterable<string>): Promise<void> {
+  const pending = new Map<string, number>();
+  for (const dir of dirs) {
+    let depth = dir ? dir.split("/").length : 0;
+    for (let path = dir; !pending.has(path); path = posix.dirname(path) === "." ? "" : posix.dirname(path)) {
+      pending.set(path, depth--);
+      if (path === "") break;
+    }
   }
+  for (const [path] of [...pending].sort((a, b) => b[1] - a[1])) await generateIndexMd(root, path);
 }

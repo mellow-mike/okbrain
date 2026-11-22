@@ -228,6 +228,7 @@ var DIR_MARK = { out: '→', in: '←', both: '↔' };
 // Every render gets a generation number; async work checks `stale(seq)` after
 // each await so a render abandoned by navigation never touches the new view.
 var gen = 0;
+var activeAsk = null;
 function stale(seq) { return seq !== gen; }
 function setHtml(id, html) {
   var el = document.getElementById(id);
@@ -246,6 +247,8 @@ view.addEventListener('click', function (e) {
 // Each route is a page turn (Okb.go): the render runs inside one view
 // transition, which captures the new view once the render has settled.
 function route() {
+  activeAsk?.abort();
+  activeAsk = null;
   var h = location.hash.slice(1) || 'home';
   var slash = h.indexOf('/');
   var name = slash < 0 ? h : h.slice(0, slash);
@@ -335,12 +338,53 @@ function wireCards(listEl, handle) {
 
 // ---- home ----------------------------------------------------------------
 
+async function mountBrainStarter(panel, seq) {
+  try {
+    var templates = await api('brain_templates', {});
+    if (stale(seq) || panel.hidden || !templates.length) return;
+    panel.innerHTML = '<form class="card stack"><h3>Start with a template</h3>' +
+      '<label class="field"><span>Starter template</span><select name="template" required>' +
+      '<option value="">Choose a starter</option>' + templates.map(function (template) {
+        return '<option value="' + esc(template.name) + '">' + esc(template.title) + '</option>';
+      }).join('') + '</select></label><div data-template-preview aria-live="polite"></div>' +
+      '<div class="row"><button type="submit" disabled>Create starter guide</button><span role="status"></span></div></form>';
+    var form = panel.querySelector('form');
+    var select = form.elements.template;
+    var submit = form.querySelector('button');
+    var preview = form.querySelector('[data-template-preview]');
+    var message = form.querySelector('[role="status"]');
+    select.addEventListener('change', function () {
+      var template = templates.find(function (option) { return option.name === select.value; });
+      submit.disabled = !template;
+      message.textContent = '';
+      preview.innerHTML = template
+        ? '<p class="muted">' + esc(template.description) + ' This adds one editable Markdown guide.</p>' + chips(template.tags)
+        : '';
+    });
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      if (!select.value || submit.disabled) return;
+      select.disabled = submit.disabled = true;
+      Okb.working(message, 'creating guide');
+      var brain = BRAIN;
+      try {
+        var result = await api('init', { template: select.value, 'no-default-bundle': true });
+        if (!stale(seq) && BRAIN === brain) location.hash = conceptHref(result.starter.id);
+      } catch (error) {
+        if (!stale(seq)) message.innerHTML = errorBox(error);
+      } finally { select.disabled = submit.disabled = false; }
+    });
+  } catch (error) {
+    if (!stale(seq) && !panel.hidden) panel.innerHTML = errorBox(error);
+  }
+}
+
 async function renderHome(_arg, seq) {
   var name = STATUS ? (STATUS.brain || basename(STATUS.bundle)) : 'your brain';
   var readonly = STATUS && STATUS.readonly;
   view.innerHTML =
     '<div class="stack wide"><h2 class="display">' + esc(name) + '</h2>' +
-    '<div id="h-index"></div><div id="h-tiles"></div>' +
+    '<div id="h-index"></div><div id="h-tiles"></div><section id="h-starter" hidden></section>' +
     (readonly ? '' : '<form id="h-cap" class="card stack"><label class="field"><span>Quick note</span>' +
     '<textarea rows="2" id="h-cap-text" placeholder="Capture a thought…" required></textarea></label>' +
     '<div class="row"><button class="primary">Capture</button><span id="h-cap-msg" class="muted" role="status"></span></div></form>') +
@@ -399,6 +443,7 @@ async function renderHome(_arg, seq) {
       msg.querySelector('a').focus();
       loadInboxPreview();
       loadTiles();
+      loadRecent();
     } catch (err) { msg.innerHTML = errorBox(err); }
     finally { submit.disabled = false; }
   });
@@ -430,7 +475,7 @@ async function renderHome(_arg, seq) {
         ? q.map(function (it) {
             return '<div class="card compact" data-id="' + esc(it.id) + '"><div class="title">' +
               conceptLink(it.id, it.title) + '</div><div class="why">' + esc(it.reasons.join('; ')) + '</div>' +
-              '<div class="row"><button class="small" data-act="done" title="records a verified event by you">Reviewed ✓</button>' +
+              '<div class="row">' + reviewClaimLink(it) + '<button class="small" data-act="done" title="records a verified event by you">Reviewed ✓</button>' +
               '<button class="small" data-act="snooze">Snooze</button></div></div>';
           }).join('')
         : '<div class="empty">Nothing needs review.</div>';
@@ -468,6 +513,10 @@ async function renderHome(_arg, seq) {
     var el = document.getElementById('h-recent');
     try {
       var rows = await api('list_concepts', { detail: true });
+      if (stale(seq)) return;
+      var starter = document.getElementById('h-starter');
+      starter.hidden = !!readonly || rows.length > 0;
+      if (!starter.hidden && !starter.hasChildNodes()) mountBrainStarter(starter, seq);
       setTypes(rows.map(function (r) { return r.type; }));
       rows.sort(function (a, b) { return (b.updated || '') < (a.updated || '') ? -1 : 1; });
       el.innerHTML = rows.length
@@ -1041,7 +1090,9 @@ function renderSearch(initialQ) {
               ' <span class="muted">(' + h.score.toFixed(3) + ')</span></div>' +
               '<div class="why"><code>' + esc(h.id) + '</code> · ' + chips(h.sources) + '</div>' +
               (h.description ? '<div class="why">' + esc(h.description) + '</div>' : '') +
-              (h.snippet ? '<div class="muted">' + esc(h.snippet.slice(0, 240)) + '…</div>' : '') +
+              (h.keywordExcerpt?.length ? '<div class="muted search-excerpt">' + h.keywordExcerpt.map(function (part) {
+                return part.match ? '<mark>' + esc(part.text) + '</mark>' : esc(part.text);
+              }).join('') + '</div>' : h.snippet ? '<div class="muted">' + esc(h.snippet.slice(0, 240)) + '…</div>' : '') +
               '<div class="row"><a href="' + conceptHref(h.id) + '" class="link-button small">Open</a>' +
               '<a href="' + editHref(h.id) + '" class="link-button small">Edit</a>' +
               '<a href="' + mapHref(h.id) + '">Focused map</a></div></div>';
@@ -1061,67 +1112,133 @@ function citationLinks(citations) {
   }).join(' ');
 }
 
-function renderAsk() {
+async function readAnswerEvents(response, receive) {
+  if (!response.ok) throw new Error((await response.json()).error || 'Could not start the answer.');
+  if (!response.body) throw new Error('The answer stream is unavailable.');
+  var reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  var buffer = '';
+  try {
+    while (true) {
+      var chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += chunk.value;
+      var end;
+      while ((end = buffer.indexOf('\n\n')) >= 0) {
+        var frame = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        var newline = frame.indexOf('\n');
+        if (newline < 0 || !frame.startsWith('event: ') || !frame.startsWith('data: ', newline + 1)) continue;
+        var event = frame.slice(7, newline);
+        var data = JSON.parse(frame.slice(newline + 7));
+        if (event === 'error') throw new Error(data.error);
+        receive(event, data);
+        if (event === 'done') return;
+      }
+    }
+    throw new Error('The answer stream ended early.');
+  } finally {
+    await reader.cancel().catch(function () {});
+  }
+}
+
+function renderAsk(_arg, seq) {
   view.innerHTML =
     '<div class="stack"><h2>Ask your brain</h2>' +
     '<p><a href="#ask-plan">Ask with a ChatGPT plan</a></p>' +
     '<form id="askf" class="row">' +
-    '<input id="askq" style="flex:1" placeholder="What do my notes say about…" autofocus>' +
-    '<select id="askp"><option value="">balanced</option><option>lean</option><option>max</option></select>' +
-    '<button class="primary">Ask</button></form>' +
-    '<div id="askctx"></div><div id="askout" class="md"></div><div id="asksrc"></div></div>';
+    '<input id="askq" style="flex:1" aria-label="Question" placeholder="What do my notes say about…" maxlength="8000" required autofocus>' +
+    '<select id="askp" aria-label="Retrieval profile"><option value="">Configured default</option><option>lean</option><option>balanced</option><option>max</option></select>' +
+    '<button id="asksend" class="primary">Ask</button><button id="askstop" type="button" hidden>Stop</button></form>' +
+    '<p id="askstatus" role="status"></p><div id="askctx"></div><div id="askout" class="md"></div><div id="asksrc"></div></div>';
   var ctxEl = document.getElementById('askctx');
   var outEl = document.getElementById('askout');
   var srcEl = document.getElementById('asksrc');
-  document.getElementById('askf').addEventListener('submit', function (e) {
+  var statusEl = document.getElementById('askstatus');
+  var submit = document.getElementById('asksend');
+  var stop = document.getElementById('askstop');
+  stop.addEventListener('click', function () { activeAsk?.abort(); });
+  document.getElementById('askf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var q = document.getElementById('askq').value.trim();
-    if (!q) return;
-    Okb.working(ctxEl, 'retrieving');
-    outEl.innerHTML = '';
-    srcEl.innerHTML = '';
-    var url = '/api/ask/stream?token=' + encodeURIComponent(TOKEN) + '&question=' + encodeURIComponent(q);
+    if (!q || activeAsk) return;
+    var request = new AbortController();
+    activeAsk = request;
+    submit.disabled = true;
+    stop.hidden = false;
+    statusEl.textContent = 'Finding sources…';
+    var draft = document.createTextNode('');
+    outEl.classList.add('ask-partial');
+    outEl.replaceChildren(draft);
+    ctxEl.replaceChildren();
+    srcEl.replaceChildren();
     var profile = document.getElementById('askp').value;
-    if (profile) url += '&profile=' + encodeURIComponent(profile);
-    if (BRAIN) url += '&brain=' + encodeURIComponent(BRAIN);
-    var es = new EventSource(url);
     Okb.busy(true);
-    function end() { es.close(); Okb.busy(false); } // a closed stream fires nothing more
-    es.addEventListener('context', function (ev) {
-      var ctx = JSON.parse(ev.data);
-      ctxEl.innerHTML = ctx.length ? '<span class="muted">reading:</span> ' + citationLinks(ctx) : '';
-    });
-    es.addEventListener('answer', function (ev) {
-      outEl.innerHTML = R.renderMarkdown(JSON.parse(ev.data).answer);
-      Okb.settle(outEl);
-    });
-    es.addEventListener('done', function (ev) {
-      var r = JSON.parse(ev.data).result;
-      if (r.citations.length) srcEl.innerHTML = '<h3>Sources</h3>' + citationLinks(r.citations);
-      end();
-    });
-    es.addEventListener('error', function (ev) {
-      if (ev.data) outEl.innerHTML = errorBox(JSON.parse(ev.data).error);
-      else if (!outEl.innerHTML) outEl.innerHTML = errorBox('stream failed');
-      end();
-    });
+    try {
+      var response = await fetch('/api/ask/stream', {
+        method: 'POST', headers: headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ question: q, profile: profile || undefined }), signal: request.signal,
+      });
+      await readAnswerEvents(response, function (event, data) {
+        if (stale(seq)) return;
+        if (event === 'context') {
+          statusEl.textContent = 'Writing the answer…';
+          ctxEl.innerHTML = data.length ? '<span class="muted">Reading</span> ' + citationLinks(data) : '';
+        } else if (event === 'delta') {
+          draft.appendData(data.text);
+        } else if (event === 'done') {
+          var result = data.result;
+          statusEl.textContent = 'Answer ready.';
+          outEl.classList.remove('ask-partial');
+          outEl.innerHTML = R.renderMarkdown(result.answer);
+          if (result.citations.length) srcEl.innerHTML = '<h3>Sources</h3>' + citationLinks(result.citations);
+          Okb.settle(outEl);
+        }
+      });
+    } catch (error) {
+      if (!stale(seq)) statusEl.textContent = request.signal.aborted ? 'Answer stopped.' : error.message;
+    } finally {
+      if (activeAsk === request) activeAsk = null;
+      submit.disabled = false;
+      stop.hidden = true;
+      Okb.busy(false);
+    }
   });
 }
 
 // ---- review view --------------------------------------------------------
 
+function reviewClaimLink(item) {
+  return item.overdueClaim && !STATUS?.readonly
+    ? '<a href="#claims/' + encodeURIComponent(item.id) + '" class="link-button small">Resolve claim</a>' : '';
+}
+
 async function renderReview() {
   view.innerHTML = '<div class="stack"><h2>Review</h2>' +
     '<p class="muted">A small daily queue with stated reasons. “Reviewed ✓” records a <code>verified</code> event by you (OKF trust tier: human-reviewed).</p>' +
-    '<label class="row"><input type="checkbox" id="rgarnish"> AI garnish (connects items to recent notes)</label>' +
+    '<form id="rform" class="stack"><div class="row">' +
+    '<label class="field">Queue size<input id="rlimit" type="number" min="1" step="1" placeholder="Default"></label>' +
+    '<label class="field">Retrieval profile<select id="rprofile"><option value="">Default</option>' +
+    '<option value="lean">Lean</option><option value="balanced">Balanced</option><option value="max">Max</option></select></label></div>' +
+    '<label class="row"><input type="checkbox" id="rgarnish"> Ask the configured model to connect items to recent notes</label>' +
+    '<div class="row"><button id="rload" type="submit">Update queue</button></div></form>' +
+    (STATUS?.readonly ? '' : '<div class="row"><label class="field">Snooze days<input id="rdays" type="number" min="1" step="1" value="7" required></label></div>') +
     '<div id="rlist" class="list"></div></div>';
   var listEl = document.getElementById('rlist');
+  var limitEl = document.getElementById('rlimit');
+  var profileEl = document.getElementById('rprofile');
   var garnishEl = document.getElementById('rgarnish');
+  var snoozeEl = document.getElementById('rdays');
+  var loadButton = document.getElementById('rload');
   async function load() {
+    var params = { garnish: garnishEl.checked };
+    if (limitEl.value) params.limit = limitEl.valueAsNumber;
+    if (profileEl.value) params.profile = profileEl.value;
+    loadButton.disabled = true;
     Okb.working(listEl, 'scoring');
     var q;
-    try { q = await (garnishEl.checked ? appWork(api('review_queue', { garnish: true })) : api('review_queue', {})); }
+    try { q = await (params.garnish ? appWork(api('review_queue', params)) : api('review_queue', params)); }
     catch (e) { listEl.innerHTML = errorBox(e); return; }
+    finally { loadButton.disabled = false; }
     if (!q.length) { listEl.innerHTML = '<div class="empty">Nothing needs review.</div>'; return; }
     listEl.innerHTML = q.map(function (it) {
       return '<div class="card" data-id="' + esc(it.id) + '">' +
@@ -1129,16 +1246,21 @@ async function renderReview() {
         ' <span class="muted">(' + it.score.toFixed(2) + ')</span></div>' +
         '<div class="why">' + esc(it.reasons.join('; ')) + '</div>' +
         (it.garnish ? '<div class="garnish">↳ ' + esc(it.garnish) + '</div>' : '') +
-        cardActions(it.id, '<button class="small" data-act="done">Reviewed ✓</button><button class="small" data-act="snooze">Snooze 7d</button>') +
+        cardActions(it.id, reviewClaimLink(it) + (snoozeEl ? '<button class="small" data-act="done">Reviewed ✓</button><button class="small" data-act="snooze">Snooze</button>' : '')) +
         '</div>';
     }).join('');
     Okb.enter(listEl);
   }
   wireCards(listEl, async function (act, id, card) {
-    await api(act === 'done' ? 'review_done' : 'review_snooze', { id: id });
+    if (act === 'snooze' && !snoozeEl.reportValidity()) {
+      card.querySelector('[data-act="snooze"]').disabled = false;
+      return;
+    }
+    if (act === 'snooze') await api('review_snooze', { id: id, days: snoozeEl.valueAsNumber });
+    else await api('review_done', { id: id });
     await fileAway(card, act === 'done' ? 'done' : 'snooze', 'Nothing needs review.');
   });
-  garnishEl.addEventListener('change', load);
+  document.getElementById('rform').addEventListener('submit', function (event) { event.preventDefault(); load(); });
   load();
 }
 
@@ -1192,27 +1314,34 @@ function renderAdd() {
     '<p>To bring over chats from ChatGPT or Claude, <a href="#sources">import conversations</a>.</p>' +
     '<h3>Quick capture</h3>' +
     '<form id="capf" class="stack">' +
-    '<label class="field"><span>Note (first line becomes the title)</span>' +
-    '<textarea id="cap-text" rows="4" placeholder="a thought worth keeping…"></textarea></label>' +
-    '<div class="row"><input id="cap-tags" placeholder="tags (comma-separated)">' +
+    '<label class="field"><span>Note</span><textarea id="cap-text" rows="4" required></textarea></label>' +
+    '<div class="grid"><label class="field"><span>Title</span><input id="cap-title" placeholder="First line by default"></label>' +
+    '<label class="field"><span>Tags</span><input id="cap-tags" placeholder="Comma-separated"></label></div><div class="row">' +
     '<button class="primary">Capture</button></div></form><div id="cap-out"></div>' +
     '<h3>Clip a web page</h3>' +
-    '<form id="clipf" class="row">' +
-    '<input id="clip-url" style="flex:1" placeholder="https://… page to clip">' +
+    '<form id="clipf" class="stack">' +
+    '<label class="field"><span>Page URL</span><input id="clip-url" type="url" placeholder="https://…" required></label>' +
+    '<details><summary>Highlights and tags</summary><div class="stack">' +
+    '<label class="field"><span>Quote</span><textarea id="clip-quote" rows="3"></textarea></label>' +
+    '<label class="field"><span>Comment</span><textarea id="clip-note" rows="2"></textarea></label>' +
+    '<label class="field"><span>Tags</span><input id="clip-tags" placeholder="Comma-separated"></label></div></details>' +
+    '<div class="row">' +
     '<label class="row" style="gap:5px"><input type="checkbox" id="clip-read"> already read</label>' +
     '<label class="row" style="gap:5px"><input type="checkbox" id="clip-auto"> auto-tag (AI)</label>' +
-    '<button>Clip</button></form><div id="clip-out"></div>' +
+    '<button>Clip</button></div></form><div id="clip-out"></div>' +
     '<p class="muted">Clipped pages arrive as <code>references/</code> concepts with the page recorded under <code>sources</code>.</p>' +
     '<h3>Bookmarklet</h3><div id="bm-out"></div>' +
-    '<h3>Pull RSS feeds</h3><form id="rssf" class="row">' +
-    '<input id="rss-url" style="flex:1" placeholder="feed URL (empty = every configured rss.feeds entry)">' +
-    '<button>Pull</button></form><div id="rss-out"></div>' +
-    '<h3>Import markdown (server-side path)</h3>' +
-    '<form id="impf" class="row">' +
-    '<input id="imp-path" style="flex:1" placeholder="/path/to/file-or-directory on the okb host">' +
-    '<input id="imp-dest" placeholder="dest dir (optional)" style="width:150px">' +
+    '<h3>Pull RSS feeds</h3><form id="rssf" class="stack"><div class="grid">' +
+    '<label class="field"><span>Feed URL</span><input id="rss-url" type="url" placeholder="All configured feeds"></label>' +
+    '<label class="field"><span>Max new items per feed</span><input id="rss-limit" type="number" min="0" placeholder="Configured default"></label>' +
+    '</div><div class="row"><button>Pull</button></div></form><div id="rss-out"></div>' +
+    '<h3>Import Markdown from disk</h3>' +
+    '<form id="impf" class="stack">' +
+    '<label class="field"><span>File or folder path on the okbrain server</span><input id="imp-path" required></label>' +
+    '<div class="grid"><label class="field"><span>Destination folder</span><input id="imp-dest" placeholder="Brain root by default"></label>' +
+    '<label class="field"><span>Type for files without one</span><input id="imp-type" placeholder="Note by default"></label></div><div class="row">' +
     '<label class="row" style="gap:5px"><input type="checkbox" id="imp-over"> overwrite</label>' +
-    '<button>Import</button></form><div id="imp-out"></div></div>';
+    '<button>Import</button></div></form><div id="imp-out"></div></div>';
 
   var out = setHtml;
   function done(el, id, label) {
@@ -1225,7 +1354,9 @@ function renderAdd() {
     var text = document.getElementById('cap-text').value.trim();
     if (!text) return;
     var params = { text: text };
+    var title = document.getElementById('cap-title').value.trim();
     var tags = document.getElementById('cap-tags').value.trim();
+    if (title) params.title = title;
     if (tags) params.tags = tags;
     working('cap-out', 'capturing');
     try {
@@ -1241,6 +1372,10 @@ function renderAdd() {
     var url = document.getElementById('clip-url').value.trim();
     if (!url) return;
     var params = { url: url };
+    ['quote', 'note', 'tags'].forEach(function (field) {
+      var value = document.getElementById('clip-' + field).value.trim();
+      if (value) params[field] = value;
+    });
     if (document.getElementById('clip-read').checked) params.read = true;
     if (document.getElementById('clip-auto').checked) params['auto-tag'] = true;
     working('clip-out', 'clipping');
@@ -1256,9 +1391,12 @@ function renderAdd() {
   document.getElementById('rssf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var url = document.getElementById('rss-url').value.trim();
+    var limit = document.getElementById('rss-limit').valueAsNumber;
+    var params = url ? { url: url } : {};
+    if (Number.isFinite(limit)) params.limit = limit;
     working('rss-out', 'pulling');
     try {
-      var feeds = await appWork(api('rss', url ? { url: url } : {}));
+      var feeds = await appWork(api('rss', params));
       out('rss-out', '<div class="notice">' + esc(feeds.map(function (f) {
         if (f.error) return (f.feed || f.url) + ' — failed: ' + f.error;
         return (f.feed || f.url) + ': ' + f.added.length + ' added, ' + f.deduped + ' known';
@@ -1272,7 +1410,9 @@ function renderAdd() {
     if (!path) return;
     var params = { path: path };
     var dest = document.getElementById('imp-dest').value.trim();
+    var type = document.getElementById('imp-type').value.trim();
     if (dest) params.dest = dest;
+    if (type) params.type = type;
     if (document.getElementById('imp-over').checked) params.overwrite = true;
     working('imp-out', 'importing');
     try {
@@ -1642,7 +1782,7 @@ function renderSources(_arg, seq) {
 
 // ---- claims view (take / resolve / calibrate) ---------------------------
 
-async function renderClaims() {
+async function renderClaims(focusId, seq) {
   view.innerHTML =
     '<div class="stack"><h2>Claims &amp; calibration</h2>' +
     '<h3>Stake a claim</h3>' +
@@ -1689,6 +1829,7 @@ async function renderClaims() {
     var c;
     try { c = await api('calibrate', {}); }
     catch (e) { el.innerHTML = errorBox(e); return; }
+    if (stale(seq)) return;
     var total = c.open.length + c.correct + c.incorrect + c.void;
     if (!total) { el.innerHTML = '<div class="empty">No claims yet — stake one above.</div>'; return; }
     var h = '<h3>Score</h3><div class="tiles">' +
@@ -1713,6 +1854,13 @@ async function renderClaims() {
     }
     el.innerHTML = h;
     flashChanged(el, before);
+    if (first && focusId) {
+      var focused = Array.from(el.querySelectorAll('[data-id]')).find(function (card) { return card.dataset.id === focusId; });
+      if (focused) {
+        focused.querySelector('.title a')?.focus();
+        focused.scrollIntoView({ block: 'center' });
+      }
+    }
   }
 
   document.getElementById('c-out').addEventListener('click', async function (e) {
@@ -1822,11 +1970,12 @@ async function renderBrainMounts(parent, readonly, seq) {
     return '<label class="row"><input type="checkbox" name="readOnly"' + (checked ? ' checked' : '') + '> Read-only</label>';
   }
 
-  async function finish(next, message) {
+  async function finish(next, message, showHome) {
     rememberBrain(next);
     await loadBrains();
     await refreshStatus();
     if (stale(seq)) return;
+    if (showHome) { location.hash = '#home'; return; }
     await route();
     if (location.hash === '#settings') {
       var notice = document.getElementById('brain-mount-feedback');
@@ -1846,7 +1995,7 @@ async function renderBrainMounts(parent, readonly, seq) {
       });
       var payload = await response.json();
       if (!response.ok) throw new Error(payload.error || response.statusText);
-      if (!stale(seq) && BRAIN === selected) await finish(next(payload.result), message);
+      if (!stale(seq) && BRAIN === selected) await finish(next(payload.result), message, input.action === 'create');
     } catch (error) {
       if (!stale(seq)) feedback.innerHTML = errorBox(error);
     } finally {
@@ -1909,6 +2058,59 @@ async function renderBrainMounts(parent, readonly, seq) {
   });
 }
 
+function mountBundleWatch(panel, readonly, seq) {
+  var start = panel.querySelector('[data-start-watch]');
+  var stop = panel.querySelector('[data-stop-watch]');
+  var message = panel.querySelector('[role="status"]');
+  var status = null;
+  var running;
+  var timer;
+  var active = function () { return !stale(seq) && panel.isConnected; };
+
+  function paint(error) {
+    start.disabled = Boolean(running || readonly || status?.active);
+    stop.disabled = Boolean(running || !status?.active);
+    var text = error || status?.error;
+    if (!text) {
+      if (readonly && !status?.active) text = 'Watching requires a writable brain.';
+      else if (status?.indexing) text = 'Refreshing search and graph…';
+      else if (status?.active && status.lastIndexedAt) text = 'Watching. Last refresh ' + new Date(status.lastIndexedAt).toLocaleTimeString() + '.';
+      else text = status?.active ? 'Watching.' : 'Watching is off.';
+    }
+    if (message.textContent !== text) message.textContent = text;
+  }
+
+  async function update(action) {
+    if (!active() || running) return;
+    clearTimeout(timer);
+    running = true;
+    if (action) paint(action === 'start' ? 'Starting watch…' : 'Stopping watch…');
+    var error;
+    try {
+      var res = await fetch('/api/brains/watch', action ? {
+        method: 'POST', headers: headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ action: action }),
+      } : { headers: headers(), cache: 'no-store' });
+      var payload = await res.json();
+      if (!res.ok) throw new Error(payload.error || res.statusText);
+      status = payload.result;
+      if (active() && status?.lastIndexedAt && !STATUS?.hasIndex) void refreshStatus();
+    } catch (e) {
+      error = e.message;
+    } finally {
+      running = false;
+      if (active()) {
+        paint(error);
+        if (status?.active) timer = setTimeout(update, 1200);
+      }
+    }
+  }
+
+  start.addEventListener('click', function () { void update('start'); });
+  stop.addEventListener('click', function () { void update('stop'); });
+  void update();
+}
+
 async function renderSettings(_arg, seq) {
   var st = STATUS || {};
   var mcpArgs = st.brain ? ['--brain', st.brain, 'mcp'] : ['--bundle', st.bundle || '<bundle>', 'mcp'];
@@ -1939,8 +2141,9 @@ async function renderSettings(_arg, seq) {
     '<option>lean</option><option>balanced</option><option>max</option></select></label>' +
     '<button>Save</button></div></form>' +
     '<div id="set-out"></div><p class="muted">A local provider needs no API key.</p><section id="provider-keys" class="stack"></section>' +
-    '<h3>Sync (git)</h3><div class="row">' +
-    '<button id="sync-status">Status</button><button id="sync-run">Sync now</button></div>' +
+    '<h3>Sync (git)</h3><form id="syncf" class="stack">' +
+    field('sync-message', 'Commit message (optional)', '', 'Automatic timestamped message') +
+    '<div class="row"><button id="sync-status" type="button">Status</button><button type="submit">Sync now</button></div></form>' +
     '<div id="sync-out"></div>' +
     '<h3>Enrichment (guardrailed web pass)</h3>' +
     '<form id="enrf" class="stack"><div class="grid">' +
@@ -1955,10 +2158,21 @@ async function renderSettings(_arg, seq) {
     '</div><div class="row"><button>Run enrich</button></div></form>' +
     '<div id="enr-out"></div>' +
     '<h3>Maintenance</h3><div class="row">' +
-    '<button id="mx-index">Re-index</button><button id="mx-embed">Embed</button>' +
+    '<button id="mx-index">Re-index</button>' +
     '<button id="mx-doctor">Doctor</button>' +
     '<button id="mx-rebuild" class="danger">Rebuild (wipe + reindex)</button></div>' +
+    '<form id="embedf" class="stack"><h4>Embeddings</h4><div class="grid">' +
+    field('run-embed-provider', 'Provider override', '', 'Configured provider') +
+    field('run-embed-model', 'Model override', '', 'Configured model') +
+    '<label class="field"><span>Max notes this run</span><input id="embed-limit" type="number" min="0" placeholder="All pending notes"></label>' +
+    '</div><p class="muted">Changing the provider or model rebuilds the vector cache.</p>' +
+    '<div class="row"><button>Embed</button></div><div id="embed-out" aria-live="polite"></div></form>' +
+    '<section id="bundle-watch" class="stack"><h4>Watch brain folder</h4>' +
+    '<p class="muted">Keep keyword search and graph links current when you edit Markdown in another app.</p>' +
+    '<div class="row"><button data-start-watch disabled>Start watching</button><button data-stop-watch disabled>Stop watching</button></div>' +
+    '<p role="status">Checking watch status…</p></section>' +
     '<div class="row"><button id="mx-viz">Export viz.html</button>' +
+    '<label><input id="mx-viz-fonts" type="checkbox"> Embed app fonts in graph export</label>' +
     (st.readonly ? '' : '<label><input id="mx-viz-private" type="checkbox"> Include private drafts in graph export</label>') + '</div>' +
     '<div class="row"><span class="muted">Jobs:</span>' +
     ['index', 'embed', 'rss', 'review', 'doctor'].map(function (j) {
@@ -1973,6 +2187,7 @@ async function renderSettings(_arg, seq) {
 
   var show = setHtml;
   showBookmarklet();
+  mountBundleWatch(document.getElementById('bundle-watch'), Boolean(st.readonly), seq);
   renderBrainMounts(document.getElementById('brain-mount-settings'), Boolean(st.readonly), seq);
   renderProviderKeys(document.getElementById('provider-keys'), Boolean(st.readonly));
   window.okbMcpSettings.mount(document.getElementById('mcp-settings'), { readonly: Boolean(st.readonly), requestHeaders: headers });
@@ -2029,23 +2244,37 @@ async function renderSettings(_arg, seq) {
     try { show('sync-out', jsonNotice(await api('sync', { status: true }))); }
     catch (e) { show('sync-out', errorBox(e)); }
   });
-  document.getElementById('sync-run').addEventListener('click', async function () {
+  document.getElementById('syncf').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var message = document.getElementById('ed-sync-message').value.trim();
     working('sync-out', 'syncing');
-    try { show('sync-out', jsonNotice(await appWork(api('sync', {})))); }
+    try { show('sync-out', jsonNotice(await appWork(api('sync', message ? { message: message } : {})))); }
     catch (e) { show('sync-out', errorBox(e)); }
   });
-  async function maint(op, verb, params, render) {
-    working('mx-out', verb);
-    try { show('mx-out', (render || jsonNotice)(await appWork(api(op, params || {})))); await refreshStatus(); }
-    catch (e) { show('mx-out', errorBox(e)); }
+  async function maint(op, verb, params, render, output) {
+    var target = output || 'mx-out';
+    working(target, verb);
+    try { show(target, (render || jsonNotice)(await appWork(api(op, params || {})))); await refreshStatus(); }
+    catch (e) { show(target, errorBox(e)); }
   }
   document.getElementById('mx-index').addEventListener('click', function () { maint('index', 'indexing'); });
-  document.getElementById('mx-embed').addEventListener('click', function () { maint('embed', 'embedding'); });
+  document.getElementById('embedf').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var params = {};
+    var provider = document.getElementById('ed-run-embed-provider').value.trim();
+    var model = document.getElementById('ed-run-embed-model').value.trim();
+    var limit = document.getElementById('embed-limit').valueAsNumber;
+    if (provider) params.provider = provider;
+    if (model) params.model = model;
+    if (Number.isFinite(limit)) params.limit = limit;
+    maint('embed', 'embedding', params, null, 'embed-out');
+  });
   document.getElementById('mx-doctor').addEventListener('click', function () { maint('doctor', 'checking', {}, doctorSummary); });
   document.getElementById('mx-viz').addEventListener('click', function () {
     var includePrivate = Boolean(document.getElementById('mx-viz-private')?.checked);
     if (includePrivate && !confirm('The exported HTML will contain private draft text. Export it?')) return;
-    maint('export_viz', 'exporting', { 'include-private': includePrivate }, function (r) {
+    var fonts = document.getElementById('mx-viz-fonts').checked;
+    maint('export_viz', 'exporting', { 'include-private': includePrivate, fonts: fonts }, function (r) {
       return '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>';
     });
   });

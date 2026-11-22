@@ -14,10 +14,11 @@ import {
   RECIPES,
   rerankCall,
   type ChatMessage,
+  type ChatProgress,
   type Recipe,
 } from "./recipes.ts";
 
-export { AiError, RECIPES, type ChatMessage };
+export { AiError, RECIPES, type ChatMessage, type ChatProgress };
 
 export type Capability = "chat" | "embed" | "rerank";
 
@@ -137,17 +138,17 @@ export interface RerankResult {
 }
 
 export interface Gateway {
-  chat(messages: ChatMessage[], opts?: AiOptions): Promise<ChatResult>;
+  chat(messages: ChatMessage[], opts?: AiOptions, progress?: ChatProgress): Promise<ChatResult>;
   embed(texts: string[], opts?: AiOptions): Promise<EmbedResult>;
   rerank(query: string, documents: string[], opts?: AiOptions): Promise<RerankResult>;
 }
 
 export function createGateway(settings: AiSettings = {}, env: Env = gatewayEnvironment()): Gateway {
   return {
-    async chat(messages, opts) {
+    async chat(messages, opts, progress) {
       const r = resolveCall("chat", settings, env, opts);
       requireKey(r);
-      const text = await chatCall(r.recipe.chat!.style, r.baseUrl, r.apiKey, r.model, messages, 120_000);
+      const text = await chatCall(r.recipe.chat!.style, r.baseUrl, r.apiKey, r.model, messages, 120_000, progress);
       return { text, provider: r.provider, model: r.model };
     },
     async embed(texts, opts) {

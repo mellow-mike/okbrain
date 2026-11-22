@@ -4,6 +4,8 @@
 // of them and OpenAI/OpenRouter/Voyage too. Plain fetch, no provider SDKs —
 // the binary stays light and offline stays first-class.
 
+import { EventSourceParserStream } from "eventsource-parser/stream";
+
 export class AiError extends Error {}
 
 export interface ChatMessage {
@@ -72,20 +74,22 @@ export const RECIPES: Record<string, Recipe> = {
   },
 };
 
-async function post(
+async function postResponse(
   url: string,
   headers: Record<string, string>,
   body: unknown,
   timeoutMs: number,
-): Promise<Record<string, unknown>> {
+  signal?: AbortSignal,
+): Promise<Response> {
   let res: Response;
+  const timeout = AbortSignal.timeout(timeoutMs);
   try {
     res = await fetch(url, {
       method: "POST",
       redirect: "error",
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
   } catch (e) {
     throw new AiError(
@@ -98,7 +102,11 @@ async function post(
       if (secret) message = message.replaceAll(secret, "[redacted]");
     throw new AiError(`${url} → HTTP ${res.status}: ${message.slice(0, 300)}`);
   }
-  return (await res.json()) as Record<string, unknown>;
+  return res;
+}
+
+async function post(url: string, headers: Record<string, string>, body: unknown, timeoutMs: number) {
+  return (await postResponse(url, headers, body, timeoutMs)).json() as Promise<Record<string, unknown>>;
 }
 
 const bearer = (apiKey?: string): Record<string, string> =>
@@ -109,54 +117,106 @@ const splitSystem = (messages: ChatMessage[]) => ({
   rest: messages.filter((m) => m.role !== "system"),
 });
 
+export interface ChatProgress {
+  onDelta?(text: string): void;
+  signal?: AbortSignal;
+}
+
+type ChatStyle = NonNullable<Recipe["chat"]>["style"];
+
+function chatRequest(style: ChatStyle, baseUrl: string, apiKey: string | undefined, model: string,
+  messages: ChatMessage[], streaming: boolean): { url: string; headers: Record<string, string>; body: unknown } {
+  const { system, rest } = splitSystem(messages);
+  if (style === "anthropic") return {
+    url: `${baseUrl}/messages`,
+    headers: { "x-api-key": apiKey ?? "", "anthropic-version": "2023-06-01" },
+    body: { model, max_tokens: 4096, ...(system ? { system } : {}), messages: rest, ...(streaming ? { stream: true } : {}) },
+  };
+  if (style === "gemini") return {
+    url: `${baseUrl}/models/${model}:${streaming ? "streamGenerateContent?alt=sse" : "generateContent"}`,
+    headers: { "x-goog-api-key": apiKey ?? "" },
+    body: {
+      ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+      contents: rest.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
+    },
+  };
+  return {
+    url: `${baseUrl}/chat/completions`,
+    headers: bearer(apiKey),
+    body: { model, messages, ...(streaming ? { stream: true } : {}) },
+  };
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any -- provider JSON shapes */
+function geminiText(candidate: any): string {
+  return (candidate?.content?.parts ?? [])
+    .filter((part: any) => part.thought !== true && typeof part.text === "string")
+    .map((part: any) => part.text).join("");
+}
+
+function completeText(style: ChatStyle, value: any): string {
+  if (style === "anthropic") return (value.content ?? [])
+    .filter((block: any) => block.type === "text").map((block: any) => block.text).join("");
+  if (style === "gemini") return value.candidates?.[0]?.content?.parts?.map((part: any) => part.text ?? "").join("") ?? "";
+  return value.choices?.[0]?.message?.content ?? "";
+}
+
+function eventText(style: ChatStyle, data: string, event?: string): { delta?: string; complete?: boolean } {
+  if (style === "openai" && data === "[DONE]") return { complete: true };
+  const frame = JSON.parse(data);
+  if (event === "error" || frame.type === "error" || frame.error) throw new AiError("The model provider reported a streaming error.");
+  if (style === "anthropic") return {
+    complete: frame.type === "message_stop",
+    delta: frame.type === "content_block_delta" && frame.delta?.type === "text_delta" ? frame.delta.text : undefined,
+  };
+  if (style === "gemini") {
+    const candidate = frame.candidates?.[0];
+    if (!candidate && frame.promptFeedback?.blockReason) throw new AiError("The model provider declined this request.");
+    return { delta: geminiText(candidate), complete: Boolean(candidate?.finishReason) };
+  }
+  const choice = frame.choices?.[0];
+  return { delta: choice?.delta?.content, complete: Boolean(choice?.finish_reason) };
+}
+
+const MAX_CHAT_TEXT = 2_000_000;
+
+async function streamText(style: ChatStyle, response: Response, onDelta: (text: string) => void): Promise<string> {
+  if (!response.body) throw new AiError("The model provider returned an empty response stream.");
+  const events = response.body.pipeThrough(new TextDecoderStream())
+    .pipeThrough(new EventSourceParserStream({ maxBufferSize: MAX_CHAT_TEXT }));
+  let text = "";
+  try {
+    for await (const { data, event } of events) {
+      const { delta, complete } = eventText(style, data, event);
+      if (typeof delta === "string" && delta.length) {
+        if (text.length + delta.length > MAX_CHAT_TEXT) throw new AiError("The answer exceeded the local text limit.");
+        text += delta;
+        onDelta(delta);
+      }
+      if (complete) return text;
+    }
+  } catch (error) {
+    if (error instanceof AiError) throw error;
+    throw new AiError("The model response stream was interrupted.");
+  }
+  throw new AiError("The model response stream ended before completion.");
+}
+
 export async function chatCall(
-  style: "openai" | "anthropic" | "gemini",
+  style: ChatStyle,
   baseUrl: string,
   apiKey: string | undefined,
   model: string,
   messages: ChatMessage[],
   timeoutMs: number,
+  progress?: ChatProgress,
 ): Promise<string> {
-  if (style === "anthropic") {
-    const { system, rest } = splitSystem(messages);
-    const j: any = await post(
-      `${baseUrl}/messages`,
-      { "x-api-key": apiKey ?? "", "anthropic-version": "2023-06-01" },
-      { model, max_tokens: 4096, ...(system ? { system } : {}), messages: rest },
-      timeoutMs,
-    );
-    return (j.content ?? [])
-      .filter((b: any) => b.type === "text")
-      .map((b: any) => b.text)
-      .join("");
-  }
-  if (style === "gemini") {
-    const { system, rest } = splitSystem(messages);
-    const contents = rest.map((m) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }],
-    }));
-    const j: any = await post(
-      `${baseUrl}/models/${model}:generateContent`,
-      { "x-goog-api-key": apiKey ?? "" },
-      {
-        ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
-        contents,
-      },
-      timeoutMs,
-    );
-    return (
-      j.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? "").join("") ?? ""
-    );
-  }
-  const j: any = await post(
-    `${baseUrl}/chat/completions`,
-    bearer(apiKey),
-    { model, messages },
-    timeoutMs,
-  );
-  return j.choices?.[0]?.message?.content ?? "";
+  const { url, headers, body } = chatRequest(style, baseUrl, apiKey, model, messages, Boolean(progress?.onDelta));
+  const response = await postResponse(url, headers, body, timeoutMs, progress?.signal);
+  if (progress?.onDelta && response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "text/event-stream")
+    return streamText(style, response, progress.onDelta);
+  // Some compatible local servers answer with ordinary JSON despite stream:true.
+  return completeText(style, await response.json());
 }
 
 export async function embedCall(

@@ -178,9 +178,19 @@ async function benchmark(workspace: string, repetitions: number, tokenBudget: nu
     throw new Error(`Use Vite ${tag} at ${revision}.`);
   if (git(workspace, "status", "--porcelain", "--untracked-files=no"))
     throw new Error("Use a clean Vite worktree to benchmark the pinned evidence.");
-  for (const task of tasks) for (const expected of task.expected) {
-    if (!(await readFile(join(workspace, expected.path), "utf8")).includes(expected.text))
-      throw new Error(`Missing pinned evidence for ${task.id}: ${expected.path}`);
+  const evaluationSeries = `vite-${revision.slice(0, 7)}-${narrow ? "subsystem" : "package"}-${tokenBudget}`;
+  const evaluationCases = new Map<string, { prompt: string; evidence: string[] }>();
+  for (const task of tasks) {
+    const evidence: string[] = [];
+    for (const expected of task.expected) {
+      const content = await readFile(join(workspace, expected.path), "utf8");
+      const index = content.indexOf(expected.text);
+      if (index < 0) throw new Error(`Missing pinned evidence for ${task.id}: ${expected.path}`);
+      const start = content.slice(0, index).split("\n").length;
+      const end = start + expected.text.split("\n").length - 1;
+      evidence.push(`${expected.path}:${start}${start === end ? "" : "-" + end}`);
+    }
+    evaluationCases.set(task.id, { prompt: task.description + " Cite supporting source by file path and line range.", evidence });
   }
   const measured: Record<Strategy, Measurement[]> = { explicit: [], lexical: [], indexed: [] };
   for (let round = 0; round < repetitions; round++) {
@@ -203,6 +213,7 @@ async function benchmark(workspace: string, repetitions: number, tokenBudget: nu
 
   console.log(JSON.stringify({
     repository, tag, revision,
+    evaluationSeries,
     runtime: { platform: platform(), arch: arch(), bun: Bun.version, cpu: cpus()[0]?.model },
     trackedPaths: git(workspace, "ls-files", "-z").split("\0").length - 1,
     repetitions, tokenBudget, scope: narrow ? "subsystem directories" : "package directories",
@@ -213,6 +224,7 @@ async function benchmark(workspace: string, repetitions: number, tokenBudget: nu
       projects: (narrow ? task.narrow : task).projects,
       sharedProjects: (narrow ? task.narrow : task).sharedProjects,
       expectedFiles: task.expected.map(({ path }) => path),
+      evaluation: evaluationCases.get(task.id),
       results: Object.fromEntries(strategies.map((strategy) => {
         const results = measured[strategy].filter((result) => result.task === task.id);
         const retrieved = results[0]!;

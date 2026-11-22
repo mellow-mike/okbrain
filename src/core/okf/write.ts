@@ -25,8 +25,8 @@ import {
   type ActorEvent,
   type SourceEntry,
 } from "./document.ts";
-import { regenerateIndexes } from "./indexmd.ts";
-import { appendLog } from "./logmd.ts";
+import { regenerateIndexBranches, regenerateIndexes } from "./indexmd.ts";
+import { appendLog, appendLogEntry, formatLogEntry, todayUtc } from "./logmd.ts";
 import { idToAbsPath, inDbOnlyDir, isReservedName, slugify } from "./paths.ts";
 
 export class OkfWriteError extends Error {}
@@ -85,6 +85,21 @@ interface WriteOptions {
   createOnly?: boolean;
   /** The caller will regenerate the affected index branch after a batch. */
   deferIndex?: boolean;
+  /** Accumulate derived metadata until the importing operation finishes. */
+  batch?: { dirs: Set<string>; log: Map<string, string[]> };
+}
+
+/** Import a group of concepts through the same writer and refresh metadata even after a partial import. */
+export async function writeConceptBatch<T>(root: string, write: (
+  add: (input: WriteConceptInput, options?: Pick<WriteOptions, "createOnly">) => Promise<WriteResult>,
+) => Promise<T>): Promise<T> {
+  const batch = { dirs: new Set<string>(), log: new Map<string, string[]>() };
+  try {
+    return await write((input, options) => writeConcept(root, input, { ...options, batch }));
+  } finally {
+    try { await regenerateIndexBranches(root, batch.dirs); }
+    finally { for (const [date, entries] of batch.log) await appendLogEntry(root, entries.join("\n\n"), date); }
+  }
 }
 
 /** Emitted instant format: ISO 8601 UTC, second precision. */
@@ -265,12 +280,22 @@ export async function writeConcept(
   } else {
     await writeFile(path, serialized, { encoding: "utf8", mode });
   }
-  const dir = posix.dirname(input.id);
-  if (!options.deferIndex) await regenerateIndexes(root, dir === "." ? "" : dir);
+  const dir = posix.dirname(input.id) === "." ? "" : posix.dirname(input.id);
   const kind = existing === undefined ? "Creation" : "Update";
-  if (!privateConcept && !input.metadataOnly)
+  const publicLog = !privateConcept && !input.metadataOnly;
+  if (options.batch) {
+    options.batch.dirs.add(dir);
+    if (publicLog) {
+      const date = todayUtc();
+      const entries = options.batch.log.get(date) ?? [];
+      if (!entries.length) options.batch.log.set(date, entries);
+      entries.push(formatLogEntry(kind, input.id, fm.title as string, fm.description as string));
+    }
+  } else {
+    if (!options.deferIndex) await regenerateIndexes(root, dir);
     // Private concepts never leak titles into the committed root log.md;
     // metadata-only stamps aren't content changes worth a log entry.
-    await appendLog(root, kind, input.id, fm.title as string, fm.description as string);
+    if (publicLog) await appendLog(root, kind, input.id, fm.title as string, fm.description as string);
+  }
   return { id: input.id, path, created: existing === undefined };
 }

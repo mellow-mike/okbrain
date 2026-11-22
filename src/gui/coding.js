@@ -208,6 +208,7 @@
         field('Estimated excerpt tokens', '', 'number', 'data-package-budget min="1" max="4096" placeholder="2048"') + '</fieldset>').join('') + '</div>' +
       '<div class="row"><button type="button" data-preview>Preview source</button></div>' +
       '<div class="coding-preview stack" aria-live="polite" data-preview-content></div>' +
+      '<div data-evaluation-options></div>' +
       '<label class="row" data-approve hidden><input type="checkbox" name="approved"><span data-approve-text></span></label>' +
       '<div class="row"><button type="submit" class="primary" disabled>Send request</button><span class="muted">' + esc(project.model) +
       '</span></div><div class="coding-feedback" role="status"></div></form>';
@@ -222,6 +223,7 @@
     const approveText = form.querySelector('[data-approve-text]');
     const packageFields = Array.from(form.querySelectorAll('[data-package]'));
     const feedback = form.querySelector('[role="status"]');
+    const evaluation = window.okbCodingEvaluation.composerOptions(form.querySelector('[data-evaluation-options]'), readonly);
     let preview = null;
     let revision = 0;
     let busy = false;
@@ -276,7 +278,7 @@
       feedback.textContent = 'Reading selected source…';
       try {
         const selection = sourceInput();
-        const result = await coding(prefix + '/preview', selection);
+        const result = await coding(prefix + '/preview', { ...selection, ...(evaluation.enabled() ? { measurePreview: true } : {}) });
         if (current !== revision || detached()) return;
         previewContents(previewEl, result);
         if (result.source === 'repository' && !result.excerpts.length) return;
@@ -305,7 +307,7 @@
       try {
         const run = await coding(prefix + '/run', {
           ...preview.selection, approved: true, previewId: preview.id, prompt: prompt.value,
-          session: session.value, requestId: requestId.value,
+          session: session.value, requestId: requestId.value, evaluation: evaluation.value(),
         });
         if (detached()) return;
         await selectRun(run);
@@ -468,7 +470,10 @@
       '<h3>Team access</h3><p class="muted">Project tokens expire after seven days. Team members need a project-specific provider key to run requests.</p>' +
       '<form class="row" data-add-member>' + field('Member name', '', 'text', 'name="name" maxlength="48" required') +
       '<button type="submit">Create project token</button></form><div class="stack" data-token></div><div class="stack" data-members></div>' +
-      '<h3>Transcript retention</h3><form class="stack" data-delete>' +
+      '<h3>Transcript retention</h3><form class="stack" data-retention>' +
+      field('Days to keep inactive transcripts', '', 'number', 'name="days" min="1" max="365" step="1"') +
+      '<p class="muted">Leave blank to keep transcripts until you delete them. Saving an age limit can remove already expired sessions. Running or interrupted sessions stay available.</p>' +
+      '<div class="row"><button type="submit">Save retention policy</button></div></form><form class="stack" data-delete>' +
       field('Session to delete', '', 'text', 'name="session" maxlength="64" required') +
       field('Type the session name again', '', 'text', 'name="confirm" maxlength="64" required') +
       '<div class="row"><button type="submit" class="danger">Delete session and transcript</button></div></form>' +
@@ -483,8 +488,11 @@
     const token = panel.querySelector('[data-token]');
     const audit = panel.querySelector('[data-audit]');
     const deleteSession = panel.querySelector('[data-delete]');
+    const retention = panel.querySelector('[data-retention]');
+    const saveRetention = retention.querySelector('button');
     const credential = panel.querySelector('[data-credential]');
     panel.querySelectorAll('button').forEach((button) => button.disabled = readonly);
+    saveRetention.disabled = true;
 
     function setProject(current) {
       project = current;
@@ -539,8 +547,28 @@
     }
 
     panel.addEventListener('toggle', () => {
-      if (panel.open) loadMembers();
+      if (panel.open) { loadMembers(); loadRetention(); }
       else token.replaceChildren();
+    });
+    async function loadRetention() {
+      try {
+        const policy = await coding(prefix + '/retention');
+        retention.elements.days.value = policy.days ?? '';
+        retention.elements.days.disabled = saveRetention.disabled = readonly || !policy.active;
+      } catch (error) { report(feedback, error); }
+    }
+    retention.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      saveRetention.disabled = true;
+      report(feedback);
+      try {
+        const value = retention.elements.days.value;
+        const { removed } = await coding(prefix + '/retention', { days: value === '' ? null : Number(value) });
+        feedback.textContent = removed === 1 ? 'Retention saved. One transcript expired.' :
+          removed > 1 ? 'Retention saved. ' + removed + ' transcripts expired.' : 'Retention policy saved.';
+        await runsChanged();
+      } catch (error) { report(feedback, error); }
+      finally { saveRetention.disabled = readonly; }
     });
     keyForm.addEventListener('submit', (event) => {
       event.preventDefault();
@@ -768,7 +796,8 @@
     intro.className = 'coding-project-header stack';
     intro.innerHTML = '<h3>' + esc(project.title) + '</h3>' + (project.workspace
       ? '<p><code>' + esc(project.workspace) + '</code></p>' : '') +
-      '<p class="muted">Permitted scope · ' + esc(project.scopes.join(', ')) + '</p>';
+      '<p class="muted">Permitted scope · ' + esc(project.scopes.join(', ')) + '</p>' +
+      '<p class="muted">' + (project.workerIsolation === 'docker' ? 'Docker worker · Only this session is mounted' : 'Local worker · Server OS account') + '</p>';
     page.append(intro);
     const grid = document.createElement('div');
     grid.className = 'coding-workspace-grid';
@@ -779,6 +808,7 @@
     right.className = 'stack coding-right';
     grid.append(left, right);
     const runs = activity(right, project, readonly, isDetached);
+    window.okbCodingEvaluation.mount(right, { prefix: projectUrl(project.id), coding, readonly, detached: isDetached });
     composer(left, project, readonly, isDetached, runs.selectRun);
     const composerPanel = left.querySelector('.coding-composer');
     if (!teamMode) settings(left, project, readonly, composerPanel.updateProject, runs.refresh);

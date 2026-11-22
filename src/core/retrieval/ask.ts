@@ -15,6 +15,9 @@ export interface AskDeps {
   bundle: string;
   arms: HybridArms;
   chat(messages: ChatMessage[]): Promise<ChatResult>;
+  /** Optional streaming call for synthesis. Internal query expansion stays off the answer stream. */
+  synthesize?(messages: ChatMessage[]): Promise<ChatResult>;
+  signal?: AbortSignal;
   /** Optional rerank of the pool (caller owns gating and failure policy). */
   rerank?(query: string, hits: HybridHit[]): Promise<HybridHit[]>;
   /** Called with the packed context before synthesis (streaming surfaces). */
@@ -111,11 +114,14 @@ export async function askBrain(
   deps: AskDeps,
   profile: RetrievalProfile,
 ): Promise<AskResult> {
+  deps.signal?.throwIfAborted();
   const queries = [
     question,
     ...(profile.multiQuery > 0 ? await queryVariants(question, profile.multiQuery, deps.chat) : []),
   ];
+  deps.signal?.throwIfAborted();
   const { hits, vectorSkipped } = await hybridRetrieve(queries, deps.arms, profile, profile.vecK);
+  deps.signal?.throwIfAborted();
   const pool = deps.rerank && hits.length ? await deps.rerank(question, hits) : hits;
   const { blocks, packed } = await packContext(deps.bundle, pool, profile.budgetChars);
   return answerFromContext(question, { blocks, context: packed.map(citationOf), profile: profile.name, vectorSkipped }, deps);
@@ -145,9 +151,10 @@ export async function prepareLocalContext(
 export async function answerFromContext(
   question: string,
   prepared: PreparedContext,
-  deps: Pick<AskDeps, "chat" | "onContext">,
+  deps: Pick<AskDeps, "chat" | "onContext" | "synthesize" | "signal">,
 ): Promise<AskResult> {
   const { blocks, context, profile, vectorSkipped } = prepared;
+  deps.signal?.throwIfAborted();
   const base = { profile, vectorSkipped };
   if (context.length === 0)
     return {
@@ -160,7 +167,7 @@ export async function answerFromContext(
     };
 
   deps.onContext?.(context);
-  const { text, provider, model } = await deps.chat([
+  const { text, provider, model } = await (deps.synthesize ?? deps.chat)([
     { role: "system", content: SYNTH_SYSTEM },
     { role: "user", content: `Concepts:\n\n${blocks.join("\n\n")}\n\nQuestion: ${question}` },
   ]);

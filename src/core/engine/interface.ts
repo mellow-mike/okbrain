@@ -47,6 +47,12 @@ export interface SearchHit {
   title: string;
   /** Higher is better (BM25-derived). */
   score: number;
+  keywordExcerpt?: SearchExcerptPart[];
+}
+
+export interface SearchExcerptPart {
+  text: string;
+  match: boolean;
 }
 
 export interface LinkCandidate {
@@ -149,7 +155,7 @@ export interface Engine {
   /** Direct resolved links in each direction with an independent bound. */
   focusEdges(id: string, limit: number): { out: EdgeRecord[]; in: EdgeRecord[] };
   /** Keyword search (BM25) over title/body/tags. */
-  search(query: string, limit?: number): SearchHit[];
+  search(query: string, limit?: number, excerpts?: boolean): SearchHit[];
   /** Undirected neighborhood (links + backlinks) out to `depth` hops. */
   neighbors(id: string, depth?: number): Neighbor[];
   /** Every node's review fields (Resurface), sorted by id. */

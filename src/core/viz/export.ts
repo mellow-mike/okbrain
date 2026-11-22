@@ -28,6 +28,7 @@ import {
   type TrustTier,
 } from "../okf/document.ts";
 import { inDbOnlyDir } from "../okf/paths.ts";
+import { embeddedFontCss } from "./fonts.ts";
 import okbJs from "./okb.js" with { type: "text" };
 import renderJs from "./render.js" with { type: "text" };
 import safeMarkdownJs from "./safe-markdown.js" with { type: "text" };
@@ -109,10 +110,10 @@ export interface VizExport {
 }
 
 /** Export the bundle's graph to `<root>/viz.html` (fixed path by design). */
-export async function exportViz(root: string, { includePrivate = false } = {}): Promise<VizExport> {
+export async function exportViz(root: string, { includePrivate = false, fonts = false } = {}): Promise<VizExport> {
   const graph = await buildVizGraph(root, { includePrivate });
   const path = join(root, "viz.html");
-  await writeFile(path, renderHtml(graph), "utf8");
+  await writeFile(path, renderHtml(graph, fonts ? await embeddedFontCss() : ""), "utf8");
   return { path, nodes: graph.nodes.length, edges: graph.edges.length };
 }
 
@@ -120,13 +121,12 @@ export async function exportViz(root: string, { includePrivate = false } = {}): 
  * Render the single-file page: data + vendored libs + viewer, no network.
  * Look: the design system's tokens (core/viz/tokens.css, inlined) and its
  * Okb helpers (theme restore + ink-flood toggle under `okb-viz-theme`, graph
- * palette), shared with the GUI. The web fonts stay out — the families fall
- * back through their stacks — so the file stays the size of its libraries.
+ * palette), shared with the GUI. The fonts can be embedded for offline use.
  * Types take graph slots in sorted order (the ninth onward shares
  * graph-other), and every node keeps a visible label, so identity is never
  * colour alone.
  */
-export function renderHtml(graph: VizGraph): string {
+export function renderHtml(graph: VizGraph, fontCss = ""): string {
   // <-escape so no `</script>` (or any tag) can break out of the block.
   const data = JSON.stringify(graph).replace(/</g, "\\u003c");
   return `<!doctype html>
@@ -135,7 +135,7 @@ export function renderHtml(graph: VizGraph): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>okbrain graph — ${graph.nodes.length} concepts</title>
-<style>${tokensCss}</style>
+<style>${tokensCss}${fontCss ? `\n${fontCss}` : ""}</style>
 <style>
   :root, [data-theme="dark"] { color-scheme: dark; --wght-text: 370; --wght-read: 400; }
   [data-theme="light"] { color-scheme: light; --wght-text: 400; --wght-read: 440; }

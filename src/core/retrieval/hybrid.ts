@@ -5,7 +5,7 @@
 // no store, unreachable provider, dimension drift — degrades to keyword-only
 // with a note, never an error. Deterministic given its inputs.
 
-import type { Engine, VectorStore } from "../engine/interface.ts";
+import type { Engine, SearchExcerptPart, VectorStore } from "../engine/interface.ts";
 import { relationalRanking } from "./relational.ts";
 import type { RetrievalProfile } from "./profiles.ts";
 
@@ -21,6 +21,8 @@ export interface HybridHit {
   sources: RecallSource[];
   /** Closest chunk text (vector arm); feeds display, rerank, and ask packing. */
   snippet?: string;
+  /** Structured FTS match highlighting for search results. */
+  keywordExcerpt?: SearchExcerptPart[];
   /** Relevance from the rerank arm, when it ran. */
   rerankScore?: number;
 }
@@ -58,17 +60,23 @@ export async function hybridRetrieve(
   arms: HybridArms,
   profile: RetrievalProfile,
   limit: number,
+  keywordExcerpts = false,
 ): Promise<HybridResult> {
   const eng = arms.engine;
   const rankings: string[][] = [];
   const sources = new Map<string, Set<RecallSource>>();
+  const excerpts = new Map<string, SearchExcerptPart[]>();
   const mark = (id: string, s: RecallSource) => {
     if (!sources.has(id)) sources.set(id, new Set());
     sources.get(id)!.add(s);
   };
 
   for (const q of queries) {
-    rankings.push(eng.search(q, profile.ftsK).map((h) => (mark(h.id, "keyword"), h.id)));
+    rankings.push(eng.search(q, profile.ftsK, keywordExcerpts).map((hit) => {
+      mark(hit.id, "keyword");
+      if (hit.keywordExcerpt && !excerpts.has(hit.id)) excerpts.set(hit.id, hit.keywordExcerpt);
+      return hit.id;
+    }));
     // Relational arm (4.3): typed-edge recall for queries naming a relation;
     // deterministic, and a strict no-op for everything else.
     const rel = relationalRanking(q, eng);
@@ -119,6 +127,7 @@ export async function hybridRetrieve(
       description: node.description,
       score,
       sources: [...sources.get(id)!],
+      ...(excerpts.has(id) ? { keywordExcerpt: excerpts.get(id)! } : {}),
       ...(snippets.has(id) ? { snippet: snippets.get(id)! } : {}),
     });
   }

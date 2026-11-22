@@ -19,6 +19,7 @@ import {
   budgetedModels, codingBudget, codingHistory, compactionPolicy, contextBudgetError, estimateCodingContext, newRequestFits,
   type CodingBudget,
 } from "./history.ts";
+import { evaluationInput, type EvaluationInput } from "./evaluation.ts";
 import {
   confirmedPackageReviewParts, createPackageReview, PackageReviewError, packageReviewExtension, packageReviewIds,
   packageReviewReceipt, packageReviewTask, previewPackageReviews, type ChildReview, type PackageReviewScope,
@@ -65,6 +66,7 @@ export type CodingSessionResult = { session: string; requestId: string; reposito
 export type CodingSessionStatusOptions = Pick<CodingSessionOptions, "workspace" | "session" | "provider" | "model" | "thinkingLevel"> & {
   requestId?: string;
   includeReceipt?: boolean;
+  includeEvaluationInput?: boolean;
 };
 
 export interface CodingSessionStatusResult {
@@ -82,13 +84,17 @@ export interface CodingSessionStatusResult {
     stopReason?: AssistantMessage["stopReason"];
     reason?: string;
     receipt?: CodingSessionResult;
+    evaluationInput?: EvaluationInput;
   };
 }
 
 export type CodingDependencies = {
   stateDir?: string;
+  /** Use the host's state identity when the transcript is mounted elsewhere. */
+  stateBinding?: string;
   models?: Models;
   workspaceBinding?: string;
+  preparedInput?: PreparedCodingInput;
   apiKey?: string;
   allowEnvKey?: boolean;
   signal?: AbortSignal;
@@ -199,6 +205,32 @@ async function requestContent(
   return JSON.stringify({ task: prompt, files });
 }
 
+export type PreparedCodingInput =
+  | { kind: "request"; content: string }
+  | { kind: "package-review"; parts: ReturnType<typeof confirmedPackageReviewParts> };
+
+/** Verify the preview against live source before giving the captured input to a worker. */
+export async function prepareCodingInput(options: CodingSessionOptions, workspace: string): Promise<PreparedCodingInput> {
+  const { prompt, packageReviews } = options;
+  if (prompt === undefined) throw new CodingError("Enter a coding prompt before preparing source.");
+  if (!packageReviews) {
+    return { kind: "request", content: await requestContent(
+      workspace, prompt, options.files ?? [], options.repository, options.filePreviewId, options.allowedAttachmentScopes,
+    ) };
+  }
+
+  if (!prompt.trim() || Buffer.byteLength(prompt) > maxPromptBytes || options.files || options.repository)
+    throw new CodingError("Use a coding prompt and select one source mode for the package review.");
+  try {
+    const preview = await previewPackageReviews(workspace, packageReviews.packages);
+    const parts = confirmedPackageReviewParts(preview, packageReviews.id, options.requestId, prompt);
+    return { kind: "package-review", parts };
+  } catch (error) {
+    if (error instanceof PackageReviewError || error instanceof RepositoryContextError) throw new CodingError(error.message, { cause: error });
+    throw error;
+  }
+}
+
 export async function previewCodingAttachments(workspace: string, paths: string[], scopes?: string[]) {
   if (paths.length > maxAttachments) throw new CodingError("Attach at most 12 workspace files per request.");
   const { excludedPath } = await import("./repository-context.ts");
@@ -284,7 +316,8 @@ async function withCodingSession<T>(
     throw new CodingError("The selected model does not support this reasoning level.");
   const budget = model ? codingBudget(model) : undefined;
   const history = codingHistory(budget);
-  const affinity = createHash("sha256").update(JSON.stringify([workspace, directory, provider, options.model])).digest("hex");
+  const affinityDirectory = dependencies.stateBinding ? join(dependencies.stateBinding, `session-${options.session}`) : directory;
+  const affinity = createHash("sha256").update(JSON.stringify([workspace, affinityDirectory, provider, options.model])).digest("hex");
 
   try {
     if (create) {
@@ -334,17 +367,32 @@ async function withCodingSession<T>(
   }
 }
 
-async function savedManifest(storage: SqliteStorage, submission: SubmissionRecord): Promise<RepositoryContextManifest | undefined> {
+async function savedUserContent(storage: SqliteStorage, submission: SubmissionRecord): Promise<string | undefined> {
   if (submission.entry === undefined) return undefined;
   const entry = (await storage.entry(submission.conversationId, submission.entry, context))?.entry;
   const user = entry && UserEntry.is(entry) ? entry.model?.[0] : undefined;
-  if (user?.role !== "user" || typeof user.content !== "string") return undefined;
+  if (user?.role === "user" && typeof user.content === "string") return user.content;
+}
+
+async function savedManifest(storage: SqliteStorage, submission: SubmissionRecord): Promise<RepositoryContextManifest | undefined> {
+  const content = await savedUserContent(storage, submission);
+  if (content === undefined) return undefined;
   try {
-    const saved = JSON.parse(user.content) as { repositoryContext?: RepositoryContextManifest } | null;
+    const saved = JSON.parse(content) as { repositoryContext?: RepositoryContextManifest } | null;
     return saved?.repositoryContext;
   } catch {
     return undefined;
   }
+}
+
+function evaluatedPackages(input: unknown): EvaluationInput | undefined {
+  if (!input || typeof input !== "object" || !("parts" in input) || !Array.isArray(input.parts)) return;
+  const parts = input.parts.flatMap((part) => {
+    const saved = typeof part?.content === "string" && evaluationInput(part.content);
+    return saved ? [saved] : [];
+  });
+  const first = parts[0];
+  if (first) return { task: first.task, sources: parts.flatMap(({ sources }) => sources) };
 }
 
 async function savedAnswer(storage: SqliteStorage, submission: SubmissionRecord): Promise<AssistantMessage | undefined> {
@@ -388,7 +436,8 @@ export async function runCodingSession(
       const task = await harness.getTask(packageTask, context);
       if (task?.state.status === "terminal") return { ...identity, ...packageReviewReceipt(task.state.outcome) };
     }
-    if (!existing && !packageTask && options.prompt === undefined) {
+    const hasNewInput = options.prompt !== undefined || dependencies.preparedInput !== undefined;
+    if (!existing && !packageTask && !hasNewInput) {
       throw new CodingError(`No saved request ${options.requestId} exists in coding session ${options.session}.`);
     }
     // Waiting on even a settled Pi submission enables scheduling for the whole harness.
@@ -405,25 +454,13 @@ export async function runCodingSession(
     let content: string | undefined;
     dependencies.signal?.throwIfAborted();
     let packageParts: ReturnType<typeof confirmedPackageReviewParts> | undefined;
-    if (!existing && !packageTask && options.prompt !== undefined) {
+    if (!existing && !packageTask && hasNewInput) {
       const inspection = await harness.inspect(context);
       const pending = packageReviewIds(inspection)[0] ?? inspection.submissions.find(({ conversationId }) => conversationId === ROOT_CONVERSATION_ID)?.requestId;
       if (pending) throw new CodingError(`Resume pending request ${pending} before starting another request in this session.`);
-      if (options.packageReviews) {
-        if (!options.prompt.trim() || Buffer.byteLength(options.prompt) > maxPromptBytes || options.files || options.repository)
-          throw new CodingError("Use a coding prompt and select one source mode for the package review.");
-        try {
-          const preview = await previewPackageReviews(workspace, options.packageReviews.packages);
-          packageParts = confirmedPackageReviewParts(preview, options.packageReviews.id, options.requestId, options.prompt);
-        } catch (error) {
-          if (error instanceof PackageReviewError || error instanceof RepositoryContextError) throw new CodingError(error.message, { cause: error });
-          throw error;
-        }
-      } else {
-        content = await requestContent(
-          workspace, options.prompt, options.files ?? [], options.repository, options.filePreviewId, options.allowedAttachmentScopes,
-        );
-      }
+      const input = dependencies.preparedInput ?? await prepareCodingInput(options, workspace);
+      if (input.kind === "package-review") packageParts = input.parts;
+      else content = input.content;
       if ([...(content === undefined ? [] : [content]), ...(packageParts?.map((part) => part.content) ?? [])]
         .some((input) => !newRequestFits(input, instructions, budget))) {
         throw new CodingError(`The new coding request exceeds the ${budget.limitTokens}-token input budget. Use fewer lines, files, or prompt tokens.`);
@@ -538,11 +575,13 @@ export async function getCodingSessionStatus(
         const task = await harness.getTask(taskId, context);
         const identity = { session: options.session, requestId: options.requestId };
         const receipt = task?.state.status === "terminal" ? { ...identity, ...packageReviewReceipt(task.state.outcome) } : undefined;
+        const saved = options.includeEvaluationInput ? evaluatedPackages(task?.input) : undefined;
         result.request = {
           requestId: options.requestId, status: receipt?.status ?? "placed",
           ...(receipt?.status === "done" ? { usage: receipt.usage, stopReason: receipt.stopReason } : {}),
           ...(receipt?.status === "unanswered" ? { reason: receipt.reason } : {}),
           ...(receipt && options.includeReceipt ? { receipt } : {}),
+          ...(saved ? { evaluationInput: saved } : {}),
         };
         return result;
       }
@@ -551,12 +590,15 @@ export async function getCodingSessionStatus(
       const repositoryContext = await savedManifest(storage, submission);
       const answer = await savedAnswer(storage, submission);
       const reason = unansweredReason(submission);
+      const content = options.includeEvaluationInput ? await savedUserContent(storage, submission) : undefined;
+      const saved = content === undefined ? undefined : evaluationInput(content);
       result.request = {
         requestId: options.requestId,
         status: submission.status,
         ...(repositoryContext ? { repositoryContext } : {}),
         ...(answer ? { usage: answer.usage, stopReason: answer.stopReason } : {}),
         ...(reason ? { reason } : {}),
+        ...(saved ? { evaluationInput: saved } : {}),
         ...(options.includeReceipt && (submission.status === "done" || submission.status === "unanswered")
           ? { receipt: await codingReceipt(storage, submission, { session: options.session, requestId: options.requestId }) }
           : {}),

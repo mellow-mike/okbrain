@@ -55,14 +55,19 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Measure evidence recall and preview latency on pinned public Vite source
   across six repository tasks and two scope and budget settings. Improve
   indexed excerpt recall from 20.0% to 53.3% with the same source boundaries.
+- [x] Record opt-in evaluations against saved previews, compare strategy usage,
+  and let a different project member review the captured evidence and outcome.
 - [ ] Measure live provider usage and tokens per accepted result with
   independent human review of citations and outcomes.
 - [x] Add project authorization, expiring member tokens, dedicated worker
   subprocesses, per-project credentials, and team status and cancellation.
 - [x] Verify local crash recovery and request replay, project-scoped audit,
   transcript deletion, review and approval, and a team browser through local HTTPS.
+- [x] Add opt-in Linux Docker worker isolation and owner-configured transcript
+  expiry with expired-ID replay protection. Verify with a real offline Docker run
+  and application-level retention tests.
 - [ ] Verify failure, retention, access policy, and worker isolation on the
-  intended enterprise deployment. Local workers use the server's OS account.
+  intended enterprise deployment, including actual provider egress and backups.
 - [x] Add explicitly previewed, independent Pi Durable package reviews with
   task-owned child conversations, combined usage, and a human-reviewed handoff.
 - [x] Preview and apply owner-approved local patches to existing tracked files
@@ -180,8 +185,10 @@ Goal: a real PKM you can write to, conformant on every save, versioned in git.
       under `core.autocrlf=true`; db_only end-to-end; CLI `--status`/`--json`
 
 ### 1.6 Optional
-- [ ] `okb watch` — re-index on file change (cross-platform watcher) —
-      **deferred**: recursive watching differs per OS; revisit when it hurts
+- [x] Refresh keyword search and graph links after external note edits, moves, and
+      deletions with `okb watch` and **Settings → Watch brain folder**. Use
+      the index's portable traversal, coalesce edits into serial index passes,
+      and stop if the watched mount loses write permission.
 
 ---
 
@@ -699,10 +706,9 @@ Severity: `crit` (data loss / corruption / non-conformant write) · `high`
 
 ## Backlog (unscheduled ideas)
 Capture anything not yet placed in a stage; promote into a stage when picked up.
-- [ ] Full-text snippet highlighting in `okb search` output
-- [ ] Bulk import performance: each imported file regenerates its whole
-      `index.md` ancestor chain + appends `log.md`; batch the regeneration for
-      large trees if it gets slow
+- [x] Show FTS excerpts with matched terms in browser search and CLI output.
+- [x] Batch `index.md` generation and `log.md` writes across bulk imports. Refresh
+      the derived search index for saved files when a later file fails.
 - [ ] `okb capture` triage flow: promote `inbox/` notes to a proper home
       (`okb move`? skill?) once graph tooling (1.4) exists
 - [x] Writer no-op detection: skip the write (and the `timestamp` refresh) when
@@ -715,11 +721,10 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       `core/stats.ts` (pure `computeStats`): by-type + top-tag breakdowns,
       orphan/inbox/never-reviewed counts, oldest/newest + a stale window. Needs
       an index (fails loudly otherwise, per B3); auto-exposed on CLI/API/MCP.
-- [ ] Bundle templates / starter vocabularies
+- [x] Optional Personal knowledge and Projects and decisions starter guides for empty brains on Home and through `okb init --template`, with editable Markdown and suggested types and tags.
 - [ ] Export to other PKM formats (one-way) for portability checks
-- [ ] Link extraction and doctor's `log.md` heading scan are regex-based and
-      code-fence-unaware — a `](x.md)` or `## heading` inside a fenced code
-      block is treated as real. Revisit if it bites.
+- [x] Preserve fenced Markdown examples when recognizing links and the
+      `index.md` and `log.md` section headings.
 - [ ] Concept-id case sensitivity differs across filesystems (macOS/Windows
       case-insensitive); decide on a canonical-casing policy before it matters.
 - [ ] Per-page `db_only` (frontmatter flag → sync appends the path to
@@ -727,16 +732,14 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [x] `viz.html` and the GUI render concept bodies through
       `core/viz/safe-markdown.js` (raw HTML escaped, URL schemes gated — B9);
       the shared `core/viz/render.js` builds on it.
-- [ ] True token streaming for `okb ask` / the SSE endpoint: the gateway
-      returns whole chat responses, so the `answer` event arrives in one
-      piece; add SSE parsing per dialect when incremental rendering matters.
+- [x] Stream text deltas through configured API and local model routes in Ask
+      and `okb ask --stream`. Verify citations after the provider completes.
 - [ ] Per-brain settings: a mount could carry its own retrieval profile /
       provider defaults (today `brains` entries are path + readonly only).
 - [x] GUI brain switcher: the local API re-scopes per request via
       `x-okb-brain` (read-only policy included); the sidebar has the
       dropdown.
-- [ ] Claims in review: surface overdue claims (`resolve_by` past) as a
-      Resurface signal so settling them becomes part of the daily queue.
+- [x] Surface overdue open claims in Review with a link to the claim outcome controls.
 - [ ] Per-directory `log.md` (OKF §9 allows one at any level); okbrain
       maintains only the root log today.
 - [ ] Upstream-style `index.md` (H1 sections, relative links) as a
@@ -749,8 +752,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       confirmation; today only humans and agents verify.
 - [ ] Attested Computation execution/attestation (§10) — deliberately out of
       scope for a personal brain; the contract is displayed, not run.
-- [ ] `okb export-viz --fonts`: embed the design system's faces in
-      `viz.html` (+~490 KB base64) for a pixel-faithful shared export
+- [x] Embed the app's licensed fonts on request in `viz.html` from Settings or
+      with `okb export-viz --fonts`.
 - [ ] One graph component for both surfaces: the GUI graph view and the
       static viewer duplicate their Cytoscape wiring (styles, filters,
       detail panel); a shared `core/viz` module would halve it
@@ -759,6 +762,10 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Streamed answers from configured providers, added folder watch,
+  highlighted search excerpts and overdue claims, and batched Markdown imports.
+  Added independently reviewed coding evaluation, local Docker isolation, and
+  transcript expiry. Live evaluation and intended-host verification remain open.
 - 2026-11-22 — Added both macOS and browser workflows, editor packaging,
   source reconciliation, consent and focused maps. Coding gained project and
   team access, subprocess workers, independent package reviews, approved

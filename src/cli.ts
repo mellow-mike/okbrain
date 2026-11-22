@@ -14,6 +14,7 @@ import { SyncError } from "./core/sync.ts";
 import { VERSION } from "./core/version.ts";
 import {
   OpError,
+  checkOpCall,
   operations,
   runOp,
   type Operation,
@@ -175,9 +176,10 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
 
   let bundle = process.cwd();
   let readonly = false;
+  let brainName: string | undefined;
   try {
     if (!op.bundleIndependent) {
-      const brainName = brainArg ?? (bundleArg === undefined ? process.env.OKB_BRAIN : undefined);
+      brainName = brainArg ?? (bundleArg === undefined ? process.env.OKB_BRAIN : undefined);
       if (brainName !== undefined) {
         const brain = resolveBrain(brainName);
         bundle = brain.path;
@@ -199,8 +201,17 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
   let local: LocalContext | undefined;
   try {
     local = openLocalContext(bundle, true, readonly);
-    const result = await runOp(op, local.ctx, raw);
-    io.out((json ? JSON.stringify(result, null, 2) : op.render(result)) + "\n");
+    local.ctx.brain = brainName;
+    let written = false;
+    const result = !json && raw.stream === true && op.stream && op.renderStreamFooter
+      ? await op.stream(local.ctx, checkOpCall(op, local.ctx, raw), (event, data) => {
+          if (event !== "delta" || !data || typeof (data as { text?: unknown }).text !== "string") return;
+          written = true;
+          io.out((data as { text: string }).text);
+        })
+      : await runOp(op, local.ctx, raw);
+    const output = json ? JSON.stringify(result, null, 2) : written ? op.renderStreamFooter!(result) : op.render(result);
+    io.out(output + "\n");
     return op.exitCode?.(result) ?? 0;
   } catch (e) {
     if (e instanceof OpError) {

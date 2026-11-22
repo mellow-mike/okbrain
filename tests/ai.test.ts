@@ -66,6 +66,8 @@ describe("gateway dialects (stub local server — the offline path)", () => {
   let last: { path: string; body: Record<string, unknown>; headers: Headers };
   const base = () => `http://127.0.0.1:${server.port}`;
   const gw = createGateway({}, NO_ENV);
+  const events = (items: unknown[]) => new Response(items
+    .map((item) => `data: ${JSON.stringify(item)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
 
   beforeAll(() => {
     server = Bun.serve({
@@ -75,6 +77,23 @@ describe("gateway dialects (stub local server — the offline path)", () => {
         const path = new URL(req.url).pathname;
         const body = (await req.json()) as Record<string, unknown>;
         last = { path, body, headers: req.headers };
+        if (path === "/chat/completions" && body.stream === true) return events([
+          { choices: [{ delta: { content: "a" } }] },
+          { choices: [{ delta: { content: "b" }, finish_reason: "stop" }] },
+        ]);
+        if (path === "/messages" && body.stream === true) return events([
+          { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "private" } },
+          { type: "content_block_delta", delta: { type: "text_delta", text: "a" } },
+          { type: "content_block_delta", delta: { type: "text_delta", text: "b" } },
+          { type: "message_stop" },
+        ]);
+        if (path.includes(":streamGenerateContent")) {
+          expect(new URL(req.url).searchParams.get("alt")).toBe("sse");
+          return events([
+            { candidates: [{ content: { parts: [{ thought: true, text: "private" }, { text: "a" }] } }] },
+            { candidates: [{ content: { parts: [{ text: "b" }] }, finishReason: "STOP" }] },
+          ]);
+        }
         if (path.endsWith("/chat/completions"))
           return Response.json({ choices: [{ message: { content: "local says hi" } }] });
         if (path.endsWith("/embeddings"))
@@ -174,6 +193,15 @@ describe("gateway dialects (stub local server — the offline path)", () => {
     await expect(gw.chat([{ role: "user", content: "hi" }], { provider: "openai" })).rejects.toThrow(
       /OPENAI_API_KEY/,
     );
+  });
+
+  test.each(["ollama", "openai", "openrouter", "anthropic", "gemini"])("streams only answer text through %s", async (provider) => {
+    const deltas: string[] = [];
+    const result = await gw.chat([{ role: "user", content: "hi" }], { provider, baseUrl: base(), apiKey: "fixture" }, {
+      onDelta: (text) => deltas.push(text),
+    });
+    expect(deltas).toEqual(["a", "b"]);
+    expect(result.text).toBe("ab");
   });
 });
 

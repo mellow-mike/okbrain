@@ -43,6 +43,23 @@ jobs:
           bunx --bun playwright install --with-deps --only-shell chromium
           bun run smoke:browser
 
+  coding-worker:
+    name: Linux Docker coding worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: Build coding worker
+        run: docker build --file packaging/coding-worker/Dockerfile --tag okbrain-coding-worker:ci .
+      - name: Exercise the isolated worker offline
+        run: |
+          worker_image=$(docker image inspect --format '{{.Id}}' okbrain-coding-worker:ci)
+          bun run packaging/coding-worker/smoke.ts "$worker_image"
+
   mac-app:
     name: macOS app (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

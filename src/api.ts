@@ -18,12 +18,13 @@ import { providerKeyStatus, setProviderKey } from "./core/ai/local-keys.ts";
 import { AiError } from "./core/ai/gateway.ts";
 import { CodingError } from "./core/coding/durable.ts";
 import { CodingProjectProfileError } from "./core/coding/project-profile.ts";
-import { CodingProjectControl, ProjectControlError, type ProjectControlOptions } from "./core/coding/project-control.ts";
+import { codingProjectCatalogPath, CodingProjectControl, ProjectControlError, type ProjectControlOptions } from "./core/coding/project-control.ts";
 import { RepositoryContextError } from "./core/coding/repository-context.ts";
 import { CodingTeamListener, type TeamStatus } from "./core/coding/team-listener.ts";
 import { BrainMountError } from "./core/brain-mounts.ts";
 import { ConfigError, listBrains, resolveBrain, UnknownBrainError } from "./core/config.ts";
 import { openLocalContext, type LocalContext } from "./core/context.ts";
+import { BundleWatcher } from "./core/engine/bundle-watch.ts";
 import { defaultDbPath, EngineError } from "./core/engine/sqlite.ts";
 import { SyncError } from "./core/sync.ts";
 import { defaultVectorsPath } from "./core/engine/vectors.ts";
@@ -52,6 +53,7 @@ import {
 } from "./core/serve-token.ts";
 import { VERSION } from "./core/version.ts";
 import { ManagedMcpHttp, ManagedMcpHttpError } from "./mcp/managed-http.ts";
+import { fontAssets, hostedFontCss } from "./core/viz/fonts.ts";
 import cytoscapeJs from "./core/viz/vendor/cytoscape.min.js" with { type: "text" };
 import markedJs from "./core/viz/vendor/marked.umd.js" with { type: "text" };
 import okbJs from "./core/viz/okb.js" with { type: "text" };
@@ -61,52 +63,48 @@ import tokensCss from "./core/viz/tokens.css" with { type: "text" };
 import guiAppJs from "./gui/app.js" with { type: "text" };
 import guiMcpSettingsJs from "./gui/mcp-settings.js" with { type: "text" };
 import guiCodingJs from "./gui/coding.js" with { type: "text" };
+import guiCodingEvaluationJs from "./gui/coding-evaluation.js" with { type: "text" };
 import guiGithubJs from "./gui/github.js" with { type: "text" };
 import guiNotionJs from "./gui/notion.js" with { type: "text" };
 import guiCodingCss from "./gui/coding.css" with { type: "text" };
 import guiCodingTeamHtml from "./gui/coding-team.html" with { type: "text" };
 import guiAccountsJs from "./gui/accounts.js" with { type: "text" };
 import guiFocusedMapJs from "./gui/focused-map.js" with { type: "text" };
-import literataItalic from "./gui/fonts/Literata-Italic-VF.woff2" with { type: "file" };
-import literata from "./gui/fonts/Literata-VF.woff2" with { type: "file" };
-import recursiveMono from "./gui/fonts/RecursiveMono-VF.woff2" with { type: "file" };
-import recursiveSans from "./gui/fonts/RecursiveSans-VF.woff2" with { type: "file" };
 import guiIndexHtml from "./gui/index.html" with { type: "text" };
 import guiStyleCss from "./gui/style.css" with { type: "text" };
 
 const JS = "application/javascript; charset=utf-8";
 const CSS = "text/css; charset=utf-8";
-const WOFF2 = "font/woff2";
 
 /**
  * GUI static assets (tokenless, like `/`): body + content type per route.
  * Fonts are `file` imports — a path on disk in dev, embedded in the
  * compiled binary — read per request.
  */
-const GUI_ASSETS: Record<string, [string | Blob, string]> = {
+const GUI_ASSETS: Record<string, readonly [string | Blob, string]> = {
   "/gui/app.js": [guiAppJs, JS],
   "/gui/mcp-settings.js": [guiMcpSettingsJs, JS],
   "/gui/coding.js": [guiCodingJs, JS],
+  "/gui/coding-evaluation.js": [guiCodingEvaluationJs, JS],
   "/gui/github.js": [guiGithubJs, JS],
   "/gui/notion.js": [guiNotionJs, JS],
   "/gui/coding.css": [guiCodingCss, CSS],
   "/gui/accounts.js": [guiAccountsJs, JS],
   "/gui/focused-map.js": [guiFocusedMapJs, JS],
-  "/gui/style.css": [guiStyleCss, CSS],
+  "/gui/style.css": [`${hostedFontCss}\n${guiStyleCss}`, CSS],
   "/gui/tokens.css": [tokensCss, CSS],
   "/gui/okb.js": [okbJs, JS],
   "/gui/cytoscape.js": [cytoscapeJs, JS],
   "/gui/marked.js": [markedJs, JS],
   "/gui/safe-markdown.js": [safeMarkdownJs, JS],
   "/gui/render.js": [renderJs, JS],
-  "/gui/fonts/RecursiveSans-VF.woff2": [Bun.file(recursiveSans), WOFF2],
-  "/gui/fonts/RecursiveMono-VF.woff2": [Bun.file(recursiveMono), WOFF2],
-  "/gui/fonts/Literata-VF.woff2": [Bun.file(literata), WOFF2],
-  "/gui/fonts/Literata-Italic-VF.woff2": [Bun.file(literataItalic), WOFF2],
+  ...Object.fromEntries(fontAssets),
 };
 
 export interface ApiOptions {
   bundle: string;
+  /** Original named mount when serving with `okb --brain`. */
+  servedBrain?: string;
   /** Bind port on 127.0.0.1 (0 = ephemeral, for tests). */
   port?: number;
   /** Injectable for tests; default: the per-install serve token. */
@@ -215,6 +213,8 @@ interface ServeState {
   team?: CodingTeamListener;
   projectTokensOnly?: boolean;
   bundle: string;
+  servedBrain?: string;
+  watches?: Map<string | null, BundleWatcher>;
   port: number;
   token: string;
   readonly: boolean;
@@ -237,6 +237,51 @@ function scopeOf(req: Request, url: URL, o: ServeState): Scope {
 }
 
 const open = (s: Scope): LocalContext => openLocalContext(s.bundle, true, s.readonly);
+
+async function bundleWatchRequest(req: Request, url: URL, opts: ServeState, cors?: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+    return json(401, { error: "missing or invalid local app token" }, headers);
+  if (req.headers.has("origin") && !cors)
+    return json(403, { error: "Watch settings must come from the local app." }, headers);
+  const watches = opts.watches!;
+  try {
+    if (req.method === "GET") {
+      return json(200, { result: watches.get(scopeOf(req, url, opts).brain)?.status() ?? null }, headers);
+    }
+    if (req.method !== "POST") return json(405, { error: "Method not allowed." }, headers);
+    if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+      return json(415, { error: "Send a JSON object." }, headers);
+    const raw = await readUpload(req, 4096, "Watch settings exceed 4 KiB.");
+    let action: unknown;
+    try { action = JSON.parse(raw.toString("utf8"))?.action; } catch { /* handled below */ }
+    if (action !== "stop" && action !== "start")
+      return json(400, { error: "Choose Start or Stop for bundle watching." }, headers);
+    // The selected mount can change while we read the request body.
+    const scope = scopeOf(req, url, opts);
+    const prior = watches.get(scope.brain);
+    if (action === "stop") {
+      await prior?.stop();
+      return json(200, { result: prior?.status() ?? null }, headers);
+    }
+    const local = open(scope);
+    try { checkOpCall(getOp("watch_index")!, local.ctx, {}); }
+    finally { local.close(); }
+    const name = scope.brain ?? opts.servedBrain;
+    const canWrite = (): boolean => {
+      if (!name) return true;
+      const mount = resolveBrain(name);
+      return mount.path === scope.bundle && !mount.readonly;
+    };
+    if (!canWrite()) return json(403, { error: "The brain mount changed or is read-only." }, headers);
+    if (prior?.status().active) return json(200, { result: prior.status() }, headers);
+    const watcher = new BundleWatcher(scope.bundle, canWrite);
+    watches.set(scope.brain, watcher);
+    return json(200, { result: watcher.status() }, headers);
+  } catch (error) {
+    return json(error instanceof UploadTooLarge ? 413 : errStatus(error), errBody(error), headers);
+  }
+}
 
 function mountIsAvailable(path: string): boolean {
   try { return statSync(path).isDirectory(); } catch { return false; }
@@ -378,41 +423,62 @@ async function runJsonOp(
   }
 }
 
-function sse(local: LocalContext, run: (send: (event: string, data: unknown) => void) => Promise<unknown>, cors: Hdrs = {}): Response {
+function sse(local: LocalContext, request: Request,
+  run: (send: (event: string, data: unknown) => void, signal: AbortSignal) => Promise<unknown>, cors: Hdrs = {}): Response {
   const enc = new TextEncoder();
+  const detached = new AbortController();
+  const disconnect = AbortSignal.any([request.signal, detached.signal]);
+  const signal = AbortSignal.any([disconnect, AbortSignal.timeout(300_000)]);
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const send = (event: string, data: unknown): void =>
-        controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-      try {
-        send("done", { result: await run(send) });
-      } catch (e) {
-        send("error", errBody(e));
-      } finally {
-        controller.close();
-        local.close();
-      }
+    start(controller) {
+      const send = (event: string, data: unknown): void => {
+        if (!disconnect.aborted) controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      };
+      void (async () => {
+        try {
+          send("done", { result: await run(send, signal) });
+        } catch (error) {
+          send("error", signal.aborted ? { error: "The answer took too long to complete." } : errBody(error));
+        } finally {
+          try { if (!disconnect.aborted) controller.close(); }
+          finally { local.close(); }
+        }
+      })();
     },
+    cancel() { detached.abort(); },
   });
   return new Response(stream, {
     headers: { "content-type": "text/event-stream", "cache-control": "no-store", ...GUARD, ...cors },
   });
 }
 
-function askStream(url: URL, scope: Scope, cors: Hdrs): Response {
+async function askStream(req: Request, url: URL, scope: Scope, cors: Hdrs): Promise<Response> {
   const op = getOp("ask")!;
-  const raw: Record<string, unknown> = {};
-  for (const k of ["question", "profile"]) {
-    const v = url.searchParams.get(k);
-    if (v !== null) raw[k] = v;
-  }
+  let raw: Record<string, unknown> = {};
   const local = open(scope);
   try {
+    if (req.method === "POST") {
+      if (req.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") {
+        local.close();
+        return json(415, { error: "Send the question as JSON." }, cors);
+      }
+      const input = await readUpload(req, 64 * 1024, "The question is too large.");
+      let parsed: unknown;
+      try { parsed = JSON.parse(input.toString("utf8")); }
+      catch { throw new OpError("Send the question as a JSON object.", "bad_params"); }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new OpError("Send the question as a JSON object.", "bad_params");
+      raw = parsed as Record<string, unknown>;
+    } else {
+      for (const key of ["question", "profile"]) {
+        const value = url.searchParams.get(key);
+        if (value !== null) raw[key] = value;
+      }
+    }
     const params = checkOpCall(op, local.ctx, raw);
-    return sse(local, (send) => op.stream!(local.ctx, params, send), cors);
+    return sse(local, req, (send, signal) => op.stream!(local.ctx, params, send, signal), cors);
   } catch (e) {
     local.close();
-    return json(errStatus(e), errBody(e), cors);
+    return json(e instanceof UploadTooLarge ? 413 : errStatus(e), errBody(e), cors);
   }
 }
 
@@ -614,7 +680,7 @@ async function codingRequest(req: Request, url: URL, opts: ServeState, cors: Hdr
 }
 
 const teamAssets = new Set([
-  "/gui/coding.js", "/gui/github.js", "/gui/coding.css", "/gui/tokens.css", "/gui/style.css", "/gui/render.js",
+  "/gui/coding.js", "/gui/coding-evaluation.js", "/gui/github.js", "/gui/coding.css", "/gui/tokens.css", "/gui/style.css", "/gui/render.js",
   "/gui/fonts/RecursiveSans-VF.woff2", "/gui/fonts/RecursiveMono-VF.woff2",
   "/gui/fonts/Literata-VF.woff2", "/gui/fonts/Literata-Italic-VF.woff2",
 ]);
@@ -688,6 +754,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
       return json(403, { error: "Source actions must come from the local app." });
   }
   if (url.pathname === "/api/brains/mounts") return brainMountRequest(req, url, opts, cors ?? {});
+  if (url.pathname === "/api/brains/watch" && opts.watches) return bundleWatchRequest(req, url, opts, cors);
 
   let scope: Scope;
   try {
@@ -700,6 +767,12 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   const notion = /^\/api\/personal\/sources\/notion\/(status|connect|disconnect|preview|import)$/.exec(url.pathname);
   if (notion && opts.notion) return notionRequest(req, notion[1]!, scope, opts.notion, cors ?? {});
   if (url.pathname === "/api/mcp/http" && opts.mcp) return managedMcpRequest(req, opts, scope, cors);
+
+  if (url.pathname === "/api/ask/stream" && (req.method === "GET" || req.method === "POST")) {
+    if (req.method === "POST" && (!tokenMatches(req.headers.get("x-okb-token"), opts.token) || (req.headers.has("origin") && !cors)))
+      return json(403, { error: "Open Ask from the local app." });
+    return askStream(req, url, scope, cors ?? {});
+  }
 
   if ((url.pathname.startsWith("/api/plan/") && opts.plan) || url.pathname === "/api/provider-keys") {
     if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
@@ -730,7 +803,6 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
       return json(200, { port: opts.port, bookmarklet: bookmarkletJs(opts.port, opts.token) }, cors);
     if (url.pathname === "/api/personal/sources/history")
       return runJsonOp(getOp("personal_source_history")!, scope, {}, { ...cors, "cache-control": "no-store" });
-    if (url.pathname === "/api/ask/stream") return askStream(url, scope, cors ?? {});
     if (url.pathname === "/clip") return clipNav(url, scope);
   }
 
@@ -762,11 +834,16 @@ export function createApiServer(opts: ApiOptions): ApiServer {
   const plan = createBrowserPlan(opts.chatgpt);
   const notion = createNotionSource(opts.notion);
   const mcp = new ManagedMcpHttp();
+  const watches = new Map<string | null, BundleWatcher>();
   const team = new CodingTeamListener();
   const { bundle, readonly = false } = opts;
   const wanted = opts.port ?? DEFAULT_PORT;
   let controller: CodingProjectControl | undefined;
-  const coding = () => controller ??= new CodingProjectControl(opts.coding);
+  const coding = () => controller ??= new CodingProjectControl({ ...opts.coding, retentionAllowed: () => {
+    if (readonly || opts.coding?.retentionAllowed?.() === false) return false;
+    if (!opts.servedBrain) return true;
+    try { return !resolveBrain(opts.servedBrain).readonly; } catch { return false; }
+  } });
   let server: Bun.Server<undefined>;
   try {
     server = Bun.serve({
@@ -775,8 +852,9 @@ export function createApiServer(opts: ApiOptions): ApiServer {
       fetch(req) {
         const path = new URL(req.url).pathname;
         if (path === "/api/plan/answer") server.timeout(req, 150);
+        if (path === "/api/ask/stream") server.timeout(req, 0);
         if (path.startsWith("/api/coding/")) server.timeout(req, 65);
-        return handleRequest(req, { bundle, port: server.port!, token, readonly, plan, coding, team, notion, mcp });
+        return handleRequest(req, { bundle, servedBrain: opts.servedBrain, watches, port: server.port!, token, readonly, plan, coding, team, notion, mcp });
       },
     });
   } catch (e) {
@@ -786,6 +864,9 @@ export function createApiServer(opts: ApiOptions): ApiServer {
       );
     throw e;
   }
+  if (!readonly && existsSync(codingProjectCatalogPath(opts.coding?.stateDir))) {
+    try { coding(); } catch { /* Leave personal routes available. The Coding API reports catalog errors. */ }
+  }
   const port = server.port!;
   return {
     url: `http://127.0.0.1:${port}/`,
@@ -794,7 +875,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
     async stop() {
       plan.close();
       notion.close();
-      const stopped = await Promise.allSettled([server.stop(true), team.stop(), mcp.stop(), controller?.close()]);
+      const stopped = await Promise.allSettled([server.stop(true), team.stop(), mcp.stop(), controller?.close(), ...[...watches.values()].map((watcher) => watcher.stop())]);
       const failures = stopped.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
       if (failures.length) throw new AggregateError(failures, "Could not close the okbrain server.");
     },

@@ -9,6 +9,7 @@
 // doctor` is where it gets flagged.
 
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { sourceTargets } from "../graph/links.ts";
 import { classifyTargets, type TypedTarget } from "../graph/typed-edges.ts";
 import { log } from "../log.ts";
@@ -31,6 +32,20 @@ export interface IndexStats {
   removed: number;
   /** Resolved edges (both endpoints indexed) after the build. */
   edges: number;
+}
+
+const indexWrites = new Map<string, Promise<void>>();
+
+/** Keep whole index passes and point updates from interleaving in this process. */
+export function withIndexWrite<T>(root: string, write: () => T | Promise<T>): Promise<T> {
+  const path = realpathSync(root);
+  const result = (indexWrites.get(path) ?? Promise.resolve()).then(write);
+  const release = result.then(() => {}, () => {});
+  indexWrites.set(path, release);
+  void release.then(() => {
+    if (indexWrites.get(path) === release) indexWrites.delete(path);
+  });
+  return result;
 }
 
 const hashOf = (raw: string): string =>
