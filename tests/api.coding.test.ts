@@ -184,7 +184,7 @@ test("the local coding app resumes an interrupted standalone request after the w
     expect(new TextDecoder().decode(marker.value).trim()).toBe("generation-started");
     const { call, request } = apiClient(api.url);
     expect(await call("/standalone")).toMatchObject({ sessions: [{ session: "legacy", state: "busy" }] });
-    expect(await call("/standalone/inspect", identity)).toEqual({ state: "busy", requests: [] });
+    expect(await call<{ state: "busy"; requests: unknown[] }>("/standalone/inspect", identity)).toEqual({ state: "busy", requests: [] });
     child.kill("SIGKILL");
     await child.exited;
     await rm(workspace, { recursive: true, force: true });
