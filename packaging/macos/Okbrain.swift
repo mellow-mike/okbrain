@@ -153,7 +153,7 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
         child.environment = environment
         let output = Pipe()
         child.standardOutput = output
-        child.standardError = FileHandle.nullDevice
+        child.standardError = smokeTest ? FileHandle.standardError : FileHandle.nullDevice
         output.fileHandleForReading.readabilityHandler = { [weak self, weak child] handle in
             let data = handle.availableData
             if data.isEmpty { handle.readabilityHandler = nil }
@@ -224,21 +224,28 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard smokeTest else { return }
-        webView.callAsyncJavaScript("""
-            for (let i = 0; i < 100; i++) {
-                if (document.title === 'okbrain' && window.OKB_TOKEN && document.querySelector('#h-cap')) return true;
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
-            return false;
-            """, arguments: [:], in: nil, contentWorld: .page) { [weak self] result in
-            guard case .success(let value) = result, value as? Bool == true else { self?.stop(); exit(1) }
-            self?.stop()
-            NSApp.terminate(nil)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let value = try await webView.callAsyncJavaScript("""
+                    for (let i = 0; i < 100; i++) {
+                        if (document.title === 'okbrain' && window.OKB_TOKEN && document.querySelector('#h-cap')) return true;
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    return false;
+                    """, arguments: [:], in: nil, contentWorld: .page)
+                guard value as? Bool == true else { self.show("The okbrain page did not initialize."); return }
+                NSApp.terminate(nil)
+            } catch { self.show(error.localizedDescription) }
         }
     }
 
     private func show(_ message: String) {
-        if smokeTest { stop(); exit(1) }
+        if smokeTest {
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+            stop()
+            exit(1)
+        }
         let alert = NSAlert()
         alert.messageText = "Could not open okbrain"
         alert.informativeText = message
@@ -246,8 +253,13 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
     }
 }
 
-let app = NSApplication.shared
-let delegate = Okbrain()
-app.setActivationPolicy(.regular)
-app.delegate = delegate
-app.run()
+@main
+struct OkbrainApp {
+    @MainActor static func main() {
+        let app = NSApplication.shared
+        let delegate = Okbrain()
+        app.setActivationPolicy(.regular)
+        app.delegate = delegate
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}

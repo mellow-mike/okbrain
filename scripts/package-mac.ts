@@ -21,7 +21,7 @@ try {
   await copyFile(join(root, "packaging", "macos", "Info.plist"), join(contents, "Info.plist"));
   await $`/usr/libexec/PlistBuddy -c ${`Set :CFBundleShortVersionString ${version}`} ${join(contents, "Info.plist")}`;
   const target = `${process.arch === "arm64" ? "arm64" : "x86_64"}-apple-macosx13.0`;
-  await $`xcrun swiftc -O -target ${target} -o ${join(executables, "Okbrain")} ${join(root, "packaging", "macos", "Okbrain.swift")}`;
+  await $`xcrun swiftc -O -parse-as-library -target ${target} -o ${join(executables, "Okbrain")} ${join(root, "packaging", "macos", "Okbrain.swift")}`;
   await $`bun build --compile --outfile ${join(executables, "okb")} ${join(root, "src", "cli.ts")}`;
   await copyFile(sqliteVec.getLoadablePath(), join(executables, "vec0.dylib"));
 
