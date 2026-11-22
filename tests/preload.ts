@@ -9,6 +9,7 @@ import { join } from "node:path";
 
 const dir = mkdtempSync(join(tmpdir(), "okb-test-config-"));
 process.env.XDG_CONFIG_HOME = dir; // linux/macOS configDir
+process.env.XDG_DATA_HOME = join(dir, "data"); // linux/macOS dataDir
 process.env.APPDATA = join(dir, "roaming"); // windows configDir
 process.env.LOCALAPPDATA = join(dir, "local"); // windows dataDir
 

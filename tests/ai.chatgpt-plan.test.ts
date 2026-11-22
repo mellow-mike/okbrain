@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { runCli } from "../src/cli.ts";
 import { createChatgptPlan } from "../src/core/ai/chatgpt-plan.ts";
+import { writeConcept } from "../src/core/okf/write.ts";
 import { getOp } from "../src/core/operations.ts";
 
 const grantScope = "openid resource.invoke chatgpt.tokens.use.direct offline_access";
@@ -159,5 +161,23 @@ describe("ChatGPT plan", () => {
   test("registry keeps plan usage and account controls on the CLI", () => {
     for (const name of ["ask_plan", "chatgpt_connect", "chatgpt_status", "chatgpt_use", "chatgpt_models", "chatgpt_disconnect"])
       expect(getOp(name)?.localOnly).toBe(true);
+  });
+
+  test("ask-plan retrieves indexed context before requiring a connection", async () => {
+    const root = await mkdtemp(join(tmpdir(), "okb-chatgpt-brain-"));
+    try {
+      await writeConcept(root, {
+        id: "notes/library", type: "note", title: "Neighborhood library", description: "Planning notes",
+      });
+      let stderr = "";
+      const cli = (...args: string[]) => runCli(["--bundle", root, ...args], {
+        out: () => {}, err: (text) => { stderr += text; },
+      });
+      expect(await cli("index")).toBe(0);
+      expect(await cli("ask-plan", "neighborhood library")).toBe(1);
+      expect(stderr).toContain("Connect a ChatGPT plan");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

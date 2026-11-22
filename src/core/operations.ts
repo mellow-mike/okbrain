@@ -565,7 +565,7 @@ export const operations: readonly Operation[] = [
           ...(await plan.complete(messages, p.model as string | undefined)),
           provider: "chatgpt-plan",
         }),
-      }, { ...PROFILES.balanced!, vecK: 0, rerank: false });
+      }, { ...PROFILES.balanced!, rerank: false });
     },
     render: renderAnswer,
   },
