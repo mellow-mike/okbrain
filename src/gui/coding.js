@@ -813,6 +813,26 @@
       prompt.focus();
       return true;
     };
+    panel.loadGitHubIssue = (issue) => {
+      if (busy || readonly || detached() || !panel.isConnected) return false;
+      const task = ['GitHub issue #' + issue.number + ' · ' + issue.title, issue.url, issue.body].filter(Boolean).join('\n\n');
+      if (new TextEncoder().encode(task).length > 16384) throw new Error('The issue text exceeds the task limit. Open the issue on GitHub to copy a shorter excerpt.');
+      const hasDraft = preview || [...form.querySelectorAll('input, textarea')].some((input) => input.type === 'checkbox'
+        ? input.checked !== input.defaultChecked : input.value !== input.defaultValue) || source.value !== 'repository';
+      if (hasDraft && !confirm('Replace the current task and source selection with a new draft for issue #' + issue.number + '?')) return;
+      form.reset();
+      evaluationPrompt = undefined;
+      session.value = 'issue-' + issue.number + '-' + crypto.randomUUID();
+      requestId.value = crypto.randomUUID();
+      prompt.value = task;
+      form.elements.query.value = issue.title;
+      updateSourceFields();
+      enrollment.dispatchEvent(new Event('change'));
+      updateBranchMode();
+      report(feedback, undefined, 'Issue #' + issue.number + ' loaded. Preview source before sending.');
+      prompt.focus();
+      return true;
+    };
     panel.updateProject(project);
     return (targetSession) => {
       if (session.value !== targetSession) return;
@@ -2214,7 +2234,8 @@
     github.dataset.codingGithub = '';
     left.append(github);
     const target = actionRoute ? { session: actionRoute[3], id: actionRoute[4] } : undefined;
-    window.okbGitHub?.mount(github, { project, coding, readonly, target: actionRoute?.[2] === 'github' ? target : undefined });
+    window.okbGitHub?.mount(github, { project, coding, readonly, detached: isDetached, loadIssue: composerPanel.loadGitHubIssue,
+      target: actionRoute?.[2] === 'github' ? target : undefined });
     if (!teamMode) {
       openPatch = patchReview(left, project, readonly, isDetached);
       if (actionRoute?.[2] === 'patch') void openPatch(target);

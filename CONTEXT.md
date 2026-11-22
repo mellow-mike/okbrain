@@ -11,6 +11,9 @@ v0.2 remains the interchange baseline and its reference bundle verifies
 compatibility. Product-specific fields and concepts can evolve alongside it.
 The personal product prioritizes source capture, user-directed memory,
 configurable retrieval, and inspectable links.
+Both Ask routes can copy a completed answer as Markdown with the submitted
+question and a separate list of verified bundle-root citation links.
+Clipboard fallback keeps the copy visible and selectable in the current app.
 
 The coding workflow keeps operational state in Pi Durable storage in the
 user's application data. Each named session binds to a canonical workspace
@@ -104,6 +107,9 @@ The benchmark CLI and app share the six pinned Vite tasks and evidence
 locations. Reserved app study IDs bind the task, citation targets, retrieval
 recipe, clean Git revision, and timed preview to each new trial.
 GitHub activity and compare handoff use a bound project remote.
+An explicitly selected issue is read from that remote and displayed as text.
+Using it in Coding fills an editable draft in a fresh session and clears
+prior source approval. The normal preview and approval bind the later send.
 Branch publication binds exact applied patch bytes to a verified GitHub base
 commit. A separate Contents write credential creates a commit and a new ref.
 The catalog saves the commit SHA before exposing the ref so receipt recovery

@@ -22,8 +22,8 @@ Open **Coding** to register a permitted workspace, preview source excerpts,
 send a Pi Durable request, and inspect, resume, or review its result. Save
 project request presets for recurring work. The VS Code and Cursor extension
 previews source and opens run results from a local project or an HTTPS team
-workspace. Connect a GitHub remote from Coding to review repository activity and
-hand off accepted work.
+workspace. Connect a GitHub remote from Coding to review repository activity,
+start a draft from an issue, or hand off accepted work.
 See the [personal guide](docs/PERSONAL.md) and [coding guide](docs/CODING.md).
 
 > [!NOTE]

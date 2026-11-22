@@ -16,6 +16,16 @@ export class GitHubError extends Error {
 const GITHUB_ORIGIN = "https://github.com";
 const API_ORIGIN = "https://api.github.com";
 const PAGE_SIZE = 30;
+const ISSUE_TITLE_BYTES = 512;
+const ISSUE_BODY_BYTES = 14 * 1024;
+
+function repositorySlug(path: string): string | undefined {
+  const [owner, name, extra] = path.split("/");
+  if (extra !== undefined || !owner || !name ||
+      !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/iu.test(owner) ||
+      !/^[a-z0-9_.-]{1,100}$/iu.test(name) || name === "." || name === "..") return;
+  return `${owner.toLowerCase()}/${name.toLowerCase()}`;
+}
 
 function githubRepository(remoteUrl: string): string | undefined {
   const scp = /^git@github\.com:([^\s]+)$/iu.exec(remoteUrl);
@@ -28,11 +38,7 @@ function githubRepository(remoteUrl: string): string | undefined {
       return;
     path = parsed.pathname.slice(1);
   }
-  const [owner, name, extra] = path.replace(/\.git$/i, "").split("/");
-  if (extra !== undefined || !owner || !name ||
-      !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/iu.test(owner) ||
-      !/^[a-z0-9_.-]{1,100}$/iu.test(name) || name === "." || name === "..") return;
-  return `${owner.toLowerCase()}/${name.toLowerCase()}`;
+  return repositorySlug(path.replace(/\.git$/i, ""));
 }
 
 /** Inspect local Git configuration without contacting a remote or using its credentials. */
@@ -153,7 +159,9 @@ interface GitHubItem {
 const asRecord = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
-async function gitHubRequest(path: string, token: string | null, transport: GitHubFetch, body?: GitHubPullDraft) {
+async function gitHubRequest(
+  path: string, token: string | null, transport: GitHubFetch, body?: GitHubPullDraft, target: "activity" | "issue" = "activity",
+) {
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
     "user-agent": "okbrain",
@@ -171,6 +179,8 @@ async function gitHubRequest(path: string, token: string | null, transport: GitH
     throw new GitHubError(body ? "GitHub did not confirm creation. Recover the pull request before retrying." : "GitHub could not be reached. Try refreshing again.", 502);
   }
   if (response.status === 401) throw new GitHubError("GitHub rejected the saved access token.", 502);
+  if (response.status === 404 && target === "issue")
+    throw new GitHubError("GitHub could not find this issue. Check the issue number and repository read permission.", 404);
   if (response.status === 404) throw new GitHubError("GitHub could not find this repository. For a private repository, check the token's repository and permissions.", 502);
   if (response.status === 429 || (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0"))
     throw new GitHubError("GitHub's rate limit was reached. Try again later.", 502);
@@ -181,7 +191,7 @@ async function gitHubRequest(path: string, token: string | null, transport: GitH
     throw new GitHubError("GitHub rejected creation. Check that both branches exist, that the head has changes, and that the comparison has no open pull request.", 409);
   if (body ? response.status !== 201 : !response.ok) throw new GitHubError(body
     ? "GitHub did not confirm creation. Recover the pull request before retrying."
-    : "GitHub could not load this repository's activity.", 502);
+    : target === "issue" ? "GitHub could not load this issue." : "GitHub could not load this repository's activity.", 502);
   try {
     const reader = response.body?.getReader();
     if (!reader) throw new Error();
@@ -213,6 +223,54 @@ async function gitHubRequest(path: string, token: string | null, transport: GitH
 
 async function getGitHub(path: string, token: string | null, transport: GitHubFetch): Promise<unknown> {
   return (await gitHubRequest(path, token, transport)).data;
+}
+
+export function githubIssueNumber(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
+    throw new GitHubError("Enter a positive integer GitHub issue number.");
+  return value;
+}
+
+export interface GitHubIssuePreview {
+  number: number;
+  title: string;
+  body: string;
+  truncated: boolean;
+  url: string;
+}
+
+function matchesIssueEndpoint(value: unknown, prefix: string, repository: string, suffix: string): boolean {
+  return typeof value === "string" && value.startsWith(prefix) && value.endsWith(suffix) &&
+    value.slice(prefix.length, value.length - suffix.length).toLowerCase() === repository;
+}
+
+function capIssueText(text: string, limit: number) {
+  const bytes = Buffer.from(text, "utf8");
+  let end = Math.min(bytes.length, limit);
+  // If the next byte continues a code point, end before that code point.
+  while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
+  return { text: bytes.subarray(0, end).toString("utf8"), truncated: end < bytes.length };
+}
+
+export async function githubIssue(
+  repository: string, issueNumber: number, token: string | null, transport: GitHubFetch,
+): Promise<GitHubIssuePreview> {
+  if (repositorySlug(repository) !== repository)
+    throw new GitHubError("Connect a valid local GitHub repository first.", 409);
+  const number = githubIssueNumber(issueNumber);
+  const suffix = `/issues/${number}`;
+  const { data } = await gitHubRequest(`/repos/${repository}${suffix}`, token, transport, undefined, "issue");
+  const row = asRecord(data);
+  const unreadable = () => new GitHubError("GitHub returned a different issue or an unreadable preview.", 502);
+  if (row.number !== number) throw unreadable();
+  if (Object.hasOwn(row, "pull_request")) throw new GitHubError("That number belongs to a pull request. Choose an issue.", 409);
+  if (!matchesIssueEndpoint(row.html_url, GITHUB_ORIGIN + "/", repository, suffix) ||
+      (Object.hasOwn(row, "url") && !matchesIssueEndpoint(row.url, API_ORIGIN + "/repos/", repository, suffix)) ||
+      (Object.hasOwn(row, "repository_url") && !matchesIssueEndpoint(row.repository_url, API_ORIGIN + "/repos/", repository, "")) ||
+      typeof row.title !== "string" || !row.title.trim() || (typeof row.body !== "string" && row.body !== null)) throw unreadable();
+  const title = capIssueText(row.title, ISSUE_TITLE_BYTES);
+  const body = capIssueText(row.body ?? "", ISSUE_BODY_BYTES);
+  return { number, title: title.text, body: body.text, truncated: title.truncated || body.truncated, url: githubUrl(repository) + suffix };
 }
 
 function pullMatches(row: Record<string, unknown>, repository: string, base: string, head: string) {

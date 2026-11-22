@@ -4,14 +4,16 @@
   const esc = window.okbRender.esc;
   const external = (url, label) => '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(label) + '</a>';
 
-  function activityList(items, empty) {
+  function activityList(items, empty, previewIssues = false) {
     if (!items.length) return '<p class="muted">' + esc(empty) + '</p>';
     return '<ul class="plain stack">' + items.map((item) =>
-      '<li>' + external(item.url, '#' + item.number + ' ' + item.title) +
-      (item.draft ? ' <span class="chip">Draft</span>' : '') + '</li>').join('') + '</ul>';
+      '<li' + (previewIssues ? ' class="row"' : '') + '>' + external(item.url, '#' + item.number + ' ' + item.title) +
+      (item.draft ? ' <span class="chip">Draft</span>' : '') +
+      (previewIssues ? '<button type="button" class="small" data-preview-issue="' + esc(item.number) + '\">Preview issue #' +
+        esc(item.number) + '</button>' : '') + '</li>').join('') + '</ul>';
   }
 
-  function mount(parent, { project, coding, readonly, target }) {
+  function mount(parent, { project, coding, readonly, detached, loadIssue, target }) {
     const path = '/projects/' + encodeURIComponent(project.id) + '/github-';
     parent.className = 'coding-panel stack';
     parent.innerHTML = '<h3>GitHub</h3><div data-github-body><p class="muted">Loading connection…</p></div>' +
@@ -35,6 +37,46 @@
         notice(error.message, true);
       } finally {
         busy = button.disabled = false;
+      }
+    }
+
+    function mountIssues(activity, response) {
+      const preview = activity.querySelector('[data-github-issue-preview]');
+      const current = () => preview.isConnected && !detached();
+      for (const button of activity.querySelectorAll('[data-preview-issue]')) {
+        const selected = response.issues.find((issue) => issue.number === Number(button.dataset.previewIssue));
+        if (!selected) continue;
+        button.addEventListener('click', () => perform(button, async () => {
+          preview.hidden = true;
+          preview.replaceChildren();
+          notice('Loading issue #' + selected.number + '…');
+          const issue = await coding(path + 'issue', { number: selected.number });
+          if (!current()) return;
+          if (issue?.number !== selected.number || issue.url !== selected.url || typeof issue.title !== 'string' ||
+              typeof issue.body !== 'string' || typeof issue.truncated !== 'boolean')
+            throw new Error('GitHub issue preview did not match the selected issue. Refresh activity and try again.');
+          preview.innerHTML = '<h4 tabindex="-1"></h4><p data-issue-title></p>' +
+            (issue.body ? '<pre class="source-markdown"></pre>' : '<p class="muted">This issue has no description.</p>') +
+            (issue.truncated ? '<p class="muted">Preview shortened. Open the issue on GitHub for the full text.</p>' : '') +
+            '<div class="row">' + external(issue.url, 'Open issue on GitHub') + (readonly ? '' :
+              '<button type="button" data-use-issue>Use issue in new draft</button>') + '</div>';
+          const heading = preview.querySelector('h4');
+          heading.textContent = 'GitHub issue #' + issue.number;
+          preview.querySelector('[data-issue-title]').textContent = issue.title;
+          if (issue.body) preview.querySelector('pre').textContent = issue.body;
+          const use = preview.querySelector('[data-use-issue]');
+          use?.addEventListener('click', () => {
+            if (!current()) return;
+            try {
+              const loaded = loadIssue(issue);
+              if (loaded === false) notice('Wait for the current request to finish sending before loading the issue.', true);
+              if (loaded) use.disabled = true;
+            } catch (error) { notice(error.message, true); }
+          });
+          preview.hidden = false;
+          notice('');
+          heading.focus();
+        }));
       }
     }
 
@@ -168,10 +210,13 @@
       if (refresh) refresh.addEventListener('click', () => perform(refresh, async () => {
         const activity = area.querySelector('[data-github-activity]');
         const response = await coding(path + 'activity');
+        if (detached() || !activity.isConnected) return;
         activity.innerHTML = '<details open><summary>Recent open issues</summary>' +
-          activityList(response.issues, response.issuesEnabled ? 'No open issues in this result.' : 'Issues are disabled.') +
+          activityList(response.issues, response.issuesEnabled ? 'No open issues in this result.' : 'Issues are disabled.', true) +
+          '<section class="coding-preview stack" data-github-issue-preview hidden></section>' +
           '</details><details open><summary>Recent open pull requests</summary>' +
           activityList(response.pulls, 'No open pull requests in this result.') + '</details>';
+        mountIssues(activity, response);
         if (form && !form.elements.base.value) form.elements.base.value = response.defaultBranch;
         notice('GitHub activity refreshed.');
       }));

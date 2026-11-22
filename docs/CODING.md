@@ -283,6 +283,8 @@ Open the project in **Coding**, then open **GitHub → Connection settings** and
 
 Choose **Refresh GitHub activity** to load recent open issues and pull requests. The app sends the token and repository requests to GitHub. The activity view displays titles and URLs. Refresh stops if the configured Git remote now points at a different repository.
 
+Choose **Preview issue** next to an issue number to read its Markdown description in the Mac app, local web app, or team workspace. For a long issue, the app shows a shortened preview and links to the full issue. Select **Use issue in new draft** to start a fresh session with the issue title, link, and visible description in the editable task. If you have a draft open, confirm before replacing it. Check the task and repository query, choose **Preview source**, then approve the request as usual. [GitHub issue API](https://docs.github.com/en/rest/issues/issues#get-an-issue)
+
 After accepting a coding request, open **Prepare GitHub review**, choose the accepted request, and enter the base and head branches already on GitHub. Use **Prepare comparison** to open GitHub's review screen. In VS Code and Cursor, choose **Prepare GitHub pull request in okbrain** from an accepted run to open the same form. [Compare branches in GitHub](https://docs.github.com/en/pull-requests/committing-changes-to-your-project/viewing-and-comparing-commits/comparing-commits)
 
 ### Publish an applied patch as a new branch

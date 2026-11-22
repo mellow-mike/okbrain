@@ -945,11 +945,18 @@ test("GitHub reads stay on the bound project and comparison requires an accepted
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
   };
   const repo = "/repos/example-org/product";
+  const issue = {
+    number: 1, title: "Review settings", body: "## Expected behavior\n\nKeep the selected setting.",
+    html_url: "https://github.com/example-org/product/issues/1",
+  };
+  const longBody = "a".repeat(14 * 1024 - 1) + "😀 end of issue";
+  const changedRemote = "https://github.com/example-org/changed.git";
+  let changeRemoteDuringIssueRead = false;
   git("init", "-q");
   git("remote", "add", "origin", "git@github.com:Example-Org/Product.git");
   git("remote", "add", "unrelated", "https://example.com/acme/product.git");
   git("remote", "add", "embedded", "https://secret@github.com/example-org/product.git");
-  const api = createApiServer({ bundle: workspace, port: 0, token: ownerToken, coding: {
+  const open = (readonly = false) => createApiServer({ bundle: workspace, port: 0, token: ownerToken, readonly, coding: {
     stateDir, models,
     githubFetch: async (url, options) => {
       expect(url.origin).toBe("https://api.github.com");
@@ -965,12 +972,24 @@ test("GitHub reads stay on the bound project and comparison requires an accepted
           ]);
         case repo + "/pulls":
           return Response.json([{ number: 2, title: "Update settings", draft: true }]);
+        case repo + "/issues/1":
+          if (changeRemoteDuringIssueRead) git("remote", "set-url", "origin", changedRemote);
+          return Response.json(issue);
+        case repo + "/issues/2":
+          return Response.json({ ...issue, number: 2, html_url: "https://github.com/example-org/product/pull/2", pull_request: {} });
+        case repo + "/issues/3":
+          return Response.json({ ...issue, number: 3, html_url: "https://github.com/example-org/other/issues/3" });
+        case repo + "/issues/4":
+          return Response.json({ ...issue, number: 4, html_url: "https://github.com/example-org/product/issues/4", body: longBody });
+        case repo + "/issues/5":
+          return Response.json({ ...issue, number: 5, html_url: "https://github.com/example-org/product/issues/5", body: null });
       }
       return new Response(null, { status: 404 });
     },
   } });
+  let api = open();
   try {
-    const { request, call } = apiClient(api.url);
+    let { request, call } = apiClient(api.url);
     const projectFields = { workspace, title: "Connected workspace", scopes: ["src"], provider: "openai", model: "repo-test" };
     const project = await call<Project>("/projects", projectFields);
     const other = await call<Project>("/projects", { ...projectFields, title: "Other workspace" });
@@ -1002,6 +1021,41 @@ test("GitHub reads stay on the bound project and comparison requires an accepted
     expect(seen.map((entry) => entry.path).sort()).toEqual([repo, repo + "/issues", repo + "/pulls"]);
     for (const result of seen) expect(result).toMatchObject({ method: "GET", authorization: "Bearer " + fineGrained });
 
+    const issueRoute = endpoint + "issue";
+    const issueRequestsStart = seen.length;
+    expect((await request(issueRoute, { number: 1 }, null)).status).toBe(401);
+    expect((await request(`/projects/${other.id}/github-issue`, { number: 1 }, member.token)).status).toBe(403);
+    expect((await request(`/projects/${other.id}/github-issue`, { number: 1 })).status).toBe(409);
+    expect((await request(issueRoute)).status).toBe(404);
+    for (const number of [0, -1, 1.5, "1", Number.MAX_SAFE_INTEGER + 1]) {
+      expect((await request(issueRoute, { number })).status).toBe(400);
+    }
+    expect((await request(issueRoute, { number: 1, repository: "example-org/other" })).status).toBe(400);
+    expect(seen).toHaveLength(issueRequestsStart);
+
+    const expectedIssue = {
+      number: issue.number, title: issue.title, body: issue.body, url: issue.html_url, truncated: false,
+    };
+    expect(await call(issueRoute, { number: 1 }, member.token)).toEqual(expectedIssue);
+    await api.stop();
+    api = open(true);
+    expect(await apiClient(api.url).call(issueRoute, { number: 1 })).toEqual(expectedIssue);
+    await api.stop();
+    api = open();
+    ({ request, call } = apiClient(api.url));
+    expect((await request(issueRoute, { number: 2 })).status).toBe(409);
+    expect((await request(issueRoute, { number: 3 })).status).toBe(502);
+    const capped = await call<{ body: string; truncated: boolean }>(issueRoute, { number: 4 });
+    expect(capped).toMatchObject({ body: "a".repeat(14 * 1024 - 1), truncated: true });
+    expect(await call(issueRoute, { number: 5 })).toMatchObject({ body: "", truncated: false });
+    expect((await request(issueRoute, { number: 6 })).status).toBe(404);
+    const requestedIssues = [1, 1, 2, 3, 4, 5, 6];
+    expect(seen.slice(issueRequestsStart)).toEqual(requestedIssues.map((number) => ({
+      path: repo + `/issues/${number}`, method: "GET", authorization: "Bearer " + fineGrained,
+    })));
+    expect(await call(prefix + "/runs")).toEqual([]);
+    expect(faux.state.callCount).toBe(0);
+
     const inputs = { source: "files", files: ["src/example.ts"] };
     const source = await call<{ id: string }>(prefix + "/preview", inputs);
     const identity = { session: "main", requestId: "github-review" };
@@ -1019,10 +1073,15 @@ test("GitHub reads stay on the bound project and comparison requires an accepted
     expect(await call(prefix + "/audit")).toContainEqual(expect.objectContaining({
       kind: "github_handoff", request_id: identity.requestId, session: "main",
     }));
-    git("remote", "set-url", "origin", "https://github.com/example-org/changed.git");
+    changeRemoteDuringIssueRead = true;
+    const staleIssue = await request(issueRoute, { number: 1 }, member.token);
+    expect(staleIssue.status).toBe(409);
+    expect(await staleIssue.json()).not.toHaveProperty("result");
+    expect(seen).toHaveLength(issueRequestsStart + requestedIssues.length + 1);
     expect((await request(endpoint + "activity")).status).toBe(409);
+    expect((await request(issueRoute, { number: 1 }, member.token)).status).toBe(409);
     expect((await request(endpoint + "handoff", branches)).status).toBe(409);
-    expect(seen).toHaveLength(3);
+    expect(seen).toHaveLength(issueRequestsStart + requestedIssues.length + 1);
     expect(await call(endpoint + "disconnect", {})).toMatchObject({ connection: null });
   } finally {
     await api.stop();

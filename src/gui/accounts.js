@@ -1,4 +1,4 @@
-/* global headers, errorBox, esc, view, STATUS, R, conceptLink, citationLinks */
+/* global headers, errorBox, esc, view, STATUS, R, conceptLink, citationLinks, mountAnswerCopy */
 'use strict';
 
 async function planApi(action, data) {
@@ -158,11 +158,12 @@ async function renderPlanAsk() {
     '<label class="field"><span>ChatGPT model</span><select name="model" required></select></label>' +
     '<label><input type="checkbox" name="includePrivate"> Include private drafts in source search</label>' +
     '<div><button class="primary">Preview sources</button></div></form><div class="stack" id="plan-preview" aria-live="polite"></div>' +
-    '<div class="stack" id="plan-answer" aria-live="polite"></div></div>';
+    '<div class="stack" id="plan-answer" aria-live="polite"></div><div id="plan-answer-copy" hidden></div></div>';
   var setup = document.getElementById('plan-ask-setup');
   var form = document.getElementById('plan-question');
   var preview = document.getElementById('plan-preview');
   var answer = document.getElementById('plan-answer');
+  var copy = document.getElementById('plan-answer-copy');
   var account;
   var generation = 0;
   try {
@@ -180,11 +181,16 @@ async function renderPlanAsk() {
     }).join('');
     form.hidden = false;
   } catch (error) { setup.innerHTML = errorBox(error); return; }
-  form.addEventListener('input', function () { generation++; preview.replaceChildren(); answer.replaceChildren(); });
+  function clearAnswer() {
+    answer.replaceChildren();
+    copy.hidden = true;
+    copy.replaceChildren();
+  }
+  form.addEventListener('input', function () { generation++; preview.replaceChildren(); clearAnswer(); });
   form.addEventListener('submit', async function (event) {
     event.preventDefault();
     var current = ++generation;
-    answer.replaceChildren();
+    clearAnswer();
     preview.textContent = 'Searching the local index…';
     var fields = new FormData(form);
     try {
@@ -205,9 +211,10 @@ async function renderPlanAsk() {
         answer.textContent = 'Waiting for ChatGPT…';
         try {
           var response = await planApi('answer', { id: result.id });
-          if (current !== generation) return;
+          if (!form.isConnected || current !== generation) return;
           answer.innerHTML = '<div class="md">' + R.renderMarkdown(response.answer) + '</div>' +
             (response.citations.length ? '<h3>Citations</h3><div>' + citationLinks(response.citations) + '</div>' : '');
+          mountAnswerCopy(copy, String(fields.get('question')).trim(), response);
         } catch (error) {
           if (current === generation) answer.innerHTML = errorBox(error);
         }

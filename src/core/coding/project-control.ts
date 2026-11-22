@@ -24,7 +24,8 @@ import { dockerWorkerConfig, type DockerWorkerConfig } from "./docker-worker.ts"
 import { PackageReviewError, previewPackageReviews, validatePackageReviews } from "./package-review.ts";
 import { codingPatchProposals } from "./patch-proposals.ts";
 import {
-  githubActivity, githubBranch, githubCommitComparison, githubComparison, githubCreatePull, githubFindPull, githubPullBody, githubPullDraft,
+  githubActivity, githubBranch, githubCommitComparison, githubComparison, githubCreatePull, githubFindPull, githubIssue, githubIssueNumber,
+  githubPullBody, githubPullDraft,
   GitHubError, githubRemotes, githubToken, githubUrl, type GitHubFetch, type GitHubPullReceipt,
 } from "./github.ts";
 import { githubBranchRef, githubCreatePatchCommit, githubCreatePatchRef, githubPreparePatchBranch } from "./github-branch.ts";
@@ -1702,6 +1703,21 @@ export class CodingProjectControl {
         this.#requirePatchSlot(project, run.session);
         return await this.#publishGitHub(project, run, bound, action, body, actor, authorize);
       }
+      if (method === "POST" && action === "github-issue") {
+        if (Object.keys(body).length !== 1) throw new GitHubError("Enter a positive integer GitHub issue number.");
+        const number = githubIssueNumber(body.number);
+        if (!bound) throw new ProjectControlError("Connect a local GitHub remote for this project first.", 409);
+        const checkConnection = async () => {
+          await this.#checkGitHubRemote(project, bound);
+          const current = this.#get<GitHubRow>("SELECT remote, repository, token FROM github_projects WHERE project = ?", project.id);
+          if (current?.remote !== bound.remote || current.repository !== bound.repository || current.token !== bound.token)
+            throw new ProjectControlError("The GitHub connection changed. Refresh the issue preview.", 409);
+        };
+        await checkConnection();
+        const issue = await githubIssue(bound.repository, number, bound.token, this.#githubFetch);
+        await checkConnection();
+        return issue;
+      }
       if ((method === "GET" && action === "github-activity") || (method === "POST" && action === "github-handoff")) {
         if (!bound) throw new ProjectControlError("Connect a local GitHub remote for this project first.", 409);
         await this.#checkGitHubRemote(project, bound);
@@ -1761,7 +1777,8 @@ export class CodingProjectControl {
       return projects.map((row) => this.#projectView(row, actor));
     }
     if (method === "POST" && readonly && !path.endsWith("/preview") && !path.endsWith("/inspect") &&
-        !path.endsWith("/evaluation-inspect") && !path.endsWith("/source-inspect") && !path.endsWith("/branch-comparison-inspect"))
+        !path.endsWith("/evaluation-inspect") && !path.endsWith("/source-inspect") && !path.endsWith("/branch-comparison-inspect") &&
+        !path.endsWith("/github-issue"))
       throw new ProjectControlError("This server is attached to a read-only brain mount.", 403);
     if (path === "/projects" && method === "POST") return this.#addProject(body, actor);
     const match = /^\/projects\/([a-f0-9-]{36})\/([a-z-]+)$/.exec(path);

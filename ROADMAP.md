@@ -49,6 +49,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   the reviewed Markdown picker from Add and link directly imported notes.
 - [x] Filter Browse by exact tag and follow note tags into that view. Retain
   the tag and type when returning from a note.
+- [x] Copy a completed answer and verified bundle citation links from both
+  Ask routes, with selectable Markdown when clipboard access is unavailable.
 
 ### Stage 8 — Enterprise coding
 
@@ -140,6 +142,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   verified GitHub branch workflow while preserving the local Git index.
 - [x] Bind GitHub repositories, show activity, and prepare a GitHub browser
   comparison for accepted results.
+- [x] Preview an issue from the bound GitHub repository and use it in a new
+  Coding draft. Keep task editing, source preview, and approval separate.
 - [x] Preview and publish an owner-approved GitHub pull request from an accepted
   run using a separate publishing credential and a durable PR receipt.
 - [x] Publish an applied patch from the Mac or web app as a new GitHub branch
@@ -849,6 +853,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added reviewed GitHub issue drafts in Coding and portable
+  Markdown copy with verified citations in both personal Ask routes.
 - 2026-11-22 — Added exact tag browsing, local repository requests in the
   editor, and Pi source lookup receipts. Rehearsed all 36 pinned Vite trials
   with an injected provider and a separate fixture reviewer.

@@ -12,6 +12,7 @@ import { runCodingSession } from "../src/core/coding/durable.ts";
 import type { CodingRunReport } from "../src/core/coding/run-report.ts";
 import { loadConfig } from "../src/core/config.ts";
 import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/core/engine/cache-settings.ts";
+import { extractTargets } from "../src/core/graph/links.ts";
 import { fmGenerated, parse, serialize } from "../src/core/okf/document.ts";
 import { githubBranchBrowserFixture } from "./github-branch-browser-fixture.ts";
 
@@ -46,6 +47,7 @@ const finishStandalone = Promise.withResolvers<void>();
 const finishProject = Promise.withResolvers<void>();
 let answerSource = "";
 let modelFixtureCalls = 0;
+const localAnswerTail = () => ` [${answerSource}] [unverified/raw-note]\n\n**Raw Markdown**`;
 const chatFixture = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
   modelFixtureCalls++;
   const input = await req.json() as { stream?: boolean; model?: string; input?: string[] };
@@ -61,7 +63,7 @@ const chatFixture = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req)
   return new Response(new ReadableStream({ async start(controller) {
     controller.enqueue(frame("**Local answer**"));
     await finishAnswer.promise;
-    controller.enqueue(frame(` [${answerSource}]`, "stop"));
+    controller.enqueue(frame(localAnswerTail(), "stop"));
     controller.close();
   } }), { headers: { "content-type": "text/event-stream" } });
 } });
@@ -213,13 +215,29 @@ try {
     assert.ok(unmounted.ok, await unmounted.text());
   }
   await nav.getByRole("link", { name: "Ask", exact: true }).click();
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin });
+  const copyAskLabel = "Copy answer with citations";
+  const copyAsk = page.getByRole("button", { name: copyAskLabel, exact: true });
+  async function verifyAskCopy(expected: string, citations: string[]) {
+    await copyAsk.click();
+    await page.getByText("Answer Markdown copied.", { exact: true }).waitFor();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    assert.equal(copied, expected);
+    assert.deepEqual(extractTargets("db_only/copy-test", copied), citations);
+    await verifyClipboardFallback(page, copyAskLabel, "Use your copy shortcut to copy the selected answer Markdown.", "Answer Markdown", expected);
+  }
   await page.getByRole("textbox", { name: "Question", exact: true }).fill("orchid");
   await page.getByRole("button", { name: "Ask", exact: true }).click();
   await page.locator("#askout", { hasText: "**Local answer**" }).waitFor();
   await page.getByRole("button", { name: "Stop", exact: true }).waitFor();
+  assert.equal(await copyAsk.count(), 0);
   finishAnswer.resolve();
   await page.locator("#askout strong", { hasText: "Local answer" }).waitFor();
   await page.locator("#asksrc").getByRole("link", { name: "Offline orchid propagation", exact: true }).waitFor();
+  const modelCallsAfterAnswer = modelFixtureCalls;
+  await verifyAskCopy("## Question\n\n> orchid\n\n## Verified citations\n\n- [Offline orchid propagation](/" + answerSource + ".md)\n\n" +
+    "## Answer\n\n**Local answer**" + localAnswerTail(), [answerSource]);
+  assert.equal(modelFixtureCalls, modelCallsAfterAnswer);
   await nav.getByRole("link", { name: "Review", exact: true }).click();
   await page.getByRole("button", { name: /Reviewed/ }).first().waitFor();
   await page.getByLabel("Queue size", { exact: true }).fill("1");
@@ -335,6 +353,64 @@ try {
   await page.getByText("No connected account is selected.").waitFor();
   await page.getByRole("link", { name: "Ask with ChatGPT", exact: true }).click();
   await page.getByText("Connect an eligible account to continue.").waitFor();
+  assert.equal(await copyAsk.count(), 0);
+  const planRoute = "**/api/plan/*";
+  const planCalls: string[] = [];
+  const planAnswerStarted = Promise.withResolvers<void>();
+  const finishPlanAnswer = Promise.withResolvers<void>();
+  const planQuestion = "What did we save?\nKeep the **answer** grounded.";
+  const planTitle = "Orchid [field notes] *spring*";
+  const planId = "orchids (lab)#%";
+  const planNote = join(bundle, planId + ".md");
+  await writeFile(planNote, serialize({ frontmatter: { type: "note", title: planTitle }, body: "Local citation fixture.\n" }));
+  const planCitation = { id: planId, title: planTitle };
+  const planMarkdown = "**Plan answer**\n\n```md\n[literal]\n```\n\n[" + planId + "] [unverified/other-note]";
+  await page.route(planRoute, async (route) => {
+    const action = new URL(route.request().url()).pathname.split("/").at(-1)!;
+    planCalls.push(action);
+    let result: unknown;
+    switch (action) {
+      case "status": result = { connected: true, sharing: true, account: "browser-plan-fixture" }; break;
+      case "models": result = [{ slug: "plan-model-fixture", name: "Plan model fixture" }]; break;
+      case "preview": result = {
+        id: "plan-preview-fixture", account: "browser-plan-fixture", model: "plan-model-fixture",
+        sources: [{ ...planCitation, text: "Exact original excerpt." }, { id: "unverified/other-note", title: "Unused", text: "Uncited excerpt." }],
+      }; break;
+      case "answer":
+        planAnswerStarted.resolve();
+        await finishPlanAnswer.promise;
+        result = {
+          answer: planMarkdown, citations: [planCitation, { id: "../../unsafe", title: "Unsafe citation" }],
+          context: [planCitation, { id: "unverified/other-note", title: "Unused" }],
+          provider: "chatgpt-plan", model: "plan-model-fixture",
+        };
+        break;
+      default: throw new Error("Unexpected plan request " + action);
+    }
+    await route.fulfill({ json: { result } });
+  });
+  try {
+    await page.reload();
+    const planInput = page.getByRole("textbox", { name: "Question", exact: true });
+    await planInput.fill(planQuestion);
+    await page.getByRole("button", { name: "Preview sources", exact: true }).click();
+    const sendPlan = page.getByRole("button", { name: "Send question and excerpts", exact: true });
+    await sendPlan.waitFor();
+    assert.equal(await copyAsk.count(), 0);
+    await sendPlan.click();
+    await planAnswerStarted.promise;
+    assert.equal(await copyAsk.count(), 0);
+    finishPlanAnswer.resolve();
+    await verifyAskCopy("## Question\n\n> What did we save?\n> Keep the **answer** grounded.\n\n## Verified citations\n\n" +
+      "- [Orchid \\[field notes\\] \\*spring\\*](/orchids%20%28lab%29%23%25.md)\n\n## Answer\n\n" + planMarkdown, [planId]);
+    await planInput.fill("Another question");
+    assert.equal(await copyAsk.count(), 0);
+    assert.deepEqual(planCalls, ["status", "models", "preview", "answer"]);
+  } finally {
+    finishPlanAnswer.resolve();
+    await page.unroute(planRoute);
+    await rm(planNote, { force: true });
+  }
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
   const cacheSettings = page.locator("#cache-settings");
   await cacheSettings.getByText("SQLite", { exact: true }).waitFor();
@@ -2352,6 +2428,7 @@ try {
   assert.equal(remote.exitCode, 0, remote.stderr.toString());
   const github = page.locator("[data-coding-github]");
   await github.getByRole("button", { name: "Detect GitHub remotes", exact: true }).click();
+  await github.getByLabel("Fine-grained token (optional for public repositories)", { exact: true }).fill(githubFixture.activityToken);
   await github.getByRole("button", { name: "Save connection", exact: true }).click();
   await github.getByText("GitHub connection saved.", { exact: true }).waitFor();
   await github.getByText("Connection settings", { exact: true }).click();
@@ -2406,6 +2483,87 @@ try {
   assert.equal(await pullLink.getAttribute("href"), `https://github.com/${githubFixture.repository}/pull/22`);
   assert.deepEqual(githubFixture.writes, ["/git/blobs", "/git/trees", "/git/commits", "/git/refs", "/pulls"]);
   assert.equal(await Bun.file(file).text(), branchAfter);
+
+  {
+    const { issue, issueReads } = githubFixture;
+    const unsentTask = "Keep this approved request until I replace it.";
+    const session = projectComposer.getByLabel("Session", { exact: true });
+    const requestID = projectComposer.getByLabel("Request ID", { exact: true });
+    const sourcePreview = projectComposer.locator("[data-preview-content]");
+    await projectMode.selectOption("files");
+    await manualFiles.fill("browser.ts");
+    await task.fill(unsentTask);
+    await projectLookup.check();
+    await previewProject.click();
+    await explicitApproval.check();
+    assert.equal(await sendProject.isEnabled(), true);
+    assert.equal(await sourcePreview.locator("pre").textContent(), branchAfter);
+    const previousSession = await session.inputValue();
+    const previousRequest = await requestID.inputValue();
+    const providerCalls = projectFaux.state.callCount;
+    const previousGitHubWrites = githubFixture.writes.slice();
+    const projectPosts: { action: string; data: unknown }[] = [];
+    const projectApiPath = "/api/coding" + projectPath + "/";
+    const recordIssuePosts = (request: BrowserRequest) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === "POST" && path.startsWith(projectApiPath)) {
+        projectPosts.push({ action: path.slice(projectApiPath.length), data: request.postDataJSON() });
+      }
+    };
+    page.on("request", recordIssuePosts);
+    try {
+      await github.getByRole("button", { name: "Refresh GitHub activity", exact: true }).click();
+      const previewIssue = github.getByRole("button", { name: `Preview issue #${issue.number}`, exact: true });
+      await previewIssue.waitFor();
+      const issuePreview = github.locator("[data-github-issue-preview]");
+      assert.deepEqual(issueReads, []);
+      assert.equal(await issuePreview.locator("pre").count(), 0);
+      await previewIssue.click();
+      await issuePreview.getByRole("heading", { name: `GitHub issue #${issue.number}`, exact: true }).waitFor();
+      await issuePreview.getByText(issue.title, { exact: true }).waitFor();
+      assert.equal(await issuePreview.locator("pre").textContent(), issue.body);
+      assert.equal(await issuePreview.locator("[data-fixture-issue-markup]").count(), 0);
+      assert.equal(await issuePreview.getByRole("link", { name: "Open issue on GitHub", exact: true }).getAttribute("href"), issue.html_url);
+      assert.equal(await task.inputValue(), unsentTask);
+      assert.equal(await sendProject.isEnabled(), true);
+
+      const useIssue = issuePreview.getByRole("button", { name: "Use issue in new draft", exact: true });
+      page.once("dialog", (dialog) => dialog.dismiss());
+      await useIssue.click();
+      assert.equal(await task.inputValue(), unsentTask);
+      assert.equal(await session.inputValue(), previousSession);
+      assert.equal(await requestID.inputValue(), previousRequest);
+      assert.equal(await explicitApproval.isChecked(), true);
+      assert.equal(await sendProject.isEnabled(), true);
+
+      page.once("dialog", (dialog) => dialog.accept());
+      await useIssue.click();
+      await page.getByText(`Issue #${issue.number} loaded. Preview source before sending.`, { exact: true }).waitFor();
+      const issueTask = `GitHub issue #${issue.number} · ${issue.title}\n\n${issue.html_url}\n\n${issue.body}`;
+      assert.equal(await task.inputValue(), issueTask);
+      assert.match(await session.inputValue(), new RegExp(`^issue-${issue.number}-[0-9a-f-]{36}$`, "u"));
+      assert.notEqual(await session.inputValue(), previousSession);
+      assert.notEqual(await requestID.inputValue(), previousRequest);
+      assert.equal(await projectMode.inputValue(), "repository");
+      assert.equal(await query.inputValue(), issue.title);
+      assert.equal(await projectLookup.isChecked(), false);
+      assert.equal(await explicitApproval.isChecked(), false);
+      assert.equal(await explicitApproval.isVisible(), false);
+      assert.equal(await sourcePreview.locator("pre").count(), 0);
+      assert.equal(await sendProject.isEnabled(), false);
+      const editedIssueTask = issueTask + "\n\nReview the selected setting first.";
+      await task.fill(editedIssueTask);
+      assert.equal(await task.inputValue(), editedIssueTask);
+      assert.equal(await sendProject.isEnabled(), false);
+      assert.deepEqual(projectPosts, [{ action: "github-issue", data: { number: issue.number } }]);
+      assert.deepEqual(issueReads, [issue.number]);
+      assert.deepEqual(githubFixture.writes, previousGitHubWrites);
+      assert.equal(projectFaux.state.callCount, providerCalls);
+      assert.equal(await Bun.file(file).text(), branchAfter);
+    } finally {
+      page.off("request", recordIssuePosts);
+    }
+  }
 
   const lookupIdentity = { session: "browser-source-lookups", requestId: "browser-lookup" };
   projectFaux.setResponses([

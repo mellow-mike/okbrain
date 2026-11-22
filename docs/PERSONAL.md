@@ -105,6 +105,8 @@ Select **Restore default chat endpoint** or **Restore default embedding endpoint
 
 **Ask** displays text as the provider returns it and verifies citations when the answer completes. **Stop** cancels the in-flight answer. Providers that return a complete response display it in one piece. Use `okb ask --stream 'your question'` for incremental terminal output. `--json` returns a single completed result.
 
+In **Ask** or **Ask with ChatGPT**, choose **Copy answer with citations** after the answer completes. The copied Markdown includes your question, the original answer, and a list of verified links that resolve from anywhere in the same brain. If clipboard access is unavailable, the app selects the Markdown so you can copy it manually.
+
 In **Settings → Enrichment**, enter comma-separated **Allowed hosts**, **Allowed path prefixes**, and **Denied path prefixes** to set the crawler’s scope. The crawler checks these settings before each request, including redirects. Denied path prefixes take precedence.
 
 Clip, RSS, and enrichment connect to a checked address at each redirect. HTTPS still verifies the original hostname. If you configure an environment proxy with `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`, use HTTPS source URLs for hostname-based sites routed through it. The app matches `NO_PROXY` against the original source address.

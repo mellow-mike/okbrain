@@ -1209,6 +1209,51 @@ function citationLinks(citations) {
   }).join(' ');
 }
 
+function mountAnswerCopy(parent, question, result) {
+  if (!parent.isConnected || typeof result.answer !== 'string' || !result.answer.trim() || !Array.isArray(result.citations)) return;
+  var citations = result.citations.flatMap(function (citation) {
+    if (typeof citation?.id !== 'string') return [];
+    var parts = citation.id.split('/');
+    if (parts.some(function (part) { return !part || part === '.' || part === '..' || /[\\\x00]/u.test(part); })) return [];
+    var path = parts.map(function (part) {
+      return encodeURIComponent(part).replace(/[()]/g, function (character) { return character === '(' ? '%28' : '%29'; });
+    }).join('/');
+    var label = typeof citation.title === 'string' && citation.title.trim() ? citation.title : citation.id;
+    var title = label.replace(/\s+/g, ' ').replace(/[\\\[\]`*_<>~&]/g, '\\$&');
+    return ['- [' + title + '](/' + path + '.md)'];
+  });
+  var quotedQuestion = question.split('\n').map(function (line) { return '> ' + line; }).join('\n');
+  var markdown = '## Question\n\n' + quotedQuestion + '\n\n' +
+    (citations.length ? '## Verified citations\n\n' + citations.join('\n') + '\n\n' : '') +
+    '## Answer\n\n' + result.answer;
+  parent.innerHTML = '<div class="stack"><div class="row"><button type="button">Copy answer with citations</button>' +
+    '<span class="muted" role="status"></span></div><label class="field" hidden><span>Answer Markdown</span>' +
+    '<textarea rows="8" readonly spellcheck="false"></textarea></label></div>';
+  parent.hidden = false;
+  var copy = parent.querySelector('button');
+  var status = parent.querySelector('[role="status"]');
+  var fallback = parent.querySelector('label');
+  var source = fallback.querySelector('textarea');
+  var attempt = 0;
+  copy.addEventListener('click', async function () {
+    var current = ++attempt;
+    try {
+      await navigator.clipboard.writeText(markdown);
+      if (!copy.isConnected || current !== attempt) return;
+      fallback.hidden = true;
+      source.value = '';
+      status.textContent = 'Answer Markdown copied.';
+    } catch {
+      if (!copy.isConnected || current !== attempt) return;
+      source.value = markdown;
+      fallback.hidden = false;
+      source.focus();
+      source.select();
+      status.textContent = 'Use your copy shortcut to copy the selected answer Markdown.';
+    }
+  });
+}
+
 async function readAnswerEvents(response, receive) {
   if (!response.ok) throw new Error((await response.json()).error || 'Could not start the answer.');
   if (!response.body) throw new Error('The answer stream is unavailable.');
@@ -1247,10 +1292,12 @@ function renderAsk(_arg, seq) {
     '<select id="askp" aria-label="Retrieval profile"><option value="">Configured default</option><option>lean</option><option>balanced</option><option>max</option></select>' +
     '<label class="row"><input id="ask-private" type="checkbox"> Include private notes</label>' +
     '<button id="asksend" class="primary">Ask</button><button id="askstop" type="button" hidden>Stop</button></form>' +
-    '<p id="askstatus" role="status"></p><div id="askctx"></div><div id="askout" class="md"></div><div id="asksrc"></div></div>';
+    '<p id="askstatus" role="status"></p><div id="askctx"></div><div id="askout" class="md"></div><div id="asksrc"></div>' +
+    '<div id="ask-copy" hidden></div></div>';
   var ctxEl = document.getElementById('askctx');
   var outEl = document.getElementById('askout');
   var srcEl = document.getElementById('asksrc');
+  var copyEl = document.getElementById('ask-copy');
   var statusEl = document.getElementById('askstatus');
   var submit = document.getElementById('asksend');
   var stop = document.getElementById('askstop');
@@ -1269,6 +1316,8 @@ function renderAsk(_arg, seq) {
     outEl.replaceChildren(draft);
     ctxEl.replaceChildren();
     srcEl.replaceChildren();
+    copyEl.hidden = true;
+    copyEl.replaceChildren();
     var profile = document.getElementById('askp').value;
     Okb.busy(true);
     try {
@@ -1290,6 +1339,7 @@ function renderAsk(_arg, seq) {
           outEl.classList.remove('ask-partial');
           outEl.innerHTML = R.renderMarkdown(result.answer);
           if (result.citations.length) srcEl.innerHTML = '<h3>Sources</h3>' + citationLinks(result.citations);
+          mountAnswerCopy(copyEl, q, result);
           Okb.settle(outEl);
         }
       });
