@@ -5,6 +5,6 @@ Install `okbrain-coding.vsix` with **Extensions → Install from VSIX**. Open a 
 1. Choose **okbrain: Open Coding Workspace** from the Command Palette and register the repository, permitted folders, model, and provider credential.
 2. Save a local file. Open **okbrain: Preview Active File for Coding Request** in the editor context menu or Command Palette.
 3. Enter the request and session name. Inspect the preview in the editor, then select **Send Request** in the notification.
-4. Choose **okbrain: Inspect and Review Coding Runs** to reopen a result, record a review, cancel an active run, or resume a saved request.
+4. Choose **okbrain: Inspect and Review Coding Runs** to reopen a result, record a review, cancel an active run, or resume a saved request. Choose **Refresh** while a request runs to read the answer so far.
 
 The local server enforces project scope and binds the approved preview to the source bytes. Requests use the project model and any active session history. Editor review records a decision in okbrain. Edit and publish code through your repository tools.

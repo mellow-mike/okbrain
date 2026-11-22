@@ -172,9 +172,11 @@ describe("okb rss (CLI)", () => {
   test("no URL and no configured feeds → usage error", async () => {
     const root = tempBundle();
     try {
-      const r = await okb(["rss", "--bundle", root]);
-      expect(r.code).toBe(2);
-      expect(r.stderr).toContain("rss.feeds");
+      const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "../src/cli.ts"), "rss", "--bundle", root], {
+        env: { ...process.env, XDG_CONFIG_HOME: root, APPDATA: root }, stderr: "pipe",
+      });
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr.toString()).toContain("okb rss settings --feeds");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -24,6 +24,7 @@ import { VERSION } from "../core/version.ts";
 
 export interface McpOptions {
   bundle: string;
+  brain?: string;
   /** Expose write ops to this connection. Never set for remote clients. */
   trusted: boolean;
   /** Serving a read-only brain mount: write ops refused even when trusted. */
@@ -87,6 +88,7 @@ export function createMcpServer(opts: McpOptions): Server {
       opts.readonly === true,
       mcpActor(server.getClientVersion()),
     );
+    local.ctx.brain = opts.brain;
     try {
       const result = await runOp(op, local.ctx, req.params.arguments ?? {});
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };

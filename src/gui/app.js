@@ -1308,6 +1308,36 @@ function showBookmarklet() {
   }).catch(function (e) { setHtml('bm-out', errorBox(e)); });
 }
 
+function mountRssSettings(panel) {
+  var form = panel.querySelector('form');
+  var input = form.elements.feeds;
+  var save = form.querySelector('button');
+  var feedback = panel.querySelector('[role="status"]');
+  function setEnabled(enabled) { input.disabled = save.disabled = !enabled; }
+  function populate(result) { input.value = result.feeds.join('\n'); }
+  get('/api/rss-settings').then(function (payload) {
+    populate(payload.result);
+    feedback.textContent = '';
+    setEnabled(true);
+  }).catch(function (error) { feedback.textContent = error.message; });
+  form.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    setEnabled(false);
+    feedback.textContent = 'Saving feed URLs…';
+    try {
+      var response = await fetch('/api/rss-settings', {
+        method: 'POST', headers: headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ feeds: input.value }),
+      });
+      var payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || response.statusText);
+      populate(payload.result);
+      feedback.textContent = payload.result.feeds.length ? 'Feed URLs saved.' : 'Saved feed list cleared.';
+    } catch (error) { feedback.textContent = error.message; }
+    finally { setEnabled(true); }
+  });
+}
+
 function renderAdd() {
   view.innerHTML =
     '<div class="stack"><h2>Add to your brain</h2>' +
@@ -1335,6 +1365,11 @@ function renderAdd() {
     '<label class="field"><span>Feed URL</span><input id="rss-url" type="url" placeholder="All configured feeds"></label>' +
     '<label class="field"><span>Max new items per feed</span><input id="rss-limit" type="number" min="0" placeholder="Configured default"></label>' +
     '</div><div class="row"><button>Pull</button></div></form><div id="rss-out"></div>' +
+    (STATUS?.readonly ? '' : '<details id="rss-settings"><summary>Manage saved feeds</summary>' +
+    '<form class="stack"><label class="field"><span>Feed URLs (one per line)</span>' +
+    '<textarea name="feeds" rows="4" spellcheck="false" disabled></textarea></label>' +
+    '<p class="muted">The saved list is shared across brain folders on this device. Pull saves entries in the selected brain.</p>' +
+    '<div class="row"><button disabled>Save feed URLs</button><span role="status">Loading feed URLs…</span></div></form></details>') +
     '<h3>Import Markdown from disk</h3>' +
     '<form id="impf" class="stack">' +
     '<label class="field"><span>File or folder path on the okbrain server</span><input id="imp-path" required></label>' +
@@ -1348,6 +1383,8 @@ function renderAdd() {
     out(el, '<div class="notice">' + esc(label) + ' — ' + conceptLink(id, 'open') + '</div>');
   }
   showBookmarklet();
+  var rssSettings = document.getElementById('rss-settings');
+  if (rssSettings) mountRssSettings(rssSettings);
 
   document.getElementById('capf').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -1970,6 +2007,13 @@ async function renderBrainMounts(parent, readonly, seq) {
     return '<label class="row"><input type="checkbox" name="readOnly"' + (checked ? ' checked' : '') + '> Read-only</label>';
   }
 
+  function profileField(current) {
+    return '<label class="field"><span>Default retrieval profile</span><select name="retrievalProfile">' +
+      [['', 'Use app default'], ['lean', 'Lean'], ['balanced', 'Balanced'], ['max', 'Max']].map(function (option) {
+        return '<option value="' + option[0] + '"' + (option[0] === current ? ' selected' : '') + '>' + option[1] + '</option>';
+      }).join('') + '</select></label>';
+  }
+
   async function finish(next, message, showHome) {
     rememberBrain(next);
     await loadBrains();
@@ -2009,7 +2053,8 @@ async function renderBrainMounts(parent, readonly, seq) {
       (mount.exists ? '' : ' <span class="muted">· Folder missing</span>') + '</summary>' +
       '<div class="stack brain-mount-body">' +
       (mount.exists && mount.name !== BRAIN ? '<div><button type="button" data-mount-open>Open brain</button></div>' : '') +
-      (readonly ? '' : '<form class="stack" data-mount-edit>' + nameField(mount.name) + accessField(mount.readonly) +
+      (readonly ? '' : '<form class="stack" data-mount-edit><div class="grid">' + nameField(mount.name) + profileField(mount.retrievalProfile) +
+        '</div>' + accessField(mount.readonly) +
         '<div class="row"><button type="submit">Save mount</button><button type="button" data-mount-remove>Remove mount</button></div></form>') +
       '</div></details>';
   }).join('') : '<p class="muted">No named brain folders.</p>') +
@@ -2019,7 +2064,7 @@ async function renderBrainMounts(parent, readonly, seq) {
       '<option value="register">Register an existing folder</option><option value="create">Create a new brain folder</option>' +
       '</select></label></div><label class="field"><span>Absolute folder path</span>' +
       '<input name="path" maxlength="4096" required autocomplete="off" spellcheck="false"></label>' +
-      '<p class="muted">Create accepts a new path or an empty folder.</p>' + accessField(false) +
+      '<p class="muted">Create accepts a new path or an empty folder.</p>' + profileField() + accessField(false) +
       '<div class="row"><button type="submit" class="primary">Add brain folder</button></div></form></details>');
 
   list.querySelectorAll('[data-mount]').forEach(function (row) {
@@ -2036,7 +2081,8 @@ async function renderBrainMounts(parent, readonly, seq) {
     if (!form) return;
     form.addEventListener('submit', function (event) {
       event.preventDefault();
-      var input = { action: 'update', previous: mount.name, name: form.elements.mountName.value, readonly: form.elements.readOnly.checked };
+      var input = { action: 'update', previous: mount.name, name: form.elements.mountName.value,
+        readonly: form.elements.readOnly.checked, retrievalProfile: form.elements.retrievalProfile.value };
       change(form.querySelector('button[type=submit]'), input, function (result) {
         return selected === mount.name ? result.name : selected;
       }, 'Mount settings saved.');
@@ -2052,7 +2098,7 @@ async function renderBrainMounts(parent, readonly, seq) {
     event.preventDefault();
     var input = {
       action: add.elements.action.value, name: add.elements.mountName.value,
-      path: add.elements.path.value, readonly: add.elements.readOnly.checked,
+      path: add.elements.path.value, readonly: add.elements.readOnly.checked, retrievalProfile: add.elements.retrievalProfile.value,
     };
     change(add.querySelector('button[type=submit]'), input, function (result) { return result.name; }, 'Brain folder added.');
   });
@@ -2122,8 +2168,12 @@ async function renderSettings(_arg, seq) {
     '<dt>Bundle</dt><dd><code>' + esc(st.bundle || '?') + '</code>' + (st.brain ? ' (brain <strong>' + esc(st.brain) + '</strong>)' : '') +
     (st.readonly ? ' <span class="chip warn">read-only</span>' : '') + '</dd>' +
     '<dt>Caches</dt><dd>' + (st.hasIndex ? 'index ✓' : 'no index') + ' · ' + (st.hasVectors ? 'vectors ✓' : 'no vectors') + '</dd>' +
+    '<dt>Retrieval profile</dt><dd>' + esc(st.retrievalProfile || 'balanced') + '</dd>' +
     '<dt>Port</dt><dd>' + esc(st.port || '?') + ' (127.0.0.1 only)</dd></dl>' +
     '<section id="brain-mount-settings" class="stack"></section>' +
+    (st.readonly ? '' : '<div class="row"><button id="set-default-brain" type="button"' + (st.isDefaultBundle ? ' disabled' : '') +
+      '>Use as default brain</button><span id="default-brain-status" role="status">' +
+      (st.isDefaultBundle ? 'This folder is the default.' : 'Used when okb starts without a folder argument.') + '</span></div>') +
     '<h3>Identity</h3><form id="actf" class="row">' +
     '<label class="field" style="flex:1"><span>Actor (generated.by / verified.by on your writes)</span>' +
     '<input id="act-in" value="' + esc(st.actor || '') + '" placeholder="human:alice"></label>' +
@@ -2136,7 +2186,10 @@ async function renderSettings(_arg, seq) {
     field('embed-provider', 'Embed provider', '', 'openai | voyage | gemini | local') +
     field('embed-model', 'Embed model', '', 'provider default') +
     field('embed-base-url', 'Embedding endpoint (optional)', '', 'provider default') +
-    '</div><div class="row"><label class="field"><span>Retrieval profile</span>' +
+    '</div><div class="row">' +
+    '<label><input id="reset-chat-endpoint" type="checkbox" aria-controls="ed-base-url"> Restore default chat endpoint</label>' +
+    '<label><input id="reset-embed-endpoint" type="checkbox" aria-controls="ed-embed-base-url"> Restore default embedding endpoint</label></div>' +
+    '<div class="row"><label class="field"><span>Retrieval profile</span>' +
     '<select id="ed-retrieval-profile"><option value="">(keep)</option>' +
     '<option>lean</option><option>balanced</option><option>max</option></select></label>' +
     '<button>Save</button></div></form>' +
@@ -2174,6 +2227,13 @@ async function renderSettings(_arg, seq) {
     '<div class="row"><button id="mx-viz">Export viz.html</button>' +
     '<label><input id="mx-viz-fonts" type="checkbox"> Embed app fonts in graph export</label>' +
     (st.readonly ? '' : '<label><input id="mx-viz-private" type="checkbox"> Include private drafts in graph export</label>') + '</div>' +
+    '<section class="stack" aria-labelledby="markdown-export-heading"><h4 id="markdown-export-heading">Markdown and Obsidian export</h4>' +
+    (st.readonly ? '<p>Open a writable brain to export its notes.</p>' :
+      '<form id="markdown-export" class="stack"><label class="field"><span>New export folder (absolute path)</span>' +
+      '<input name="destination" autocomplete="off" spellcheck="false" maxlength="4096" required aria-describedby="markdown-export-help"></label>' +
+      '<p class="muted" id="markdown-export-help">Choose a new folder outside this brain. Open it as an Obsidian vault or browse the Markdown in any editor.</p>' +
+      '<label class="row"><input type="checkbox" name="private"> Include private drafts in Markdown export</label>' +
+      '<div class="row"><button type="submit">Export Markdown</button><span role="status"></span></div></form>') + '</section>' +
     '<div class="row"><span class="muted">Jobs:</span>' +
     ['index', 'embed', 'rss', 'review', 'doctor'].map(function (j) {
       return '<label class="row" style="gap:4px"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
@@ -2192,6 +2252,20 @@ async function renderSettings(_arg, seq) {
   renderProviderKeys(document.getElementById('provider-keys'), Boolean(st.readonly));
   window.okbMcpSettings.mount(document.getElementById('mcp-settings'), { readonly: Boolean(st.readonly), requestHeaders: headers });
 
+  var setDefault = document.getElementById('set-default-brain');
+  if (setDefault) setDefault.addEventListener('click', async function () {
+    setDefault.disabled = true;
+    var status = document.getElementById('default-brain-status');
+    try {
+      await api('brain_default', {});
+      status.textContent = 'This folder is the default.';
+      await refreshStatus();
+    } catch (error) {
+      setDefault.disabled = false;
+      status.textContent = error.message;
+    }
+  });
+
   document.getElementById('actf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var actor = document.getElementById('act-in').value.trim();
@@ -2203,6 +2277,12 @@ async function renderSettings(_arg, seq) {
       refreshStatus();
     } catch (err) { show('act-out', errorBox(err)); }
   });
+  var endpointResets = [['reset-chat-endpoint', 'base-url'], ['reset-embed-endpoint', 'embed-base-url']].map(function (pair) {
+    var checkbox = document.getElementById(pair[0]);
+    var input = document.getElementById('ed-' + pair[1]);
+    checkbox.addEventListener('change', function () { input.disabled = checkbox.checked; });
+    return { checkbox: checkbox, input: input, param: pair[1] };
+  });
   document.getElementById('setf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var params = { 'no-default-bundle': true };
@@ -2210,9 +2290,16 @@ async function renderSettings(_arg, seq) {
       var v = document.getElementById('ed-' + n).value.trim();
       if (v) params[n] = v;
     });
+    var restoring = endpointResets.filter(function (reset) { return reset.checkbox.checked; });
+    restoring.forEach(function (reset) { params[reset.param] = ''; });
     working('set-out', 'saving');
     try {
       var r = await api('init', params);
+      restoring.forEach(function (reset) {
+        reset.input.value = '';
+        reset.input.disabled = false;
+        reset.checkbox.checked = false;
+      });
       show('set-out', '<div class="notice">chat: ' + esc(r.chat.provider + ' / ' + r.chat.model +
         ' (' + r.chat.keyStatus + ')') + '\nembed: ' + esc(r.embed.provider + ' / ' + r.embed.model +
         ' (' + r.embed.keyStatus + ')') + '</div>');
@@ -2277,6 +2364,24 @@ async function renderSettings(_arg, seq) {
     maint('export_viz', 'exporting', { 'include-private': includePrivate, fonts: fonts }, function (r) {
       return '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>';
     });
+  });
+  var markdown = document.getElementById('markdown-export');
+  if (markdown) markdown.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    var destination = markdown.elements.destination.value.trim();
+    var includePrivate = markdown.elements.private.checked;
+    var button = markdown.querySelector('button');
+    var status = markdown.querySelector('[role="status"]');
+    if (!destination || button.disabled) return;
+    if (includePrivate && !confirm('The Markdown export will contain private drafts. Export them?')) return;
+    button.disabled = true;
+    Okb.working(status, 'exporting notes');
+    try {
+      var result = await appWork(api('export_markdown', { destination: destination, 'include-private': includePrivate }));
+      if (!stale(seq)) status.textContent = 'Exported ' + result.notes + (result.notes === 1 ? ' note to ' : ' notes to ') + result.path;
+    } catch (error) {
+      if (!stale(seq)) status.innerHTML = errorBox(error);
+    } finally { button.disabled = false; }
   });
   document.getElementById('mx-rebuild').addEventListener('click', function () {
     if (!confirm('Rebuild wipes the derived index and rebuilds it from the bundle. Continue?')) return;

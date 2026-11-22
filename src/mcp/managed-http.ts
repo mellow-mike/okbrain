@@ -84,7 +84,7 @@ export class ManagedMcpHttp {
       }
     };
     const token = randomBytes(32).toString("base64url");
-    const options = { bundle, readonly: mount.readonly, trusted, mountAllowed };
+    const options = { bundle, brain: mount.brain ?? undefined, readonly: mount.readonly, trusted, mountAllowed };
     try {
       const server = Bun.serve({
         port, hostname: "127.0.0.1",

@@ -42,6 +42,7 @@ import {
   runNotionSource,
   runOp,
   runPersonalSourceUpload,
+  runRssSettings,
   type Operation,
 } from "./core/operations.ts";
 import {
@@ -226,17 +227,28 @@ interface Scope {
   bundle: string;
   readonly: boolean;
   brain: string | null;
+  /** Name configured on the served bundle when no browser mount is selected. */
+  servedBrain?: string;
 }
 
 /** Resolve `x-okb-brain` / `?brain=` to a mount (ConfigError on unknown names). */
 function scopeOf(req: Request, url: URL, o: ServeState): Scope {
   const name = req.headers.get("x-okb-brain") ?? url.searchParams.get("brain");
-  if (name === null || name === "") return { bundle: o.bundle, readonly: o.readonly, brain: null };
+  if (name === null || name === "") {
+    if (!o.servedBrain) return { bundle: o.bundle, readonly: o.readonly, brain: null };
+    const mount = resolveBrain(o.servedBrain);
+    if (mount.path !== o.bundle) throw new ConfigError("The served brain folder changed. Restart okbrain to use its new path.");
+    return { bundle: o.bundle, readonly: o.readonly || mount.readonly, brain: null, servedBrain: o.servedBrain };
+  }
   const brain = resolveBrain(name);
   return { bundle: brain.path, readonly: o.readonly || brain.readonly, brain: name };
 }
 
-const open = (s: Scope): LocalContext => openLocalContext(s.bundle, true, s.readonly);
+const open = (s: Scope): LocalContext => {
+  const local = openLocalContext(s.bundle, true, s.readonly);
+  local.ctx.brain = s.brain ?? s.servedBrain;
+  return local;
+};
 
 async function bundleWatchRequest(req: Request, url: URL, opts: ServeState, cors?: Hdrs): Promise<Response> {
   const headers = { ...cors, "cache-control": "no-store" };
@@ -342,7 +354,7 @@ async function managedMcpRequest(req: Request, opts: ServeState, scope: Scope, c
       return json(200, { result: null }, headers);
     }
     if (params.action !== "start") return json(400, { error: "Choose Start or Stop for MCP HTTP." }, headers);
-    const mount = { ...scope, readonly: opts.readonly || scope.readonly };
+    const mount = { ...scope, brain: scope.brain ?? scope.servedBrain ?? null, readonly: opts.readonly || scope.readonly };
     const result = mcp.start(params, mount, () => {
       if (!mount.brain) return mount;
       const current = resolveBrain(mount.brain);
@@ -371,6 +383,30 @@ async function providerKeys(req: Request, scope: Scope, cors: Hdrs): Promise<Res
     if (error instanceof TypeError || error instanceof SyntaxError || error instanceof UploadTooLarge)
       return json(400, errBody(error), headers);
     return json(409, { error: "Could not use the local provider credential store." }, headers);
+  }
+}
+
+async function rssSettings(req: Request, url: URL, opts: ServeState, cors?: Hdrs): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+    return json(401, { error: "missing or invalid local app token" }, headers);
+  if (req.headers.has("origin") && !cors)
+    return json(403, { error: "RSS settings must come from the local app." }, headers);
+  try {
+    let feeds: unknown;
+    if (req.method === "POST") {
+      if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+        return json(415, { error: "Send a JSON object." }, headers);
+      const raw = await readUpload(req, 128 * 1024, "RSS settings exceed 128 KiB.");
+      try { feeds = JSON.parse(raw.toString("utf8"))?.feeds; } catch { /* handled below */ }
+      if (typeof feeds !== "string")
+        return json(400, { error: "Enter one feed URL per line." }, headers);
+    } else if (req.method !== "GET") return json(405, { error: "Method not allowed." }, headers);
+    const local = open(scopeOf(req, url, opts));
+    try { return json(200, { result: runRssSettings(local.ctx, feeds) }, headers); }
+    finally { local.close(); }
+  } catch (error) {
+    return json(error instanceof UploadTooLarge ? 413 : errStatus(error), errBody(error), headers);
   }
 }
 
@@ -623,6 +659,8 @@ function status(scope: Scope, o: ServeState): unknown {
       bundle: scope.bundle,
       brain: scope.brain,
       readonly: scope.readonly,
+      isDefaultBundle: local.ctx.config().defaultBundle === scope.bundle,
+      retrievalProfile: local.ctx.config().retrieval?.profile || "balanced",
       hasIndex: existsSync(defaultDbPath(scope.bundle)),
       hasVectors: existsSync(defaultVectorsPath(scope.bundle)),
       actor: local.ctx.actor(),
@@ -747,6 +785,14 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     url.searchParams.get("token");
   if (!tokenMatches(presented, opts.token))
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
+  const markdownExport = url.pathname === "/api/op/export_markdown";
+  if (markdownExport) {
+    if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+      return json(401, { error: "missing or invalid local app token" }, cors);
+    if (req.headers.has("origin") && !cors) return json(403, { error: "Export must come from the local app." });
+    if (req.method === "POST" && req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+      return json(415, { error: "Send a JSON object." }, cors);
+  }
   if (url.pathname.startsWith("/api/personal/sources/")) {
     if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
       return json(401, { error: "missing or invalid local app token" }, cors);
@@ -754,7 +800,21 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
       return json(403, { error: "Source actions must come from the local app." });
   }
   if (url.pathname === "/api/brains/mounts") return brainMountRequest(req, url, opts, cors ?? {});
+  if (url.pathname === "/api/rss-settings") return rssSettings(req, url, opts, cors);
   if (url.pathname === "/api/brains/watch" && opts.watches) return bundleWatchRequest(req, url, opts, cors);
+  if (req.method === "GET" && url.pathname === "/api/brains") {
+    try {
+      const mounts = listBrains();
+      const selected = req.headers.get("x-okb-brain") ?? url.searchParams.get("brain");
+      const bundle = mounts.find(({ name }) => name === selected)?.path ?? opts.bundle;
+      // Discovery stays available after removing the served mount and excludes host paths.
+      const brains = mounts.map(({ path, ...mount }) => ({ ...mount, exists: mountIsAvailable(path), active: path === bundle }));
+      return json(200, { brains }, { ...cors, "cache-control": "no-store" });
+    } catch (e) {
+      if (!(e instanceof ConfigError)) throw e;
+      return json(400, errBody(e), cors);
+    }
+  }
 
   let scope: Scope;
   try {
@@ -785,20 +845,6 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   if (req.method === "GET") {
     if (url.pathname === "/api/ops") return json(200, { ops: opDescriptors() }, cors);
     if (url.pathname === "/api/status") return json(200, status(scope, opts), cors);
-    if (url.pathname === "/api/brains")
-      try {
-        // Names and policy only — mount paths are host topology (5.2 decision).
-        const brains = listBrains().map((b) => ({
-          name: b.name,
-          readonly: b.readonly,
-          exists: mountIsAvailable(b.path),
-          active: b.path === scope.bundle,
-        }));
-        return json(200, { brains }, { ...cors, "cache-control": "no-store" });
-      } catch (e) {
-        if (!(e instanceof ConfigError)) throw e;
-        return json(400, { error: e.message }, cors);
-      }
     if (url.pathname === "/api/bookmarklet")
       return json(200, { port: opts.port, bookmarklet: bookmarkletJs(opts.port, opts.token) }, cors);
     if (url.pathname === "/api/personal/sources/history")
@@ -816,14 +862,22 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     if (!op) return json(404, { error: `unknown op: ${m[1]}` }, cors);
     let raw: unknown;
     try {
-      const text = await req.text();
+      const text = markdownExport ? (await readUpload(req, 16 * 1024, "Markdown export request exceeds 16 KiB.")).toString("utf8") : await req.text();
       raw = text === "" ? {} : JSON.parse(text);
-    } catch {
+    } catch (error) {
+      if (error instanceof UploadTooLarge) return json(413, errBody(error), cors);
       return json(400, { error: "request body must be JSON" }, cors);
     }
     if (typeof raw !== "object" || raw === null || Array.isArray(raw))
       return json(400, { error: "request body must be a JSON object of parameters" }, cors);
-    return runJsonOp(op, scope, raw as Record<string, unknown>, cors);
+    if (scope.brain || scope.servedBrain) {
+      try { scope = scopeOf(req, url, opts); }
+      catch (error) {
+        if (!(error instanceof ConfigError)) throw error;
+        return json(400, errBody(error), cors);
+      }
+    }
+    return runJsonOp(op, scope, raw as Record<string, unknown>, markdownExport ? { ...cors, "cache-control": "no-store" } : cors);
   }
 
   return json(404, { error: "not found" }, cors);

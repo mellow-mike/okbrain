@@ -47,6 +47,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   recover from the stored snapshot.
 - [x] Expose local request status, active context estimates, Pi Durable history
   compaction, and recorded provider usage including cache counters.
+- [x] Surface bounded Pi Durable answer text during runs in browser and editor
+  inspection, with review controls available after completion.
 - [x] Add versioned project profiles, a rebuildable worktree-aware symbol and
   dependency index, selection explanations, and stable Pi provider affinity.
 - [x] Compare explicit attachments, scoped lexical previews, and indexed
@@ -722,7 +724,7 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       orphan/inbox/never-reviewed counts, oldest/newest + a stale window. Needs
       an index (fails loudly otherwise, per B3); auto-exposed on CLI/API/MCP.
 - [x] Optional Personal knowledge and Projects and decisions starter guides for empty brains on Home and through `okb init --template`, with editable Markdown and suggested types and tags.
-- [ ] Export to other PKM formats (one-way) for portability checks
+- [x] One-way Markdown and Obsidian vault export in Settings and `okb export-markdown`. Keeps frontmatter, makes links between exported notes relative, and excludes private notes unless selected.
 - [x] Preserve fenced Markdown examples when recognizing links and the
       `index.md` and `log.md` section headings.
 - [ ] Concept-id case sensitivity differs across filesystems (macOS/Windows
@@ -734,8 +736,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       the shared `core/viz/render.js` builds on it.
 - [x] Stream text deltas through configured API and local model routes in Ask
       and `okb ask --stream`. Verify citations after the provider completes.
-- [ ] Per-brain settings: a mount could carry its own retrieval profile /
-      provider defaults (today `brains` entries are path + readonly only).
+- [x] Override the app's retrieval profile for a named brain from its mount settings.
+- [ ] Allow named brains to carry their own provider defaults.
 - [x] GUI brain switcher: the local API re-scopes per request via
       `x-okb-brain` (read-only policy included); the sidebar has the
       dropdown.
@@ -762,6 +764,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Exposed saved feeds, endpoint resets, and brain-level retrieval
+  defaults in Settings. Added portable Markdown export and bounded in-progress
+  Coding answer text across browser and editor surfaces.
 - 2026-11-22 — Streamed answers from configured providers, added folder watch,
   highlighted search excerpts and overdue claims, and batched Markdown imports.
   Added independently reviewed coding evaluation, local Docker isolation, and

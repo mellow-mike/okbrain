@@ -4,6 +4,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { ConfigError, listBrains, loadConfig, saveConfig, type OkbConfig } from "./config.ts";
 import { serialize } from "./okf/document.ts";
 import { OKF_VERSION } from "./okf/indexmd.ts";
+import { PROFILES } from "./retrieval/profiles.ts";
 
 export class BrainMountError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -55,11 +56,14 @@ function createIndex(path: string) {
 
 /** Teach the local registry about one folder. Prior mount and config metadata survive edits. */
 export function changeBrainMount(input: Record<string, unknown>): { name: string; removed: boolean } {
-  const { action, previous, readonly } = input;
+  const { action, previous, readonly, retrievalProfile } = input;
   if (action !== "create" && action !== "register" && action !== "update" && action !== "remove")
     throw new ConfigError("Choose create, register, update, or remove.");
   if (action !== "remove" && typeof readonly !== "boolean")
     throw new ConfigError("Choose a mount access policy.");
+  if (action !== "remove" && retrievalProfile !== undefined && retrievalProfile !== "" &&
+      (typeof retrievalProfile !== "string" || !Object.hasOwn(PROFILES, retrievalProfile)))
+    throw new ConfigError("Choose a retrieval profile or use the app default.");
   const cfg = loadConfig();
   if (cfg.brains !== undefined && (!cfg.brains || typeof cfg.brains !== "object" || Array.isArray(cfg.brains)))
     throw new ConfigError("The saved brain mount registry is invalid.");
@@ -77,7 +81,10 @@ export function changeBrainMount(input: Record<string, unknown>): { name: string
     if (name !== previous && Object.hasOwn(brains, name))
       throw new BrainMountError("Another mount already uses this name.", 409);
     delete brains[previous];
-    brains[name] = { ...(typeof prior === "string" ? { path: prior } : prior), readonly: readonly === true };
+    const updated = { ...(typeof prior === "string" ? { path: prior } : prior), readonly: readonly === true };
+    if (retrievalProfile === "") delete updated.retrievalProfile;
+    else if (typeof retrievalProfile === "string") updated.retrievalProfile = retrievalProfile;
+    brains[name] = updated;
     saveConfig({ ...cfg, brains });
     return { name, removed: false };
   }
@@ -102,7 +109,8 @@ export function changeBrainMount(input: Record<string, unknown>): { name: string
       throw new BrainMountError("This folder contains files. Register the folder to use it as a brain.", 409);
     createIndex(existing ?? path);
   }
-  brains[name] = { path: existing ?? realpathSync(path), readonly: readonly === true };
+  brains[name] = { path: existing ?? realpathSync(path), readonly: readonly === true,
+    ...(typeof retrievalProfile === "string" && retrievalProfile ? { retrievalProfile } : {}) };
   saveConfig({ ...cfg, brains });
   return { name, removed: false };
 }

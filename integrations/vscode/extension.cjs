@@ -78,13 +78,15 @@ async function runActiveFile(connection) {
 
 async function inspectRun(connection, project, selected) {
   const identity = { session: selected.session, requestId: selected.id };
-  const { run, pi, admissionMissing } = await connection.api(pathFor(project, 'inspect'), identity);
+  const { run, pi, admissionMissing, liveAnswer } = await connection.api(pathFor(project, 'inspect'), identity);
   const receipt = pi?.request?.receipt;
   await showText([
     project.title, `Session: ${run.session}`, `Request: ${run.id}`, `Status: ${run.status}`,
     ...(run.review ? [`Review: ${run.review} by ${run.reviewer}`] : []),
     ...(run.error ? ['', run.error] : []),
     ...(admissionMissing ? ['', 'This request has no saved admission. Resume to recover its status.'] : []),
+    ...(run.status === 'running' && liveAnswer?.text ? ['',
+      liveAnswer.truncated ? 'Response in progress. Preview limit reached.' : 'Response in progress.', liveAnswer.text] : []),
     ...(receipt?.text ? ['', 'Pi response', receipt.text] : []),
     ...(receipt?.reason ? ['', receipt.reason] : []),
     ...(pi?.usage ? ['', 'Recorded session usage', JSON.stringify(pi.usage, null, 2)] : []),

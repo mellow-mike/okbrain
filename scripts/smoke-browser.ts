@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import { createApiServer } from "../src/api.ts";
+import { loadConfig } from "../src/core/config.ts";
 
 const root = await mkdtemp(join(tmpdir(), "okbrain-browser-smoke-"));
 process.env.XDG_CONFIG_HOME = join(root, "config");
@@ -144,6 +145,13 @@ try {
   await page.getByRole("button", { name: "Export viz.html" }).click();
   assert.equal((await exported).status(), 200);
   assert.match(await Bun.file(join(bundle, "viz.html")).text(), /data:font\/woff2;base64,/);
+  const markdownExport = page.locator("#markdown-export");
+  assert.equal(await markdownExport.getByRole("checkbox", { name: "Include private drafts in Markdown export" }).isChecked(), false);
+  const vault = join(root, "exported vault");
+  await markdownExport.getByLabel("New export folder (absolute path)").fill(vault);
+  await markdownExport.getByRole("button", { name: "Export Markdown" }).click();
+  await markdownExport.getByRole("status").getByText(/^Exported [1-9]\d* notes? to /).waitFor();
+  assert.match(await Bun.file(join(vault, `${answerSource}.md`)).text(), /Offline orchid propagation/);
   const keys = page.locator("#provider-keys");
   await keys.getByRole("combobox", { name: "API provider" }).selectOption("openai");
   await keys.getByLabel("API key", { exact: true }).fill("fixture-key-for-browser-smoke");
@@ -152,14 +160,37 @@ try {
   await keys.getByRole("button", { name: "Remove saved key" }).click();
   await keys.getByText("No saved key.", { exact: false }).waitFor();
 
+  const previousAi = loadConfig().ai;
+  await page.getByRole("button", { name: "Use as default brain" }).click();
+  await page.getByText("This folder is the default.", { exact: true }).waitFor();
+  assert.equal(loadConfig().defaultBundle, bundle);
+  assert.deepEqual(loadConfig().ai, previousAi);
+  const providerForm = page.locator("#setf");
+  await providerForm.getByLabel("Chat endpoint (optional)", { exact: true }).fill("http://127.0.0.1:21234/v1");
+  await providerForm.getByLabel("Embedding endpoint (optional)", { exact: true }).fill("http://127.0.0.1:21235/v1");
+  await providerForm.getByRole("button", { name: "Save", exact: true }).click();
+  await page.locator("#set-out .notice").waitFor();
+  assert.equal(loadConfig().ai?.baseUrl, "http://127.0.0.1:21234/v1");
+  assert.equal(loadConfig().ai?.embedBaseUrl, "http://127.0.0.1:21235/v1");
+  await providerForm.getByLabel("Restore default chat endpoint", { exact: true }).check();
+  await providerForm.getByLabel("Restore default embedding endpoint", { exact: true }).check();
+  await providerForm.getByRole("button", { name: "Save", exact: true }).click();
+  await page.locator("#set-out .notice").waitFor();
+  assert.equal(loadConfig().ai?.baseUrl, undefined);
+  assert.equal(loadConfig().ai?.embedBaseUrl, undefined);
+
   const mounts = page.locator("#brain-mount-settings");
   await mounts.getByText("Add a brain folder", { exact: true }).click();
   await mounts.getByLabel("Mount name").fill("field-notes");
   await mounts.getByLabel("Folder action").selectOption("create");
   await mounts.getByLabel("Absolute folder path").fill(join(root, "field-notes"));
+  await mounts.getByLabel("Default retrieval profile").selectOption("lean");
   await mounts.getByRole("button", { name: "Add brain folder" }).click();
   await page.getByRole("heading", { name: "field-notes", exact: true }).waitFor();
   assert.equal(await page.locator("#brain").inputValue(), "field-notes");
+  assert.equal(await (await fetch(new URL("api/status", server.url), { headers: {
+    "x-okb-token": server.token, "x-okb-brain": "field-notes",
+  } })).json().then((data: { retrievalProfile: string }) => data.retrievalProfile), "lean");
   await page.getByLabel("Starter template").selectOption("projects");
   await page.getByText("This adds one editable Markdown guide.", { exact: false }).waitFor();
   await page.getByRole("button", { name: "Create starter guide" }).click();
@@ -219,16 +250,29 @@ try {
   assert.equal(gitLog.stdout.toString().trim(), "Sync browser notes");
 
   const feedUrl = "https://example.invalid/feed";
+  const feedRequests: unknown[] = [];
   await page.route("**/api/op/rss", async (route) => {
-    assert.deepEqual(route.request().postDataJSON(), { url: feedUrl, limit: 2 });
+    feedRequests.push(route.request().postDataJSON());
     await route.fulfill({ json: { result: [{ url: feedUrl, feed: "Sample feed", added: [], deduped: 0 }] } });
   });
   await nav.getByRole("link", { name: "Add", exact: true }).click();
+  const savedFeeds = page.locator("#rss-settings");
+  const feedUrls = savedFeeds.getByLabel("Feed URLs (one per line)");
+  await savedFeeds.getByText("Manage saved feeds", { exact: true }).click();
+  await feedUrls.fill(feedUrl);
+  await savedFeeds.getByRole("button", { name: "Save feed URLs" }).click();
+  await savedFeeds.getByText("Feed URLs saved.", { exact: true }).waitFor();
+  assert.deepEqual(feedRequests, []);
+  await nav.getByRole("link", { name: "Home", exact: true }).click();
+  await nav.getByRole("link", { name: "Add", exact: true }).click();
+  await savedFeeds.getByText("Manage saved feeds", { exact: true }).click();
+  await savedFeeds.locator("textarea:enabled").waitFor();
+  assert.equal(await feedUrls.inputValue(), feedUrl);
   const rss = page.locator("#rssf");
-  await rss.getByLabel("Feed URL").fill(feedUrl);
   await rss.getByLabel("Max new items per feed").fill("2");
   await rss.getByRole("button", { name: "Pull", exact: true }).click();
   await page.getByText("Sample feed: 0 added, 0 known", { exact: true }).waitFor();
+  assert.deepEqual(feedRequests, [{ limit: 2 }]);
 
   await nav.getByRole("link", { name: "Coding", exact: true }).click();
   await page.getByText("Add a project", { exact: true }).waitFor();

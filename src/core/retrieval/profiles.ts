@@ -34,7 +34,7 @@ export class ProfileError extends Error {}
 
 export function resolveProfile(explicit: string | undefined, cfg: OkbConfig): RetrievalProfile {
   const name = explicit ?? cfg.retrieval?.profile ?? "balanced";
-  const p = PROFILES[name];
+  const p = Object.hasOwn(PROFILES, name) ? PROFILES[name] : undefined;
   if (!p)
     throw new ProfileError(
       `unknown retrieval profile: ${name} (known: ${Object.keys(PROFILES).join(", ")})`,

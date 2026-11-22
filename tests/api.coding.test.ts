@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
-import { createModels, fauxAssistantMessage, fauxProvider, getCurrentTools } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, createModels, fauxAssistantMessage, fauxProvider, getCurrentTools } from "@earendil-works/pi-ai";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApiServer } from "../src/api.ts";
-import { listCodingModels } from "../src/core/coding/durable.ts";
+import { listCodingModels, maxLiveAnswerLength, type CodingLiveAnswer } from "../src/core/coding/durable.ts";
 
 const ownerToken = "local-operator-test";
 type Project = { id: string; workspace: string; credential: string };
 type Run = { id: string; status: string; actor: string; admitted: boolean; error: string | null; review: string | null };
-type Inspection = { run: Run; pi?: { request?: { receipt?: { text?: string } } } };
+type Inspection = { run: Run; liveAnswer?: CodingLiveAnswer; pi?: { request?: { receipt?: { text?: string } } } };
 
 async function fixture(prefix: string) {
   const root = await mkdtemp(join(tmpdir(), prefix));
@@ -250,6 +250,71 @@ test("GitHub reads stay on the bound project and comparison requires an accepted
     expect(seen).toHaveLength(3);
     expect(await call(endpoint + "disconnect", {})).toMatchObject({ connection: null });
   } finally {
+    await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("shows only bounded current answer text before Pi settles and clears it on cancellation", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-coding-live-answer-");
+  const models = createModels();
+  models.setProvider(fauxProvider({ provider: "openai", models: [{ id: "live-test" }] }).provider);
+  const streams = [createAssistantMessageEventStream(), createAssistantMessageEventStream()];
+  let calls = 0;
+  models.streamSimple = (_model, _transcript, options) => {
+    const stream = streams[calls++]!;
+    const signal = options?.signal;
+    signal?.addEventListener("abort", () => stream.end(fauxAssistantMessage("", { stopReason: "aborted" })), { once: true });
+    return stream;
+  };
+  const api = createApiServer({ bundle: workspace, port: 0, token: ownerToken, coding: { stateDir, models } });
+  try {
+    const { call, request } = apiClient(api.url);
+    const settings = { title: "Live answer", workspace, provider: "openai", model: "live-test" };
+    const project = await call<Project>("/projects", settings);
+    const other = await call<Project>("/projects", { ...settings, title: "Other project" });
+    const path = "/projects/" + project.id;
+    const member = await call<{ token: string }>(`/projects/${other.id}/members`, { name: "other-project" });
+    const selected = { source: "files", files: ["src/example.ts"] };
+    const preview = await call<{ id: string }>(path + "/preview", selected);
+    const body = { ...selected, prompt: "Review the example", approved: true, previewId: preview.id, session: "main" };
+    const first = { session: body.session, requestId: "first" };
+    const firstText = "<b>Visible text</b>" + "x".repeat(maxLiveAnswerLength);
+    const partial = fauxAssistantMessage([
+      { type: "thinking", thinking: "private reasoning fixture" },
+      { type: "text", text: firstText },
+    ]);
+    streams[0]!.push({ type: "text_delta", contentIndex: 1, delta: firstText, partial });
+    await call(path + "/run", { ...body, ...first });
+    const active = await waitFor(() => call<Inspection>(path + "/inspect", first), (value) => Boolean(value.liveAnswer));
+    expect(active.run).toMatchObject({ status: "running", admitted: true });
+    expect(active.liveAnswer).toEqual({ text: firstText.slice(0, maxLiveAnswerLength), truncated: true });
+    expect(active.pi).toBeUndefined();
+    expect(JSON.stringify(active)).not.toContain("private reasoning fixture");
+    expect((await request(path + "/inspect", first, member.token)).status).toBe(403);
+    expect((await request(path + "/review", { ...first, decision: "accepted" })).status).toBe(409);
+    expect(JSON.stringify(await call(path + "/runs"))).not.toContain("Visible text");
+
+    const final = fauxAssistantMessage("Completed first answer.");
+    streams[0]!.push({ type: "done", reason: "stop", message: final });
+    const finished = await waitFor(() => call<Inspection>(path + "/inspect", first), (value) => value.run.status === "done");
+    expect(finished.liveAnswer).toBeUndefined();
+    expect(finished.pi?.request?.receipt?.text).toBe("Completed first answer.");
+
+    const second = { session: body.session, requestId: "second" };
+    const secondText = "Waiting for cancellation.";
+    streams[1]!.push({ type: "text_delta", contentIndex: 0, delta: secondText, partial: fauxAssistantMessage(secondText) });
+    await call(path + "/run", { ...body, ...second });
+    const running = await waitFor(() => call<Inspection>(path + "/inspect", second), (value) => Boolean(value.liveAnswer));
+    expect(running.liveAnswer).toEqual({ text: secondText, truncated: false });
+    expect((await call<Inspection>(path + "/inspect", first)).liveAnswer).toBeUndefined();
+    await call(path + "/cancel", second);
+    const cancelled = await waitFor(() => call<Inspection>(path + "/inspect", second), (value) => value.run.status === "cancelled");
+    expect(cancelled.run.status).toBe("cancelled");
+    expect(cancelled.liveAnswer).toBeUndefined();
+    expect(calls).toBe(2);
+  } finally {
+    for (const stream of streams) stream.end(fauxAssistantMessage("", { stopReason: "aborted" }));
     await api.stop();
     await rm(root, { recursive: true, force: true });
   }

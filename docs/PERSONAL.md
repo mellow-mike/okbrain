@@ -16,11 +16,15 @@ Open **Focused map** with a question, project, or note. Filter by source, date, 
 
 Use **Sources** to import conversations, browser bookmarks, Markdown, and Notion export files, find web capture and RSS tools, or get to AI settings. The import forms show which brain receives drafts. If you have multiple brains mounted, select a writable brain before importing.
 
-In **Add → Pull RSS feeds**, enter a feed URL or leave it blank to pull every configured feed. Set **Max new items per feed** to limit the number of new entries saved from each feed in that pull.
+In **Add → Manage saved feeds**, enter one URL per line and select **Save feed URLs**. The list is shared across brain folders on this device. In **Pull RSS feeds**, enter one URL or leave it blank to pull every saved feed into the selected brain. Set **Max new items per feed** to limit how many entries each feed can add. The terminal equivalent for viewing the saved list is `okb rss settings`.
 
 ### Manage brain folders
 
 Use **Settings → Brain folders → Add a brain folder** to create a brain in a new or empty directory, or register an existing folder by its absolute path. Create writes a portable OKF index. Registering an existing folder keeps its contents. The new named brain opens immediately and appears in the sidebar picker.
+
+Choose **Use as default brain** in Settings to select the active writable folder for `okb` launches without a folder argument. The macOS app remembers the last folder opened from its File menu.
+
+Set **Default retrieval profile** on a named brain folder to choose how Search and Ask use that brain by default. Use **Use app default** to inherit the global retrieval setting. A profile selected for a specific search or answer takes precedence.
 
 On **Home** in an empty, writable brain, open **Start with a template** to choose **Personal knowledge** or **Projects and decisions**. Each adds one editable `start-here.md` guide with suggested types and tags. You can also begin by capturing a note or importing your own files. The terminal equivalents are `okb brain-templates` to list the starters and `okb init --template personal` or `okb init --template projects` to add one from the bundle folder. Add `--no-default-bundle` to keep your current default brain.
 
@@ -54,6 +58,8 @@ okb ask-plan 'What did I conclude about spacing my reviews?'
 Model calls use the selected account's ChatGPT plan allowance or available credits. If permission, usage, or the connection is unavailable when okbrain needs a model, the command returns an error on that route. An empty retrieval result ends before inference. Account credentials are stored per user outside the bundle. `okb chatgpt disconnect` clears the selected connection's local credentials and attempts remote revocation. If revocation fails, remove the connection from ChatGPT. [ChatGPT usage and connection controls](https://chatgpt.com/settings/usage)
 
 `okb ask` and the app's **Ask** screen use the configured AI provider. Choose the provider, model, and optional endpoint in **Settings**. For an API-backed provider, save its key under **Provider API keys**, or supply its environment variable. Saved keys stay in per-user application data. A local model runs without an API key.
+
+Select **Restore default chat endpoint** or **Restore default embedding endpoint**, then save to remove a custom endpoint from your settings.
 
 **Ask** displays text as the provider returns it and verifies citations when the answer completes. **Stop** cancels the in-flight answer. Providers that return a complete response display it in one piece. Use `okb ask --stream 'your question'` for incremental terminal output. `--json` returns a single completed result.
 
@@ -103,6 +109,14 @@ okb export-viz
 ```
 
 The local GUI can browse, search, and edit conversation drafts in its selected bundle. **Settings → Sync now** accepts an optional commit message and uses an automatic timestamped message when the field is blank. Sync keeps untracked `db_only/` files out of Git and omits private note metadata from the shared root index and log. When managing the bundle directly with Git, verify that `db_only/` is ignored and untracked. **Settings → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`. Select **Embed app fonts in graph export** or pass `--fonts` to include the app's typefaces for offline viewing.
+
+### Export notes to Markdown or Obsidian
+
+From a writable brain, open **Settings → Markdown and Obsidian export**. Enter the absolute path to a new folder outside the brain. The new folder's parent must already exist. Choose **Export Markdown**, then use Obsidian's **Open folder as vault** or open the files in any Markdown editor.
+
+The export copies the note folders and YAML frontmatter, including custom fields. Markdown body links between exported notes use relative paths. Generated indexes, logs, attachments, app caches, and private `db_only/` notes are omitted by default. Text and metadata already present in exported notes remain visible, including references to notes or attachments outside the export. Review the folder before sharing it.
+
+Select **Include private drafts in Markdown export** and confirm to include those notes. The CLI equivalent is `okb export-markdown /absolute/path/to/new-vault` with the optional `--include-private` flag. An export supports up to 10,000 notes, 16 MiB per source note, and 256 MiB total.
 
 ## Connect an MCP client
 

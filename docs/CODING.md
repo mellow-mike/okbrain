@@ -7,7 +7,7 @@ Use the **Coding** workspace in the Mac app or local web app to review source fi
 1. Open **Coding** and choose **Add a project**. Enter the repository's absolute path on this computer, set the permitted directories, and choose a Pi provider, model, and optional reasoning level.
 2. Save a provider key for that project or use an existing environment key for local runs. The app shows which credential source the project uses.
 3. Describe the task and select tracked excerpts or explicit files. Choose **Preview source**, inspect the actual text, and approve sending it with the task and active conversation history. Sending with a changed file selection requires a fresh preview.
-4. Watch **Run history** for the answer or interruption. Inspect the result and its recorded provider usage before choosing **Accept result** or **Request changes**. An interrupted run can resume with its stored input, or be cancelled. A follow-up uses the same session and a new request ID.
+4. Select the request in **Run history**. Ordinary requests can show a short preview of the answer as it arrives. When the run finishes, inspect the full result and its recorded provider usage before choosing **Accept result** or **Request changes**. An interrupted run can resume with its stored input, or be cancelled. A follow-up uses the same session and a new request ID.
 
 Use **Project settings** to rotate or remove an API key, inspect the audit log, or set transcript retention. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.
 

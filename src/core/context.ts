@@ -4,7 +4,7 @@
 // close via the returned handle.
 
 import { existsSync } from "node:fs";
-import { loadConfig, resolveActor, type OkbConfig } from "./config.ts";
+import { configForBrain, loadConfig, resolveActor, type OkbConfig } from "./config.ts";
 import type { Engine, VectorStore } from "./engine/interface.ts";
 import { defaultDbPath, EngineError, openSqliteEngine } from "./engine/sqlite.ts";
 import { defaultVectorsPath, openVectorStore } from "./engine/vectors.ts";
@@ -49,7 +49,7 @@ export function openLocalContext(
       return vectors;
     },
     hasVectors: () => existsSync(defaultVectorsPath(bundle)),
-    config: () => (cfg ??= loadConfig()),
+    config: () => configForBrain((cfg ??= loadConfig()), ctx.brain, bundle),
   };
   return {
     ctx,

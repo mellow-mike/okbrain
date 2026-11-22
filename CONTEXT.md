@@ -763,6 +763,7 @@ account and coding commands that operate independently of a selected brain.
 |---|---|---|
 | `okb brain-templates` | read | List optional starter guides and their tag vocabularies |
 | `okb init [--actor …] [--template …]` | admin | Set up the bundle and AI providers. Optionally add a starter guide to an empty brain |
+| `okb export-markdown <destination>` | admin | Copy notes and frontmatter to a new Markdown vault with relative concept links, with optional `--include-private` |
 | `okb new <type> <title> <description>` | write | Create a conformant concept at `<type>s/<slug>` |
 | `okb capture [text]` | write | Quick-capture text/stdin → `inbox/` concept |
 | `okb import <path>` | write | Map existing markdown (file/tree) → concepts; dedupe by id |
@@ -814,9 +815,9 @@ over the registry, trusted like the CLI but defended like a network surface:
   local authorization headers and can cancel the synthesis request.
   `GET /clip` (bookmarklet), `GET /` + `/gui/*` (the app and its
   vendored assets). Dedicated routes include `GET /api/status`
-  (version, OKF version, active bundle path, brain, read-only, index/vector
-  presence, actor, port), `GET /api/brains` (mount **names** + policy —
-  never mount paths, per the 5.2 decision), `GET /api/bookmarklet`, and
+  (version, OKF version, active bundle path, brain, read-only, default folder status,
+  retrieval profile, index/vector presence, actor, port), `GET /api/brains`
+  (mount names, policy, and retrieval preference), `GET /api/bookmarklet`, and
   `POST /api/conversations/upload`. The upload accepts browser-selected JSON
   bytes, checks the write policy, and binds confirmation to the bytes,
   provider, and active brain. Additional source routes accept file and folder

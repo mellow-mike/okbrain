@@ -13,7 +13,7 @@ import {
 import {
   cancelCodingRequest, canonicalWorkspace, codingCredential, CodingError, getCodingSessionStatus, hasCodingCredential,
   listCodingModels, previewCodingAttachments, runCodingSession,
-  type CodingDependencies, type CodingProvider, type CodingSessionOptions,
+  type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions,
 } from "./durable.ts";
 import { CodingEvaluationError, CodingEvaluations, parseEvaluation, presentEvidence } from "./evaluation.ts";
 import { dockerWorkerConfig, type DockerWorkerConfig } from "./docker-worker.ts";
@@ -43,7 +43,12 @@ type PatchRow = {
 };
 type AuditRow = { kind: string; actor: string; session: string | null; request_id: string | null; at: string };
 type GitHubRow = { remote: string; repository: string; token: string | null };
-type Running = { cancel: AbortController; promise: Promise<void>; stop?: () => void };
+type Running = {
+  cancel: AbortController;
+  promise: Promise<void>;
+  stop?: () => void;
+  progress?: { requestId: string; answer?: CodingLiveAnswer };
+};
 
 export class ProjectControlError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
@@ -428,18 +433,20 @@ export class CodingProjectControl {
     const key = `${project.id}/${run.session}`;
     const cancel = new AbortController();
     const dependencies = this.#dependencies(project, actor);
+    const progress: NonNullable<Running["progress"]> = { requestId: run.requestId };
     const admitted = () => this.#auditAdmitted(project.id, run, actor);
+    const liveAnswer = (answer: CodingLiveAnswer | undefined) => { progress.answer = answer; };
     let stop: (() => void) | undefined;
     let result: Promise<"done" | "unanswered">;
     try {
       if (dependencies.models) {
         stop = () => cancel.abort();
-        result = runCodingSession(run, { ...dependencies, signal: cancel.signal, admitted }).then((receipt) => receipt.status);
+        result = runCodingSession(run, { ...dependencies, signal: cancel.signal, admitted, liveAnswer }).then((receipt) => receipt.status);
       } else {
         const worker = launchProjectWorker({
           options: run, stateDir: dependencies.stateDir!, workspaceBinding: project.workspace,
           apiKey: codingCredential(project.provider, dependencies),
-        }, cancel.signal, admitted, this.#dockerWorker);
+        }, cancel.signal, { admitted, liveAnswer }, this.#dockerWorker);
         stop = worker.stop;
         result = worker.result;
       }
@@ -458,7 +465,7 @@ export class CodingProjectControl {
     // Retain the status on disk even if catalog writes are interrupted. The
     // next server will reconcile the left-behind row with the Pi transcript.
     void promise.catch(() => {});
-    this.#active.set(key, { cancel, promise, stop });
+    this.#active.set(key, { cancel, promise, stop, progress });
   }
 
   #canSchedule(project: ProjectRow, run: { session: string; requestId: string }) {
@@ -523,7 +530,12 @@ export class CodingProjectControl {
     if (this.#get("SELECT session FROM session_deletions WHERE project = ? AND session = ?", project.id, run.session))
       throw new ProjectControlError("This transcript is being deleted.", 409);
     const value = this.#runView(row);
-    if (this.#active.has(`${project.id}/${run.session}`) || (row.status !== "interrupted" && !row.admitted)) return { run: value };
+    const active = this.#active.get(`${project.id}/${run.session}`);
+    if (active || (row.status !== "interrupted" && !row.admitted)) {
+      const answer = row.status === "running" && active?.progress?.requestId === run.requestId
+        && !active.cancel.signal.aborted ? active.progress.answer : undefined;
+      return { run: value, ...(answer && { liveAnswer: answer }) };
+    }
     try {
       const pi = await getCodingSessionStatus(
         { ...this.#session(project, run), includeReceipt: true },

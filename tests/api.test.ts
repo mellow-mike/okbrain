@@ -244,6 +244,47 @@ describe("request guards", () => {
     }
   });
 
+  test("saved RSS feeds are local settings and pulls still use the fetch guard", async () => {
+    const cfg = loadConfig();
+    let requests = 0;
+    const fixture = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+      requests++;
+      return new Response("<rss/>");
+    } });
+    const url = `http://127.0.0.1:${fixture.port}/feed`;
+    const path = "api/rss-settings";
+    const edit = (feeds: string, headers: Record<string, string> = {}) => call(path, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ feeds }),
+    });
+    try {
+      saveConfig({ ...cfg, retainedSetting: { untouched: true }, rss: { maxItems: 17 }, brains: {
+        ...cfg.brains, "rss-readonly": { path: bundle, readonly: true },
+      } });
+      expect((await fetch(`${base}${path}?token=${TOKEN}`)).status).toBe(401);
+      expect((await edit(url, { origin: "https://untrusted.example" })).status).toBe(403);
+      expect((await edit(url, { "x-okb-brain": "rss-readonly" })).status).toBe(403);
+      expect((await post("rss_settings", { feeds: url })).status).toBe(404);
+
+      const saved = await edit(` ${url}\r\n\r\n${url}`);
+      expect(saved.status).toBe(200);
+      expect(await saved.json()).toEqual({ result: { feeds: [url] } });
+      expect(saved.headers.get("cache-control")).toBe("no-store");
+      expect(requests).toBe(0);
+      expect((await edit(`${url}\nfile:///data/feed.xml`)).status).toBe(400);
+      expect(await (await call(path)).json()).toEqual({ result: { feeds: [url] } });
+      expect(loadConfig()).toMatchObject({ retainedSetting: { untouched: true }, rss: { feeds: [url], maxItems: 17 } });
+      expect((await post("rss", {})).status).toBe(403);
+      expect(requests).toBe(0);
+      expect(JSON.parse((await okb(["rss", "settings", "--json", "--bundle", bundle])).stdout)).toEqual({ feeds: [url] });
+      expect(await (await edit("")).json()).toEqual({ result: { feeds: [] } });
+    } finally {
+      await fixture.stop(true);
+      saveConfig(cfg);
+    }
+  });
+
   test("GUI assets served tokenless with correct content types", async () => {
     const cases: [string, string, string][] = [
       ["gui/app.js", "application/javascript", "renderGraph"],
@@ -478,6 +519,57 @@ describe("server routes for the GUI", () => {
     } finally {
       saveConfig(config);
       await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  test("named retrieval preferences are scoped to their brain and allow one-run overrides", async () => {
+    const saved = loadConfig();
+    const profileBundle = await mkdtemp(join(tmpdir(), "okb-api-profile-"));
+    const scoped = (route: string, params: Record<string, unknown>) => call(route, {
+      method: "POST", headers: { "content-type": "application/json", "x-okb-brain": "Profile" }, body: JSON.stringify(params),
+    });
+    try {
+      saveConfig({ ...saved, retrieval: { profile: "balanced" }, brains: { Profile: profileBundle } });
+      const selection = { action: "update", previous: "Profile", name: "Profile", readonly: false };
+      expect((await scoped("api/brains/mounts", { ...selection, retrievalProfile: "__proto__" })).status).toBe(400);
+      expect((await scoped("api/brains/mounts", { ...selection, retrievalProfile: "lean" })).status).toBe(200);
+      for (let i = 0; i < 12; i++) await writeFile(join(profileBundle, `note-${i}.md`), `---\ntype: note\ntitle: Note ${i}\n---\nquartzleaf\n`);
+      expect((await scoped("api/op/index", {})).status).toBe(200);
+      const query = { query: "quartzleaf", "keyword-only": true };
+      const search = async (params: Record<string, unknown>) => {
+        const reply = await scoped("api/op/search", params);
+        expect(reply.status).toBe(200);
+        return (await reply.json() as { result: unknown[] }).result;
+      };
+      expect(await search(query)).toHaveLength(8);
+      expect(await search({ ...query, profile: "max" })).toHaveLength(12);
+      expect(await (await call("api/status")).json()).toMatchObject({ retrievalProfile: "balanced" });
+      let output = "";
+      expect(await runCli(["--brain", "Profile", "search", "quartzleaf", "--keyword-only", "--json"], {
+        out: (value) => { output += value; }, err: () => {},
+      })).toBe(0);
+      expect(JSON.parse(output)).toHaveLength(8);
+      expect((await scoped("api/brains/mounts", { ...selection, retrievalProfile: "" })).status).toBe(200);
+      expect(await search(query)).toHaveLength(12);
+
+      const served = createApiServer({ bundle: profileBundle, servedBrain: "Profile", port: 0, token: TOKEN });
+      try {
+        expect((await scoped("api/brains/mounts", { ...selection, retrievalProfile: "lean", readonly: true })).status).toBe(200);
+        const rootStatus = await fetch(new URL("api/status", served.url), { headers: { "x-okb-token": TOKEN } });
+        expect(await rootStatus.json()).toMatchObject({ brain: null, readonly: true, retrievalProfile: "lean" });
+        const blocked = await fetch(new URL("api/op/capture", served.url), { method: "POST",
+          headers: { "content-type": "application/json", "x-okb-token": TOKEN }, body: JSON.stringify({ text: "Blocked" }) });
+        expect(blocked.status).toBe(403);
+        const removed = await call("api/brains/mounts", { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "remove", previous: "Profile" }) });
+        expect(removed.status).toBe(200);
+        const discovery = await fetch(new URL("api/brains", served.url), { headers: { "x-okb-token": TOKEN } });
+        expect(discovery.status).toBe(200);
+        expect(await discovery.json()).toEqual({ brains: [] });
+      } finally { await served.stop(); }
+    } finally {
+      saveConfig(saved);
+      await rm(profileBundle, { recursive: true, force: true });
     }
   });
 

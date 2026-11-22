@@ -4,7 +4,7 @@
 // Trust is fail-closed (invariant 3): `runOp` refuses write/admin scope for any
 // caller not explicitly trusted, before the handler is ever reached.
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { readdir, readFile, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -68,6 +68,7 @@ import {
 } from "./okf/document.ts";
 import { regenerateIndexes } from "./okf/indexmd.ts";
 import { appendLog } from "./okf/logmd.ts";
+import { exportMarkdown, MarkdownExportError, type MarkdownExport } from "./okf/markdown-export.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
 import { brainStarterCatalog, createBrainStarter, findBrainStarter } from "./okf/starter.ts";
 import { upgradeBundle, type UpgradeResult } from "./okf/upgrade.ts";
@@ -666,6 +667,27 @@ export async function runNotionSource(ctx: OpContext, connector: NotionSource, a
 export function runBrainMountChange(ctx: OpContext, input: Record<string, unknown>) {
   checkOpScope({ name: "brain mount settings", scope: "admin" }, ctx);
   return changeBrainMount(input);
+}
+
+/** The settings edit only local config. All network rules remain in pullFeed. */
+export function runRssSettings(ctx: OpContext, input?: unknown): { feeds: string[] } {
+  checkOpScope({ name: "rss_settings", scope: "admin" }, ctx);
+  const cfg = loadConfig();
+  if (input === undefined) return { feeds: cfg.rss?.feeds ?? [] };
+  if (typeof input !== "string") throw new OpError("Enter one feed URL per line.", "bad_params");
+
+  const feeds = new Set<string>();
+  for (const [index, line] of input.split(/\r?\n/).entries()) {
+    const feed = line.trim();
+    if (!feed) continue;
+    const url = URL.parse(feed);
+    if (!url || !["http:", "https:"].includes(url.protocol) || url.username || url.password)
+      throw new OpError(`Line ${index + 1} must be an HTTP or HTTPS feed URL without credentials.`, "bad_params");
+    feeds.add(feed);
+  }
+  const saved = [...feeds];
+  saveConfig({ ...cfg, rss: { ...cfg.rss, feeds: saved } });
+  return { feeds: saved };
 }
 
 export const operations: readonly Operation[] = [
@@ -1364,6 +1386,27 @@ export const operations: readonly Operation[] = [
     },
   },
   {
+    name: "export_markdown",
+    cliName: "export-markdown",
+    summary: "Copy brain notes to a new portable Markdown or Obsidian folder",
+    scope: "admin",
+    params: [
+      { name: "destination", type: "string", required: true, positional: true, description: "absolute path to a new folder outside the brain" },
+      { name: "include-private", type: "boolean", description: "include notes from private db_only directories" },
+    ],
+    handler: (ctx, p) => writing(async () => {
+      try { return await exportMarkdown(ctx.bundle, p.destination as string, p["include-private"] === true); }
+      catch (error) {
+        if (error instanceof MarkdownExportError) throw new OpError(error.message, "bad_params");
+        throw error;
+      }
+    }),
+    render: (r) => {
+      const { path, notes } = r as MarkdownExport;
+      return `exported ${notes} ${notes === 1 ? "note" : "notes"} to ${path}`;
+    },
+  },
+  {
     name: "index",
     cliName: "index",
     summary: "(Re)index the bundle incrementally (unchanged files skipped)",
@@ -1628,7 +1671,7 @@ export const operations: readonly Operation[] = [
       const urls = p.url !== undefined ? [p.url as string] : (cfg?.feeds ?? []);
       if (urls.length === 0)
         throw new OpError(
-          "no feed URL given and no rss.feeds configured (add feeds to config.json)",
+          "Enter a feed URL or add feeds in Add → Manage saved feeds or with okb rss settings --feeds.",
           "bad_params",
         );
       return pullFeeds(ctx, urls, (p.limit as number | undefined) ?? cfg?.maxItems);
@@ -1644,6 +1687,16 @@ export const operations: readonly Operation[] = [
           ];
         })
         .join("\n"),
+  },
+  {
+    name: "rss_settings",
+    cliName: "rss settings",
+    summary: "View or replace saved RSS feed URLs without pulling entries",
+    scope: "admin",
+    localOnly: true,
+    params: [{ name: "feeds", type: "string", description: "one feed URL per line (empty clears the list)" }],
+    handler: async (ctx, p) => runRssSettings(ctx, p.feeds),
+    render: (r) => (r as { feeds: string[] }).feeds.join("\n") || "No saved RSS feeds.",
   },
   {
     name: "link_suggest",
@@ -2120,6 +2173,19 @@ export const operations: readonly Operation[] = [
     render: () => brainStarterCatalog.map((starter) => `${starter.name} — ${starter.description}`).join("\n"),
   },
   {
+    name: "brain_default",
+    cliName: "brains default",
+    summary: "Use the selected brain when okb starts without a folder argument",
+    scope: "admin",
+    params: [],
+    handler: async (ctx) => {
+      const cfg = loadConfig();
+      if (cfg.defaultBundle !== ctx.bundle) saveConfig({ ...cfg, defaultBundle: ctx.bundle });
+      return { defaultBundle: ctx.bundle };
+    },
+    render: (result) => `default brain: ${(result as { defaultBundle: string }).defaultBundle}`,
+  },
+  {
     name: "init",
     cliName: "init",
     summary: "Set up a brain, its AI providers, and an optional starter template",
@@ -2169,7 +2235,7 @@ export const operations: readonly Operation[] = [
         ai[field] = url.href.replace(/\/$/, "");
       }
       if (p["retrieval-profile"] !== undefined) {
-        if (!PROFILES[p["retrieval-profile"] as string])
+        if (!Object.hasOwn(PROFILES, p["retrieval-profile"] as string))
           throw new OpError(
             `unknown retrieval profile: ${p["retrieval-profile"]} (known: ${Object.keys(PROFILES).join(", ")})`,
             "bad_params",
@@ -2284,13 +2350,22 @@ export const operations: readonly Operation[] = [
     handler: async (ctx, p) => {
       const trusted = p.trusted === true;
       const readonly = ctx.readonly === true;
-      const mode = trusted ? "TRUSTED — write ops exposed" : "untrusted, read-only";
+      const brain = ctx.brain;
+      const bundle = brain ? realpathSync(ctx.bundle) : ctx.bundle;
+      const mountAllowed = brain ? () => {
+        try {
+          const mount = resolveBrain(brain);
+          return mount.path === ctx.bundle && realpathSync(mount.path) === bundle && (!trusted || !mount.readonly || readonly);
+        } catch { return false; }
+      } : undefined;
+      const options = { bundle, brain, trusted, readonly, mountAllowed };
+      const mode = trusted && !readonly ? "TRUSTED — write ops exposed" : "read-only";
       if (p.http === true || p.port !== undefined) {
         const port = (p.port as number | undefined) ?? DEFAULT_MCP_PORT;
-        runMcpHttp({ bundle: ctx.bundle, trusted, readonly, port });
+        runMcpHttp({ ...options, port });
         log.info(`mcp: http://127.0.0.1:${port}/ (${mode})`);
       } else {
-        await runMcpStdio({ bundle: ctx.bundle, trusted, readonly });
+        await runMcpStdio(options);
         log.info(`mcp: stdio (${mode})`);
       }
       return new Promise(() => {}); // lives until the client disconnects us

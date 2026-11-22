@@ -2,11 +2,16 @@ import { mkdirSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { dockerWorkerStateDir, planDockerWorker, type DockerWorkerConfig } from "./docker-worker.ts";
-import { canonicalWorkspace, CodingError, prepareCodingInput, runCodingSession, type CodingSessionOptions, type PreparedCodingInput } from "./durable.ts";
+import {
+  canonicalWorkspace, CodingError, maxLiveAnswerLength, prepareCodingInput, runCodingSession,
+  type CodingLiveAnswer, type CodingSessionOptions, type PreparedCodingInput,
+} from "./durable.ts";
 
 type Request = { stateDir: string; workspaceBinding: string; options: CodingSessionOptions; apiKey?: string };
 type WorkerRequest = Request & { stateBinding?: string; preparedInput?: PreparedCodingInput };
-type Event = { type: "admitted" } | { type: "settled"; status: "done" | "unanswered" } | { type: "error"; error: string };
+type Event = { type: "admitted" } | { type: "answer"; answer: CodingLiveAnswer | null }
+  | { type: "settled"; status: "done" | "unanswered" } | { type: "error"; error: string };
+type WorkerCallbacks = { admitted: () => void; liveAnswer: (answer: CodingLiveAnswer | undefined) => void };
 const maxWorkerInputBytes = 512 * 1024; // Even doubly escaped explicit text must fit the pipe.
 export const projectWorkerArg = "--project-worker";
 export class ProjectWorkerInterrupted extends Error {}
@@ -37,6 +42,7 @@ export async function runProjectWorker(): Promise<number> {
         allowEnvKey: false,
         signal: controller.signal,
         admitted: () => { void send({ type: "admitted" }); },
+        liveAnswer: (answer) => send({ type: "answer", answer: answer ?? null }),
       }).then(async (result) => {
         await send({ type: "settled", status: result.status });
         input.close();
@@ -58,7 +64,7 @@ export async function runProjectWorker(): Promise<number> {
 
 const workerEnvs = new Set(["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "OKB_SQLITE_LIB"]);
 
-function launchPipe(request: WorkerRequest, signal: AbortSignal, admitted: () => void, docker?: ReturnType<typeof planDockerWorker>) {
+function launchPipe(request: WorkerRequest, signal: AbortSignal, callbacks: WorkerCallbacks, docker?: ReturnType<typeof planDockerWorker>) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => workerEnvs.has(name.toUpperCase())));
   const standalone = Bun.embeddedFiles.length > 0;
   // The standalone app starts its CLI entry again. Development runs the source module with Bun.
@@ -87,8 +93,14 @@ function launchPipe(request: WorkerRequest, signal: AbortSignal, admitted: () =>
       signal.addEventListener("abort", cancel, { once: true });
       for await (const line of reader) {
         const event = JSON.parse(line) as Event;
-        if (event.type === "admitted") admitted();
-        else if (event.type === "settled" || event.type === "error") disposition = event;
+        if (event.type === "admitted") callbacks.admitted();
+        else if (event.type === "answer") {
+          if (event.answer === null) callbacks.liveAnswer(undefined);
+          else if (typeof event.answer?.text === "string" && event.answer.text.length <= maxLiveAnswerLength
+            && typeof event.answer.truncated === "boolean") {
+            callbacks.liveAnswer({ text: event.answer.text, truncated: event.answer.truncated });
+          }
+        } else if (event.type === "settled" || event.type === "error") disposition = event;
       }
       const code = await child.exited;
       if (code === 0 && disposition?.type === "settled") return disposition.status;
@@ -111,10 +123,10 @@ function launchPipe(request: WorkerRequest, signal: AbortSignal, admitted: () =>
   return { stop, result };
 }
 
-export function launchProjectWorker(request: Request, signal: AbortSignal, admitted: () => void, docker?: DockerWorkerConfig) {
+export function launchProjectWorker(request: Request, signal: AbortSignal, callbacks: WorkerCallbacks, docker?: DockerWorkerConfig) {
   if (!docker) {
     mkdirSync(request.stateDir, { recursive: true, mode: 0o700 });
-    return launchPipe(request, signal, admitted);
+    return launchPipe(request, signal, callbacks);
   }
 
   let worker: ReturnType<typeof launchPipe> | undefined;
@@ -135,7 +147,7 @@ export function launchProjectWorker(request: Request, signal: AbortSignal, admit
         stateDir: dockerWorkerStateDir, stateBinding: stateDir, workspaceBinding, preparedInput, apiKey,
         options: { session: options.session, requestId: options.requestId, workspace: options.workspace,
           provider: options.provider, model: options.model, thinkingLevel: options.thinkingLevel },
-      }, signal, admitted, plan);
+      }, signal, callbacks, plan);
     } catch (error) {
       if (error instanceof CodingError) throw error;
       throw new ProjectWorkerInterrupted("The Docker coding worker could not start. Check that Docker is installed and available to the server.", { cause: error });

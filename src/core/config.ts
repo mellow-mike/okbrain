@@ -4,7 +4,7 @@
 // Windows. All path work goes through node:path; nothing here hardcodes a
 // separator. Pure given an injected Platform, so it is fully testable.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ReviewConfig } from "./review/score.ts";
@@ -103,9 +103,9 @@ export interface OkbConfig {
   };
   /**
    * Named bundle mounts (Stage 5): `okb --brain work …`. A string is the
-   * bundle path; the object form adds a per-brain access policy.
+   * bundle path; the object form adds access policy and retrieval preferences.
    */
-  brains?: Record<string, string | { path: string; readonly?: boolean; [key: string]: unknown }>;
+  brains?: Record<string, string | { path: string; readonly?: boolean; retrievalProfile?: string; [key: string]: unknown }>;
   /** Unknown keys are preserved on rewrite (permissive, like the OKF reader). */
   [key: string]: unknown;
 }
@@ -172,6 +172,24 @@ export interface BrainMount {
   name: string;
   path: string;
   readonly: boolean;
+  retrievalProfile?: string;
+}
+
+function mountPath(raw: string, p: Platform): string {
+  return raw === "~" || raw.startsWith("~/") ? join(p.home, raw.slice(2)) : raw;
+}
+
+/** Apply a named mount's retrieval default only for the bundle bound to that mount. */
+export function configForBrain(cfg: OkbConfig, name: string | undefined, bundle: string, p: Platform = currentPlatform()): OkbConfig {
+  const mount = name && cfg.brains && Object.hasOwn(cfg.brains, name) ? cfg.brains[name] : undefined;
+  if (!mount || typeof mount === "string" || typeof mount.retrievalProfile !== "string" || !mount.retrievalProfile ||
+      typeof mount.path !== "string") return cfg;
+  const path = resolve(p.cwd, mountPath(mount.path, p));
+  if (path !== bundle) {
+    try { if (realpathSync(path) !== realpathSync(bundle)) return cfg; }
+    catch { return cfg; }
+  }
+  return { ...cfg, retrieval: { ...cfg.retrieval, profile: mount.retrievalProfile } };
 }
 
 /** Every configured brain mount, normalized; paths expand a leading `~`. */
@@ -179,10 +197,12 @@ export function listBrains(p: Platform = currentPlatform()): BrainMount[] {
   const brains = loadConfig(p).brains ?? {};
   return Object.entries(brains).map(([name, v]) => {
     const raw = typeof v === "string" ? v : v.path;
-    const expanded = raw === "~" || raw.startsWith("~/") ? join(p.home, raw.slice(2)) : raw;
+    const expanded = mountPath(raw, p);
     if (!isAbsolute(expanded))
       throw new ConfigError(`brain ${name}: path must be absolute (got ${raw})`);
-    return { name, path: resolve(expanded), readonly: typeof v !== "string" && v.readonly === true };
+    const retrievalProfile = typeof v === "string" ? undefined : v.retrievalProfile;
+    return { name, path: resolve(expanded), readonly: typeof v !== "string" && v.readonly === true,
+      ...(typeof retrievalProfile === "string" && retrievalProfile ? { retrievalProfile } : {}) };
   });
 }
 

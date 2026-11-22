@@ -118,6 +118,19 @@ export function normalizeLinks(srcId: string, body: string): string {
   });
 }
 
+/** Make links to selected concepts work in readers outside the OKF bundle. */
+export function relativeConceptLinks(srcId: string, body: string, selected: KnownConcepts): string {
+  return rewriteBodyLinks(body, (match, raw) => {
+    const target = resolveLinkTarget(srcId, raw);
+    if (target === null || !selected.has(target)) return match;
+    const { dest, suffix } = splitTarget(raw);
+    const path = posix.relative(posix.dirname(srcId), `${target}.md`)
+      .split("/").map((part) => encodeURIComponent(part).replace(/[()]/g, (c) => c === "(" ? "%28" : "%29")).join("/");
+    const tail = dest.search(/[?#]/);
+    return `](${path}${tail < 0 ? "" : dest.slice(tail)}${suffix})`;
+  });
+}
+
 /** All resolved internal link target ids in a body, deduped, in first-seen order. */
 export function extractTargets(srcId: string, body: string): string[] {
   const seen = new Set<string>();

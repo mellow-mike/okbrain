@@ -348,6 +348,15 @@
     let timer;
     let generation = 0;
 
+    function showLiveAnswer(preview, answer) {
+      preview.hidden = !answer;
+      const label = preview.querySelector('p');
+      const text = preview.querySelector('pre');
+      const caption = answer?.truncated ? 'Response in progress · Preview limit reached' : 'Response in progress';
+      if (label.textContent !== caption) label.textContent = caption;
+      if (text.textContent !== (answer?.text ?? '')) text.textContent = answer?.text ?? '';
+    }
+
     async function readRun(run, current) {
       const result = await coding(prefix + '/inspect', identity(run));
       if (detached() || current !== generation) return;
@@ -356,9 +365,13 @@
       const receipt = pi?.request?.receipt;
       const error = row.error || receipt?.reason;
       const snippet = receipt?.repositoryContext?.files || pi?.request?.repositoryContext?.files || [];
-      if (row.status === 'running' && inspected.dataset.run === row.id && inspected.dataset.status === 'running') return;
+      const live = inspected.querySelector('[data-live-answer]');
+      if (row.status === 'running' && inspected.dataset.run === row.id && inspected.dataset.session === row.session && live) {
+        showLiveAnswer(live, result.liveAnswer);
+        return;
+      }
       inspected.dataset.run = row.id;
-      inspected.dataset.status = row.status;
+      inspected.dataset.session = row.session;
       inspected.innerHTML = '<div class="coding-result stack"><h4>' + esc(row.id) + '</h4>' +
         '<p>' + esc(labelStatus(row)) + ' · ' + esc(row.session) + ' · ' + esc(row.actor) + '</p>' +
         (row.reviewer ? '<p class="muted">Reviewed by ' + esc(row.reviewer) + ' · ' + esc(time(row.reviewed)) + '</p>' : '') +
@@ -368,10 +381,12 @@
           esc(pi.context.estimatedTokens.toLocaleString()) + ' active context tokens' +
           (pi.context.historyCompacted ? ' · Older turns compacted' : '') + '</p>' : '') +
         (receipt?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
+        (row.status === 'running' ? '<div data-live-answer hidden><p class="muted"></p><pre></pre></div>' : '') +
         (receipt?.text ? '<pre data-answer></pre><div class="row"><button type="button" data-copy>Copy response</button></div>' : '') +
         (snippet.length ? '<details><summary>Source references</summary><ul>' + snippet.map((file) =>
           '<li><code>' + esc(file.path + ':' + file.startLine + '–' + file.endLine) + '</code></li>').join('') + '</ul></details>' : '') +
         '<div class="row" data-actions></div></div>';
+      if (row.status === 'running') showLiveAnswer(inspected.querySelector('[data-live-answer]'), result.liveAnswer);
       if (receipt?.text) {
         inspected.querySelector('[data-answer]').textContent = receipt.text;
         inspected.querySelector('[data-copy]').addEventListener('click', async () => {
