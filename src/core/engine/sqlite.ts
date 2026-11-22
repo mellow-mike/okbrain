@@ -27,6 +27,8 @@ import type {
 export class EngineError extends Error {}
 
 const SCHEMA_VERSION = 4;
+const BUSY_TIMEOUT_MS = 1000;
+const STARTUP_BUSY_TIMEOUT_MS = 25;
 
 const SCHEMA = `
 CREATE TABLE nodes(
@@ -111,26 +113,60 @@ interface NodeRow {
   content_hash: string;
 }
 
+function isTransientLock(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^SQLITE_(?:BUSY|LOCKED)(?:_|$)/.test(code);
+}
+
 function createSchema(db: Database): void {
   try {
     db.exec(SCHEMA);
-  } catch (e) {
+  } catch (error) {
+    if (isTransientLock(error)) throw error;
     throw new EngineError(
-      `cannot create index schema (SQLite build may lack FTS5): ${(e as Error).message}`,
+      `cannot create index schema (SQLite build may lack FTS5): ${(error as Error).message}`,
+      { cause: error },
     );
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
+function schemaVersion(db: Database): number {
+  return db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
+}
+
 /** True when the schema is current; false = stale, only wipe() may repair. */
 function migrate(db: Database): boolean {
-  const { user_version } = db
-    .query<{ user_version: number }, []>("PRAGMA user_version")
-    .get()!;
-  if (user_version === SCHEMA_VERSION) return true;
-  if (user_version !== 0) return false;
-  createSchema(db);
-  return true;
+  const version = schemaVersion(db);
+  if (version !== 0) return version === SCHEMA_VERSION;
+  // Concurrent openers can both see version 0. Only the writer holding the
+  // transaction may initialize it, and the schema and version commit together.
+  return db.transaction(() => {
+    const currentVersion = schemaVersion(db);
+    if (currentVersion === 0) createSchema(db);
+    return currentVersion === 0 || currentVersion === SCHEMA_VERSION;
+  }).immediate();
+}
+
+function initialize(db: Database): boolean {
+  db.exec(`PRAGMA busy_timeout = ${STARTUP_BUSY_TIMEOUT_MS}`);
+  const deadline = performance.now() + BUSY_TIMEOUT_MS;
+  let delay = 5;
+  while (true) {
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      const schemaOk = migrate(db);
+      db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      return schemaOk;
+    } catch (error) {
+      const remaining = deadline - performance.now();
+      if (!isTransientLock(error) || remaining <= 0) throw error;
+      // SQLite can return BUSY immediately when changing the journal mode
+      // requires a lock upgrade, even with a native busy timeout configured.
+      Bun.sleepSync(Math.min(delay, remaining));
+      delay = Math.min(delay * 2, 50);
+    }
+  }
 }
 
 /** Open (creating/migrating as needed) a SQLite engine at `dbPath`. */
@@ -142,8 +178,7 @@ export function openSqliteEngine(dbPath: string): Engine {
   const db = new Database(dbPath, { create: true });
   let schemaOk: boolean;
   try {
-    db.exec("PRAGMA busy_timeout = 1000; PRAGMA journal_mode = WAL");
-    schemaOk = migrate(db);
+    schemaOk = initialize(db);
   } catch (error) {
     db.close();
     throw error;
@@ -420,9 +455,11 @@ export function openSqliteEngine(dbPath: string): Engine {
     wipe() {
       // Drop + recreate rather than DELETE FROM: this is also the upgrade
       // path from any older schema version (`okb rebuild`).
-      for (const t of ["fts", "nodes", "edges", "tags", "review_state"])
-        db.exec(`DROP TABLE IF EXISTS ${t}`);
-      createSchema(db);
+      db.transaction(() => {
+        for (const t of ["fts", "nodes", "edges", "tags", "review_state"])
+          db.exec(`DROP TABLE IF EXISTS ${t}`);
+        createSchema(db);
+      }).immediate();
       schemaOk = true;
     },
 

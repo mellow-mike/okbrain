@@ -823,6 +823,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Fixed the SQLite cache startup race between watch and foreground
+  reads. Schema initialization and explicit rebuilds now commit atomically.
 - 2026-11-22 — Added the pinned Vite studies and validated checkout and source
   approval for app-managed evaluation trials.
 - 2026-11-22 — Added evaluation case reuse and tested the author-to-reviewer

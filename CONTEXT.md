@@ -412,7 +412,9 @@ rel)` (`rel` nullable, derived — see typed edges above), `tags(node_id, tag)`,
 `review_state(node_id, snooze_until)` (Resurface's DB-only snooze), and an
 FTS5 table sharing `nodes.rowid`. The index lives at `<bundle>/.okb/index.db`
 — inside the bundle so it travels with context but gitignored and always
-disposable (`okb rebuild`). Schema migrations ARE rebuilds: on a version
+disposable (`okb rebuild`). Concurrent first opens wait briefly while a process
+switches the journal to WAL or creates the schema. Schema creation and its
+version commit together, as do explicit rebuilds. On a schema version
 mismatch every data method fails with "run `okb rebuild`", and `wipe()` —
 what rebuild calls — drops and recreates the current schema, so rebuild works
 against any old index file and no read can half-answer from a stale shape. **Edges are
