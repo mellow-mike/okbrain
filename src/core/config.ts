@@ -51,6 +51,10 @@ export function dataDir(p: Platform = currentPlatform()): string {
 export class ConfigError extends Error {}
 export class UnknownBrainError extends ConfigError {}
 
+export const brainAiFields = ["provider", "model", "embedProvider", "embedModel"] as const;
+export type BrainAiDefaults = Partial<Record<typeof brainAiFields[number], string>>;
+export const brainAiDefaults = Symbol("brainAiDefaults");
+
 /** AI provider settings persisted by `okb init` (resolution: core/ai/gateway.ts). */
 export interface AiSettings {
   provider?: string;
@@ -61,6 +65,8 @@ export interface AiSettings {
   embedBaseUrl?: string;
   rerankProvider?: string;
   rerankModel?: string;
+  /** Runtime-only selection. Preserve the global provider associated with custom endpoints. */
+  [brainAiDefaults]?: BrainAiDefaults;
 }
 
 export interface OkbConfig {
@@ -105,7 +111,7 @@ export interface OkbConfig {
    * Named bundle mounts (Stage 5): `okb --brain work …`. A string is the
    * bundle path; the object form adds access policy and retrieval preferences.
    */
-  brains?: Record<string, string | { path: string; readonly?: boolean; retrievalProfile?: string; [key: string]: unknown }>;
+  brains?: Record<string, string | { path: string; readonly?: boolean; retrievalProfile?: string; ai?: BrainAiDefaults; [key: string]: unknown }>;
   /** Unknown keys are preserved on rewrite (permissive, like the OKF reader). */
   [key: string]: unknown;
 }
@@ -173,23 +179,39 @@ export interface BrainMount {
   path: string;
   readonly: boolean;
   retrievalProfile?: string;
+  ai?: BrainAiDefaults;
 }
 
 function mountPath(raw: string, p: Platform): string {
   return raw === "~" || raw.startsWith("~/") ? join(p.home, raw.slice(2)) : raw;
 }
 
-/** Apply a named mount's retrieval default only for the bundle bound to that mount. */
+/** Allow only provider/model preferences when reading older or manually edited config. */
+export function readBrainAiDefaults(value: unknown): BrainAiDefaults | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const saved = value as Record<string, unknown>;
+  const ai: BrainAiDefaults = {};
+  for (const field of brainAiFields) {
+    const entry = Object.hasOwn(saved, field) ? saved[field] : undefined;
+    if (typeof entry === "string" && entry.trim()) ai[field] = entry.trim();
+  }
+  return Object.keys(ai).length ? ai : undefined;
+}
+
+/** Apply personal defaults only for the bundle bound to the named mount. */
 export function configForBrain(cfg: OkbConfig, name: string | undefined, bundle: string, p: Platform = currentPlatform()): OkbConfig {
   const mount = name && cfg.brains && Object.hasOwn(cfg.brains, name) ? cfg.brains[name] : undefined;
-  if (!mount || typeof mount === "string" || typeof mount.retrievalProfile !== "string" || !mount.retrievalProfile ||
-      typeof mount.path !== "string") return cfg;
+  if (!mount || typeof mount === "string" || typeof mount.path !== "string") return cfg;
+  const profile = typeof mount.retrievalProfile === "string" && mount.retrievalProfile ? mount.retrievalProfile : undefined;
+  const ai = readBrainAiDefaults(mount.ai);
+  if (!profile && !ai) return cfg;
   const path = resolve(p.cwd, mountPath(mount.path, p));
   if (path !== bundle) {
     try { if (realpathSync(path) !== realpathSync(bundle)) return cfg; }
     catch { return cfg; }
   }
-  return { ...cfg, retrieval: { ...cfg.retrieval, profile: mount.retrievalProfile } };
+  return { ...cfg, ...(profile ? { retrieval: { ...cfg.retrieval, profile } } : {}),
+    ...(ai ? { ai: { ...cfg.ai, [brainAiDefaults]: ai } } : {}) };
 }
 
 /** Every configured brain mount, normalized; paths expand a leading `~`. */
@@ -201,8 +223,9 @@ export function listBrains(p: Platform = currentPlatform()): BrainMount[] {
     if (!isAbsolute(expanded))
       throw new ConfigError(`brain ${name}: path must be absolute (got ${raw})`);
     const retrievalProfile = typeof v === "string" ? undefined : v.retrievalProfile;
+    const ai = typeof v === "string" ? undefined : readBrainAiDefaults(v.ai);
     return { name, path: resolve(expanded), readonly: typeof v !== "string" && v.readonly === true,
-      ...(typeof retrievalProfile === "string" && retrievalProfile ? { retrievalProfile } : {}) };
+      ...(typeof retrievalProfile === "string" && retrievalProfile ? { retrievalProfile } : {}), ...(ai ? { ai } : {}) };
   });
 }
 

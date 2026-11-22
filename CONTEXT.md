@@ -19,7 +19,8 @@ human review. Source context can be attached explicitly or selected from
 tracked files under caller-chosen Git project directories. Selection reports
 file and line ranges, an estimated excerpt budget, scan limits, and a digest
 of the selected bytes. Admission checks the digest and saves the exact
-selection. Recovery reads the saved input. The app and CLI report Pi Durable
+selection. Recovery reads the saved input. When the operator opts in, Pi can
+look up bounded line ranges in the current request's saved selection. The app and CLI report Pi Durable
 status, active context estimates, and recorded provider and cache usage.
 Compaction reduces active context while preserving the original transcript.
 The project control plane scopes credentials, members, worker runs, and
@@ -172,11 +173,15 @@ Every write produces a conformant bundle (`writeConcept`, exposed as the
   Missing intros get a deterministic placeholder. `okf_version: "0.2"` is
   maintained in the root `index.md` frontmatter (the only `index.md` where
   frontmatter is allowed; unknown root keys are preserved; an existing
-  declaration is kept until `okb upgrade` bumps it).
+  declaration is kept until `okb upgrade` bumps it). The optional reference
+  format uses H1 groups and relative links, selected in the root manifest
+  with `okbrain_index_style: reference`.
 - Root `log.md` appended per write (`core/okf/logmd.ts`): `## YYYY-MM-DD`
   headings (UTC, matching `generated.at`), newest first; entries are
   `**Creation**`/`**Update**`/`**Deprecation**`/`**Deletion**`:
-  `[Title](/id.md) — summary`, same-day entries sharing one section.
+  `[Title](/id.md) — summary`, same-day entries sharing one section. A regular
+  `log.md` in a public subfolder also records future changes within that folder.
+  `okb log create` enables one without backfilling. Private branches are excluded.
 
 ### Authoring ops (`okb new` / `okb capture` / `okb import` / `okb rm`)
 All are thin front-ends over `writeConcept`:
@@ -788,6 +793,7 @@ account and coding commands that operate independently of a selected brain.
 | `okb links accept <id> <target>` | write | Accept one: normalized link under `# Related` |
 | `okb review` / `review done` / `review snooze` | read/write | The Resurface queue; done = a `verified` event by you |
 | `okb inbox` / `inbox read` | read/write | Unread clips and notes |
+| `okb inbox file <id> <destination>` | admin | Preview a capture's new path. With `--confirm <preview-id>`, save the note and leave a forwarding link at its old ID |
 | `okb clip` / `okb rss` | write | Web page / feed → cited `references/` concepts |
 | `okb index` / `okb embed` | admin | (Re)build FTS / vectors incrementally |
 | `okb watch` | admin (localOnly) | Refresh keyword search and graph links after external Markdown changes |
@@ -817,7 +823,7 @@ over the registry, trusted like the CLI but defended like a network surface:
   vendored assets). Dedicated routes include `GET /api/status`
   (version, OKF version, active bundle path, brain, read-only, default folder status,
   retrieval profile, index/vector presence, actor, port), `GET /api/brains`
-  (mount names, policy, and retrieval preference), `GET /api/bookmarklet`, and
+  (mount names, policy, retrieval preference, and provider/model defaults), `GET /api/bookmarklet`, and
   `POST /api/conversations/upload`. The upload accepts browser-selected JSON
   bytes, checks the write policy, and binds confirmation to the bytes,
   provider, and active brain. Additional source routes accept file and folder

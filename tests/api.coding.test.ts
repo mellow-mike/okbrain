@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { createAssistantMessageEventStream, createModels, fauxAssistantMessage, fauxProvider, getCurrentTools } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApiServer } from "../src/api.ts";
+import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
 import { listCodingModels, maxLiveAnswerLength, type CodingLiveAnswer } from "../src/core/coding/durable.ts";
 
 const ownerToken = "local-operator-test";
@@ -249,6 +250,102 @@ test("GitHub reads stay on the bound project and comparison requires an accepted
     expect((await request(endpoint + "handoff", branches)).status).toBe(409);
     expect(seen).toHaveLength(3);
     expect(await call(endpoint + "disconnect", {})).toMatchObject({ connection: null });
+  } finally {
+    await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("allows an approved source lookup only for the submitted preview and opt-in request", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-coding-source-lookup-");
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: "lookup-fixture" }] });
+  models.setProvider(faux.provider);
+  const api = createApiServer({ bundle: workspace, port: 0, token: ownerToken, coding: { stateDir, models } });
+  try {
+    const { call, request } = apiClient(api.url);
+    const project = await call<Project>("/projects", {
+      title: "Source lookup", workspace, provider: "openai", model: "lookup-fixture",
+    });
+    const path = "/projects/" + project.id;
+    const source = { source: "files", files: ["src/example.ts"] };
+    const preview = await call<{ id: string }>(path + "/preview", source);
+    const identity = { session: "main", requestId: "lookup" };
+    const body = { ...source, prompt: "Review the example", approved: true, previewId: preview.id, ...identity };
+    faux.setResponses([(input) => {
+      expect(getCurrentTools(input.messages).map(({ name }) => name)).toEqual([approvedSourceToolName]);
+      return fauxAssistantMessage([
+        fauxToolCall(approvedSourceToolName, { path: "src/example.ts", startLine: 1, endLine: 1 }, { id: "approved" }),
+        fauxToolCall(approvedSourceToolName, { path: "private/example.ts", startLine: 1, endLine: 1 }, { id: "outside" }),
+        fauxToolCall(approvedSourceToolName, { path: "src/example.ts", startLine: 1, endLine: 2 }, { id: "outside-lines" }),
+      ], { stopReason: "toolUse" });
+    }, (input, options) => {
+      expect(options?.toolChoice).toBe("none");
+      const results = input.messages.filter((message) => message.role === "toolResult");
+      expect(results.map(({ toolCallId, isError }) => ({ toolCallId, isError }))).toEqual([
+        { toolCallId: "approved", isError: false }, { toolCallId: "outside", isError: true },
+        { toolCallId: "outside-lines", isError: true },
+      ]);
+      const result = results[0]?.content[0];
+      expect(result?.type === "text" && JSON.parse(result.text)).toEqual({
+        path: "src/example.ts", startLine: 1, endLine: 1, content: "export const answer = 42;",
+      });
+      expect(JSON.stringify(results)).not.toContain("private text");
+      return fauxAssistantMessage("Checked the approved line.");
+    }, (input) => {
+      expect(getCurrentTools(input.messages)).toEqual([]);
+      return fauxAssistantMessage("Reviewed without a lookup.");
+    }]);
+    expect((await request(path + "/run", { ...body, approved: false, approvedSourceLookup: true })).status).toBe(400);
+    expect((await request(path + "/run", { ...body, files: [], approvedSourceLookup: true })).status).toBe(400);
+    await call(path + "/run", { ...body, approvedSourceLookup: true });
+    const done = await waitFor(() => call<Inspection>(path + "/inspect", identity), ({ run }) => run.status !== "running");
+    expect(done.pi?.request?.receipt?.text).toBe("Checked the approved line.");
+    expect((await request(path + "/run", body)).status).toBe(409);
+    await call(path + "/run", { ...body, approvedSourceLookup: true });
+    expect(faux.state.callCount).toBe(2);
+
+    const followup = { session: identity.session, requestId: "default" };
+    await call(path + "/run", { ...body, ...followup });
+    const defaultRun = await waitFor(() => call<Inspection>(path + "/inspect", followup), ({ run }) => run.status !== "running");
+    expect(defaultRun.pi?.request?.receipt?.text).toBe("Reviewed without a lookup.");
+    expect(faux.state.callCount).toBe(3);
+
+    const file = "src/indexed.ts";
+    const tracked = Array.from({ length: 160 }, (_, index) =>
+      index === 80 ? "export const exactReviewNeedle = 42;" : `const ordinary${index} = ${index};`);
+    await writeFile(join(workspace, file), tracked.join("\n") + "\n");
+    for (const args of [["init", "--quiet"], ["add", "--", file]]) {
+      const git = Bun.spawnSync(["git", ...args], { cwd: workspace, stdout: "ignore", stderr: "pipe" });
+      if (git.exitCode !== 0) throw new Error(git.stderr.toString());
+    }
+    const repository = { source: "repository", projects: ["src"], query: "exactReviewNeedle", tokenBudget: 300 };
+    const excerpts = await call<{ manifest: { id: string }; excerpts: { path: string; startLine: number; endLine: number }[] }>(
+      path + "/preview", repository,
+    );
+    const selected = excerpts.excerpts.find((excerpt) => excerpt.path === file && excerpt.startLine <= 81 && excerpt.endLine >= 81);
+    expect(selected?.startLine).toBeGreaterThan(1);
+    const repositoryRun = { session: identity.session, requestId: "excerpt" };
+    faux.setResponses([fauxAssistantMessage([
+      fauxToolCall(approvedSourceToolName, { path: file, startLine: 81, endLine: 81 }, { id: "excerpt-line" }),
+      fauxToolCall(approvedSourceToolName, { path: file, startLine: 1, endLine: 1 }, { id: "unapproved-line" }),
+    ], { stopReason: "toolUse" }), (input) => {
+      const results = input.messages.filter((message) => message.role === "toolResult")
+        .filter(({ toolCallId }) => toolCallId === "excerpt-line" || toolCallId === "unapproved-line");
+      expect(results.map(({ toolCallId, isError }) => ({ toolCallId, isError }))).toEqual([
+        { toolCallId: "excerpt-line", isError: false }, { toolCallId: "unapproved-line", isError: true },
+      ]);
+      const result = results[0]?.content[0];
+      expect(result?.type === "text" && JSON.parse(result.text)).toEqual({
+        path: file, startLine: 81, endLine: 81, content: "export const exactReviewNeedle = 42;",
+      });
+      return fauxAssistantMessage("Checked line 81 in the saved excerpt.");
+    }]);
+    await call(path + "/run", { ...repository, ...repositoryRun, prompt: "Find the exact reviewed line", approved: true,
+      previewId: excerpts.manifest.id, approvedSourceLookup: true });
+    const excerptRun = await waitFor(() => call<Inspection>(path + "/inspect", repositoryRun), ({ run }) => run.status !== "running");
+    expect(excerptRun.pi?.request?.receipt?.text).toBe("Checked line 81 in the saved excerpt.");
+    expect(faux.state.callCount).toBe(5);
   } finally {
     await api.stop();
     await rm(root, { recursive: true, force: true });

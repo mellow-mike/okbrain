@@ -66,8 +66,9 @@ import {
   type Status,
   type TrustTier,
 } from "./okf/document.ts";
-import { regenerateIndexes } from "./okf/indexmd.ts";
-import { appendLog } from "./okf/logmd.ts";
+import { regenerateIndexes, setIndexStyle } from "./okf/indexmd.ts";
+import { fileInboxNote, InboxFilingError, type InboxFiling } from "./okf/inbox-filing.ts";
+import { appendLog, createDirectoryLog, LogFolderError } from "./okf/logmd.ts";
 import { exportMarkdown, MarkdownExportError, type MarkdownExport } from "./okf/markdown-export.ts";
 import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
 import { brainStarterCatalog, createBrainStarter, findBrainStarter } from "./okf/starter.ts";
@@ -1416,6 +1417,38 @@ export const operations: readonly Operation[] = [
     render: renderStats,
   },
   {
+    name: "create_directory_log",
+    cliName: "log create",
+    summary: "Enable a Markdown change log in an existing public folder",
+    scope: "write",
+    params: [{ name: "folder", type: "string", required: true, positional: true, description: "folder path relative to the brain" }],
+    handler: (ctx, p) => writing(async () => {
+      try { return await createDirectoryLog(ctx.bundle, p.folder as string); }
+      catch (error) {
+        if (error instanceof LogFolderError) throw new OpError(error.message, "bad_params");
+        throw error;
+      }
+    }),
+    render: (value) => {
+      const { folder, created } = value as Awaited<ReturnType<typeof createDirectoryLog>>;
+      return `${folder}/log.md ${created ? "created" : "is already enabled"}`;
+    },
+  },
+  {
+    name: "set_index_style",
+    cliName: "manifests style",
+    summary: "Regenerate Markdown indexes using grouped or OKF reference headings",
+    scope: "admin",
+    params: [{ name: "style", type: "string", required: true, positional: true, description: "index layout: grouped or reference" }],
+    handler: async (ctx, p) => {
+      const style = p.style;
+      if (style !== "grouped" && style !== "reference") throw new OpError("Choose grouped or reference index headings.", "bad_params");
+      await setIndexStyle(ctx.bundle, style);
+      return { style };
+    },
+    render: (result) => `updated index.md files using ${(result as { style: string }).style} headings`,
+  },
+  {
     name: "watch_index",
     cliName: "watch",
     summary: "Watch a writable brain folder and refresh keyword search and graph links",
@@ -1880,6 +1913,41 @@ export const operations: readonly Operation[] = [
     render: (r) => {
       const x = r as { id: string; removed: boolean };
       return x.removed ? `marked ${x.id} read` : `${x.id} was not in the inbox`;
+    },
+  },
+  {
+    name: "inbox_file",
+    cliName: "inbox file",
+    summary: "Preview or confirm filing an inbox capture to an unused concept ID",
+    scope: "admin",
+    params: [
+      { name: "id", type: "string", required: true, positional: true, description: "captured inbox concept ID" },
+      { name: "destination", type: "string", required: true, positional: true, description: "new concept ID outside the inbox" },
+      { name: "confirm", type: "string", description: "matching preview ID to approve the filing" },
+    ],
+    handler: (ctx, p) => writing(async () => {
+      try {
+        const file = () => fileInboxNote(ctx.bundle, p.id as string, p.destination as string, ctx.actor(), p.confirm as string | undefined);
+        if (p.confirm === undefined) return await file();
+        return await withIndexWrite(ctx.bundle, async () => {
+          const result = await file();
+          if (ctx.hasIndex()) {
+            await updateIndexFor(ctx.bundle, result.destination, ctx.engine());
+            await updateIndexFor(ctx.bundle, result.id, ctx.engine());
+          }
+          if (ctx.hasVectors()) ctx.vectors().remove(result.id);
+          return result;
+        });
+      } catch (error) {
+        if (error instanceof InboxFilingError) throw new OpError(error.message, "bad_params");
+        throw error;
+      }
+    }),
+    render: (r) => {
+      const filing = r as InboxFiling;
+      return filing.status === "filed"
+        ? `filed ${filing.title} at ${filing.destination}`
+        : `${filing.id} → ${filing.destination}\nPreview ${filing.preview}\nRun the same command with --confirm ${filing.preview} to file it.`;
     },
   },
   {

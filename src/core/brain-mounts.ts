@@ -1,7 +1,8 @@
 import { mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { ConfigError, listBrains, loadConfig, saveConfig, type OkbConfig } from "./config.ts";
+import { providersFor } from "./ai/gateway.ts";
+import { brainAiFields, ConfigError, listBrains, loadConfig, readBrainAiDefaults, saveConfig, type BrainAiDefaults, type OkbConfig } from "./config.ts";
 import { serialize } from "./okf/document.ts";
 import { OKF_VERSION } from "./okf/indexmd.ts";
 import { PROFILES } from "./retrieval/profiles.ts";
@@ -54,9 +55,30 @@ function createIndex(path: string) {
   }
 }
 
+function updateAiDefaults(prior: unknown, input: unknown): BrainAiDefaults | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new ConfigError("Choose chat and embedding providers and models for this brain.");
+  const ai = readBrainAiDefaults(prior) ?? {};
+  for (const [field, value] of Object.entries(input)) {
+    const setting = brainAiFields.find((key) => key === field);
+    if (!setting || typeof value !== "string" || value.length > 256 || /[\x00-\x1f\x7f]/u.test(value))
+      throw new ConfigError("Brain AI settings accept only provider names and model IDs.");
+    const name = value.trim();
+    if (!name) { delete ai[setting]; continue; }
+    if (setting === "provider" || setting === "embedProvider") {
+      const capability = setting === "provider" ? "chat" : "embed";
+      const provider = name === "local" ? "ollama" : name;
+      if (!providersFor(capability).includes(provider))
+        throw new ConfigError(`Choose a supported ${capability === "chat" ? "chat" : "embedding"} provider or use the app default.`);
+      ai[setting] = provider;
+    } else ai[setting] = name;
+  }
+  return Object.keys(ai).length ? ai : undefined;
+}
+
 /** Teach the local registry about one folder. Prior mount and config metadata survive edits. */
 export function changeBrainMount(input: Record<string, unknown>): { name: string; removed: boolean } {
-  const { action, previous, readonly, retrievalProfile } = input;
+  const { action, previous, readonly, retrievalProfile, ai: aiInput } = input;
   if (action !== "create" && action !== "register" && action !== "update" && action !== "remove")
     throw new ConfigError("Choose create, register, update, or remove.");
   if (action !== "remove" && typeof readonly !== "boolean")
@@ -84,12 +106,18 @@ export function changeBrainMount(input: Record<string, unknown>): { name: string
     const updated = { ...(typeof prior === "string" ? { path: prior } : prior), readonly: readonly === true };
     if (retrievalProfile === "") delete updated.retrievalProfile;
     else if (typeof retrievalProfile === "string") updated.retrievalProfile = retrievalProfile;
+    if (aiInput !== undefined) {
+      const ai = updateAiDefaults(updated.ai, aiInput);
+      if (ai) updated.ai = ai;
+      else delete updated.ai;
+    }
     brains[name] = updated;
     saveConfig({ ...cfg, brains });
     return { name, removed: false };
   }
 
   const name = mountName(input.name);
+  const ai = aiInput === undefined ? undefined : updateAiDefaults(undefined, aiInput);
   if (Object.hasOwn(brains, name)) throw new BrainMountError("Another mount already uses this name.", 409);
   const path = folderPath(input.path);
   const existing = existingDirectory(path);
@@ -110,7 +138,7 @@ export function changeBrainMount(input: Record<string, unknown>): { name: string
     createIndex(existing ?? path);
   }
   brains[name] = { path: existing ?? realpathSync(path), readonly: readonly === true,
-    ...(typeof retrievalProfile === "string" && retrievalProfile ? { retrievalProfile } : {}) };
+    ...(typeof retrievalProfile === "string" && retrievalProfile ? { retrievalProfile } : {}), ...(ai ? { ai } : {}) };
   saveConfig({ ...cfg, brains });
   return { name, removed: false };
 }

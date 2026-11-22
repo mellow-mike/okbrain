@@ -206,6 +206,7 @@
         field('Directory', part === 3 || project.scopes[part - 1] === '.' ? '' : project.scopes[part - 1], 'text', 'data-package-project spellcheck="false"') +
         field('Search source', '', 'search', 'data-package-query maxlength="1024"') +
         field('Estimated excerpt tokens', '', 'number', 'data-package-budget min="1" max="4096" placeholder="2048"') + '</fieldset>').join('') + '</div>' +
+      '<label class="row" data-source-lookup><input type="checkbox" name="approvedSourceLookup"><span>Let the model look up line numbers within this request’s approved source</span></label>' +
       '<div class="row"><button type="button" data-preview>Preview source</button></div>' +
       '<div class="coding-preview stack" aria-live="polite" data-preview-content></div>' +
       '<div data-evaluation-options></div>' +
@@ -215,7 +216,7 @@
     parent.append(panel);
 
     const form = panel.querySelector('form');
-    const { source, projects, tokenBudget, profile, files, session, requestId, prompt, approved } = form.elements;
+    const { source, projects, tokenBudget, profile, files, session, requestId, prompt, approved, approvedSourceLookup } = form.elements;
     const previewButton = form.querySelector('[data-preview]');
     const send = form.querySelector('button[type="submit"]');
     const previewEl = form.querySelector('[data-preview-content]');
@@ -259,12 +260,15 @@
       return data;
     }
 
-    for (const input of [source, projects, tokenBudget, profile, files, session, requestId, prompt, form.elements.query, ...form.querySelectorAll('[data-package] input')])
+    for (const input of [source, projects, tokenBudget, profile, files, session, requestId, prompt, approvedSourceLookup,
+      form.elements.query, ...form.querySelectorAll('[data-package] input')])
       input.addEventListener('input', clearPreview);
     source.addEventListener('change', () => {
       form.querySelector('[data-repository]').hidden = source.value !== 'repository';
       form.querySelector('[data-files]').hidden = source.value !== 'files';
       form.querySelector('[data-packages]').hidden = source.value !== 'packages';
+      form.querySelector('[data-source-lookup]').hidden = source.value === 'packages';
+      if (source.value === 'packages') approvedSourceLookup.checked = false;
     });
     approved.addEventListener('change', () => {
       send.disabled = readonly || busy || project.credential === 'missing' || !preview || !approved.checked;
@@ -278,16 +282,20 @@
       feedback.textContent = 'Reading selected source…';
       try {
         const selection = sourceInput();
+        const lookup = approvedSourceLookup.checked;
+        if (lookup && selection.source === 'files' && !selection.files.length)
+          throw new Error('Choose at least one file to allow approved source lookup.');
         const result = await coding(prefix + '/preview', { ...selection, ...(evaluation.enabled() ? { measurePreview: true } : {}) });
         if (current !== revision || detached()) return;
         previewContents(previewEl, result);
         if (result.source === 'repository' && !result.excerpts.length) return;
         if (result.source === 'packages' && result.packages.some((part) => !part.excerpts.length)) return;
-        preview = { selection, id: result.manifest?.id || result.id };
+        preview = { selection, lookup, id: result.manifest?.id || result.id };
         const provider = project.provider === 'openai' ? 'OpenAI' : 'Anthropic';
         approveText.textContent = result.source === 'packages'
           ? 'Approve sending the shared task and each package’s selected text to ' + provider + '.'
           : 'Approve sending the task, selected text, and active session history to ' + provider + '.';
+        if (lookup) approveText.textContent += ' Allow lookups within this request’s selected text.';
         approve.hidden = false;
         approved.focus();
       } catch (error) {
@@ -308,11 +316,13 @@
         const run = await coding(prefix + '/run', {
           ...preview.selection, approved: true, previewId: preview.id, prompt: prompt.value,
           session: session.value, requestId: requestId.value, evaluation: evaluation.value(),
+          ...(preview.lookup ? { approvedSourceLookup: true } : {}),
         });
         if (detached()) return;
         await selectRun(run);
         if (run.status !== 'failed') {
           requestId.value = crypto.randomUUID();
+          approvedSourceLookup.checked = false;
           clearPreview();
           feedback.textContent = 'Request ' + run.id + ' is tracked in Run history.';
         }
@@ -380,6 +390,7 @@
         (pi ? '<p class="muted">' + esc(usageText(pi.request?.usage)) + '</p><p class="muted">' +
           esc(pi.context.estimatedTokens.toLocaleString()) + ' active context tokens' +
           (pi.context.historyCompacted ? ' · Older turns compacted' : '') + '</p>' : '') +
+        (pi?.request?.approvedSourceLookup ? '<p class="muted">Approved source lookup enabled for this request.</p>' : '') +
         (receipt?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
         (row.status === 'running' ? '<div data-live-answer hidden><p class="muted"></p><pre></pre></div>' : '') +
         (receipt?.text ? '<pre data-answer></pre><div class="row"><button type="button" data-copy>Copy response</button></div>' : '') +

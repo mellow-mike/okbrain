@@ -131,6 +131,20 @@ export function relativeConceptLinks(srcId: string, body: string, selected: Know
   });
 }
 
+/** Preserve relative Markdown links and images when the containing note changes folder. */
+export function rebaseBodyLinks(srcId: string, dstId: string, body: string): string {
+  const from = posix.dirname(srcId), to = posix.dirname(dstId);
+  if (from === to) return body;
+  return rewriteBodyLinks(body, (match, raw) => {
+    const { dest, suffix } = splitTarget(raw);
+    const cut = dest.search(/[?#]/);
+    const path = cut < 0 ? dest : dest.slice(0, cut);
+    if (!path || path.startsWith("/") || /^[a-z][a-z0-9+.-]*:/i.test(path)) return match;
+    const target = posix.relative(to, posix.join(from, path)) + (cut < 0 ? "" : dest.slice(cut));
+    return `](${/\s/.test(target) ? `<${target}>` : target}${suffix})`;
+  });
+}
+
 /** All resolved internal link target ids in a body, deduped, in first-seen order. */
 export function extractTargets(srcId: string, body: string): string[] {
   const seen = new Set<string>();

@@ -483,8 +483,14 @@ export class CodingProjectControl {
     if (body.approved !== true) throw new ProjectControlError("Review the preview and confirm the content to send.");
     const previewId = field(body, "previewId", 128);
     const selection = sourceOptions(project, body);
+    if (body.approvedSourceLookup !== undefined && typeof body.approvedSourceLookup !== "boolean")
+      throw new ProjectControlError("Choose whether to allow lookups in approved source.");
+    const approvedSourceLookup = body.approvedSourceLookup === true;
+    if (approvedSourceLookup && (selection.packages || (!selection.repository && !selection.files?.length)))
+      throw new ProjectControlError("Choose explicit files or repository excerpts to allow approved source lookup.");
+    const capabilities = approvedSourceLookup ? { approvedSourceLookup: true as const } : {};
     const evaluation = parseEvaluation(body.evaluation, JSON.parse(project.scopes));
-    const signature = digest(JSON.stringify({ prompt, previewId, selection, ...(evaluation ? { evaluation } : {}) }));
+    const signature = digest(JSON.stringify({ prompt, previewId, selection, ...(evaluation ? { evaluation } : {}), ...capabilities }));
     await this.#workspace(project);
     const prior = this.#get<RunRow>("SELECT * FROM runs WHERE project = ? AND session = ? AND id = ?", project.id, run.session, run.requestId);
     if (prior && prior.status !== "failed") {
@@ -516,7 +522,7 @@ export class CodingProjectControl {
       this.#audit(project.id, "submitted", actor.id, run.session, run.requestId);
     })();
     this.#schedule(project, {
-      ...this.#session(project, run), prompt,
+      ...this.#session(project, run), prompt, ...capabilities,
       ...(selection.packages ? { packageReviews: { packages: selection.packages, id: previewId } } : selection.repository
         ? { repository: { ...selection.repository, id: previewId } }
         : { files: selection.files, filePreviewId: previewId, allowedAttachmentScopes: JSON.parse(project.scopes) as string[] }),

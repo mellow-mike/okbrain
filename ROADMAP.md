@@ -49,6 +49,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   compaction, and recorded provider usage including cache counters.
 - [x] Surface bounded Pi Durable answer text during runs in browser and editor
   inspection, with review controls available after completion.
+- [x] Offer an approved-source line lookup for explicit files and scoped
+  excerpts, using Pi Durable replay against the saved request bytes.
 - [x] Add versioned project profiles, a rebuildable worktree-aware symbol and
   dependency index, selection explanations, and stable Pi provider affinity.
 - [x] Compare explicit attachments, scoped lexical previews, and indexed
@@ -711,8 +713,7 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [x] Show FTS excerpts with matched terms in browser search and CLI output.
 - [x] Batch `index.md` generation and `log.md` writes across bulk imports. Refresh
       the derived search index for saved files when a later file fails.
-- [ ] `okb capture` triage flow: promote `inbox/` notes to a proper home
-      (`okb move`? skill?) once graph tooling (1.4) exists
+- [x] File captures from Inbox, the note reader, or `okb inbox file` with a destination preview, explicit confirmation, and a forwarding note at the old address.
 - [x] Writer no-op detection: skip the write (and the `timestamp` refresh) when
       the result would be byte-identical, so re-running imports/agent passes
       never churns git history. `writeConcept` reserializes the candidate with
@@ -737,15 +738,15 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [x] Stream text deltas through configured API and local model routes in Ask
       and `okb ask --stream`. Verify citations after the provider completes.
 - [x] Override the app's retrieval profile for a named brain from its mount settings.
-- [ ] Allow named brains to carry their own provider defaults.
+- [x] Set independent chat and embedding provider/model defaults for named brains in Settings.
 - [x] GUI brain switcher: the local API re-scopes per request via
       `x-okb-brain` (read-only policy included); the sidebar has the
       dropdown.
 - [x] Surface overdue open claims in Review with a link to the claim outcome controls.
-- [ ] Per-directory `log.md` (OKF §9 allows one at any level); okbrain
-      maintains only the root log today.
-- [ ] Upstream-style `index.md` (H1 sections, relative links) as a
-      generator option, for bundles shared with the reference tooling.
+- [x] Maintain an optional `log.md` in public subfolders, enabled through
+      Settings or `okb log create`.
+- [x] Generate reference-style `index.md` files with H1 sections and relative
+      links through Settings or `okb manifests style reference`.
 - [ ] `usage_count` / `usage_window` credibility signals from local usage
       (reads, ask citations) — the spec's adoption signal, sourced from
       the brain's own telemetry, opt-in.
@@ -764,6 +765,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added inbox filing with forwarding notes, named-brain provider
+  defaults, folder logs, reference-style Markdown indexes, and an approved-source
+  lookup tool with real Pi replay and usage accounting.
 - 2026-11-22 — Exposed saved feeds, endpoint resets, and brain-level retrieval
   defaults in Settings. Added portable Markdown export and bounded in-progress
   Coding answer text across browser and editor surfaces.

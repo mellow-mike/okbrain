@@ -2,7 +2,9 @@ import type { Api, Message, Model, Usage } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { estimateContextTokens, estimateMessageTokens, estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { CompactionTask, defineExtension, hook, type CompactionPolicy } from "@earendil-works/pi-durable";
+import { approvedSourceToolName } from "./approved-source-tool.ts";
 
 export const contextBudgetError = "The saved coding context exceeds the active token budget. Start a new session or submit a smaller request.";
 
@@ -113,11 +115,18 @@ function blockedRequest(model: Model<Api>, errorMessage: string) {
 export function budgetedModels(models: Models, budget: CodingBudget, sessionId: string): Models {
   const streamSimple: Models["streamSimple"] = (model, context, options) => {
     const messages = outboundMessages(context.messages);
+    const toolRounds = getCurrentTools(messages).some(({ name }) => name === approvedSourceToolName)
+      ? messages.slice(messages.findLastIndex(({ role }) => role === "user") + 1).filter((message) =>
+        message.role === "assistant" && message.content.some((part) => part.type === "toolCall" && part.name === approvedSourceToolName)).length
+      : 0;
+    if (toolRounds > 1)
+      return blockedRequest(model, "The model requested additional lookups after its approved lookup round.");
     // Durable's beforeRequest hooks are fail-soft. Enforce the budget at the provider boundary,
     // including on replay from a checkpoint already in its request phase.
     if (estimateOutboundTokens(messages) <= budget.limitTokens) {
       return models.streamSimple(model, { ...context, messages }, {
         ...options,
+        ...(toolRounds ? { toolChoice: "none" } : {}),
         // Preserve provider affinity across harness openings, scoped to this transcript.
         sessionId,
         maxTokens: Math.min(options?.maxTokens ?? budget.maxOutputTokens, budget.maxOutputTokens),

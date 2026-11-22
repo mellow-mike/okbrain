@@ -1,11 +1,11 @@
 // Provider-agnostic AI gateway (CLAUDE.md invariant 6): one interface for
 // embed / chat / rerank, resolved per call as
-//   per-call override → env (OKB_*) → config (okb init) → detected default.
+//   per-call override → env (OKB_*) → named brain → app config → detection.
 // Detection is API-first when a key is present; with no keys everything runs
 // against a local server (Ollama et al.) — fully offline is first-class.
 // Nothing above this file may talk to a provider directly.
 
-import type { AiSettings } from "../config.ts";
+import { brainAiDefaults, type AiSettings } from "../config.ts";
 import { gatewayEnvironment } from "./local-keys.ts";
 import {
   AiError,
@@ -44,7 +44,7 @@ type Env = Record<string, string | undefined>;
 /** `local` is an alias for the most common local server. */
 const alias = (name?: string): string | undefined => (name === "local" ? "ollama" : name);
 
-const withCap = (cap: Capability): string[] =>
+export const providersFor = (cap: Capability): string[] =>
   Object.keys(RECIPES).filter((n) => RECIPES[n]![cap] !== undefined);
 
 /** First capability-bearing provider a present API key points at, else local. */
@@ -78,29 +78,44 @@ export function resolveCall(
       : cap === "embed"
         ? (settings.embedProvider ?? capable(settings.provider))
         : settings.rerankProvider;
+  const brain = settings[brainAiDefaults];
+  const brainProvider = alias(cap === "chat" ? brain?.provider : cap === "embed" ? brain?.embedProvider : undefined);
+  const configProvider = alias(fromSettings);
+  const envPrefix = `OKB_${cap.toUpperCase()}_`;
+  const envProvider = alias(env[`${envPrefix}PROVIDER`]) ?? capable(env.OKB_AI_PROVIDER);
+  const globalProvider = configProvider ?? detectProvider(cap, env);
   const provider =
     alias(opts.provider) ??
-    alias(env[`OKB_${cap.toUpperCase()}_PROVIDER`]) ??
-    capable(env.OKB_AI_PROVIDER) ??
-    alias(fromSettings) ??
-    detectProvider(cap, env);
+    envProvider ??
+    brainProvider ??
+    globalProvider;
 
-  const recipe = RECIPES[provider];
+  const recipe = Object.hasOwn(RECIPES, provider) ? RECIPES[provider] : undefined;
   if (!recipe)
     throw new AiError(`unknown AI provider: ${provider} (known: ${Object.keys(RECIPES).join(", ")})`);
   const spec = recipe[cap];
   if (!spec)
-    throw new AiError(`provider ${provider} has no ${cap} support (try: ${withCap(cap).join(", ")})`);
+    throw new AiError(`provider ${provider} has no ${cap} support (try: ${providersFor(cap).join(", ")})`);
 
+  const brainModel = cap === "chat" ? brain?.model : cap === "embed" ? brain?.embedModel : undefined;
+  const configModel = cap === "chat" ? settings.model : cap === "embed" ? settings.embedModel : settings.rerankModel;
   const model =
     opts.model ??
-    env[`OKB_${cap.toUpperCase()}_MODEL`] ??
-    (cap === "chat" ? settings.model : cap === "embed" ? settings.embedModel : settings.rerankModel) ??
+    env[`${envPrefix}MODEL`] ??
+    (brainProvider === undefined || brainProvider === provider ? brainModel : undefined) ??
+    (globalProvider === provider ? configModel : undefined) ??
     spec.defaultModel;
+
+  // An explicit environment URL belongs to the environment's provider or the
+  // provider the app would resolve without a mount. An unbound config URL can
+  // still serve the default local engine without forwarding an inferred key.
+  const envEndpointProvider = envProvider ?? globalProvider;
+  const configEndpointProvider = configProvider ?? "ollama";
+  const configUrl = cap === "chat" ? settings.baseUrl : cap === "embed" ? settings.embedBaseUrl : undefined;
   const baseUrl =
     opts.baseUrl ??
-    env[`OKB_${cap.toUpperCase()}_BASE_URL`] ??
-    (cap === "chat" ? settings.baseUrl : cap === "embed" ? settings.embedBaseUrl : undefined) ??
+    (envEndpointProvider === provider ? env[`${envPrefix}BASE_URL`] : undefined) ??
+    (configEndpointProvider === provider ? configUrl : undefined) ??
     spec.baseUrl;
   return {
     provider,

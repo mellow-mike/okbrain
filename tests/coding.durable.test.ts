@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider, getCurrentTools,
   type FauxModelDefinition, type TranscriptContext } from "@earendil-works/pi-ai";
-import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { CodingError, getCodingSessionStatus, runCodingSession, type CodingSessionOptions } from "../src/core/coding/durable.ts";
+import { CodingError, getCodingSessionStatus, previewCodingAttachments, runCodingSession, type CodingSessionOptions } from "../src/core/coding/durable.ts";
 
 let testDirectory: string;
 let workspace: string;
@@ -217,4 +217,80 @@ test("resumes an interrupted Pi Durable request using the original attachment by
     text: "Recovered from the saved request.",
   });
   expect(faux.state.callCount).toBe(2);
+}, 15_000);
+
+test("replays an interrupted approved-source tool using the saved input with no checkout", async () => {
+  const { models, faux } = provider();
+  const bound = { ...options, workspace: await realpath(workspace) };
+  const original = "const first = 1;\nconst second = 2;\n";
+  await writeFile(join(bound.workspace, "approved.ts"), original);
+  const files = ["approved.ts"];
+  const { id } = await previewCodingAttachments(bound.workspace, files);
+  const script = `
+    import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+    import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+    import { runCodingSession } from "./src/core/coding/durable.ts";
+    import { approvedSourceToolName } from "./src/core/coding/approved-source-tool.ts";
+    const { options, stateDir } = JSON.parse(process.argv.at(-1));
+    const models = createModels();
+    const faux = fauxProvider({ provider: options.provider, models: [{ id: options.model }] });
+    models.setProvider(faux.provider);
+    let emitted = false;
+    faux.setResponses([() => {
+      emitted = true;
+      return fauxAssistantMessage(fauxToolCall(approvedSourceToolName, {
+        path: "approved.ts", startLine: 2, endLine: 2,
+      }, { id: "durable-lookup" }), { stopReason: "toolUse" });
+    }]);
+    const entry = SqliteStorage.prototype.entry;
+    SqliteStorage.prototype.entry = async function (...args) {
+      const result = await entry.apply(this, args);
+      const user = result?.entry.model?.[0];
+      if (emitted && user?.role === "user" && typeof user.content === "string" && JSON.parse(user.content).approvedSourceLookup) {
+        console.log("lookup-reading-saved-input");
+        return new Promise(() => {});
+      }
+      return result;
+    };
+    const keepAlive = setInterval(() => {}, 1000);
+    try { await runCodingSession(options, { stateDir, models, workspaceBinding: options.workspace }); }
+    finally { clearInterval(keepAlive); }
+  `;
+  const input = { ...bound, prompt: "Check the second line.", files, filePreviewId: id, approvedSourceLookup: true };
+  const child = Bun.spawn([process.execPath, "-e", script, "--", JSON.stringify({ stateDir, options: input })], {
+    cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "inherit",
+  });
+  const timeout = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  try {
+    const reader = child.stdout.getReader();
+    const marker = await reader.read();
+    reader.releaseLock();
+    expect(new TextDecoder().decode(marker.value).trim()).toBe("lookup-reading-saved-input");
+  } finally {
+    clearTimeout(timeout);
+    child.kill("SIGKILL");
+    await child.exited;
+  }
+
+  await rename(bound.workspace, join(testDirectory, "checkout-moved"));
+  const dependencies = { stateDir, models, workspaceBinding: bound.workspace };
+  expect(await getCodingSessionStatus(bound, dependencies)).toMatchObject({ request: { status: "placed" } });
+  faux.setResponses([(input, options) => {
+    expect(options?.toolChoice).toBe("none");
+    const results = input.messages.filter((message) => message.role === "toolResult");
+    expect(results.map(({ toolCallId, isError }) => ({ toolCallId, isError })))
+      .toEqual([{ toolCallId: "durable-lookup", isError: false }]);
+    const result = results[0]?.content[0];
+    expect(result?.type === "text" && JSON.parse(result.text)).toEqual({
+      path: "approved.ts", startLine: 2, endLine: 2, content: "const second = 2;",
+    });
+    return fauxAssistantMessage("Recovered safely from the approved lookup.");
+  }]);
+  const settled = await runCodingSession(bound, dependencies);
+  expect(settled).toMatchObject({ status: "done", text: "Recovered safely from the approved lookup." });
+  if (settled.status !== "done") throw new Error("The replay must complete.");
+  const status = await getCodingSessionStatus({ ...bound, includeReceipt: true }, dependencies);
+  expect(status.request?.receipt).toEqual(settled);
+  expect(status.usage.models["openai/test-model"]?.totalTokens).toBe(settled.usage.totalTokens);
+  expect(faux.state.callCount).toBe(1);
 }, 15_000);

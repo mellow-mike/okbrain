@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AiError, createGateway, detectProvider, resolveCall } from "../src/core/ai/gateway.ts";
 import {
+  brainAiDefaults,
   ConfigError,
   configFilePath,
   loadConfig,
@@ -58,6 +59,37 @@ describe("resolution (pure)", () => {
     expect(() => resolveCall("rerank", {}, NO_ENV, { provider: "ollama" })).toThrow(
       /no rerank support/,
     );
+  });
+
+  test("brain defaults preserve precedence and do not redirect credentials to inherited endpoints", () => {
+    const settings = {
+      provider: "openai", model: "app-chat", baseUrl: "http://configured-openai/chat",
+      embedModel: "app-embed", embedBaseUrl: "http://configured-openai/embeddings",
+      [brainAiDefaults]: { provider: "anthropic", model: "brain-chat" },
+    };
+    expect(resolveCall("chat", settings, {
+      ANTHROPIC_API_KEY: "fixture-anthropic", OKB_CHAT_BASE_URL: "http://inherited-app-proxy",
+    })).toMatchObject({ provider: "anthropic", model: "brain-chat", baseUrl: "https://api.anthropic.com/v1", apiKey: "fixture-anthropic" });
+    expect(resolveCall("embed", settings, NO_ENV)).toMatchObject({
+      provider: "openai", model: "app-embed", baseUrl: "http://configured-openai/embeddings",
+    });
+    const override = { ...settings, [brainAiDefaults]: { embedProvider: "voyage" } };
+    expect(resolveCall("embed", override, { VOYAGE_API_KEY: "fixture-voyage" })).toMatchObject({
+      provider: "voyage", model: "voyage-3", baseUrl: "https://api.voyageai.com/v1", apiKey: "fixture-voyage",
+    });
+    const env = { OKB_CHAT_PROVIDER: "gemini", OKB_CHAT_MODEL: "env-chat", OKB_CHAT_BASE_URL: "http://configured-gemini" };
+    expect(resolveCall("chat", settings, env)).toMatchObject({ provider: "gemini", model: "env-chat", baseUrl: "http://configured-gemini" });
+    expect(resolveCall("chat", settings, env, { provider: "openai", model: "override" })).toMatchObject({
+      provider: "openai", model: "override", baseUrl: "http://configured-openai/chat",
+    });
+    expect(resolveCall("chat", { baseUrl: "http://unbound-local" }, { OPENAI_API_KEY: "fixture-openai" })).toMatchObject({
+      provider: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "fixture-openai",
+    });
+    const legacy = { OKB_CHAT_BASE_URL: "http://env-openai", OPENAI_API_KEY: "fixture-openai", OPENROUTER_API_KEY: "fixture-openrouter" };
+    expect(resolveCall("chat", {}, legacy)).toMatchObject({ provider: "openai", baseUrl: "http://env-openai" });
+    expect(resolveCall("chat", { [brainAiDefaults]: { provider: "openrouter" } }, legacy)).toMatchObject({
+      provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1", apiKey: "fixture-openrouter",
+    });
   });
 });
 

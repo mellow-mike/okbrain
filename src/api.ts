@@ -15,7 +15,7 @@ import { existsSync, statSync } from "node:fs";
 import { BrowserPlanInputError, createBrowserPlan, type BrowserPlan } from "./core/ai/browser-plan.ts";
 import type { PlanOptions } from "./core/ai/chatgpt-plan.ts";
 import { providerKeyStatus, setProviderKey } from "./core/ai/local-keys.ts";
-import { AiError } from "./core/ai/gateway.ts";
+import { AiError, providersFor } from "./core/ai/gateway.ts";
 import { CodingError } from "./core/coding/durable.ts";
 import { CodingProjectProfileError } from "./core/coding/project-profile.ts";
 import { codingProjectCatalogPath, CodingProjectControl, ProjectControlError, type ProjectControlOptions } from "./core/coding/project-control.ts";
@@ -785,11 +785,11 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     url.searchParams.get("token");
   if (!tokenMatches(presented, opts.token))
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
-  const markdownExport = url.pathname === "/api/op/export_markdown";
-  if (markdownExport) {
+  const ownerFileAction = url.pathname === "/api/op/export_markdown" || url.pathname === "/api/op/inbox_file";
+  if (ownerFileAction) {
     if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
       return json(401, { error: "missing or invalid local app token" }, cors);
-    if (req.headers.has("origin") && !cors) return json(403, { error: "Export must come from the local app." });
+    if (req.headers.has("origin") && !cors) return json(403, { error: "This request must come from the local app." });
     if (req.method === "POST" && req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json")
       return json(415, { error: "Send a JSON object." }, cors);
   }
@@ -809,7 +809,8 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
       const bundle = mounts.find(({ name }) => name === selected)?.path ?? opts.bundle;
       // Discovery stays available after removing the served mount and excludes host paths.
       const brains = mounts.map(({ path, ...mount }) => ({ ...mount, exists: mountIsAvailable(path), active: path === bundle }));
-      return json(200, { brains }, { ...cors, "cache-control": "no-store" });
+      const providers = { chat: providersFor("chat"), embed: providersFor("embed") };
+      return json(200, { brains, providers }, { ...cors, "cache-control": "no-store" });
     } catch (e) {
       if (!(e instanceof ConfigError)) throw e;
       return json(400, errBody(e), cors);
@@ -862,7 +863,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     if (!op) return json(404, { error: `unknown op: ${m[1]}` }, cors);
     let raw: unknown;
     try {
-      const text = markdownExport ? (await readUpload(req, 16 * 1024, "Markdown export request exceeds 16 KiB.")).toString("utf8") : await req.text();
+      const text = ownerFileAction ? (await readUpload(req, 16 * 1024, "Request exceeds 16 KiB.")).toString("utf8") : await req.text();
       raw = text === "" ? {} : JSON.parse(text);
     } catch (error) {
       if (error instanceof UploadTooLarge) return json(413, errBody(error), cors);
@@ -877,7 +878,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
         return json(400, errBody(error), cors);
       }
     }
-    return runJsonOp(op, scope, raw as Record<string, unknown>, markdownExport ? { ...cors, "cache-control": "no-store" } : cors);
+    return runJsonOp(op, scope, raw as Record<string, unknown>, ownerFileAction ? { ...cors, "cache-control": "no-store" } : cors);
   }
 
   return json(404, { error: "not found" }, cors);

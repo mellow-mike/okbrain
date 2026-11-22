@@ -5,7 +5,7 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import {
   AssistantEntry, CompactionEntry, createRegistry, Harness, LiveDoc, ROOT_CONVERSATION_ID, UserEntry,
-  type Conversation, type LiveState, type SettledSubmissionRecord, type SubmissionId, type SubmissionRecord, type UsageState,
+  type Conversation, type Cursor, type LiveState, type SettledSubmissionRecord, type SubmissionId, type SubmissionRecord, type UsageState,
 } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Database } from "bun:sqlite";
@@ -15,6 +15,7 @@ import { chmod, lstat, mkdir, open, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { dataDir } from "../config.ts";
 import { ensureExtensionCapableSqlite } from "../engine/custom-sqlite.ts";
+import { approvedSourceLookupEnabled, approvedSourceTool } from "./approved-source-tool.ts";
 import {
   budgetedModels, codingBudget, codingHistory, compactionPolicy, contextBudgetError, estimateCodingContext, newRequestFits,
   type CodingBudget,
@@ -53,6 +54,7 @@ export interface CodingSessionOptions {
   files?: string[];
   filePreviewId?: string;
   allowedAttachmentScopes?: string[];
+  approvedSourceLookup?: true;
   repository?: Omit<RepositoryContextOptions, "workspace"> & { id: string };
   packageReviews?: { packages: PackageReviewScope[]; id: string };
   provider: string;
@@ -81,6 +83,7 @@ export interface CodingSessionStatusResult {
   request?: {
     requestId: string;
     status: SubmissionRecord["status"];
+    approvedSourceLookup?: true;
     repositoryContext?: RepositoryContextManifest;
     usage?: Usage;
     stopReason?: AssistantMessage["stopReason"];
@@ -195,10 +198,12 @@ async function requestContent(
   repository?: CodingSessionOptions["repository"],
   filePreviewId?: string,
   allowedAttachmentScopes?: string[],
+  approvedSourceLookup?: true,
 ): Promise<string> {
   if (!prompt.trim() || Buffer.byteLength(prompt) > maxPromptBytes) {
     throw new CodingError("Enter a coding prompt of 1–16384 UTF-8 bytes.");
   }
+  const capabilities = approvedSourceLookup ? { approvedSourceLookup } : {};
   if (repository) {
     if (paths.length) throw new CodingError("Choose either explicit files or previewed repository context for this request.");
     const { selectRepositoryContext } = await import("./repository-context.ts");
@@ -208,7 +213,7 @@ async function requestContent(
         throw new CodingError("Repository context changed or the selection options differ. Run `okb code context` again and use its context ID.");
       }
       if (!excerpts.length) throw new CodingError("The preview selected no repository excerpts. Refine the query or scope, or attach files explicitly.");
-      return JSON.stringify({ ...(guidance ? { guidance } : {}), task: prompt, excerpts, repositoryContext: manifest });
+      return JSON.stringify({ ...(guidance ? { guidance } : {}), task: prompt, excerpts, repositoryContext: manifest, ...capabilities });
     } catch (error) {
       if (error instanceof RepositoryContextError) throw new CodingError(error.message, { cause: error });
       throw error;
@@ -217,7 +222,9 @@ async function requestContent(
   const { id, files } = await previewCodingAttachments(workspace, paths, allowedAttachmentScopes);
   if (filePreviewId !== undefined && filePreviewId !== id)
     throw new CodingError("The selected files changed. Preview them again before sending.");
-  return JSON.stringify({ task: prompt, files });
+  if (approvedSourceLookup && (!filePreviewId || !files.length))
+    throw new CodingError("Preview and approve at least one file to use approved source lookup.");
+  return JSON.stringify({ task: prompt, files, ...capabilities });
 }
 
 export type PreparedCodingInput =
@@ -231,9 +238,11 @@ export async function prepareCodingInput(options: CodingSessionOptions, workspac
   if (!packageReviews) {
     return { kind: "request", content: await requestContent(
       workspace, prompt, options.files ?? [], options.repository, options.filePreviewId, options.allowedAttachmentScopes,
+      options.approvedSourceLookup,
     ) };
   }
 
+  if (options.approvedSourceLookup) throw new CodingError("Independent package review uses its selected excerpts directly.");
   if (!prompt.trim() || Buffer.byteLength(prompt) > maxPromptBytes || options.files || options.repository)
     throw new CodingError("Use a coding prompt and select one source mode for the package review.");
   try {
@@ -315,6 +324,7 @@ async function withCodingSession<T>(
     harness: Harness; storage: SqliteStorage; root: Conversation | undefined;
     workspace: string; provider: CodingProvider;
     budget: CodingBudget | undefined; history: ReturnType<typeof codingHistory>;
+    sourceTool: ReturnType<typeof approvedSourceTool>;
   }) => Promise<T>,
 ): Promise<T> {
   const provider = validateOptions(options);
@@ -352,8 +362,14 @@ async function withCodingSession<T>(
       let harness: Harness | undefined;
       try {
         const registry = createRegistry();
+        const sourceTool = approvedSourceTool(async (id, toolContext) => {
+          const submission = await storage.submission(id, toolContext);
+          if (submission?.conversationId === ROOT_CONVERSATION_ID && submission.type === "input" && submission.status === "placed")
+            return savedUserContent(storage, submission, toolContext);
+        });
         registry.install(history);
         registry.install(packageReviewExtension);
+        registry.install(sourceTool.extension);
         harness = await Harness.open(storage, {
           models: budget ? budgetedModels(models, budget, affinity) : models,
           registry,
@@ -368,7 +384,7 @@ async function withCodingSession<T>(
           if (options.thinkingLevel !== undefined && agent.thinkingLevel !== options.thinkingLevel)
             throw new CodingError(`Coding session ${options.session} uses a different reasoning level.`);
         }
-        return await use({ harness, storage, root, workspace, provider, budget, history });
+        return await use({ harness, storage, root, workspace, provider, budget, history, sourceTool });
       } finally {
         if (harness) await harness.close(context);
         else await storage.close(context);
@@ -382,15 +398,14 @@ async function withCodingSession<T>(
   }
 }
 
-async function savedUserContent(storage: SqliteStorage, submission: SubmissionRecord): Promise<string | undefined> {
+async function savedUserContent(storage: SqliteStorage, submission: SubmissionRecord, entryContext = context): Promise<string | undefined> {
   if (submission.entry === undefined) return undefined;
-  const entry = (await storage.entry(submission.conversationId, submission.entry, context))?.entry;
+  const entry = (await storage.entry(submission.conversationId, submission.entry, entryContext))?.entry;
   const user = entry && UserEntry.is(entry) ? entry.model?.[0] : undefined;
   if (user?.role === "user" && typeof user.content === "string") return user.content;
 }
 
-async function savedManifest(storage: SqliteStorage, submission: SubmissionRecord): Promise<RepositoryContextManifest | undefined> {
-  const content = await savedUserContent(storage, submission);
+function savedManifest(content: string | undefined): RepositoryContextManifest | undefined {
   if (content === undefined) return undefined;
   try {
     const saved = JSON.parse(content) as { repositoryContext?: RepositoryContextManifest } | null;
@@ -418,6 +433,27 @@ async function savedAnswer(storage: SqliteStorage, submission: SubmissionRecord)
   return answer;
 }
 
+async function requestUsage(storage: SqliteStorage, submission: SubmissionRecord, final: Usage, lookup: boolean): Promise<Usage> {
+  if (!lookup || submission.entry === undefined || submission.answer === undefined) return final;
+  const query = { conversationId: submission.conversationId, minEntryId: submission.entry, maxEntryId: submission.answer };
+  const totals = { ...final, cost: { ...final.cost } };
+  let cursor: Cursor | undefined;
+  do {
+    const page = await storage.scanEntries(query, 32, cursor, context);
+    for (const entry of page.items) {
+      if (entry.id === submission.answer || !AssistantEntry.is(entry)) continue;
+      const answer = entry.model?.[0];
+      if (answer?.role !== "assistant") continue;
+      const { usage } = answer;
+      for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) totals[key] += usage[key];
+      for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) totals.cost[key] += usage.cost[key];
+      if (usage.reasoning !== undefined) totals.reasoning = (totals.reasoning ?? 0) + usage.reasoning;
+    }
+    cursor = page.next;
+  } while (cursor);
+  return totals;
+}
+
 function unansweredReason(submission: SubmissionRecord): string | undefined {
   return submission.detail === contextBudgetError ? contextBudgetError : submission.reason;
 }
@@ -427,7 +463,8 @@ async function codingReceipt(
   settled: SettledSubmissionRecord,
   identity: { session: string; requestId: string },
 ): Promise<CodingSessionResult> {
-  const repositoryContext = await savedManifest(storage, settled);
+  const content = await savedUserContent(storage, settled);
+  const repositoryContext = savedManifest(content);
   const receipt = { ...identity, ...(repositoryContext ? { repositoryContext } : {}) };
   if (settled.status === "unanswered") {
     return { ...receipt, status: "unanswered", reason: unansweredReason(settled) ?? settled.reason };
@@ -435,7 +472,10 @@ async function codingReceipt(
   const answer = await savedAnswer(storage, settled);
   if (!answer) throw new CodingError("The stored request has no assistant answer.");
   const text = answer.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("");
-  return { ...receipt, status: "done", text, usage: answer.usage, stopReason: answer.stopReason };
+  return {
+    ...receipt, status: "done", text, stopReason: answer.stopReason,
+    usage: await requestUsage(storage, settled, answer.usage, approvedSourceLookupEnabled(content)),
+  };
 }
 
 /** Run or resume one explicit, user-directed coding request against a private local transcript. */
@@ -443,7 +483,7 @@ export async function runCodingSession(
   options: CodingSessionOptions,
   dependencies: CodingDependencies = {},
 ): Promise<CodingSessionResult> {
-  return withCodingSession(options, dependencies, true, async ({ harness, storage, root, workspace, provider, budget, history }) => {
+  return withCodingSession(options, dependencies, true, async ({ harness, storage, root, workspace, provider, budget, history, sourceTool }) => {
     const identity = { session: options.session, requestId: options.requestId };
     const existing = await storage.submissionByRequest(ROOT_CONVERSATION_ID, options.requestId, context);
     const packageTask = await packageReviewTask(harness, options.requestId, context);
@@ -482,15 +522,24 @@ export async function runCodingSession(
       }
     }
 
+    const lookupEnabled = approvedSourceLookupEnabled(content ?? (existing && await savedUserContent(storage, existing)));
+    const capabilities = {
+      extensions: lookupEnabled ? [history, sourceTool.extension] : [history],
+      tools: lookupEnabled ? [sourceTool.lookup] : [],
+    };
     const conversation = root ?? await harness.root(context, {
       agent: {
-        model: { provider, modelId: options.model }, cwd: workspace, instructions, extensions: [history], tools: [],
+        model: { provider, modelId: options.model }, cwd: workspace, instructions, ...capabilities,
         ...(options.thinkingLevel !== undefined ? { thinkingLevel: options.thinkingLevel } : {}),
       },
     });
-    if (root && !(await root.agent(context)).extensions.some((extension) => extension.name === history.name)) {
-      // The initial pilot explicitly selected no extensions.
-      await root.configure({ extensions: [history], instructions }, context);
+    if (root) {
+      const agent = await root.agent(context);
+      if (agent.extensions.length !== capabilities.extensions.length
+        || capabilities.extensions.some(({ name }) => !agent.extensions.some((extension) => extension.name === name))
+        || agent.tools.length !== capabilities.tools.length || (lookupEnabled && agent.tools[0]?.name !== sourceTool.lookup.name)) {
+        await root.configure({ ...capabilities, instructions }, context);
+      }
     }
     dependencies.signal?.throwIfAborted();
     if (packageTask || packageParts) {
@@ -614,21 +663,27 @@ export async function getCodingSessionStatus(
       }
       const submission = await storage.submissionByRequest(root.id, options.requestId, context);
       if (!submission) throw new CodingError(`No saved request ${options.requestId} exists in coding session ${options.session}.`);
-      const repositoryContext = await savedManifest(storage, submission);
-      const answer = await savedAnswer(storage, submission);
       const reason = unansweredReason(submission);
-      const content = options.includeEvaluationInput ? await savedUserContent(storage, submission) : undefined;
-      const saved = content === undefined ? undefined : evaluationInput(content);
+      const content = await savedUserContent(storage, submission);
+      const lookup = approvedSourceLookupEnabled(content);
+      const repositoryContext = savedManifest(content);
+      const saved = !options.includeEvaluationInput || content === undefined ? undefined : evaluationInput(content);
+      const receipt = options.includeReceipt && (submission.status === "done" || submission.status === "unanswered")
+        ? await codingReceipt(storage, submission, { session: options.session, requestId: options.requestId }) : undefined;
+      const answer = receipt ? undefined : await savedAnswer(storage, submission);
+      const accounting = receipt?.status === "done" ? { usage: receipt.usage, stopReason: receipt.stopReason } : answer ? {
+        usage: await requestUsage(storage, submission, answer.usage, lookup),
+        stopReason: answer.stopReason,
+      } : {};
       result.request = {
         requestId: options.requestId,
         status: submission.status,
+        ...(lookup ? { approvedSourceLookup: true } : {}),
         ...(repositoryContext ? { repositoryContext } : {}),
-        ...(answer ? { usage: answer.usage, stopReason: answer.stopReason } : {}),
+        ...accounting,
         ...(reason ? { reason } : {}),
         ...(saved ? { evaluationInput: saved } : {}),
-        ...(options.includeReceipt && (submission.status === "done" || submission.status === "unanswered")
-          ? { receipt: await codingReceipt(storage, submission, { session: options.session, requestId: options.requestId }) }
-          : {}),
+        ...(receipt ? { receipt } : {}),
       };
     }
     return result;

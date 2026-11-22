@@ -86,10 +86,12 @@ try {
 
   const approved = await call<{ id: string }>(path + "/preview", selection);
   const offline = { session: "smoke", requestId: "offline" };
-  await call(path + "/run", { ...submission, ...offline, previewId: approved.id });
+  await call(path + "/run", { ...submission, ...offline, previewId: approved.id, approvedSourceLookup: true });
   const failedProvider = await settled(path, offline);
   assert.equal(failedProvider.status, "unanswered");
   assert.equal(failedProvider.admitted, true);
+  const saved = await call<{ pi: { request: { approvedSourceLookup?: boolean } } }>(path + "/inspect", offline);
+  assert.equal(saved.pi.request.approvedSourceLookup, true);
   assert.equal(await Bun.file(join(stateDir, `project-${project.id}`, "session-smoke", "transcript.sqlite")).exists(), true);
 
   // Reopen the same control plane with a deliberately absent image. A run must

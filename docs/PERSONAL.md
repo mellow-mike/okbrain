@@ -8,6 +8,10 @@ Open **okbrain.app** and choose **File → Open Brain Folder** if you have an ex
 
 On **Home**, enter a **Quick note**, select **Capture**, and open the saved note. Select **Enable search and review** to build the local index. **Search** uses local keywords by default and highlights matches in result excerpts. Open **Review** to see suggested notes and the reasons they surfaced. Overdue claims link directly to the outcome controls. These actions work offline. **Browse** can open notes before the index is built.
 
+Open **Inbox** and choose **File note** on an unread capture. Enter a new concept ID such as `projects/garden-notes`, preview the destination, then confirm. Filing preserves the note and its provenance in the chosen folder and removes the inbox tag. A forwarding note at the old address lets existing links reach the filed note. Links to old heading anchors land on the forwarding note, and the graph shows the forward as a separate link. Keep private notes within `db_only/`. If interrupted after copying, preview the same destination and confirm to finish an unchanged filing.
+
+The terminal equivalent is `okb inbox file <inbox-id> <destination-id>`. Run it again with `--confirm <preview-id>` to approve the displayed move.
+
 In **Review**, you can change the queue size and the number of days to snooze notes. To ask your configured model to relate queue items to recent notes, opt in, select a retrieval profile, and choose **Update queue**. This sends note titles and descriptions to the configured model. The lean profile skips that model call.
 
 Open **Add** to give a capture its own title and tags, include a quote and comment with a web clip, or import a Markdown file or folder from the local server's disk with a default note type.
@@ -24,7 +28,13 @@ Use **Settings → Brain folders → Add a brain folder** to create a brain in a
 
 Choose **Use as default brain** in Settings to select the active writable folder for `okb` launches without a folder argument. The macOS app remembers the last folder opened from its File menu.
 
+In **Settings → Folder change log**, enter a public folder path such as `notes/projects` to create its `log.md`. It records subsequent changes in that folder and its descendants. The root log records changes across the brain. Private drafts are excluded from both logs. The CLI equivalent is `okb log create notes/projects`.
+
+In **Settings → Markdown indexes**, choose **OKF reference headings and relative links** for a brain you share with reference tooling. The layout choice travels in the root `index.md`. You can restore the grouped layout at any time, including with `okb manifests style grouped`.
+
 Set **Default retrieval profile** on a named brain folder to choose how Search and Ask use that brain by default. Use **Use app default** to inherit the global retrieval setting. A profile selected for a specific search or answer takes precedence.
+
+In **AI defaults for this brain**, choose a chat provider and an embedding provider independently. You can set a model for either capability. **Use app default** inherits the provider configured for the app. Leave a model blank to inherit the app's model for that provider or use the selected provider's default. Command overrides and `OKB_*` environment settings take precedence. Provider keys stay in the app's per-user settings. A custom endpoint carries over only when it belongs to the selected provider.
 
 On **Home** in an empty, writable brain, open **Start with a template** to choose **Personal knowledge** or **Projects and decisions**. Each adds one editable `start-here.md` guide with suggested types and tags. You can also begin by capturing a note or importing your own files. The terminal equivalents are `okb brain-templates` to list the starters and `okb init --template personal` or `okb init --template projects` to add one from the bundle folder. Add `--no-default-bundle` to keep your current default brain.
 

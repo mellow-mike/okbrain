@@ -60,11 +60,13 @@ async function runActiveFile(connection) {
     ...preview.files.flatMap((file) => [`File: ${file.path}`, file.content, '']),
   ].join('\n'));
   const send = await vscode.window.showInformationMessage(
-    'Review the source preview. Sending also includes active history from the selected session.', 'Send Request');
+    'Review the source preview. Sending includes active session history. Source lookup reads only this request’s approved file.',
+    'Send Request', 'Send with Source Lookup');
   if (!send) return;
 
   const requestId = `ide-${randomUUID()}`;
-  const request = { ...source, session, requestId, prompt, previewId: preview.id, approved: true };
+  const request = { ...source, session, requestId, prompt, previewId: preview.id, approved: true,
+    ...(send === 'Send with Source Lookup' ? { approvedSourceLookup: true } : {}) };
   let run;
   try { run = await connection.api(pathFor(choice.project, 'run'), request); }
   catch (error) {

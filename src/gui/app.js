@@ -186,7 +186,7 @@ async function loadBrains() {
         esc(b.name) + (b.readonly ? ' (read-only)' : '') + (b.exists ? '' : ' (missing)') + '</option>';
     }).join('');
     sel.hidden = !r.brains.length;
-    return r.brains;
+    return r;
   } catch (e) {
     sel.hidden = true;
     throw e;
@@ -219,7 +219,7 @@ var routes = {
   home: renderHome, browse: renderBrowse, concept: renderConcept, edit: renderEdit,
   editor: renderEdit, graph: renderGraph, search: renderSearch, ask: renderAsk,
   accounts: renderAccounts, 'ask-plan': renderPlanAsk, map: renderFocusedMap,
-  add: renderAdd, sources: renderSources, review: renderReview, inbox: renderInbox, claims: renderClaims,
+  add: renderAdd, sources: renderSources, review: renderReview, inbox: renderInbox, 'inbox-file': renderInboxFiling, claims: renderClaims,
   stats: renderStats, settings: renderSettings,
 };
 
@@ -264,7 +264,8 @@ function route() {
     repaint = null;
     document.querySelectorAll('#nav > a').forEach(function (a) { // not the wordmark's link
       var target = a.getAttribute('data-nav') || a.getAttribute('href').slice(1);
-      var active = target === name || (name === 'editor' && target === 'edit') || (name === 'ask-plan' && target === 'ask');
+      var active = target === name || (name === 'editor' && target === 'edit') || (name === 'ask-plan' && target === 'ask') ||
+        (name === 'inbox-file' && target === 'inbox');
       a.classList.toggle('active', active);
       if (active) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');
@@ -633,6 +634,11 @@ async function renderConcept(id, seq, was) {
   catch (e) { if (!stale(seq)) view.innerHTML = errorBox(e); return; }
   if (stale(seq)) return;
   var fm = c.frontmatter, s = c.signals;
+  if (fm.type === 'forwarding' && typeof fm.filed_to === 'string') {
+    view.innerHTML = '<div class="stack"><h2>' + esc(fm.title || id) + '</h2>' +
+      '<p>This capture was filed at ' + conceptLink(fm.filed_to) + '.</p></div>';
+    return;
+  }
   var tags = Array.isArray(fm.tags) ? fm.tags : (typeof fm.tags === 'string' ? [fm.tags] : []);
   var inInbox = tags.indexOf('inbox') >= 0;
   var verified = Array.isArray(fm.verified) ? fm.verified : (fm.verified ? [fm.verified] : []);
@@ -668,6 +674,7 @@ async function renderConcept(id, seq, was) {
     '<a href="' + editHref(id) + '" class="link-button primary small">Edit</a>' +
     '<button class="small" data-act="verify" title="records a verified event by you">Verified ✓</button>' +
     (inInbox ? '<button class="small" data-act="read">Mark read</button>' : '') +
+    (inInbox ? inboxFileLink(id) : '') +
     '<button class="small" data-act="suggest">Suggest links</button>' +
     '<a href="' + graphHref(id) + '" class="link-button small">Graph</a>' +
     '<a href="' + mapHref(id) + '" class="link-button small">Focused map</a>' +
@@ -1266,6 +1273,75 @@ async function renderReview() {
 
 // ---- inbox view ---------------------------------------------------------
 
+function inboxFileLink(id) {
+  return !STATUS?.readonly && id.split('/').at(-2) === 'inbox'
+    ? '<a href="#inbox-file/' + encodeURIComponent(id) + '" class="link-button small">File note</a>' : '';
+}
+
+async function renderInboxFiling(id, seq) {
+  if (!id || STATUS?.readonly) {
+    view.innerHTML = '<p>Choose a capture from a writable <a href="#inbox">Inbox</a>.</p>';
+    return;
+  }
+  view.innerHTML = '<div class="stack"><h2>File inbox note</h2>' +
+    '<p>From ' + conceptLink(id) + '</p><form class="card stack">' +
+    '<label class="field"><span>Destination concept ID</span><input name="destination" required maxlength="400" ' +
+    'placeholder="projects/my-note" spellcheck="false" autocomplete="off"></label>' +
+    '<p class="muted">Use a lowercase path without .md. A forwarding note will remain at the original address.</p>' +
+    '<div class="row"><button type="submit">Preview filing</button><button type="button" data-file-confirm class="primary" disabled>Confirm filing</button></div>' +
+    '<div role="status"></div></form><a href="#inbox">Back to Inbox</a></div>';
+  var form = view.querySelector('form');
+  var destination = form.elements.destination;
+  var review = form.querySelector('[type="submit"]');
+  var apply = form.querySelector('[data-file-confirm]');
+  var result = form.querySelector('[role="status"]');
+  var approved = null;
+  var busy = false;
+  destination.addEventListener('input', function () {
+    approved = null;
+    apply.disabled = true;
+    result.textContent = '';
+  });
+  form.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    var path = destination.value.trim();
+    if (!path || busy) return;
+    busy = review.disabled = apply.disabled = true;
+    approved = null;
+    Okb.working(result, 'checking destination');
+    try {
+      var preview = await api('inbox_file', { id: id, destination: path });
+      if (stale(seq) || destination.value.trim() !== path) return;
+      approved = preview;
+      result.innerHTML = '<strong>' + esc(preview.title) + '</strong> → <code>' + esc(preview.destination) + '</code>' +
+        (preview.status === 'resume' ? '<p>The copy is saved. Confirm to finish filing the original.</p>' : '') +
+        (preview.status === 'filed' ? '<p>Already filed. ' + conceptLink(preview.destination, 'Open filed note') + '</p>' : '');
+    } catch (error) {
+      if (!stale(seq) && destination.value.trim() === path) result.innerHTML = errorBox(error);
+    } finally {
+      busy = review.disabled = false;
+      apply.disabled = !approved;
+    }
+  });
+  apply.addEventListener('click', async function () {
+    if (!approved || busy) return;
+    busy = review.disabled = apply.disabled = destination.disabled = true;
+    Okb.working(result, 'filing note');
+    try {
+      var filing = await api('inbox_file', { id: id, destination: approved.destination, confirm: approved.preview });
+      if (!stale(seq)) {
+        result.innerHTML = 'Note filed. ' + conceptLink(filing.destination, 'Open filed note');
+        result.querySelector('a').focus();
+      }
+    } catch (error) {
+      if (!stale(seq)) result.innerHTML = errorBox(error);
+    } finally {
+      approved = null;
+      busy = review.disabled = destination.disabled = false;
+    }
+  });
+}
+
 async function renderInbox() {
   view.innerHTML = '<div class="stack"><h2>Inbox</h2><div id="ilist" class="list"></div></div>';
   var listEl = document.getElementById('ilist');
@@ -1279,7 +1355,7 @@ async function renderInbox() {
       return '<div class="card" data-id="' + esc(r.id) + '">' +
         '<div class="title">' + conceptLink(r.id, r.title) + '</div>' +
         '<div class="why"><code>' + esc(r.id) + '</code> · ' + dateOf(r.timestamp) + '</div>' +
-        cardActions(r.id, '<button class="small" data-act="read">Mark read</button>') + '</div>';
+        cardActions(r.id, '<button class="small" data-act="read">Mark read</button>' + inboxFileLink(r.id)) + '</div>';
     }).join('');
     Okb.enter(listEl);
   }
@@ -1986,7 +2062,8 @@ async function renderBrainMounts(parent, readonly, seq) {
   var selected = BRAIN;
   var busy = false;
   try {
-    var mounts = await loadBrains();
+    var response = await loadBrains();
+    var mounts = response.brains;
     if (stale(seq)) return;
     if (selected !== BRAIN) {
       await refreshStatus();
@@ -2012,6 +2089,30 @@ async function renderBrainMounts(parent, readonly, seq) {
       [['', 'Use app default'], ['lean', 'Lean'], ['balanced', 'Balanced'], ['max', 'Max']].map(function (option) {
         return '<option value="' + option[0] + '"' + (option[0] === current ? ' selected' : '') + '>' + option[1] + '</option>';
       }).join('') + '</select></label>';
+  }
+
+  function aiFields(defaults) {
+    var ai = defaults || {};
+    function provider(name, label, options) {
+      var selected = ai[name] === 'local' ? 'ollama' : ai[name];
+      return '<label class="field"><span>' + label + '</span><select name="' + name + '">' +
+        '<option value="">Use app default</option>' + options.map(function (option) {
+          return '<option' + (option === selected ? ' selected' : '') + '>' + esc(option) + '</option>';
+        }).join('') + '</select></label>';
+    }
+    function model(name, label) {
+      return '<label class="field"><span>' + label + '</span><input name="' + name + '" value="' + esc(ai[name] || '') +
+        '" placeholder="Use default model" maxlength="256" autocomplete="off" spellcheck="false"></label>';
+    }
+    return '<details><summary>AI defaults for this brain</summary><div class="grid">' +
+      provider('provider', 'Brain chat provider', response.providers.chat) + model('model', 'Brain chat model') +
+      provider('embedProvider', 'Brain embedding provider', response.providers.embed) + model('embedModel', 'Brain embedding model') +
+      '</div></details>';
+  }
+
+  function readAiDefaults(form) {
+    return { provider: form.elements.provider.value, model: form.elements.model.value,
+      embedProvider: form.elements.embedProvider.value, embedModel: form.elements.embedModel.value };
   }
 
   async function finish(next, message, showHome) {
@@ -2054,7 +2155,7 @@ async function renderBrainMounts(parent, readonly, seq) {
       '<div class="stack brain-mount-body">' +
       (mount.exists && mount.name !== BRAIN ? '<div><button type="button" data-mount-open>Open brain</button></div>' : '') +
       (readonly ? '' : '<form class="stack" data-mount-edit><div class="grid">' + nameField(mount.name) + profileField(mount.retrievalProfile) +
-        '</div>' + accessField(mount.readonly) +
+        '</div>' + accessField(mount.readonly) + aiFields(mount.ai) +
         '<div class="row"><button type="submit">Save mount</button><button type="button" data-mount-remove>Remove mount</button></div></form>') +
       '</div></details>';
   }).join('') : '<p class="muted">No named brain folders.</p>') +
@@ -2064,7 +2165,7 @@ async function renderBrainMounts(parent, readonly, seq) {
       '<option value="register">Register an existing folder</option><option value="create">Create a new brain folder</option>' +
       '</select></label></div><label class="field"><span>Absolute folder path</span>' +
       '<input name="path" maxlength="4096" required autocomplete="off" spellcheck="false"></label>' +
-      '<p class="muted">Create accepts a new path or an empty folder.</p>' + profileField() + accessField(false) +
+      '<p class="muted">Create accepts a new path or an empty folder.</p>' + profileField() + accessField(false) + aiFields() +
       '<div class="row"><button type="submit" class="primary">Add brain folder</button></div></form></details>');
 
   list.querySelectorAll('[data-mount]').forEach(function (row) {
@@ -2082,7 +2183,7 @@ async function renderBrainMounts(parent, readonly, seq) {
     form.addEventListener('submit', function (event) {
       event.preventDefault();
       var input = { action: 'update', previous: mount.name, name: form.elements.mountName.value,
-        readonly: form.elements.readOnly.checked, retrievalProfile: form.elements.retrievalProfile.value };
+        readonly: form.elements.readOnly.checked, retrievalProfile: form.elements.retrievalProfile.value, ai: readAiDefaults(form) };
       change(form.querySelector('button[type=submit]'), input, function (result) {
         return selected === mount.name ? result.name : selected;
       }, 'Mount settings saved.');
@@ -2098,7 +2199,7 @@ async function renderBrainMounts(parent, readonly, seq) {
     event.preventDefault();
     var input = {
       action: add.elements.action.value, name: add.elements.mountName.value,
-      path: add.elements.path.value, readonly: add.elements.readOnly.checked, retrievalProfile: add.elements.retrievalProfile.value,
+      path: add.elements.path.value, readonly: add.elements.readOnly.checked, retrievalProfile: add.elements.retrievalProfile.value, ai: readAiDefaults(add),
     };
     change(add.querySelector('button[type=submit]'), input, function (result) { return result.name; }, 'Brain folder added.');
   });
@@ -2214,6 +2315,15 @@ async function renderSettings(_arg, seq) {
     '<button id="mx-index">Re-index</button>' +
     '<button id="mx-doctor">Doctor</button>' +
     '<button id="mx-rebuild" class="danger">Rebuild (wipe + reindex)</button></div>' +
+    (st.readonly ? '' : '<form id="folder-log-form" class="stack"><h4>Folder change log</h4>' +
+      '<p class="muted">Record future changes to a folder and its subfolders in a separate log.md.</p>' +
+      '<label class="field"><span>Folder path in this brain</span><input name="folder" placeholder="notes/projects" required></label>' +
+      '<div class="row"><button type="submit">Enable folder log</button></div><div role="status"></div></form>') +
+    (st.readonly ? '' : '<form id="manifest-style-form" class="stack"><h4>Markdown indexes</h4>' +
+      '<div class="row"><label class="field"><span id="manifest-style-label">Index format</span><select name="style" aria-labelledby="manifest-style-label" required>' +
+      '<option value="">Choose a format</option><option value="grouped">Grouped headings</option>' +
+      '<option value="reference">OKF reference headings and relative links</option></select></label>' +
+      '<button type="submit">Update index files</button></div><div role="status"></div></form>') +
     '<form id="embedf" class="stack"><h4>Embeddings</h4><div class="grid">' +
     field('run-embed-provider', 'Provider override', '', 'Configured provider') +
     field('run-embed-model', 'Model override', '', 'Configured model') +
@@ -2251,6 +2361,32 @@ async function renderSettings(_arg, seq) {
   renderBrainMounts(document.getElementById('brain-mount-settings'), Boolean(st.readonly), seq);
   renderProviderKeys(document.getElementById('provider-keys'), Boolean(st.readonly));
   window.okbMcpSettings.mount(document.getElementById('mcp-settings'), { readonly: Boolean(st.readonly), requestHeaders: headers });
+
+  var folderLog = document.getElementById('folder-log-form');
+  folderLog?.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    var status = folderLog.querySelector('[role="status"]');
+    var button = folderLog.querySelector('button');
+    button.disabled = true;
+    try {
+      var result = await api('create_directory_log', { folder: folderLog.elements.folder.value });
+      status.textContent = result.folder + '/log.md ' + (result.created ? 'created.' : 'is already enabled.');
+    } catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+
+  var manifestStyle = document.getElementById('manifest-style-form');
+  manifestStyle?.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    var status = manifestStyle.querySelector('[role="status"]');
+    var button = manifestStyle.querySelector('button');
+    button.disabled = true;
+    try {
+      await appWork(api('set_index_style', { style: manifestStyle.elements.style.value }));
+      status.textContent = 'Markdown index files updated.';
+    } catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; }
+  });
 
   var setDefault = document.getElementById('set-default-brain');
   if (setDefault) setDefault.addEventListener('click', async function () {

@@ -9,6 +9,8 @@ Use the **Coding** workspace in the Mac app or local web app to review source fi
 3. Describe the task and select tracked excerpts or explicit files. Choose **Preview source**, inspect the actual text, and approve sending it with the task and active conversation history. Sending with a changed file selection requires a fresh preview.
 4. Select the request in **Run history**. Ordinary requests can show a short preview of the answer as it arrives. When the run finishes, inspect the full result and its recorded provider usage before choosing **Accept result** or **Request changes**. An interrupted run can resume with its stored input, or be cancelled. A follow-up uses the same session and a new request ID.
 
+For explicit files and repository excerpts, you can let the model look up line numbers inside the current request’s approved source. Select the option before previewing, then review the selection and approve it. Each lookup reads at most 24 consecutive lines from a single saved file or excerpt. The provider may make an extra request to turn the lookup results into an answer. Completed requests report usage from both turns. A later request starts with its own choice.
+
 Use **Project settings** to rotate or remove an API key, inspect the audit log, or set transcript retention. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.
 
 ## Give a team member access
@@ -145,7 +147,7 @@ The local input cap is 32,768 estimated tokens, reduced for smaller model window
 
 ## Runtime and storage
 
-okbrain pins Pi Durable, Pi AI, and Chord at `1.0.0`. It opens `Harness` with the portable `SqliteStorage` and a Bun SQLite adapter. Each session maps to a root conversation with a fixed workspace and model. `Conversation.submit()` admits input under a request ID, and `Submission.wait()` drives generation or recovery. Pi uses the prompt, selected text, and active history with an empty tool registry. Applying edits, running commands, and making Git changes are operator actions. [Pi Durable announcement](https://earendil.com/posts/pi-durable/) · [Pi Durable package documentation](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md)
+okbrain pins Pi Durable, Pi AI, and Chord at `1.0.0`. It opens `Harness` with the portable `SqliteStorage` and a Bun SQLite adapter. Each session maps to a root conversation with a fixed workspace and model. `Conversation.submit()` admits input under a request ID, and `Submission.wait()` drives generation or recovery. Pi uses the prompt, selected text, and active history. When approved, the source lookup tool reads only the current request’s stored selection and can replay after an interruption. Applying edits, running commands, and making Git changes are operator actions. [Pi Durable announcement](https://earendil.com/posts/pi-durable/) · [Pi Durable package documentation](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md)
 
 Sessions live under `$XDG_DATA_HOME/okbrain/coding` on Linux and macOS, defaulting to `~/.local/share/okbrain/coding`. On Windows they live under `%LOCALAPPDATA%\okbrain\coding`, defaulting to `AppData\Local\okbrain\coding` in the user profile. Each `session-<name>` directory holds an SQLite transcript and an ownership database. A SQLite lock allows one invocation per session and releases on process exit. Keep the session directory on a local filesystem.
 

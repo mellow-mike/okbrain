@@ -393,6 +393,22 @@ describe("op routes", () => {
 });
 
 describe("server routes for the GUI", () => {
+  test("enabled folder logs follow public deletions and omit private notes", async () => {
+    const enabled = await post("create_directory_log", { folder: "notes" });
+    expect(enabled.status).toBe(200);
+    expect((await post("create_directory_log", { folder: "notes/../elsewhere" })).status).toBe(400);
+    for (const id of ["notes/public-deletion", "notes/db_only/private-deletion"]) {
+      expect((await post("write_concept", { id, type: "note", title: id, description: "Deletion fixture" })).status).toBe(200);
+      expect((await post("delete_concept", { id })).status).toBe(200);
+    }
+    for (const log of [join(bundle, "log.md"), join(bundle, "notes", "log.md")]) {
+      const text = await Bun.file(log).text();
+      expect(text).toContain("**Deletion**: [notes/public-deletion](/notes/public-deletion.md)");
+      expect(text).not.toContain("private-deletion");
+    }
+    expect((await okb(["--bundle", bundle, "log", "create", "notes"])).stdout).toContain("notes/log.md is already enabled");
+  });
+
   test("GET /api/status describes the served bundle", async () => {
     const r = await call("api/status");
     expect(r.status).toBe(200);
@@ -565,11 +581,59 @@ describe("server routes for the GUI", () => {
         expect(removed.status).toBe(200);
         const discovery = await fetch(new URL("api/brains", served.url), { headers: { "x-okb-token": TOKEN } });
         expect(discovery.status).toBe(200);
-        expect(await discovery.json()).toEqual({ brains: [] });
+        expect(await discovery.json()).toMatchObject({ brains: [] });
       } finally { await served.stop(); }
     } finally {
       saveConfig(saved);
       await rm(profileBundle, { recursive: true, force: true });
+    }
+  });
+
+  test("named brain chat and embedding defaults apply through the browser and regular CLI", async () => {
+    const saved = loadConfig();
+    const notes = await mkdtemp(join(tmpdir(), "okb-mount-ai-"));
+    const requests: { path: string; model: string }[] = [];
+    const fixture = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+      const path = new URL(req.url).pathname;
+      const body = await req.json() as { model: string; input?: string[] };
+      requests.push({ path, model: body.model });
+      if (path === "/embeddings") return Response.json({ data: body.input?.map(() => ({ embedding: [1, 0, 0] })) });
+      return Response.json({ choices: [{ message: { content: "Local answer [sample]." } }] });
+    } });
+    const name = "MountAi";
+    const scoped = (path: string, params: Record<string, unknown>) => call(path, {
+      method: "POST", headers: { "content-type": "application/json", "x-okb-brain": name }, body: JSON.stringify(params),
+    });
+    try {
+      await writeFile(join(notes, "sample.md"), "---\ntype: note\ntitle: Fern guide\n---\nquartzleaf\n");
+      const ai = { provider: "ollama", model: "app-chat", baseUrl: fixture.url.origin,
+        embedProvider: "ollama", embedModel: "app-embed", embedBaseUrl: fixture.url.origin };
+      saveConfig({ ...saved, ai, brains: { ...saved.brains, [name]: { path: notes, customField: "kept" } } });
+      const update = { action: "update", name, previous: name, readonly: false };
+      expect((await scoped("api/brains/mounts", { ...update, ai: { embedProvider: "anthropic" } })).status).toBe(400);
+      expect((await scoped("api/brains/mounts", { ...update, ai: { apiKey: "ignored" } })).status).toBe(400);
+      const defaults = { provider: "ollama", model: "brain-chat", embedProvider: "ollama", embedModel: "brain-embed" };
+      expect((await scoped("api/brains/mounts", { ...update, ai: defaults })).status).toBe(200);
+      expect(requests).toEqual([]);
+      expect(loadConfig()).toMatchObject({ ai, brains: { [name]: { path: notes, customField: "kept", ai: defaults } } });
+
+      expect((await scoped("api/op/index", {})).status).toBe(200);
+      const answered = await scoped("api/op/ask", { question: "quartzleaf", profile: "lean" });
+      expect(await answered.json()).toMatchObject({ result: { provider: "ollama", model: "brain-chat", citations: [{ id: "sample" }] } });
+      const embedded = await okb(["--brain", name, "embed", "--json"]);
+      expect(embedded.code).toBe(0);
+      expect(JSON.parse(embedded.stdout)).toMatchObject({ provider: "ollama", model: "brain-embed", embedded: 1 });
+      expect(requests).toEqual([{ path: "/chat/completions", model: "brain-chat" }, { path: "/embeddings", model: "brain-embed" }]);
+
+      expect((await scoped("api/brains/mounts", { ...update, ai: { provider: "", model: "" } })).status).toBe(200);
+      const inherited = await scoped("api/op/ask", { question: "quartzleaf", profile: "lean" });
+      expect(await inherited.json()).toMatchObject({ result: { model: "app-chat" } });
+      const global = await post("ask", { question: "databases", profile: "lean" });
+      expect(await global.json()).toMatchObject({ result: { model: "app-chat" } });
+    } finally {
+      await fixture.stop(true);
+      saveConfig(saved);
+      await rm(notes, { recursive: true, force: true });
     }
   });
 

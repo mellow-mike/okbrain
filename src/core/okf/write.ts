@@ -9,6 +9,7 @@
 // index.md up the touched dir chain and appends a log.md entry (Stage 1.2).
 
 import { randomUUID } from "node:crypto";
+import { readFileSync, renameSync } from "node:fs";
 import { link, lstat, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import { resolveActor } from "../config.ts";
@@ -23,10 +24,11 @@ import {
   serialize,
   STATUSES,
   type ActorEvent,
+  type OkfDocument,
   type SourceEntry,
 } from "./document.ts";
 import { regenerateIndexBranches, regenerateIndexes } from "./indexmd.ts";
-import { appendLog, appendLogEntry, formatLogEntry, todayUtc } from "./logmd.ts";
+import { appendConceptLogs, appendLog, formatLogEntry, todayUtc, type ConceptLogEntry } from "./logmd.ts";
 import { idToAbsPath, inDbOnlyDir, isReservedName, slugify } from "./paths.ts";
 
 export class OkfWriteError extends Error {}
@@ -86,19 +88,19 @@ interface WriteOptions {
   /** The caller will regenerate the affected index branch after a batch. */
   deferIndex?: boolean;
   /** Accumulate derived metadata until the importing operation finishes. */
-  batch?: { dirs: Set<string>; log: Map<string, string[]> };
+  batch?: { dirs: Set<string>; log: ConceptLogEntry[] };
 }
 
 /** Import a group of concepts through the same writer and refresh metadata even after a partial import. */
 export async function writeConceptBatch<T>(root: string, write: (
   add: (input: WriteConceptInput, options?: Pick<WriteOptions, "createOnly">) => Promise<WriteResult>,
 ) => Promise<T>): Promise<T> {
-  const batch = { dirs: new Set<string>(), log: new Map<string, string[]>() };
+  const batch = { dirs: new Set<string>(), log: [] as ConceptLogEntry[] };
   try {
     return await write((input, options) => writeConcept(root, input, { ...options, batch }));
   } finally {
     try { await regenerateIndexBranches(root, batch.dirs); }
-    finally { for (const [date, entries] of batch.log) await appendLogEntry(root, entries.join("\n\n"), date); }
+    finally { await appendConceptLogs(root, batch.log); }
   }
 }
 
@@ -154,6 +156,32 @@ export function normalizeSources(sources: SourceEntry[]): SourceEntry[] {
 
 const event = (e: ActorEvent): ActorEvent =>
   e.at === undefined ? { by: e.by } : { by: e.by, at: e.at };
+
+async function publishConcept(path: string, bytes: string, mode: number | undefined, expected?: string): Promise<boolean> {
+  const temporary = join(dirname(path), `.okb-write-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, bytes, { encoding: "utf8", flag: "wx", mode });
+    if (expected === undefined) await link(temporary, path);
+    else {
+      if (readFileSync(path, "utf8") !== expected) return false;
+      renameSync(temporary, path);
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === (expected === undefined ? "EEXIST" : "ENOENT")) return false;
+    throw error;
+  } finally {
+    await unlink(temporary).catch(() => {});
+  }
+}
+
+/** Publish an already validated filing document. Its original provenance must pass through untouched. */
+export async function writeFilingDocument(root: string, id: string, doc: OkfDocument, expected?: string): Promise<boolean> {
+  const path = idToAbsPath(root, id);
+  if (isReservedName(posix.basename(id) + ".md")) throw new OkfWriteError("Choose a concept path for filing.");
+  const privateConcept = inDbOnlyDir(id);
+  return publishConcept(path, serialize(doc), privateConcept ? 0o600 : undefined, expected);
+}
 
 /** Create or update one concept. Returns the written path and created flag. */
 export async function writeConcept(
@@ -266,17 +294,7 @@ export async function writeConcept(
   const mode = privateConcept ? 0o600 : undefined;
   if (options.createOnly) {
     // Publish complete bytes without ever replacing a concurrent writer's note.
-    const temporary = join(dirname(path), `.okb-write-${randomUUID()}.tmp`);
-    try {
-      await writeFile(temporary, serialized, { encoding: "utf8", flag: "wx", mode });
-      await link(temporary, path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST")
-        return { id: input.id, path, created: false, noop: true };
-      throw error;
-    } finally {
-      await unlink(temporary).catch(() => {});
-    }
+    if (!await publishConcept(path, serialized, mode)) return { id: input.id, path, created: false, noop: true };
   } else {
     await writeFile(path, serialized, { encoding: "utf8", mode });
   }
@@ -286,10 +304,8 @@ export async function writeConcept(
   if (options.batch) {
     options.batch.dirs.add(dir);
     if (publicLog) {
-      const date = todayUtc();
-      const entries = options.batch.log.get(date) ?? [];
-      if (!entries.length) options.batch.log.set(date, entries);
-      entries.push(formatLogEntry(kind, input.id, fm.title as string, fm.description as string));
+      options.batch.log.push({ id: input.id, date: todayUtc(),
+        entry: formatLogEntry(kind, input.id, fm.title as string, fm.description as string) });
     }
   } else {
     if (!options.deferIndex) await regenerateIndexes(root, dir);

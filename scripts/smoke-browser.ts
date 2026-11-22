@@ -139,6 +139,14 @@ try {
   await page.getByRole("link", { name: "Ask with ChatGPT", exact: true }).click();
   await page.getByText("Connect an eligible account to continue.").waitFor();
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
+  await page.getByLabel("Folder path in this brain", { exact: true }).fill("inbox");
+  await page.getByRole("button", { name: "Enable folder log" }).click();
+  await page.getByText("inbox/log.md created.", { exact: true }).waitFor();
+  assert.equal(await Bun.file(join(bundle, "inbox", "log.md")).text(), "# Log\n");
+  await page.getByLabel("Index format", { exact: true }).selectOption("reference");
+  await page.getByRole("button", { name: "Update index files" }).click();
+  await page.getByText("Markdown index files updated.", { exact: true }).waitFor();
+  assert.match(await Bun.file(join(bundle, "inbox", "index.md")).text(), /^# note$/m);
   assert.equal(await page.getByRole("checkbox", { name: "Include private drafts in graph export" }).isChecked(), false);
   await page.getByRole("checkbox", { name: "Embed app fonts in graph export" }).check();
   const exported = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/export_viz");
@@ -185,6 +193,11 @@ try {
   await mounts.getByLabel("Folder action").selectOption("create");
   await mounts.getByLabel("Absolute folder path").fill(join(root, "field-notes"));
   await mounts.getByLabel("Default retrieval profile").selectOption("lean");
+  await mounts.getByText("AI defaults for this brain", { exact: true }).click();
+  await mounts.getByLabel("Brain chat provider").selectOption("llamacpp");
+  await mounts.getByLabel("Brain chat model").fill("field-chat");
+  await mounts.getByLabel("Brain embedding provider").selectOption("ollama");
+  await mounts.getByLabel("Brain embedding model").fill("field-embed");
   await mounts.getByRole("button", { name: "Add brain folder" }).click();
   await page.getByRole("heading", { name: "field-notes", exact: true }).waitFor();
   assert.equal(await page.locator("#brain").inputValue(), "field-notes");
@@ -205,6 +218,12 @@ try {
   await page.getByText("MCP HTTP stopped.", { exact: true }).waitFor();
 
   await mounts.getByText("field-notes", { exact: true }).click();
+  const savedMount = mounts.locator("[data-mount-edit]");
+  await savedMount.getByText("AI defaults for this brain", { exact: true }).click();
+  assert.equal(await savedMount.getByLabel("Brain chat provider").inputValue(), "llamacpp");
+  assert.equal(await savedMount.getByLabel("Brain chat model").inputValue(), "field-chat");
+  assert.equal(await savedMount.getByLabel("Brain embedding provider").inputValue(), "ollama");
+  assert.equal(await savedMount.getByLabel("Brain embedding model").inputValue(), "field-embed");
   await mounts.getByRole("button", { name: "Remove mount" }).click();
   await mounts.getByText("Mount removed. Its files are still in the folder.", { exact: true }).waitFor();
   assert.equal(await page.locator("#brain").inputValue(), "");
