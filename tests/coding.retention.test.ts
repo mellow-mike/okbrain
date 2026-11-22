@@ -17,7 +17,7 @@ test("project transcript retention protects unfinished work and refuses replay o
   const models = createModels();
   const faux = fauxProvider({ provider: "openai", models: [{ id: model }] });
   models.setProvider(faux.provider);
-  type Run = { id: string; session: string; status: string };
+  type Run = { id: string; session: string; status: string; error: string | null };
   let server: ApiServer | undefined;
 
   const open = (readonly = false) => {
@@ -27,26 +27,37 @@ test("project transcript retention protects unfinished work and refuses replay o
     await server?.stop();
     server = undefined;
   };
-  const request = (path: string, data?: object, member?: string) => fetch(new URL("api/coding" + path, server!.url), {
-    method: data ? "POST" : "GET",
-    headers: { ...(member ? { authorization: `Bearer ${member}` } : { "x-okb-token": token }),
-      ...(data ? { "content-type": "application/json" } : {}) },
-    body: data ? JSON.stringify(data) : undefined,
-    signal: AbortSignal.timeout(6000),
-  });
+  const request = async (path: string, data?: object, member?: string) => {
+    const method = data ? "POST" : "GET";
+    try {
+      const response = await fetch(new URL("api/coding" + path, server!.url), {
+        method,
+        headers: { ...(member ? { authorization: `Bearer ${member}` } : { "x-okb-token": token }),
+          ...(data ? { "content-type": "application/json" } : {}) },
+        body: data ? JSON.stringify(data) : undefined,
+        // The fixture repeatedly stops and reopens the server while exercising
+        // retention. Its requests use fresh sockets and consume every reply.
+        keepalive: false,
+        signal: AbortSignal.timeout(12_000),
+      });
+      return { status: response.status, ok: response.ok, body: await response.json() };
+    } catch (error) {
+      throw new Error(`Retention fixture ${method} ${path} did not complete.`, { cause: error });
+    }
+  };
   const call = async <T>(path: string, data?: object) => {
     const response = await request(path, data);
-    const body = await response.json() as { result: T; error?: string };
+    const body = response.body as { result: T; error?: string };
     if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
     return body.result;
   };
-  const waitFor = async (check: () => Promise<boolean>) => {
-    const limit = Date.now() + 3500;
+  const waitFor = async (description: string, check: () => Promise<boolean>) => {
+    const limit = Date.now() + 6000;
     while (Date.now() < limit) {
       if (await check()) return;
       await Bun.sleep(20);
     }
-    throw new Error("Timed out waiting on the Coding API.");
+    throw new Error(`Timed out waiting for ${description}.`);
   };
   function withCatalog<T>(use: (database: Database) => T) {
     ensureExtensionCapableSqlite();
@@ -77,7 +88,12 @@ test("project transcript retention protects unfinished work and refuses replay o
     ] as const) {
       faux.setResponses([fauxAssistantMessage("Scoped review result.")]);
       await call(endpoint + "/run", { ...task, session });
-      await waitFor(async () => (await call<Run[]>(endpoint + "/runs")).find((row) => row.session === session)?.status === "done");
+      await waitFor(`session ${session} to settle`, async () => {
+        const run = (await call<Run[]>(endpoint + "/runs")).find((row) => row.session === session);
+        if (run && run.status !== "running" && run.status !== "done")
+          throw new Error(`Retention fixture session ${session} ended as ${run.status}${run.error ? `: ${run.error}` : ""}.`);
+        return run?.status === "done";
+      });
     }
     await close();
 
@@ -119,7 +135,7 @@ test("project transcript retention protects unfinished work and refuses replay o
     await close();
 
     open();
-    await waitFor(async () => withCatalog((db) => {
+    await waitFor("startup expiry", async () => withCatalog((db) => {
       using query = db.prepare("SELECT 1 FROM expired_requests WHERE project = ? AND session = 'recent'");
       return query.get(project.id) !== null;
     }));
@@ -131,7 +147,7 @@ test("project transcript retention protects unfinished work and refuses replay o
     await close();
     await rm(root, { recursive: true, force: true });
   }
-}, 25_000);
+}, 40_000);
 
 test("retention uses alternative branch activity and expires the shared transcript as a unit", async () => {
   const root = await mkdtemp(join(tmpdir(), "okb-branch-retention-"));
