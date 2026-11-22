@@ -37,6 +37,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Package the personal and coding interfaces in a native macOS app.
 - [x] Set Git identity and connect a new HTTPS origin in the Mac and web apps.
   Show publication destinations and recover interrupted text conflicts in place.
+- [x] Preview, replace, or disconnect a personal Git origin in the Mac and web
+  apps. Keep local history and clear tracking and push bindings to the old origin.
 - [x] Save and remove a private, repository-scoped GitHub credential for
   app-managed personal HTTPS sync from the Mac or web app.
 - [x] Restore a shared GitHub brain onto a second device from the Mac or web
@@ -54,6 +56,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Save a completed answer from either Ask route as a private Markdown
   draft with model attribution and verified sources. Recover a lost save response.
 - [x] Build a first map and its local index in place with the selected filters.
+- [ ] Export the machine-readable graph from the Mac and web apps. Exclude
+  private drafts by default and offer an explicit private export.
 - [x] Keep private notes in local Review while using only public note metadata
   for optional AI annotations.
 - [x] Use public note tags for optional clip suggestions. Keep marking a note
@@ -72,6 +76,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Preview bounded, deterministic excerpts from explicitly scoped Git
   projects. Bind the reviewed selection to its source bytes at admission and
   recover from the stored snapshot.
+- [ ] Copy the exact source selection manifest before sending a Coding
+  request from the apps or editor. Keep source text out of the copied manifest.
 - [x] Expose local request status, active context estimates, Pi Durable history
   compaction, and recorded provider usage including cache counters.
 - [x] Show the session input limit, output allowance, and model window alongside
@@ -874,6 +880,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added reviewed Git origin replacement and disconnection in
+  Settings, with the old GitHub credential available for separate removal.
 - 2026-11-22 — Added the app source retrieval benchmark with measured results
   from both pinned studies. The work creates no Coding requests or provider usage.
 - 2026-11-22 — Prepared the exact Vite benchmark checkout in the Coding apps

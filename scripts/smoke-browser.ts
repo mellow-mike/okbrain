@@ -669,7 +669,11 @@ try {
   const privateGitHub = privateSync.locator("[data-sync-github]");
   assert.equal(await privateGitHub.isVisible(), false);
   await privateSync.getByLabel("Origin HTTPS URL", { exact: true }).fill("https://github.com/fixture-owner/private-knowledge.git");
+  const connectedPrivateOrigin = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/sync_settings" &&
+    response.request().method() === "POST" && response.request().postDataJSON().action === "origin");
   await privateSync.getByRole("button", { name: "Connect origin", exact: true }).click();
+  const privateOriginResponse = await connectedPrivateOrigin;
+  assert.ok(privateOriginResponse.ok(), await privateOriginResponse.text());
   await privateGitHub.getByText("GitHub credentials", { exact: true }).click();
   await privateGitHub.getByText("fixture-owner/private-knowledge", { exact: true }).waitFor();
   const login = privateGitHub.getByLabel("GitHub login", { exact: true });
@@ -693,11 +697,128 @@ try {
   const fieldConfig = await Bun.file(join(fieldBrain, ".git", "config")).text();
   for (const fakeToken of fakeGitHubTokens) assert.equal(fieldConfig.includes(fakeToken), false);
   assert.match(fieldConfig, /url = https:\/\/github\.com\/fixture-owner\/private-knowledge\.git/u);
-  const changedGitHub = Bun.spawnSync(["git", "-C", fieldBrain, "remote", "set-url", "origin", "https://example.invalid/inactive.git"]);
-  assert.equal(changedGitHub.exitCode, 0, changedGitHub.stderr.toString());
-  await privateSync.getByRole("button", { name: "Refresh Git status", exact: true }).click();
-  await privateGitHub.getByText("The saved credential for fixture-owner/private-knowledge is inactive.", { exact: true }).waitFor();
-  assert.equal(await tokenInput.isVisible(), false);
+  {
+    const fieldGit = (...args: string[]) => {
+      const result = Bun.spawnSync(["git", "-C", fieldBrain, ...args]);
+      assert.equal(result.exitCode, 0, result.stderr.toString());
+      return result.stdout.toString().trim();
+    };
+    const originalOrigin = "https://github.com/fixture-owner/private-knowledge.git";
+    const noteBeforeOriginChange = await Bun.file(join(fieldBrain, "start-here.md")).text();
+    const branchBeforeOriginChange = fieldGit("symbolic-ref", "HEAD");
+    let connections = 0;
+    const remote = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: {
+      open(socket) { connections++; socket.end(); }, data() {},
+    } });
+    const proxy = `http://127.0.0.1:${remote.port}`;
+    const proxySettings = { https_proxy: proxy, HTTPS_PROXY: proxy, no_proxy: "127.0.0.1,localhost", NO_PROXY: "127.0.0.1,localhost" };
+    const previous = Object.keys(proxySettings).map((key) => [key, process.env[key]] as const);
+    Object.assign(process.env, proxySettings);
+    const manage = privateSync.getByText("Manage origin", { exact: true });
+    const destination = privateSync.getByLabel("New origin HTTPS URL", { exact: true });
+    const previewPanel = privateSync.locator("[data-sync-origin-preview]");
+    const replace = previewPanel.getByRole("button", { name: "Replace origin", exact: true });
+    const disconnect = previewPanel.getByRole("button", { name: "Disconnect origin", exact: true });
+    const endpoint = "/api/op/sync_settings";
+    const changes: unknown[] = [];
+    const recordOrigin = (request: BrowserRequest) => {
+      if (request.method() !== "POST" || new URL(request.url()).pathname !== endpoint) return;
+      const body = request.postDataJSON();
+      if (body.action === "origin-preview" || body.action === "origin-apply") changes.push(body);
+    };
+    const originReply = (action: string) => page.waitForResponse((response) => new URL(response.url()).pathname === endpoint &&
+      response.request().method() === "POST" && response.request().postDataJSON().action === action);
+    const showManage = async () => {
+      await manage.waitFor();
+      if (!await manage.evaluate((summary) => summary.parentElement instanceof HTMLDetailsElement && summary.parentElement.open)) await manage.click();
+    };
+    type OriginPreview = { approval: string; current: { origin: string; fetch: string; push: string }; proposed: OriginPreview["current"] | null };
+    async function previewOrigin(button: string) {
+      const requested = originReply("origin-preview");
+      await privateSync.getByRole("button", { name: button, exact: true }).click();
+      const response = await requested;
+      const text = await response.text();
+      assert.ok(response.ok(), text);
+      for (const value of fakeGitHubTokens) assert.ok(!text.includes(value));
+      return { text, result: (JSON.parse(text) as { result: OriginPreview }).result };
+    }
+    page.on("request", recordOrigin);
+    try {
+      const firstUrl = `https://127.0.0.1:${remote.port}/first.git`;
+      const secondUrl = `https://127.0.0.1:${remote.port}/second.git`;
+      await showManage();
+      await destination.fill(firstUrl);
+      const first = await previewOrigin("Preview origin change");
+      await previewPanel.getByText("Current destination", { exact: true }).waitFor();
+      await previewPanel.getByText("New destination", { exact: true }).waitFor();
+      assert.deepEqual(first.result.current, { origin: originalOrigin, fetch: originalOrigin, push: originalOrigin });
+      assert.deepEqual(first.result.proposed, { origin: firstUrl, fetch: firstUrl, push: firstUrl });
+      assert.equal(fieldGit("remote", "get-url", "origin"), originalOrigin);
+      await replace.waitFor();
+      await destination.fill(secondUrl);
+      await replace.waitFor({ state: "hidden" });
+      const second = await previewOrigin("Preview origin change");
+      await previewPanel.getByRole("button", { name: "Cancel origin change", exact: true }).click();
+      await replace.waitFor({ state: "hidden" });
+      assert.equal(fieldGit("remote", "get-url", "origin"), originalOrigin);
+      assert.deepEqual(changes, [
+        { action: "origin-preview", change: "replace", url: firstUrl },
+        { action: "origin-preview", change: "replace", url: secondUrl },
+      ]);
+      assert.notEqual(second.result.approval, first.result.approval);
+
+      await showManage();
+      await destination.fill(secondUrl);
+      const afterCancel = await previewOrigin("Preview origin change");
+      const replacement = originReply("origin-apply");
+      await replace.click();
+      const replaced = await replacement;
+      assert.ok(replaced.ok(), await replaced.text());
+      await privateSync.getByText("Origin replaced. Use Sync now when you are ready to connect.", { exact: true }).waitFor();
+      assert.deepEqual(changes.at(-1), { action: "origin-apply", change: "replace", url: secondUrl, approval: afterCancel.result.approval });
+      assert.equal(fieldGit("remote", "get-url", "origin"), secondUrl);
+      assert.equal(fieldGit("remote", "get-url", "--push", "origin"), secondUrl);
+      await privateGitHub.getByText("The saved credential for fixture-owner/private-knowledge is inactive.", { exact: true }).waitFor();
+      assert.equal(await tokenInput.isVisible(), false);
+
+      const redactedPush = `https://127.0.0.1:${remote.port}/legacy-push.git`;
+      const privateParts = ["fixture-inline-user", "fixture-inline-password", "fixture-query-secret", "fixture-hash-secret"];
+      fieldGit("config", "--local", "remote.origin.pushurl",
+        `https://${privateParts[0]}:${privateParts[1]}@127.0.0.1:${remote.port}/legacy-push.git?token=${privateParts[2]}#${privateParts[3]}`);
+      await privateSync.getByRole("button", { name: "Refresh Git status", exact: true }).click();
+      await privateSync.getByText(redactedPush, { exact: true }).waitFor();
+      await showManage();
+      const reviewed = await previewOrigin("Preview disconnection");
+      assert.deepEqual(reviewed.result.current, { origin: secondUrl, fetch: secondUrl, push: redactedPush });
+      assert.equal(reviewed.result.proposed, null);
+      await previewPanel.getByText(redactedPush, { exact: true }).waitFor();
+      const visiblePreview = await previewPanel.innerText();
+      for (const value of privateParts) {
+        assert.ok(!reviewed.text.includes(value));
+        assert.ok(!visiblePreview.includes(value));
+      }
+      assert.ok(fieldGit("remote", "get-url", "--push", "origin").includes(privateParts[1]!));
+
+      const removal = originReply("origin-apply");
+      await disconnect.click();
+      const removed = await removal;
+      assert.ok(removed.ok(), await removed.text());
+      await privateSync.getByText("Origin disconnected. Future syncs will commit locally.", { exact: true }).waitFor();
+      assert.deepEqual(changes.at(-1), { action: "origin-apply", change: "disconnect", approval: reviewed.result.approval });
+      assert.equal(fieldGit("remote"), "");
+      assert.equal(fieldGit("symbolic-ref", "HEAD"), branchBeforeOriginChange);
+      assert.equal(await Bun.file(join(fieldBrain, "start-here.md")).text(), noteBeforeOriginChange);
+      await privateGitHub.getByText("The saved credential for fixture-owner/private-knowledge is inactive.", { exact: true }).waitFor();
+      assert.equal(connections, 0);
+    } finally {
+      page.off("request", recordOrigin);
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      remote.stop(true);
+    }
+  }
   await privateGitHub.getByRole("button", { name: "Remove GitHub credential", exact: true }).click();
   await privateGitHub.getByText("GitHub credential removed.", { exact: true }).waitFor();
   assert.equal(await privateGitHub.getByRole("button", { name: "Remove GitHub credential", exact: true }).isVisible(), false);

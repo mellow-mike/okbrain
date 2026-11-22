@@ -6,10 +6,12 @@
 // and pulls/pushes when an `origin` remote is configured.
 
 import { execFile } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { lstat, mkdtemp, open, readFile, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { constants, existsSync, realpathSync, type Stats } from "node:fs";
+import { link, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve } from "node:path";
+import { dataDir } from "./config.ts";
 import { listConcepts, readConceptPermissive } from "./okf/bundle.ts";
 import { OkfParseError, parse } from "./okf/document.ts";
 import { regenerateIndexBranches } from "./okf/indexmd.ts";
@@ -179,7 +181,12 @@ function gitDiagnostic(result: GitResult): string {
   return (result.stderr || result.stdout).trim().replace(/[a-z][a-z\d+.-]*:\/\/[^\s'"<>]+/giu, displayRemote);
 }
 
-type SyncSettingsInput = { action: "status" | "identity" | "origin"; name?: string; email?: string; url?: string };
+type BasicSyncSettingsInput = { action: "status" | "identity" | "origin"; name?: string; email?: string; url?: string };
+export type SyncOriginChange = "replace" | "disconnect";
+type SyncOriginChangeInput = { change: SyncOriginChange; url?: string };
+type SyncOriginPreviewInput = SyncOriginChangeInput & { action: "origin-preview" };
+type SyncOriginApplyInput = SyncOriginChangeInput & { action: "origin-apply"; approval?: string };
+type SyncSettingsInput = BasicSyncSettingsInput | SyncOriginPreviewInput | SyncOriginApplyInput;
 
 export interface SyncSettings {
   repository: "new" | "ready" | "unavailable";
@@ -191,6 +198,74 @@ export interface SyncSettings {
   origin: string | null;
   fetch: string | null;
   push: string | null;
+}
+
+type SyncOriginDestinations = Pick<SyncSettings, "origin" | "fetch" | "push">;
+export interface SyncOriginPreview {
+  approval: string;
+  change: SyncOriginChange;
+  current: SyncOriginDestinations;
+  proposed: SyncOriginDestinations | null;
+}
+
+export class SyncOriginChangeError extends SyncError {
+  constructor(message: string, readonly status: 400 | 403 | 409) { super(message); }
+}
+
+const originConfigPattern = "^(remote\\.origin\\.|remote\\.pushdefault$|okbrain\\.syncremote$|branch\\..*\\.(remote|merge|pushremote)$|includeif\\.hasconfig:remote\\.\\*\\.url:)";
+const staleOriginApproval = () => new SyncOriginChangeError("Git settings changed. Preview the origin change again.", 409);
+
+function privateSyncState(info: Stats) {
+  return process.platform === "win32" || (info.uid === process.getuid?.() && (info.mode & 0o077) === 0);
+}
+
+async function originApprovalKey(root: string, create: boolean): Promise<Buffer> {
+  if (brainEnclosesGitHubSyncStore(root))
+    throw new SyncOriginChangeError("Git approval data must stay outside the selected brain.", 409);
+  const directory = join(dataDir(), "sync-credentials");
+  const path = join(directory, "origin-approval.key");
+  const unavailable = () => new SyncOriginChangeError("Unable to open the private Git origin approval key.", 409);
+  const read = async () => {
+    if (!(await lstat(path)).isFile()) throw unavailable();
+    const flags = process.platform === "win32" ? constants.O_RDONLY
+      : constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+    const file = await open(path, flags);
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.size !== 32 || !privateSyncState(info)) throw unavailable();
+      const key = await file.readFile();
+      if (key.length !== 32) throw unavailable();
+      return key;
+    } finally { await file.close(); }
+  };
+  try {
+    if (create) await mkdir(directory, { recursive: true, mode: 0o700 });
+    const info = await lstat(directory);
+    if (!info.isDirectory() || !privateSyncState(info)) throw unavailable();
+    try { return await read(); }
+    catch (error) { if (!create || !absent(error)) throw error; }
+    const scratch = await mkdtemp(join(directory, ".origin-approval-"));
+    try {
+      const key = randomBytes(32);
+      const source = join(scratch, "key");
+      await writeFile(source, key, { flag: "wx", mode: 0o600 });
+      try { await link(source, path); }
+      catch (error) {
+        // Another CLI process may already have created the key.
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+    } finally { await rm(scratch, { recursive: true, force: true }); }
+    return await read();
+  } catch (error) {
+    if (!create && absent(error)) throw staleOriginApproval();
+    throw unavailable();
+  }
+}
+
+function authorizeSyncSettings(canWrite?: () => boolean) {
+  try { if (!canWrite || canWrite()) return; }
+  catch { /* A selected mount can disappear while Git checks the settings. */ }
+  throw new SyncOriginChangeError("Open Git settings in a writable brain to update the repository.", 403);
 }
 
 function absent(error: unknown): boolean {
@@ -330,8 +405,12 @@ async function initializeRepository(root: string): Promise<void> {
   await git(root, ["symbolic-ref", "HEAD", "refs/heads/main"]);
 }
 
-/** Update both fields with Git's parser under the normal external Git config lock. */
-async function saveRepositoryConfig(root: string, entries: readonly [string, string][], verify?: () => Promise<void>): Promise<void> {
+/** Update config with Git's parser under the normal external Git config lock. */
+async function saveRepositoryConfig(
+  root: string,
+  update: (file: string, original: Buffer) => Promise<void>,
+  beforePublish?: () => Promise<void>,
+): Promise<void> {
   const config = join(root, ".git", "config");
   const info = await lstat(config);
   if (!info.isFile() || info.nlink !== 1) throw new SyncError("This brain does not have a writable standalone Git configuration.");
@@ -342,15 +421,15 @@ async function saveRepositoryConfig(root: string, entries: readonly [string, str
   let scratch: string | undefined;
   let installed = false;
   try {
-    await verify?.();
     scratch = await mkdtemp(join(root, ".git", "okbrain-config-"));
     const edited = join(scratch, "config");
-    await writeFile(edited, await readFile(config), { mode: 0o600 });
-    for (const [name, value] of entries)
-      await git(root, ["config", "--file", edited, "--replace-all", "--", name, value]);
+    const original = await readFile(config);
+    await writeFile(edited, original, { mode: 0o600 });
+    await update(edited, original);
     await lock.writeFile(await readFile(edited));
     await lock.sync();
     await lock.close();
+    await beforePublish?.();
     await rename(lockPath, config);
     installed = true;
   } finally {
@@ -360,9 +439,161 @@ async function saveRepositoryConfig(root: string, entries: readonly [string, str
   }
 }
 
+async function readOriginConfig(root: string, file?: string): Promise<Map<string, string[]>> {
+  const args = file ? ["--file", file, "--no-includes"] : ["--includes"];
+  const result = await runGit(root, ["config", ...args, "--null", "--get-regexp", originConfigPattern]);
+  if (result.code !== 0 && result.code !== 1)
+    throw new SyncOriginChangeError("Unable to inspect the repository's Git settings.", 409);
+  const config = new Map<string, string[]>();
+  for (const record of result.stdout.split("\0").slice(0, -1)) {
+    const separator = record.indexOf("\n");
+    const name = separator < 0 ? record : record.slice(0, separator);
+    const value = separator < 0 ? "" : record.slice(separator + 1);
+    const entries = config.get(name) ?? [];
+    entries.push(value);
+    config.set(name, entries);
+  }
+  return config;
+}
+
+function sameValues(left: string[], right: string[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function originDisplay(values: string[]) {
+  if (!values.length) return null;
+  return values.map((value) => {
+    if (value === "origin") return value; // Git's literal fallback for a remote without a URL.
+    if (/^[a-z][a-z0-9+.-]*::/iu.test(value)) return "Configured Git remote";
+    return /^[a-z][a-z0-9+.-]*:\/\//iu.test(value) || /^(?:[^@\s]+@)?[a-z0-9.-]+:[^:\s]/iu.test(value)
+      ? displayRemote(value) : "Configured Git remote";
+  }).join(", ");
+}
+
+async function inspectOriginChange(root: string, change: SyncOriginChange, url: string | null, createKey: boolean, raw?: Buffer) {
+  const repository = await standaloneRepository(root);
+  if (repository.repository !== "ready")
+    throw new SyncOriginChangeError(repository.reason ?? "Connect a Git origin before changing its settings.", 409);
+  if (await syncRebaseInProgress(root)) throw new SyncOriginChangeError("Finish or abort Sync recovery before changing the Git origin.", 409);
+  const config = join(root, ".git", "config");
+  const [direct, effective, fetch, push, commonDir] = await Promise.all([
+    readOriginConfig(root, config), readOriginConfig(root), originURLs(root), originURLs(root, true),
+    runGit(root, ["rev-parse", "--git-common-dir"]),
+  ]);
+  if (commonDir.code !== 0 || !sameDir(resolve(root, commonDir.stdout.trimEnd()), join(root, ".git")) ||
+      existsSync(join(root, ".git", "remotes", "origin")) || existsSync(join(root, ".git", "branches", "origin"))) {
+    throw new SyncOriginChangeError("This Git origin is outside a standalone repository configuration.", 409);
+  }
+  const assertLocal = (name: string) => {
+    if (!sameValues(direct.get(name) ?? [], effective.get(name) ?? []))
+      throw new SyncOriginChangeError("This origin uses inherited Git settings. Change those settings before replacing or disconnecting it.", 409);
+  };
+  const unset = new Set<string>();
+  const routing = new Set<string>();
+  let hasOrigin = false;
+  for (const [name, values] of effective) {
+    if (name.startsWith("includeif.hasconfig:remote.*.url:")) {
+      // Replacing a URL could activate a previously inactive configuration.
+      throw new SyncOriginChangeError("This repository uses Git settings conditional on a remote URL. Review those settings before changing the origin.", 409);
+    }
+    if (name.startsWith("remote.origin.")) {
+      assertLocal(name);
+      hasOrigin = true;
+    }
+    if (name === "okbrain.syncremote") assertLocal(name);
+    if (!values.includes("origin")) continue;
+    if (name === "remote.pushdefault" || (name.startsWith("branch.") && name.endsWith(".pushremote"))) {
+      assertLocal(name);
+      routing.add(name);
+    }
+    if (name.startsWith("branch.") && name.endsWith(".remote")) {
+      assertLocal(name);
+      const merge = name.slice(0, -".remote".length) + ".merge";
+      if (values.some((value) => value !== "origin"))
+        throw new SyncOriginChangeError("A branch has conflicting Git upstream settings. Resolve them before changing the origin.", 409);
+      assertLocal(merge);
+      unset.add(name);
+      if (direct.has(merge)) unset.add(merge);
+    }
+  }
+  if (direct.has("okbrain.syncremote")) unset.add("okbrain.syncremote");
+  const configured = direct.get("remote.origin.url") ?? [];
+  if (!hasOrigin) throw new SyncOriginChangeError("Connect a Git origin before changing its settings.", 409);
+  const fetchConfigured = configured.length ? configured : ["origin"];
+  const pushConfigured = direct.get("remote.origin.pushurl") ?? fetchConfigured;
+  if ([...fetchConfigured, ...pushConfigured].some((value) => !value.trim() || value !== value.trim() || /[\x00-\x1f\x7f]/u.test(value)) ||
+      !sameValues(fetchConfigured, fetch) || !sameValues(pushConfigured, push)) {
+    throw new SyncOriginChangeError(changedOriginError().message, 409);
+  }
+  if (url) {
+    try { await verifyProposedOrigin(root, url); }
+    catch { throw new SyncOriginChangeError(changedOriginError().message, 409); }
+  }
+  const approval = createHmac("sha256", await originApprovalKey(root, createKey))
+    .update(JSON.stringify([root, change, url, configured, fetch, push, [...unset].sort(), [...routing].sort()]))
+    .update(raw ?? await readFile(config)).digest("hex");
+  const preview: SyncOriginPreview = {
+    approval, change, current: { origin: originDisplay(configured), fetch: originDisplay(fetch), push: originDisplay(push) },
+    proposed: url ? { origin: url, fetch: url, push: url } : null,
+  };
+  return { preview, unset, routing };
+}
+
+async function changeOrigin(root: string, input: SyncOriginPreviewInput | SyncOriginApplyInput, canWrite?: () => boolean) {
+  const { change } = input;
+  if (change !== "replace" && change !== "disconnect") throw new SyncOriginChangeError("Choose whether to replace or disconnect the Git origin.", 400);
+  if (change === "disconnect" && input.url !== undefined) throw new SyncOriginChangeError("Disconnecting does not take a Git URL.", 400);
+  let url: string | null = null;
+  if (change === "replace") {
+    try { url = originForSetup(input.url); }
+    catch (error) { throw new SyncOriginChangeError((error as Error).message, 400); }
+  }
+  if (input.action === "origin-preview") {
+    try { return (await inspectOriginChange(root, change, url, true)).preview; }
+    catch (error) {
+      if (error instanceof SyncOriginChangeError) throw error;
+      throw new SyncOriginChangeError("Unable to inspect the repository's Git origin settings.", 409);
+    }
+  }
+  const approval = input.approval;
+  if (typeof approval !== "string" || approval.length !== 64 || !/^[a-f0-9]+$/u.test(approval)) throw staleOriginApproval();
+  const verify = async (raw?: Buffer) => {
+    const snapshot = await inspectOriginChange(root, change, url, false, raw);
+    if (!timingSafeEqual(Buffer.from(snapshot.preview.approval, "hex"), Buffer.from(approval, "hex"))) throw staleOriginApproval();
+    return snapshot;
+  };
+  authorizeSyncSettings(canWrite);
+  try {
+    await saveRepositoryConfig(root, async (file, original) => {
+      const { unset, routing } = await verify(original);
+      const edit = async (...args: string[]) => {
+        const result = await runGit(root, ["config", "--file", file, ...args]);
+        if (result.code !== 0) throw new SyncOriginChangeError("Unable to edit the repository's Git origin settings.", 409);
+      };
+      await edit("--remove-section", "remote.origin");
+      for (const name of unset) await edit("--unset-all", "--", name);
+      for (const name of routing) await edit("--unset-all", "--", name, "^origin$");
+      if (url) for (const [name, value] of managedOriginConfig(url)) await edit("--replace-all", "--", name, value);
+    }, async () => {
+      await verify();
+      authorizeSyncSettings(canWrite);
+    });
+    return await readSyncSettings(root);
+  } catch (error) {
+    if (error instanceof SyncOriginChangeError) throw error;
+    const lockUnavailable = error instanceof SyncError && error.message.startsWith("Git configuration cannot be locked.");
+    throw new SyncOriginChangeError(lockUnavailable ? error.message : "Unable to update the repository's Git origin settings.", 409);
+  }
+}
+
 /** Inspect or save local Git settings. This operation never contacts a remote. */
-export async function syncSettings(root: string, input: SyncSettingsInput): Promise<SyncSettings> {
+export function syncSettings(root: string, input: SyncOriginPreviewInput, canWrite?: () => boolean): Promise<SyncOriginPreview>;
+export function syncSettings(root: string, input: BasicSyncSettingsInput | SyncOriginApplyInput, canWrite?: () => boolean): Promise<SyncSettings>;
+export function syncSettings(root: string, input: SyncSettingsInput, canWrite?: () => boolean): Promise<SyncSettings | SyncOriginPreview>;
+export async function syncSettings(root: string, input: SyncSettingsInput, canWrite?: () => boolean): Promise<SyncSettings | SyncOriginPreview> {
   if (input.action === "status") return readSyncSettings(root);
+  if (input.action === "origin-preview" || input.action === "origin-apply")
+    return withSyncRepository(root, (canonical) => changeOrigin(canonical, input, canWrite));
   return withSyncRepository(root, async (canonical) => {
     const current = await readSyncSettings(canonical);
     if (current.repository === "unavailable") throw new SyncError(current.reason!);
@@ -380,15 +611,18 @@ export async function syncSettings(root: string, input: SyncSettingsInput): Prom
     } else {
       throw new SyncError("Choose a Git settings action.");
     }
+    authorizeSyncSettings(canWrite);
     if (current.repository === "new") await initializeRepository(canonical);
     if ((await standaloneRepository(canonical)).repository !== "ready")
       throw new SyncError("This brain does not have a writable standalone Git configuration.");
-    await saveRepositoryConfig(canonical, entries, input.action === "origin" ? async () => {
-      const registered = await readSyncSettings(canonical);
-      if (registered.originConfigured) throw new SyncError("This brain already has an origin. Change an existing remote with Git.");
-      const url = entries[0]![1];
-      await verifyProposedOrigin(canonical, url);
-    } : undefined);
+    await saveRepositoryConfig(canonical, async (file) => {
+      if (input.action === "origin") {
+        const registered = await readSyncSettings(canonical);
+        if (registered.originConfigured) throw new SyncError("This brain already has an origin. Change an existing remote with Git.");
+        await verifyProposedOrigin(canonical, entries[0]![1]);
+      }
+      for (const [name, value] of entries) await git(canonical, ["config", "--file", file, "--replace-all", "--", name, value]);
+    }, async () => authorizeSyncSettings(canWrite));
     return readSyncSettings(canonical);
   });
 }

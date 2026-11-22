@@ -395,15 +395,22 @@ rejects on any warning class — doctor is the only strict surface.
   ahead/behind without side effects. Git is spawned by argv only, with
   `GIT_TERMINAL_PROMPT=0`. Git uses the user's credential helper.
 - The owner’s Git sync panel manages the standalone brain repository’s
-  identity and can connect a new HTTPS origin. Configuration is local and
-  separate from sending commits. The owner can inspect each active rebase
-  conflict and stage a reviewed resolution against its current Git state.
+  identity and can connect, replace, or disconnect an HTTPS origin. Replacing
+  or disconnecting requires previewing the effective fetch and push destinations.
+  The approval binds the exact change to its brain and current Git configuration.
+  Its signing key stays in private per-user data. Publish the configuration
+  atomically under the Git config lock after rechecking mount policy.
+  Clear the old origin’s upstream and push bindings while retaining local files,
+  commits, and refs. Configuration is local and separate from sending commits.
+  The owner can inspect each active rebase conflict and stage a reviewed
+  resolution against its current Git state.
   Explicit continue or abort leaves publication to the next sync. Completed
   sync and rebase operations reconcile the existing keyword and graph cache.
 - An optional GitHub credential is stored in per-user app data for an exact
   brain and app-managed origin. Direct local sync passes it to the Git fetch
   and push subprocesses with HTTPS verification and redirects disabled.
-  The browser reads only its saved status and repository binding.
+  The browser reads only its saved status and repository binding. An origin
+  change leaves the old token inactive and available for separate removal.
 - The owner can restore a shared GitHub branch as a new local brain folder.
   The app fetches into a fresh repository, validates the tracked tree and
   bundle, sets its upstream, and registers the checkout. Local indexing runs

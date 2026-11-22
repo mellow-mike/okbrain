@@ -2718,6 +2718,14 @@ function mountGitSync(panel, seq) {
   var identity = panel.querySelector('[data-sync-identity]');
   var origin = panel.querySelector('[data-sync-origin]');
   var destinations = panel.querySelector('[data-sync-destinations]');
+  var originManage = destinations.querySelector('[data-sync-origin-manage]');
+  var originChange = originManage.querySelector('form');
+  var previewChange = originChange.querySelector('[type="submit"]');
+  var previewDisconnect = originManage.querySelector('[data-preview-origin-disconnect]');
+  var originPreview = originManage.querySelector('[data-sync-origin-preview]');
+  var originConfirm = originPreview.querySelector('[data-confirm-origin-change]');
+  var originCancel = originPreview.querySelector('[data-cancel-origin-change]');
+  var originFeedback = originManage.querySelector('[data-origin-feedback]');
   var github = panel.querySelector('[data-sync-github]');
   var credential = github.querySelector('form');
   var saveCredential = credential.querySelector('[type="submit"]');
@@ -2730,6 +2738,7 @@ function mountGitSync(panel, seq) {
   var feedback = panel.querySelector('[data-sync-feedback]');
   var recovery = panel.querySelector('[data-sync-recovery]');
   var settings, rebase, credentialRepository, focusAfter, busy = false;
+  var approvedOrigin, originRevision = 0;
 
   function active() { return panel.isConnected && !stale(seq) && brain === BRAIN; }
   function notice(message, error) {
@@ -2739,6 +2748,9 @@ function mountGitSync(panel, seq) {
   function updateButtons() {
     identity.querySelector('button').disabled = busy;
     origin.querySelector('button').disabled = busy;
+    previewChange.disabled = previewDisconnect.disabled = busy || !rebase || rebase.inProgress || !settings?.originConfigured;
+    originConfirm.disabled = previewChange.disabled || !approvedOrigin;
+    originCancel.disabled = busy;
     saveCredential.disabled = removeCredential.disabled = busy;
     refreshButton.disabled = busy;
     runButton.disabled = busy || !settings?.identityReady || settings.repository === 'unavailable' || !rebase || rebase.inProgress;
@@ -2776,7 +2788,125 @@ function mountGitSync(panel, seq) {
     destinations.hidden = !next.originConfigured;
     destinations.querySelector('[data-sync-fetch]').textContent = next.fetch || 'Configured in Git';
     destinations.querySelector('[data-sync-push]').textContent = next.push || 'Configured in Git';
+    clearOriginPreview();
   }
+
+  function originNotice(message, error) {
+    originFeedback.className = error ? 'error' : message ? 'notice' : '';
+    originFeedback.textContent = message;
+    originFeedback.hidden = !message;
+  }
+  function clearOriginPreview() {
+    ++originRevision;
+    approvedOrigin = undefined;
+    originPreview.hidden = true;
+    originConfirm.disabled = true;
+  }
+  function showOriginDestination(key, destination) {
+    var section = originPreview.querySelector('[data-origin-destination="' + key + '"]');
+    section.hidden = !destination;
+    ['origin', 'fetch', 'push'].forEach(function (field) {
+      section.querySelector('[data-origin-url="' + field + '"]').textContent = destination?.[field] || 'Not configured';
+    });
+  }
+  function reviewOrigin(change) {
+    if (previewChange.disabled || !active() || !originManage.open) return;
+    var target = change === 'replace' ? originChange.elements.url.value.trim() : undefined;
+    clearOriginPreview();
+    var revision = originRevision;
+    notice('');
+    void perform(undefined, async function () {
+      originNotice('Reading Git destinations…');
+      try {
+        var next = await api('sync_settings', { action: 'origin-preview', change: change, url: target });
+        if (!active() || !originManage.open || revision !== originRevision) return;
+        if (next?.change !== change || typeof next.approval !== 'string' || !next.approval || !next.current ||
+            (change === 'replace' ? !next.proposed : next.proposed !== null)) throw new Error('Could not verify the Git origin. Preview the change again.');
+        approvedOrigin = { action: 'origin-apply', change: change, url: target, approval: next.approval };
+        showOriginDestination('current', next.current);
+        showOriginDestination('proposed', next.proposed);
+        originPreview.querySelector('[data-origin-effect]').textContent =
+          (change === 'replace' ? 'Git will use the new fetch and push destinations. ' : 'Git will remove origin so future syncs can commit locally. ') +
+          'This clears upstream tracking and local push bindings to the current origin. Local files, commits, and branches stay available. ' +
+          'The change only updates local Git settings.';
+        originConfirm.textContent = change === 'replace' ? 'Replace origin' : 'Disconnect origin';
+        originConfirm.classList.toggle('danger', change === 'disconnect');
+        originPreview.hidden = false;
+        originNotice('');
+        focusAfter = originPreview.querySelector('h4');
+      } catch (error) {
+        if (active() && originManage.open && revision === originRevision) {
+          originNotice(error.message, true);
+          focusAfter = change === 'replace' ? previewChange : previewDisconnect;
+        }
+      }
+    });
+  }
+  originManage.addEventListener('toggle', function () {
+    if (!originManage.open) { clearOriginPreview(); originNotice(''); }
+  });
+  originChange.elements.url.addEventListener('input', function () { clearOriginPreview(); originNotice(''); });
+  originChange.addEventListener('submit', function (event) {
+    event.preventDefault();
+    reviewOrigin('replace');
+  });
+  previewDisconnect.addEventListener('click', function () { reviewOrigin('disconnect'); });
+  originCancel.addEventListener('click', function () {
+    if (!approvedOrigin) return;
+    var trigger = approvedOrigin.change === 'replace' ? previewChange : previewDisconnect;
+    clearOriginPreview();
+    originNotice('');
+    trigger.focus();
+  });
+  originConfirm.addEventListener('click', function () {
+    if (originConfirm.disabled || !approvedOrigin || !originManage.open || !active()) return;
+    var input = approvedOrigin;
+    if (input.change === 'replace' && input.url !== originChange.elements.url.value.trim()) {
+      clearOriginPreview();
+      originNotice('Preview the current URL before replacing origin.', true);
+      return;
+    }
+    clearOriginPreview();
+    void perform(undefined, async function () {
+      var replace = input.change === 'replace';
+      originNotice(replace ? 'Replacing origin…' : 'Disconnecting origin…');
+      var next;
+      try {
+        next = await api('sync_settings', input);
+      } catch (error) {
+        if (!active()) return;
+        await refresh().catch(function () {});
+        if (!active()) return;
+        if (!destinations.hidden && originManage.open) {
+          originNotice(error.message, true);
+          focusAfter = replace ? previewChange : previewDisconnect;
+        } else {
+          originNotice('');
+          notice(error.message, true);
+          focusAfter = refreshButton;
+        }
+        return;
+      }
+      if (!active()) return;
+      originChange.reset();
+      showSettings(next);
+      credential.reset();
+      credential.parentElement.hidden = true;
+      credentialFeedback.textContent = '';
+      github.querySelector('[data-sync-github-status]').textContent = '';
+      var outcome = replace ? 'Origin replaced. Use Sync now when you are ready to connect.' : 'Origin disconnected. Future syncs will commit locally.';
+      originNotice('');
+      if (replace && originManage.open) originNotice(outcome);
+      else notice(outcome);
+      var credentialReady = await refreshCredential();
+      if (!active()) return;
+      if (!credentialReady) {
+        github.hidden = false;
+        github.open = true;
+      }
+      focusAfter = replace ? originManage.querySelector('summary') : refreshButton;
+    });
+  });
 
   async function githubCredential(input) {
     var response = await fetch('/api/brains/sync-github', {
@@ -2799,8 +2929,14 @@ function mountGitSync(panel, seq) {
     removeCredential.parentElement.hidden = !next.hasToken;
   }
   async function refreshCredential() {
-    try { showCredential(await githubCredential({ action: 'status' })); }
-    catch (error) { if (active()) credentialFeedback.textContent = error.message; }
+    try {
+      showCredential(await githubCredential({ action: 'status' }));
+      if (active()) credentialFeedback.textContent = '';
+      return true;
+    } catch (error) {
+      if (active()) credentialFeedback.textContent = error.message;
+      return false;
+    }
   }
   function changeCredential(input) {
     void perform(undefined, async function () {
@@ -3275,8 +3411,23 @@ async function renderSettings(_arg, seq) {
       '<label class="field"><span>Origin HTTPS URL</span><input type="url" name="url" maxlength="2048" autocomplete="off" required></label>' +
       '<p class="muted">Choose an empty HTTPS repository. Connecting saves its URL.</p>' +
       '<div class="row"><button>Connect origin</button></div></form></div></div></details>' +
-      '<div data-sync-destinations hidden><dl class="kv"><dt>Fetch from</dt><dd><code data-sync-fetch></code></dd>' +
-      '<dt>Push to</dt><dd><code data-sync-push></code></dd></dl></div>' +
+      '<div data-sync-destinations hidden><div class="stack"><dl class="kv"><dt>Fetch from</dt><dd><code data-sync-fetch></code></dd>' +
+      '<dt>Push to</dt><dd><code data-sync-push></code></dd></dl>' +
+      '<details data-sync-origin-manage><summary>Manage origin</summary><div class="stack brain-mount-body">' +
+      '<form class="stack"><label class="field"><span>New origin HTTPS URL</span>' +
+      '<input type="url" name="url" maxlength="2048" autocomplete="off" required></label>' +
+      '<div class="row"><button type="submit">Preview origin change</button></div></form>' +
+      '<div class="row"><button type="button" data-preview-origin-disconnect>Preview disconnection</button></div>' +
+      '<div data-sync-origin-preview hidden><div class="card stack"><h4 tabindex="-1">Review origin change</h4>' +
+      ['current', 'proposed'].map(function (key) {
+        return '<div data-origin-destination="' + key + '"><h5>' +
+          (key === 'current' ? 'Current destination' : 'New destination') + '</h5><dl class="kv">' +
+          '<dt>Configured origin</dt><dd><code data-origin-url="origin"></code></dd>' +
+          '<dt>Fetch from</dt><dd><code data-origin-url="fetch"></code></dd>' +
+          '<dt>Push to</dt><dd><code data-origin-url="push"></code></dd></dl></div>';
+      }).join('') + '<p data-origin-effect></p><div class="row"><button type="button" data-confirm-origin-change disabled></button></div>' +
+      '<div class="row"><button type="button" data-cancel-origin-change>Cancel origin change</button></div></div></div>' +
+      '<p data-origin-feedback role="status" hidden></p></div></details></div></div>' +
       '<details data-sync-github hidden><summary>GitHub credentials</summary><div class="stack">' +
       '<p class="muted" data-sync-github-status></p><div hidden>' +
       '<p>For a private repository, use a fine-grained token for <code data-sync-github-repo></code> with Contents read and write access.</p>' +

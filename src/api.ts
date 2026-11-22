@@ -28,7 +28,7 @@ import { localBundleWatchBackend, openLocalContext, type LocalContext } from "./
 import { BundleWatcher } from "./core/engine/bundle-watch.ts";
 import { EngineError } from "./core/engine/sqlite.ts";
 import { MaintenanceScheduleError, MaintenanceScheduler, maintenanceJobNames, type MaintenanceJobName, type MaintenanceSchedulerOptions, type MaintenanceTarget } from "./core/jobs/schedule.ts";
-import { SyncError, syncGitHubCredential } from "./core/sync.ts";
+import { SyncError, SyncOriginChangeError, syncGitHubCredential } from "./core/sync.ts";
 import { MAX_CONVERSATION_EXPORT_BYTES } from "./core/ingest/conversations.ts";
 import { createNotionSource, NotionSourceError, type NotionSource, type NotionSourceOptions } from "./core/ingest/notion-source.ts";
 import { isOfflineSourceKind, MAX_OFFLINE_FILE_BYTES, MAX_SOURCE_FILES, MAX_SOURCE_ROWS, MAX_SOURCE_UPLOAD_BYTES } from "./core/ingest/personal-sources.ts";
@@ -208,11 +208,13 @@ const errStatus = (e: unknown): number =>
     ? OP_STATUS[e.code]
     : e instanceof ConfigError
       ? 400
-      : e instanceof EngineError || e instanceof SyncError
-        ? 409
-        : e instanceof AiError
-          ? 502
-          : 500;
+      : e instanceof SyncOriginChangeError
+        ? e.status
+        : e instanceof EngineError || e instanceof SyncError
+          ? 409
+          : e instanceof AiError
+            ? 502
+            : 500;
 
 const errBody = (e: unknown): { error: string; code?: string } =>
   e instanceof UnknownBrainError
@@ -618,9 +620,11 @@ async function runJsonOp(
   raw: Record<string, unknown>,
   cors: Hdrs = {},
   allowSavedSyncCredential = false,
+  canWriteSyncSettings?: () => boolean,
 ): Promise<Response> {
   const local = open(scope);
   local.ctx.allowSavedSyncCredential = allowSavedSyncCredential;
+  local.ctx.canWriteSyncSettings = canWriteSyncSettings;
   try {
     return json(200, { result: await runOp(op, local.ctx, raw) }, cors);
   } catch (e) {
@@ -1158,8 +1162,24 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     }
     const allowSavedSyncCredential = op.name === "sync" && tokenMatches(req.headers.get("x-okb-token"), opts.token)
       && (!req.headers.has("origin") || cors !== undefined);
+    let canWriteSyncSettings: (() => boolean) | undefined;
+    if (op.name === "sync_settings" && (raw as Record<string, unknown>).action !== "status") {
+      const selected = scope;
+      let canonical: string | undefined;
+      try { canonical = realpathSync.native(selected.bundle); } catch { /* The mount must be available to write. */ }
+      canWriteSyncSettings = () => {
+        let writable = false;
+        try {
+          const current = scopeOf(req, url, opts);
+          writable = !!canonical && !current.readonly && current.bundle === selected.bundle &&
+            maintenancePathMatches(current.bundle, canonical);
+        } catch { /* The original selection is no longer available. */ }
+        return writable;
+      };
+    }
     return runJsonOp(op, scope, raw as Record<string, unknown>,
-      ownerFileAction || allowSavedSyncCredential ? { ...cors, "cache-control": "no-store" } : cors, allowSavedSyncCredential);
+      ownerFileAction || allowSavedSyncCredential ? { ...cors, "cache-control": "no-store" } : cors,
+      allowSavedSyncCredential, canWriteSyncSettings);
   }
 
   return json(404, { error: "not found" }, cors);

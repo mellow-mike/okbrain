@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApiServer, type ApiServer } from "../src/api.ts";
+import type { SyncOriginPreview } from "../src/core/sync.ts";
 import { mcpOps } from "../src/mcp/server.ts";
 
 const ownerToken = "sync-fixture-owner-0123456789";
@@ -23,7 +24,9 @@ test("Git setup and recovery require the local owner and a writable brain", asyn
     const credentials = { "content-type": "application/json", "x-okb-token": ownerToken };
     const settings = { action: "identity", name: "Browser Owner", email: "owner@example.test" };
     const recovery = { action: "abort", confirm: true };
-    const actions = [["sync_settings", settings], ["sync_recovery", recovery]] as const;
+    const actions = [["sync_settings", settings], ["sync_recovery", recovery],
+      ["sync_settings", { action: "origin-preview", change: "disconnect" }],
+      ["sync_settings", { action: "origin-apply", change: "disconnect", approval: "invalid-approval" }]] as const;
     for (const [op, body] of actions) {
       expect((await request(writable, op, body, { "content-type": "application/json", authorization: `Bearer ${ownerToken}` })).status)
         .toBe(401);
@@ -56,6 +59,38 @@ test("Git setup and recovery require the local owner and a writable brain", asyn
     const configured = await origin.json();
     expect(configured).toMatchObject({ result: { originConfigured: true, origin: url, fetch: url, push: url } });
     expect(origin.status).toBe(200);
+
+    const newUrl = "https://other.example.test/team/brain.git";
+    const replace = { change: "replace", url: newUrl };
+    const preview = await request(writable, "sync_settings", { action: "origin-preview", ...replace });
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("cache-control")).toBe("no-store");
+    const { result: replacement } = await preview.json() as { result: SyncOriginPreview };
+    expect(typeof replacement.approval).toBe("string");
+    expect(replacement).toMatchObject({
+      change: "replace", current: { origin: url, fetch: url, push: url },
+      proposed: { origin: newUrl, fetch: newUrl, push: newUrl },
+    });
+    const apply = { action: "origin-apply", ...replace, approval: replacement.approval };
+    expect((await request(writable, "sync_settings", { ...apply, approval: undefined })).status).toBe(400);
+    expect((await request(writable, "sync_settings", { ...apply, url: `${newUrl}/different` })).status).toBe(409);
+    const original = await request(writable, "sync_settings", { action: "status" });
+    expect(await original.json()).toMatchObject({ result: { origin: url } });
+    const replaced = await request(writable, "sync_settings", apply);
+    expect(replaced.status).toBe(200);
+    expect(await replaced.json()).toMatchObject({ result: { originConfigured: true, origin: newUrl, fetch: newUrl, push: newUrl } });
+
+    const disconnect = { change: "disconnect" };
+    const disconnectPreview = await request(writable, "sync_settings", { action: "origin-preview", ...disconnect });
+    expect(disconnectPreview.status).toBe(200);
+    const { result: disconnection } = await disconnectPreview.json() as { result: SyncOriginPreview };
+    expect(disconnection).toMatchObject({ change: "disconnect", current: { origin: newUrl }, proposed: null });
+    const disconnected = await request(writable, "sync_settings", { action: "origin-apply", ...disconnect, approval: disconnection.approval });
+    expect(disconnected.status).toBe(200);
+    expect(await disconnected.json()).toMatchObject({ result: { originConfigured: false, origin: null } });
+    const local = await request(writable, "sync", {});
+    expect(local.status).toBe(200);
+    expect(await local.json()).toMatchObject({ result: { pushed: false, remote: null } });
 
     const current = await request(writable, "sync_recovery", { action: "status" });
     expect(current.status).toBe(200);
@@ -115,9 +150,18 @@ test("the local GitHub credential route scopes a fake token to the brain and hid
     const git = Bun.spawnSync(["git", "-C", bundle, "config", "--local", "remote.origin.pushurl", "https://github.com/other/other.git"]);
     expect(git.exitCode).toBe(0);
     expect(await (await github(writable, status)).json()).toMatchObject({ result: { repository: null, savedFor: repository, hasToken: true } });
+    const replace = { change: "replace", url: "https://github.com/fixture-owner/other-brain.git" };
+    const preview = await request(writable, "sync_settings", { action: "origin-preview", ...replace });
+    expect(preview.status).toBe(200);
+    const { result: { approval } } = await preview.json() as { result: SyncOriginPreview };
+    const replaced = await request(writable, "sync_settings", { action: "origin-apply", ...replace, approval });
+    expect(replaced.status).toBe(200);
+    expect(await (await github(writable, status)).json()).toMatchObject({ result: {
+      repository: "fixture-owner/other-brain", savedFor: repository, hasToken: true,
+    } });
     const removed = await github(writable, { action: "remove" });
     expect(removed.status).toBe(200);
-    expect(await removed.json()).toMatchObject({ result: { repository: null, savedFor: null, hasToken: false } });
+    expect(await removed.json()).toMatchObject({ result: { repository: "fixture-owner/other-brain", savedFor: null, hasToken: false } });
   } finally {
     await Promise.all([writable.stop(), readonly.stop(), otherBrain.stop()]);
     await rm(root, { recursive: true, force: true });

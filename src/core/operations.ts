@@ -113,6 +113,8 @@ export interface OpContext {
   localUsage?: boolean;
   /** Direct local owner requests may use the brain’s saved GitHub credential. */
   allowSavedSyncCredential?: boolean;
+  /** Recheck the selected mount's write policy while publishing Git settings. */
+  canWriteSyncSettings?: () => boolean;
   /** Read-only brain mount (Stage 5): write/admin ops are refused. */
   readonly?: boolean;
   /**
@@ -1937,17 +1939,34 @@ export const operations: readonly Operation[] = [
     summary: "Inspect or configure the current brain’s Git repository",
     scope: "admin",
     params: [
-      { name: "action", type: "string", required: true, positional: true, description: "status, identity, or origin" },
+      { name: "action", type: "string", required: true, positional: true,
+        description: "status, identity, origin, origin-preview, or origin-apply" },
       { name: "name", type: "string", description: "repository commit name" },
       { name: "email", type: "string", description: "repository commit email" },
       { name: "url", type: "string", description: "credential-free HTTPS origin URL" },
+      { name: "change", type: "string", description: "replace or disconnect the current origin" },
+      { name: "approval", type: "string", description: "approval from the current origin preview" },
     ],
     handler: (ctx, p) => {
-      const action = p.action;
+      const { action, change, approval } = p;
+      const url = p.url as string | undefined;
+      if (action === "origin-preview" || action === "origin-apply") {
+        if (change !== "replace" && change !== "disconnect")
+          throw new OpError("Choose whether to replace or disconnect the current origin.", "bad_params");
+        if ((change === "replace" && !url) || (change === "disconnect" && url !== undefined) ||
+          (action === "origin-apply" && !approval) || (action === "origin-preview" && approval !== undefined) ||
+          p.name !== undefined || p.email !== undefined)
+          throw new OpError("Send the replacement URL when replacing and the current preview approval when applying.", "bad_params");
+        return action === "origin-preview"
+          ? syncSettings(ctx.bundle, { action, change, url }, ctx.canWriteSyncSettings)
+          : syncSettings(ctx.bundle, { action, change, url, approval: approval as string }, ctx.canWriteSyncSettings);
+      }
       if (action !== "status" && action !== "identity" && action !== "origin")
-        throw new OpError("Choose status, identity, or origin.", "bad_params");
+        throw new OpError("Choose status, identity, origin, origin-preview, or origin-apply.", "bad_params");
+      if (change !== undefined || approval !== undefined)
+        throw new OpError("Origin change and approval are only accepted by origin-preview and origin-apply.", "bad_params");
       return syncSettings(ctx.bundle, { action, name: p.name as string | undefined, email: p.email as string | undefined,
-        url: p.url as string | undefined });
+        url }, ctx.canWriteSyncSettings);
     },
     render: (result) => JSON.stringify(result, null, 2),
   },
