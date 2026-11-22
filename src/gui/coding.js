@@ -63,9 +63,9 @@
   const labelStatus = (run) => statuses[run.review || run.status] || run.status;
   const identity = (run) => ({ session: run.session, requestId: run.id });
   const time = (iso) => new Date(iso).toLocaleString();
-  const report = (node, error) => {
+  const report = (node, error, message = '') => {
     node.className = error ? 'error coding-feedback' : 'coding-feedback';
-    node.textContent = error ? error.message || String(error) : '';
+    node.textContent = error ? error.message || String(error) : message;
   };
 
   function field(label, value, shape = 'text', attributes = '') {
@@ -98,6 +98,53 @@
       : 'Model context budget unavailable';
     return '<div class="muted" data-context-budget><p>Estimated active context · ' + esc(estimated) +
       (context?.historyCompacted === true ? ' · Older turns compacted' : '') + '</p><p>' + esc(budget) + '</p></div>';
+  }
+
+  function mountRunCopies(actions, { answer, runReport, projectId, session, requestId, status, feedback }) {
+    function addButton(label) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      actions.append(button);
+      actions.hidden = false;
+      return button;
+    }
+    if (answer) {
+      const copyResponse = addButton('Copy response');
+      copyResponse.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(answer);
+          if (copyResponse.isConnected) report(feedback, undefined, 'Response copied.');
+        } catch (error) { if (copyResponse.isConnected) report(feedback, error); }
+      });
+    }
+    if (typeof status !== 'string' || status === 'running' || runReport?.version !== 1 ||
+        runReport.runStatus !== status || runReport.projectId !== projectId ||
+        runReport.session !== session || runReport.request?.requestId !== requestId) return;
+    const copyReport = addButton('Copy run report');
+    actions.insertAdjacentHTML('afterend', '<label class="field" data-run-report-fallback hidden><span>Run report JSON</span>' +
+      '<textarea rows="8" readonly spellcheck="false"></textarea></label>');
+    const fallback = actions.nextElementSibling;
+    const jsonField = fallback.querySelector('textarea');
+    const json = JSON.stringify(runReport, null, 2);
+    let attempt = 0;
+    copyReport.addEventListener('click', async () => {
+      const current = ++attempt;
+      try {
+        await navigator.clipboard.writeText(json);
+        if (!copyReport.isConnected || current !== attempt) return;
+        fallback.hidden = true;
+        jsonField.value = '';
+        report(feedback, undefined, 'Run report copied.');
+      } catch {
+        if (!copyReport.isConnected || current !== attempt) return;
+        jsonField.value = json;
+        fallback.hidden = false;
+        jsonField.focus();
+        jsonField.select();
+        report(feedback, undefined, 'Copy the selected JSON using your browser or system Copy command.');
+      }
+    });
   }
 
   function sessionCounters(usage) {
@@ -918,22 +965,18 @@
         (receipt?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
         taskProgressPanel +
         (row.status === 'running' ? '<div data-live-answer hidden><p class="muted"></p><pre></pre></div>' : '') +
-        (receipt?.text ? '<pre data-answer></pre><div class="row"><button type="button" data-copy>Copy response</button></div>' : '') +
+        (receipt?.text ? '<pre data-answer></pre>' : '') + '<div class="row" data-run-copy-actions hidden></div>' +
         (pi ? sessionUsage(pi) : '') +
         (snippet.length ? '<details><summary>Source references</summary><ul>' + snippet.map((file) =>
           '<li><code>' + esc(file.path + ':' + file.startLine + '–' + file.endLine) + '</code></li>').join('') + '</ul></details>' : '') +
         '<div class="row" data-actions></div></div>';
       showTaskProgress(inspected.querySelector('[data-task-progress]'), progress, row.status === 'running');
       if (row.status === 'running') showLiveAnswer(inspected.querySelector('[data-live-answer]'), result.liveAnswer);
-      if (receipt?.text) {
-        inspected.querySelector('[data-answer]').textContent = receipt.text;
-        inspected.querySelector('[data-copy]').addEventListener('click', async () => {
-          try {
-            await navigator.clipboard.writeText(receipt.text);
-            feedback.textContent = 'Response copied.';
-          } catch (error) { report(feedback, error); }
-        });
-      }
+      if (receipt?.text) inspected.querySelector('[data-answer]').textContent = receipt.text;
+      mountRunCopies(inspected.querySelector('[data-run-copy-actions]'), {
+        answer: receipt?.text, runReport: result.report, projectId: project.id,
+        session: row.session, requestId: row.id, status: row.status, feedback,
+      });
       const bar = inspected.querySelector('[data-actions]');
       for (const child of receipt?.packageReviews ?? []) {
         const sources = (child.sources ?? []).map((file) => file.path + ':' + file.startLine + '–' + file.endLine);
@@ -1559,7 +1602,7 @@
       projectsEl.remove();
       await window.okbCodingStandalone.mount(page, {
         coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, report, sessionUsage, usageText, contextSummary,
-        showTaskProgress, taskProgressPanel, mountContextControls,
+        showTaskProgress, taskProgressPanel, mountContextControls, mountRunCopies,
       });
       return;
     }

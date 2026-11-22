@@ -25,6 +25,10 @@ Anthropic, and Google Gemini use Pi's model catalogs and explicit credentials.
 The app, editor, and CLI report the active context estimate and model limits
 from Pi session status. Run history shows recorded usage for the selected
 request and the full session, including main and child conversation totals.
+For a saved request, the controller supplies a versioned run report with
+identity, status, usage, and relative references from the admitted source.
+The app and editor copy that report to the clipboard on request. Task text,
+response text, source bodies, and credentials are outside the report schema.
 Run inspection projects Pi Durable's live task graph to bounded counts for
 the selected request and its descendants. The control plane forwards those
 counts through the worker pipe and the authenticated inspection route.

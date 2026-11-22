@@ -15,12 +15,14 @@ import type { CodingTaskProgress } from "../src/core/coding/task-progress.ts";
 import type { TeamPreferences, TeamStatus } from "../src/core/coding/team-listener.ts";
 import { loadConfig, saveConfig } from "../src/core/config.ts";
 import type { CodingProjectProfile } from "../src/core/coding/project-profile.ts";
+import type { CodingRunReport } from "../src/core/coding/run-report.ts";
 
 const ownerToken = "local-operator-test";
 type Project = { id: string; workspace: string; credential: string };
 type Presets = { presets: { id: string; name: string; prompt: string; query: string; profile: CodingProjectProfile }[] };
 type Run = { id: string; status: string; actor: string; admitted: boolean; error: string | null; review: string | null };
-type Inspection = { run: Run; liveAnswer?: CodingLiveAnswer; taskProgress?: CodingTaskProgress; pi?: { request?: { receipt?: { text?: string } } } };
+type Inspection = { run: Run; liveAnswer?: CodingLiveAnswer; taskProgress?: CodingTaskProgress; report?: CodingRunReport;
+  pi?: { request?: { receipt?: { text?: string } } } };
 
 async function fixture(prefix: string) {
   const root = await mkdtemp(join(tmpdir(), prefix));
@@ -80,6 +82,7 @@ test("local coding opens existing standalone Pi receipts and admits app requests
     identity?: Pick<typeof identity, "session" | "workspace" | "provider" | "model">;
     requests: { requestId: string; status: string }[];
     pi?: CodingSessionStatusResult;
+    report?: CodingRunReport;
     active?: { status: string; cancelled?: boolean; error?: string };
   };
   try {
@@ -97,6 +100,7 @@ test("local coding opens existing standalone Pi receipts and admits app requests
     const project = await call<Project>("/projects", { workspace, title: "Separate team space", provider: "openai", model: "standalone-test" });
     const member = await call<{ token: string }>("/projects/" + project.id + "/members", { name: "reviewer" });
     expect((await request("/standalone", undefined, member.token)).status).toBe(403);
+    expect((await request("/standalone/inspect", { session: identity.session, requestId: "cli-original" }, member.token)).status).toBe(403);
     const erase = { session: identity.session, confirm: identity.session };
     expect((await request("/standalone/delete-session", erase, member.token)).status).toBe(403);
     expect((await apiClient(readonly.url).request("/standalone/delete-session", erase)).status).toBe(403);
@@ -105,6 +109,15 @@ test("local coding opens existing standalone Pi receipts and admits app requests
     const first = await call<View>("/standalone/inspect", { session: identity.session, requestId: "cli-original" });
     expect(first.requests).toEqual([expect.objectContaining({ requestId: "cli-original", status: "done" })]);
     expect(first.pi?.request?.receipt).toMatchObject({ text: "Existing standalone answer." });
+    expect(first.report).toMatchObject({ version: 1, session: identity.session, provider: identity.provider, model: identity.model, runStatus: "done",
+      request: { requestId: "cli-original", status: "done", files: [{ path: "src/example.ts" }] }, receipt: { status: "done" } });
+    expect(first.report).not.toHaveProperty("projectId");
+    const readonlyReport = await apiClient(readonly.url).call<View>("/standalone/inspect", { session: identity.session, requestId: "cli-original" });
+    expect(readonlyReport.report).toEqual(first.report);
+    expect((await call<View>("/standalone/inspect", { session: identity.session, requestId: "absent" })).report).toBeUndefined();
+    const standaloneJson = JSON.stringify(first.report);
+    for (const privateValue of [workspace, ownerToken, "Original task.", "Existing standalone answer.", "export const answer = 42;"])
+      expect(standaloneJson).not.toContain(privateValue);
     expect(faux.state.callCount).toBe(1);
 
     const source = { workspace, source: "files", files: ["src/example.ts"] };
@@ -281,6 +294,7 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     const inspect = () => call<Inspection>(path + "/inspect", identity, member.token);
     const failed = await waitFor(inspect, (value) => value.run.status === "failed");
     expect(failed.run).toMatchObject({ status: "failed", admitted: false, error: expect.stringContaining("selected files changed") });
+    expect(failed.report).toBeUndefined();
     expect(await call(path + "/source-inspect", identity, member.token)).toBeNull();
     expect(faux.state.callCount).toBe(0);
 
@@ -304,6 +318,15 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
       },
     });
     expect((await request("/projects/" + other.id + "/inspect", identity, member.token)).status).toBe(403);
+    expect((await request(path + "/inspect", identity, null)).status).toBe(401);
+    expect((await request(path + "/inspect", identity, member.token)).headers.get("cache-control")).toBe("no-store");
+    expect(result.report).toMatchObject({ version: 1, projectId: project.id, session: identity.session, provider: "openai", model: "preview-test",
+      runStatus: "done", request: { requestId: identity.requestId, status: "done", files: [{ path: "src/example.ts" }] },
+      receipt: { status: "done" }, context: { estimatedTokens: expect.any(Number) },
+      usage: { models: { "openai/preview-test": { totalTokens: expect.any(Number) } } } });
+    const reportJson = JSON.stringify(result.report);
+    for (const privateValue of [workspace, ownerToken, member.token, task.prompt, "Keep this change for review.", "export const answer = 43;"])
+      expect(reportJson).not.toContain(privateValue);
     expect(calls[0]).toContain("answer = 43");
     expect(await call<Run>(path + "/run", approved, member.token)).toMatchObject({ status: "done" });
     expect((await request(path + "/run", { ...approved, prompt: "Different task" }, member.token)).status).toBe(409);
@@ -320,6 +343,9 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     expect(faux.state.callCount).toBe(1);
     expect(await call<Run>(path + "/review", { ...identity, decision: "accepted" }, member.token))
       .toMatchObject({ review: "accepted", reviewer: "human:reviewer" });
+    const accepted = (await inspect()).report;
+    expect(accepted?.review).toBe("accepted");
+    expect(JSON.stringify(accepted)).not.toContain("human:reviewer");
     const audit = await call<{ kind: string }[]>(path + "/audit");
     expect(audit.map((row) => row.kind)).toContain("admitted");
     expect(JSON.stringify(audit)).not.toContain(task.prompt);
@@ -678,6 +704,16 @@ test("source inspection reopens archived profile and package inputs from a read-
     expect(await readonly.call<SavedCodingRequestInput>(path + "/source-inspect", packageRequest, member.token)).toEqual({
       prompt: "Review both packages.", groups: packagePreview.packages.map(({ project, excerpts }) => ({ label: project, files: savedFiles(excerpts) })),
     });
+    const indexed = (await readonly.call<Inspection>(path + "/inspect", repositoryRequest)).report;
+    expect(indexed?.request.repositoryContext).toMatchObject({ id: repositoryPreview.manifest.id,
+      files: repositoryPreview.excerpts.map(({ path, startLine, endLine }) => ({ path, startLine, endLine, sha256: expect.any(String) })) });
+    expect(indexed?.request.repositoryContext).not.toHaveProperty("query");
+    const independent = (await readonly.call<Inspection>(path + "/inspect", packageRequest, member.token)).report;
+    expect(independent?.receipt).toMatchObject({ status: "done", packageReviews: packagePreview.packages.map(({ project, excerpts }) => ({
+      project, status: "done", sources: excerpts.map(({ path, startLine, endLine }) => ({ path, startLine, endLine })),
+    })) });
+    for (const privateValue of [guidance, workspace, "Review the profile.", "Review both packages.", "Profile review", "First package", "Second package", "export const answer = 42;", "private text\n"])
+      expect(JSON.stringify({ indexed, independent })).not.toContain(privateValue);
     expect(await readonly.call<unknown[]>(path + "/audit")).toEqual(beforeAudit);
     expect(faux.state.callCount).toBe(3);
   } finally {

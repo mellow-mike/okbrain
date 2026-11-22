@@ -193,6 +193,8 @@ okb code status --workspace ./my-project --session auth-review --request-id auth
 
 `code status` reads the same session data without calling a provider. With a request ID it also reports that request's state, saved source manifest, and any recorded response usage.
 
+In the Mac or web app, open a saved request in **Run history** and choose **Copy run report**. The same action appears in VS Code and Cursor run inspection, including for project members. It copies versioned JSON with run and review status, session and request IDs, model, active context estimates, recorded usage, and relative source references. Repository manifests include their saved line ranges and content hashes. Task text, answers, and source contents stay in their separate inspection controls. If the browser cannot write to the clipboard, copy the selected text from **Run report JSON**.
+
 Pi receives an opaque session ID so providers can reuse a stable prefix across follow-ups. Provider support, cache lifetime, and history compaction affect the observed counts.
 
 The local input cap is 32,768 estimated tokens, reduced for smaller model windows after reserving room for output and estimation error. Output is capped at up to 8,192 tokens depending on the model. As a session grows, Pi Durable compacts older turns into a bounded local recap with task and answer excerpts and source references. The recap costs no separate provider call, and the original entries stay in SQLite. Reattach source when an old line or decision is important to a follow-up.

@@ -10,6 +10,7 @@ import {
 } from "./durable.ts";
 import { validateCodingProjectProfile } from "./project-profile.ts";
 import { selectRepositoryContext, type RepositoryContextOptions } from "./repository-context.ts";
+import { codingRunReport } from "./run-report.ts";
 import type { CodingTaskProgress } from "./task-progress.ts";
 
 type Input = Record<string, unknown>;
@@ -233,10 +234,12 @@ export class StandaloneCodingControl {
     const refused = relevant?.status === "failed" && !relevant.admitted;
     try {
       const { identity, requests } = await listStandaloneCodingRequests(session, this.dependencies);
-      const selected = requestId && requests.some((request) => request.requestId === requestId) ? requestId : undefined;
-      const pi = await inspectStandaloneCodingSession(session, selected, this.dependencies);
+      const selected = requests.find((request) => request.requestId === requestId);
+      const pi = await inspectStandaloneCodingSession(session, selected?.requestId, this.dependencies);
+      const report = selected && codingRunReport(pi, { requestId: selected.requestId,
+        status: relevant?.cancelled ? "cancelled" : relevant?.status ?? selected.status });
       const hasCurrentRequest = relevant && requests.some((request) => request.requestId === relevant.requestId);
-      return { identity, requests, pi, ...(refused || hasCurrentRequest ? { active: relevant } : {}) };
+      return { identity, requests, pi, report, ...(refused || hasCurrentRequest ? { active: relevant } : {}) };
     } catch (error) {
       if (error instanceof CodingSessionDeletingError) {
         if (this.#runs.get(session)?.view === active) this.#runs.delete(session);

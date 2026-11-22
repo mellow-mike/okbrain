@@ -96,6 +96,7 @@ export type CodingSessionStatusOptions = CodingSessionIdentity & {
   includeReceipt?: boolean;
   includeEvaluationInput?: boolean;
   includeSavedSource?: boolean;
+  includeSourcePaths?: boolean;
 };
 
 export type CodingContextResetPreview = { version: string; handoff?: string };
@@ -126,6 +127,7 @@ export interface CodingSessionStatusResult {
     reason?: string;
     receipt?: CodingSessionResult;
     evaluationInput?: EvaluationInput;
+    sourcePaths?: string[];
     savedPrompt?: string;
     savedSource?: SavedCodingSource;
     taskProgress?: CodingTaskProgress;
@@ -1231,7 +1233,7 @@ export async function getCodingSessionStatus(
         : undefined;
       const reason = unansweredReason(submission);
       const content = await savedUserContent(storage, submission) ??
-        (options.includeSavedSource ? await queuedUserContent(harness, submission) : undefined);
+        (options.includeSavedSource || options.includeSourcePaths ? await queuedUserContent(harness, submission) : undefined);
       const lookup = approvedSourceLookupEnabled(content);
       const repositoryContext = savedManifest(content);
       const saved = !options.includeEvaluationInput || content === undefined ? undefined : evaluationInput(content);
@@ -1242,6 +1244,8 @@ export async function getCodingSessionStatus(
         usage: await requestUsage(storage, submission, answer.usage, lookup),
         stopReason: answer.stopReason,
       } : {};
+      const input = options.includeSavedSource || (options.includeSourcePaths && !repositoryContext) ? savedSource(content) : undefined;
+      const files = input?.savedSource?.source === "files" ? input.savedSource.files : undefined;
       result.request = {
         requestId: options.requestId,
         status: submission.status,
@@ -1251,7 +1255,8 @@ export async function getCodingSessionStatus(
         ...(reason ? { reason } : {}),
         ...(saved ? { evaluationInput: saved } : {}),
         ...(receipt ? { receipt } : {}),
-        ...(options.includeSavedSource ? savedSource(content) : {}),
+        ...(options.includeSavedSource ? input : {}),
+        ...(options.includeSourcePaths && files ? { sourcePaths: files.map(({ path }) => path) } : {}),
         ...(progress ? { taskProgress: progress } : {}),
       };
     }

@@ -72,6 +72,17 @@ if (mode === 'untrusted') {
   } while (Date.now() < deadline);
   assert.equal(inspected.run.status, 'done');
   assert.equal(inspected.pi.request.receipt.text, 'The team fixture found evidence on line 1.');
+  assert.equal(inspected.report.version, 1);
+  assert.equal(inspected.report.projectId, project);
+  assert.equal(inspected.report.session, identity.session);
+  assert.equal(inspected.report.request.requestId, identity.requestId);
+  assert.equal(inspected.report.request.repositoryContext.id, preview.manifest.id);
+  assert.deepEqual(inspected.report.request.repositoryContext.files.map(({ path, startLine, endLine }) => ({ path, startLine, endLine })),
+    [{ path: excerpt.path, startLine: excerpt.startLine, endLine: excerpt.endLine }]);
+  const copied = JSON.stringify(inspected.report);
+  for (const privateValue of [token, preset.prompt, preset.profile.guidance, excerpt.content.trimEnd(), inspected.pi.request.receipt.text]) {
+    assert.equal(copied.includes(privateValue), false);
+  }
   assert.equal((await api(path + '/run', { ...request, approved: true })).id, identity.requestId);
   const saved = await api(path + '/source-inspect', identity);
   assert.equal(saved.prompt, preset.prompt);

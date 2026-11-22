@@ -11,7 +11,7 @@
   const statusLabel = (status) => statusLabels[status] || status || 'Saved';
 
   async function mount(parent, { coding, readonly, detached, defaultModels, entries, field, previewContents,
-    report, sessionUsage, usageText, contextSummary, showTaskProgress, taskProgressPanel, mountContextControls }) {
+    report, sessionUsage, usageText, contextSummary, showTaskProgress, taskProgressPanel, mountContextControls, mountRunCopies }) {
     const header = parent.querySelector('header');
     header.innerHTML = '<div class="row coding-project-links"><a href="#coding">Project workspace</a></div>' +
       '<h2 class="display">Standalone sessions</h2><p class="muted">Open sessions from this app or the CLI.</p>';
@@ -258,7 +258,7 @@
       if (requestId) requestsSelect.value = requestId;
     }
 
-    function showInspection({ pi, active, identity, state }, pending) {
+    function showInspection({ pi, active, identity, state, report: runReport }, pending) {
       const request = pi?.request;
       const savedSource = request?.savedSource;
       const savedPrompt = request?.savedPrompt;
@@ -272,7 +272,7 @@
         showTaskProgress(inspectEl.querySelector('[data-task-progress]'), progress, true);
         return;
       }
-      const snapshot = JSON.stringify({ pi, active, identity, state, pending, requestId });
+      const snapshot = JSON.stringify({ pi, active, identity, state, pending, requestId, runReport });
       if (inspected === snapshot) return;
       inspected = snapshot;
       inspectEl.dataset.running = status === 'running' ? runKey : '';
@@ -296,7 +296,7 @@
         (explanation ? '<p class="notice">' + esc(explanation) + '</p>' : '') +
         taskProgressPanel +
         (status === 'running' ? '<div data-live-answer hidden><p class="muted"></p><pre></pre></div>' : '') +
-        (answer ? '<pre data-answer></pre>' : '') +
+        (answer ? '<pre data-answer></pre>' : '') + '<div class="row" data-run-copy-actions hidden></div>' +
         (request?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
         (request?.approvedSourceLookup ? '<p class="muted">Approved source lookup enabled.</p>' : '') +
         (pi ? '<p class="muted">Request usage · ' + esc(usageText(request?.usage)) + '</p>' +
@@ -309,22 +309,13 @@
         '<div class="row" data-run-actions></div></div>';
       showTaskProgress(inspectEl.querySelector('[data-task-progress]'), progress, status === 'running');
       if (answer) inspectEl.querySelector('[data-answer]').textContent = answer;
+      mountRunCopies(inspectEl.querySelector('[data-run-copy-actions]'), {
+        answer, runReport, session: sessionName, requestId, status, feedback: historyFeedback,
+      });
       if (status === 'running') showLiveAnswer(inspectEl.querySelector('[data-live-answer]'), active.liveAnswer);
       if (savedPrompt) inspectEl.querySelector('[data-saved-prompt]').textContent = savedPrompt;
       if (savedSource) previewContents(inspectEl.querySelector('[data-saved-source]'), savedSource);
       const bar = inspectEl.querySelector('[data-run-actions]');
-      if (receipt?.text) {
-        const copy = document.createElement('button');
-        copy.type = 'button';
-        copy.textContent = 'Copy response';
-        copy.addEventListener('click', async () => {
-          try {
-            await navigator.clipboard.writeText(receipt.text);
-            historyFeedback.textContent = 'Response copied.';
-          } catch (error) { report(historyFeedback, error); }
-        });
-        bar.append(copy);
-      }
       if (readonly) return;
       if (status === 'running' || pending) addRunAction(bar, 'Cancel request', 'cancel');
       if (pending && status !== 'running') {

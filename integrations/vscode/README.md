@@ -23,6 +23,8 @@ Open a trusted local workspace and start the okbrain macOS app or the local web 
 5. For a saved request, choose **View saved request source** to open a read-only editor with the original task and the exact files or excerpts supplied to Pi.
 6. On an accepted result, choose **Review proposed patch in okbrain** to open that request in the patch review form. Preview the diff in okbrain and confirm it before applying.
 
+Choose **Copy run report** on a saved request to copy JSON with the run status, model, context limits, usage, and relative source references. The task, response, and source contents stay in their existing inspection views. Project members can copy the report for runs they can inspect.
+
 With the registered project folder open, choose **okbrain: Preview Saved Request Preset** from the Command Palette. Select a preset and session, then choose whether Pi can look up lines within the selected excerpts. Review the saved task and the fresh repository excerpts before choosing **Send Request**. Create or edit presets in the okbrain Coding workspace.
 
 Choose **Start fresh context** from a finished run’s actions to leave earlier turns out of future requests in that session. Enter a single-line note under **Optional handoff for the next request** to keep a decision or next step, or press Enter to leave it blank. Review the session and exact note, then confirm **Start Fresh Context**. The note accompanies the next request to the session’s provider. Saved runs, sources, review decisions, and usage remain available.

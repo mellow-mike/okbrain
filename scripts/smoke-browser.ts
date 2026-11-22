@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { chromium, type Browser, type Page } from "playwright";
 import { createApiServer } from "../src/api.ts";
 import { runCodingSession } from "../src/core/coding/durable.ts";
+import type { CodingRunReport } from "../src/core/coding/run-report.ts";
 import { loadConfig } from "../src/core/config.ts";
 import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/core/engine/cache-settings.ts";
 import { parse } from "../src/core/okf/document.ts";
@@ -915,6 +916,22 @@ try {
     assert.equal(await page.locator(".coding-result").getByText(/^Request usage ·/).isVisible(), true);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
   }
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin });
+  async function copyRunReport(view: Page, session: string, requestId: string, privateText: string[]) {
+    await view.getByRole("button", { name: "Copy run report", exact: true }).click();
+    await view.getByText("Run report copied.", { exact: true }).waitFor();
+    const json = await view.evaluate(() => navigator.clipboard.readText());
+    for (const value of [...privateText, server.token, workspace, "standalone-browser-fixture-only"]) {
+      assert.ok(!json.includes(JSON.stringify(value).slice(1, -1)), "Run report included private input or credentials.");
+    }
+    const report = JSON.parse(json) as CodingRunReport;
+    assert.equal(report.version, 1);
+    assert.equal(report.session, session);
+    assert.equal(report.request.requestId, requestId);
+    assert.equal(report.provider, "openai");
+    assert.equal(await view.evaluate(() => document.documentElement.scrollWidth), 375);
+    return { report, json };
+  }
   const standaloneBudget = waitForBudgetInspection("/standalone", "cli-complete");
   await page.getByRole("link", { name: "Standalone sessions", exact: true }).click();
   await page.getByRole("heading", { name: "Standalone sessions", exact: true }).waitFor();
@@ -922,6 +939,33 @@ try {
   const savedContext = (await (await standaloneBudget).json()).result.pi.context;
   await verifyContextBudget(savedContext.estimatedTokens,
     "Input limit 32,768 tokens · Output reserve 8,192 tokens · Model window 128,000 tokens");
+  const standaloneReport = await copyRunReport(page, "existing-cli", "cli-complete", ["Saved CLI task.", "Saved CLI answer.", snapshot.trim()]);
+  assert.equal(standaloneReport.report.projectId, undefined);
+  assert.equal(standaloneReport.report.model, "browser-coding-fixture");
+  assert.equal(standaloneReport.report.runStatus, "done");
+  assert.equal(standaloneReport.report.receipt?.status, "done");
+  assert.equal(standaloneReport.report.context.estimatedTokens, savedContext.estimatedTokens);
+  assert.ok((standaloneReport.report.usage.models["openai/browser-coding-fixture"]?.input ?? 0) > 0);
+  assert.deepEqual(standaloneReport.report.request.files, [{ path: "browser.ts" }]);
+  await page.getByRole("button", { name: "Copy response", exact: true }).click();
+  await page.getByText("Response copied.", { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "Saved CLI answer.");
+  await page.evaluate(() => Object.defineProperty(navigator.clipboard, "writeText", {
+    configurable: true, value: () => Promise.reject(new Error("Clipboard denied")),
+  }));
+  try {
+    await page.getByRole("button", { name: "Copy run report", exact: true }).click();
+    await page.getByText("Copy the selected JSON using your browser or system Copy command.", { exact: true }).waitFor();
+    const fallback = page.getByRole("textbox", { name: "Run report JSON", exact: true });
+    await fallback.waitFor();
+    assert.equal(await fallback.inputValue(), standaloneReport.json);
+    assert.deepEqual(await fallback.evaluate((element: HTMLTextAreaElement) => [
+      element.readOnly, element === document.activeElement, element.selectionStart, element.selectionEnd,
+    ]), [true, true, 0, standaloneReport.json.length]);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  } finally {
+    await page.evaluate(() => Reflect.deleteProperty(navigator.clipboard, "writeText"));
+  }
   await page.route("**/api/coding/standalone/inspect", async (route) => {
     const response = await route.fetch();
     const payload = await response.json();
@@ -1091,6 +1135,9 @@ try {
   assert.equal(await startFresh.isVisible(), false);
   await page.getByRole("heading", { name: "Saved Pi task state", exact: true }).waitFor();
   await page.getByText("Model response · 1 pending", { exact: true }).waitFor();
+  const interruptedReport = await copyRunReport(page, "existing-cli", "cli-interrupted", ["Resume this saved task.", snapshot.trim()]);
+  assert.equal(interruptedReport.report.request.status, "placed");
+  assert.equal(interruptedReport.report.receipt, undefined);
   await page.getByText("Saved task and source", { exact: true }).click();
   await page.getByText("Resume this saved task.", { exact: true }).waitFor();
   await page.getByText("browser.ts", { exact: true }).click();
@@ -1142,6 +1189,7 @@ try {
   await sendStandalone.click();
   await page.getByRole("heading", { name: "Current Pi tasks", exact: true }).waitFor();
   await page.getByText("Model response · 1 running", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Copy run report", exact: true }).count(), 0);
   const deleteStandalone = page.locator("[data-delete-session]");
   await deleteStandalone.getByText("Delete standalone session", { exact: true }).click();
   assert.equal(await deleteStandalone.getByLabel("Type the session name to confirm", { exact: true }).isEnabled(), false);
@@ -1151,6 +1199,14 @@ try {
   assert.equal(await page.getByRole("combobox", { name: "Saved session" }).inputValue(), "from-browser");
   assert.equal(standaloneFaux.state.callCount, 3);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  const repositoryReport = await copyRunReport(page, "from-browser", await page.getByRole("combobox", { name: "Saved request" }).inputValue(),
+    ["Review only the approved browser source.", "Reviewed browser source.", newFile.trim(), "sourceMarker"]);
+  const manifest = repositoryReport.report.request.repositoryContext;
+  assert.ok(manifest);
+  assert.match(manifest.id, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(manifest.files.map(({ path, startLine, endLine }) =>
+    ({ path, startLine, endLine })), [{ path: "browser.ts", startLine: 1, endLine: 1 }]);
+  assert.match(manifest.files[0]?.sha256 ?? "", /^[a-f0-9]{64}$/u);
   await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
   await page.getByRole("combobox", { name: "Saved session" }).selectOption("existing-cli");
   await page.getByRole("combobox", { name: "Saved request" }).selectOption("cli-complete");
@@ -1334,6 +1390,56 @@ try {
   await acceptResult.click();
   assert.equal((await accepted).ok(), true);
   await reviewPatch.waitFor();
+  const reportCalls = projectFaux.state.callCount;
+  const projectPrivateText = [projectPrompt, "Project response ready for review.", branchBefore.trim()];
+  const projectReport = await copyRunReport(page, "project-browser", "project-task-progress", projectPrivateText);
+  assert.equal(projectReport.report.projectId, project.id);
+  assert.equal(projectReport.report.model, "browser-project-fixture");
+  assert.equal(projectReport.report.runStatus, "done");
+  assert.equal(projectReport.report.review, "accepted");
+  assert.equal(projectReport.report.context.limitTokens, 32_768);
+  assert.deepEqual(projectReport.report.request.files, [{ path: "browser.ts" }]);
+  assert.ok((projectReport.report.rootUsage.models["openai/browser-project-fixture"]?.output ?? 0) > 0);
+  assert.deepEqual(sourceRequests, []);
+  assert.equal(projectFaux.state.callCount, reportCalls);
+  await page.route("**/api/coding" + projectPath + "/inspect", async (route) => {
+    const response = await route.fetch();
+    const payload = await response.json();
+    payload.result.report.runStatus = "cancelled";
+    await route.fulfill({ response, json: payload });
+  }, { times: 1 });
+  const refreshProjectRuns = page.locator(".coding-activity").getByRole("button", { name: "Refresh", exact: true });
+  const copyProjectReport = page.getByRole("button", { name: "Copy run report", exact: true });
+  await refreshProjectRuns.click();
+  await copyProjectReport.waitFor({ state: "hidden" });
+  await projectResponse.waitFor();
+  await refreshProjectRuns.click();
+  await copyProjectReport.waitFor();
+  const reportMember = await codingFixture<{ token: string }>(projectPath + "/members", { name: "report-reviewer" });
+  const reportTeam = await codingFixture<{ url: string }>("/team", { action: "start", port: 0 });
+  const teamReportPage = await browser.newPage({ viewport: { width: 375, height: 700 }, reducedMotion: "reduce", locale: "en-US" });
+  try {
+    const reportOrigin = new URL(reportTeam.url).origin;
+    await teamReportPage.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: reportOrigin });
+    teamReportPage.setDefaultTimeout(8000);
+    teamReportPage.on("pageerror", (error) => errors.push(error.message));
+    await teamReportPage.route("**/*", async (route) => {
+      if (new URL(route.request().url()).origin === reportOrigin) await route.continue();
+      else {
+        outbound.push(route.request().url());
+        await route.abort();
+      }
+    });
+    await teamReportPage.goto(reportTeam.url);
+    await teamReportPage.getByLabel("Project token", { exact: true }).fill(reportMember.token);
+    await teamReportPage.getByRole("button", { name: "Open project", exact: true }).click();
+    await teamReportPage.getByRole("button", { name: /project-task-progress/ }).click();
+    const copiedByMember = await copyRunReport(teamReportPage, "project-browser", "project-task-progress", [...projectPrivateText, reportMember.token]);
+    assert.deepEqual(copiedByMember.report, projectReport.report);
+  } finally {
+    await teamReportPage.close();
+    await codingFixture("/team", { action: "stop" });
+  }
   assert.deepEqual(proposalRequests, []);
   assert.equal(await Bun.file(file).text(), branchBefore);
   const callsBeforeProjectCompaction = projectFaux.state.callCount;

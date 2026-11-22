@@ -126,6 +126,86 @@ test('editor inspection shows the context budget and opens approved source only 
   assert.equal(provideSource(lastDocument.uri), '');
 });
 
+test('editor copies only the approved report for the currently inspected saved run', async () => {
+  const project = { id: 'fixture', title: 'Project fixture' };
+  const run = { session: 'main', id: 'saved-request', status: 'done', admitted: true };
+  const savedReport = { version: 1, projectId: project.id, session: run.session, runStatus: run.status,
+    request: { requestId: run.id, status: 'done' } };
+  const editor = { document: { uri: { scheme: 'untitled' } } };
+  const label = 'Copy run report';
+  const commands = new Map();
+  const calls = [], copied = [], notices = [];
+  let candidate = savedReport, mode = 'dismiss', availableActions, editorChanged;
+  let inspectedRun = run;
+  const vscode = {
+    commands: { registerCommand: (name, run) => commands.set(name, run) },
+    env: { clipboard: { async writeText(text) { copied.push(text); } } },
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider() {},
+      async openTextDocument(document) { return document; },
+    },
+    window: {
+      activeTextEditor: editor,
+      onDidChangeActiveTextEditor(listener) { editorChanged = listener; },
+      async showTextDocument() {},
+      async showQuickPick(items, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return items[0];
+        availableActions = Array.from(items, (item) => item.label);
+        if (mode === 'dismiss') return undefined;
+        if (mode === 'away') {
+          this.activeTextEditor = undefined;
+          editorChanged(undefined);
+          this.activeTextEditor = editor;
+          editorChanged(editor);
+        }
+        return items.find((item) => item.label === label);
+      },
+      async showInformationMessage(message) { notices.push(message); },
+      async showErrorMessage(message) { throw new Error(message); },
+    },
+  };
+  activateExtension(vscode, { projects: [project], async api(path, data) {
+    calls.push({ path, data });
+    if (path === '/projects/fixture/runs') return [run];
+    assert.equal(path, '/projects/fixture/inspect');
+    assert.equal(data.session, run.session);
+    assert.equal(data.requestId, run.id);
+    return { run: inspectedRun, report: candidate, pi: { request: { receipt: { text: 'Response kept out of the clipboard.' } } } };
+  } });
+  const inspect = commands.get('okbrain.runs');
+
+  await inspect();
+  assert.ok(availableActions.includes(label));
+  assert.deepEqual(copied, []);
+  mode = 'copy';
+  for (candidate of [undefined, { ...savedReport, version: 2 }, { ...savedReport, projectId: 'other' },
+    { ...savedReport, session: 'other' }, { ...savedReport, request: { requestId: 'other' } },
+    { ...savedReport, runStatus: 'failed' }]) {
+    await inspect();
+    assert.ok(!availableActions.includes(label));
+  }
+  for (inspectedRun of [{ ...run, id: 'mismatched-run' }, { ...run, admitted: false }, { ...run, status: 'running' }]) {
+    candidate = { ...savedReport, runStatus: inspectedRun.status };
+    await inspect();
+    assert.ok(!availableActions.includes(label));
+  }
+  candidate = savedReport;
+  inspectedRun = run;
+  mode = 'away';
+  await inspect();
+  assert.deepEqual(copied, []);
+  assert.deepEqual(notices, []);
+
+  calls.length = 0;
+  mode = 'copy';
+  await inspect();
+  assert.deepEqual(calls.map(({ path }) => path), ['/projects/fixture/runs', '/projects/fixture/inspect']);
+  assert.deepEqual(copied, [JSON.stringify(savedReport, null, 2)]);
+  assert.deepEqual(notices, ['Run report copied.']);
+});
+
 test('editor sends the accepted request to patch review without calling another API', async () => {
   const project = { id: 'e2bb15ce-a12d-4630-8d72-bbbdbb986ba8', title: 'Project fixture' };
   const runs = [
@@ -336,6 +416,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   const connections = [];
   const opened = [];
   const errors = [];
+  const copied = [];
   let changed;
   const secrets = {
     onDidChange(listener) { changed = listener; },
@@ -353,10 +434,12 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   let availableActions;
   const cloned = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
   const invoke = (command) => commands.get(`okbrain.${command}`)();
+  const savedTeamReport = { version: 1, projectId, session: done.session, runStatus: done.status, request: { requestId: done.id } };
   const vscode = {
     Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }), parse: (value) => new URL(value) },
     commands: { registerCommand: (name, run) => commands.set(name, run) },
-    env: { openExternal: async (url) => { opened.push(url.href); return true; } },
+    env: { openExternal: async (url) => { opened.push(url.href); return true; },
+      clipboard: { async writeText(text) { copied.push(text); } } },
     ProgressLocation: { Notification: 1 },
     workspace: {
       isTrusted: true,
@@ -395,7 +478,9 @@ test('team commands bind SecretStorage to one project and gate server-side previ
         if (options.placeHolder === 'Choose a request to inspect') return items.find(({ label }) => label === selectedRun.id);
         assert.equal(options.placeHolder, 'Choose a run action');
         availableActions = Array.from(items, ({ label }) => label);
-        return items.find(({ label }) => label === nextRunAction);
+        const action = items.find(({ label }) => label === nextRunAction);
+        if (mode === 'disconnect-copy') await invoke('disconnectTeam');
+        return action;
       },
       async showInformationMessage(message, ...actions) {
         assert.ok(!message.includes(credential));
@@ -439,7 +524,8 @@ test('team commands bind SecretStorage to one project and gate server-side previ
         return { id: data.requestId, status: 'running' };
       }
       if (action === 'runs') return [done, interrupted, active];
-      if (action === 'inspect') return { run: selectedRun, pi: { pendingRequestIds: [], request: { receipt: { text: 'Shared result.' } } } };
+      if (action === 'inspect') return { run: selectedRun, ...(selectedRun === done ? { report: savedTeamReport } : {}),
+        pi: { pendingRequestIds: [], request: { receipt: { text: 'Shared result.' } } } };
       if (action === 'source-inspect') return { prompt: 'Saved shared task.', groups: [{ files: [{ path: 'core/sample.ts', text: '<literal source>' }] }] };
       if (action === 'cancel' || action === 'resume') return selectedRun;
       assert.equal(action, 'review');
@@ -511,6 +597,16 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
   assert.match(lastDocument.text, /Saved shared task/);
   assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect', 'source-inspect']);
+  nextRunAction = 'Copy run report';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect']);
+  assert.deepEqual(copied, [JSON.stringify(savedTeamReport, null, 2)]);
+  mode = 'disconnect-copy';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect']);
+  assert.equal(copied.length, 1);
+  mode = 'connect';
+  await invoke('connectTeam');
   nextRunAction = 'Request changes';
   await invoke('teamRuns');
   assert.deepEqual(calls.pop(), ['review', { session: done.session, requestId: done.id, decision: 'changes_requested' }]);

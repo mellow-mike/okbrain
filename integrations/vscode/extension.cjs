@@ -439,7 +439,7 @@ async function inspectRun(connection, project, selected) {
   const folders = () => JSON.stringify(localWorkspaceFolders().map(({ uri }) => uri.fsPath));
   const startingFolders = folders();
   const identity = { session: selected.session, requestId: selected.id };
-  const { run, pi, admissionMissing, liveAnswer, taskProgress } = await connection.api(pathFor(project, 'inspect'), identity);
+  const { run, pi, admissionMissing, liveAnswer, taskProgress, report } = await connection.api(pathFor(project, 'inspect'), identity);
   if (!isCurrent()) return;
   const receipt = pi?.request?.receipt;
   const progress = taskProgressLines(taskProgress ?? pi?.request?.taskProgress, run.status === 'running');
@@ -464,13 +464,20 @@ async function inspectRun(connection, project, selected) {
   if (!isCurrent()) return;
   const inspectedEditor = editorRevision;
   const startingEditor = vscode.window.activeTextEditor;
-  const idle = run.admitted && run.status !== 'running' && run.status !== 'interrupted' && pi?.pendingRequestIds?.length === 0;
-  const canChangeContext = () => !team && idle && isCurrent() && trustedEditor() && inspectedWorkspace === workspaceRevision &&
+  const sameInspection = () => isCurrent() && trustedEditor() && inspectedWorkspace === workspaceRevision &&
     startingFolders === folders() && inspectedEditor === editorRevision && startingEditor === vscode.window.activeTextEditor;
+  const idle = run.admitted && run.status !== 'running' && run.status !== 'interrupted' && pi?.pendingRequestIds?.length === 0;
+  const canChangeContext = () => !team && idle && sameInspection();
   const compactionPending = pi?.context?.compactionPending === true;
+  const canCopyReport = !admissionMissing && run.status !== 'running' &&
+    (run.admitted === true || pi?.request?.requestId === identity.requestId) &&
+    run.session === identity.session && run.id === identity.requestId &&
+    report?.version === 1 && report.projectId === project.id && report.session === identity.session &&
+    report.request?.requestId === identity.requestId && report.runStatus === run.status;
   const choices = [{ label: 'Refresh', action: 'refresh' }, { label: 'Open in okbrain', action: 'open' }];
   if (run.status !== 'running' && (run.admitted || pi?.request || (run.status === 'interrupted' && !admissionMissing)))
     choices.push({ label: 'View saved request source', action: 'source-inspect' });
+  if (canCopyReport && sameInspection()) choices.push({ label: 'Copy run report', action: 'copy-report' });
   if (run.status === 'running' || run.status === 'interrupted') choices.push({ label: 'Cancel request', action: 'cancel' });
   if (run.status === 'interrupted') choices.push({ label: 'Resume from saved context', action: 'resume' });
   if (run.status === 'done') choices.push(
@@ -489,6 +496,12 @@ async function inspectRun(connection, project, selected) {
   if (action.action === 'patch' || action.action === 'github') return openWeb(connection, project, run, action.action);
   if (action.action === 'refresh') return inspectRun(connection, project, run);
   if (action.action === 'source-inspect') return showSavedRequestSource(connection, project, identity, isCurrent);
+  if (action.action === 'copy-report') {
+    if (!canCopyReport || !sameInspection()) return;
+    await vscode.env.clipboard.writeText(JSON.stringify(report, null, 2));
+    if (sameInspection()) await vscode.window.showInformationMessage('Run report copied.');
+    return;
+  }
   if (action.action === 'reset-context') return resetOwnerContext(connection, project, run.session, () => !compactionPending && canChangeContext());
   if (action.action === 'compact-context') return compactOwnerContext(connection, project, run.session, canChangeContext);
   if (action.action === 'resume') {

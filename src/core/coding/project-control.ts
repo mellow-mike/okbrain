@@ -18,6 +18,7 @@ import {
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions,
 } from "./durable.ts";
 import { CodingEvaluationError, CodingEvaluations, parseEvaluation, presentEvidence } from "./evaluation.ts";
+import { codingRunReport } from "./run-report.ts";
 import { dockerWorkerConfig, type DockerWorkerConfig } from "./docker-worker.ts";
 import { PackageReviewError, previewPackageReviews, validatePackageReviews } from "./package-review.ts";
 import { codingPatchProposals } from "./patch-proposals.ts";
@@ -711,15 +712,17 @@ export class CodingProjectControl {
     }
     try {
       const pi = await getCodingSessionStatus(
-        { ...this.#session(project, run), includeReceipt: true },
+        { ...this.#session(project, run), includeReceipt: true, includeSourcePaths: true },
         this.#dependencies(project, actor),
       );
+      let inspected = value;
       if (row.status === "interrupted" && pi.request?.receipt) {
         this.#auditAdmitted(project.id, run, actor);
         this.#setRun(project.id, run, actor, pi.request.receipt.status);
-        return { run: this.#runView(this.#readRun(project.id, run.session, run.requestId)), pi };
+        inspected = this.#runView(this.#readRun(project.id, run.session, run.requestId));
       }
-      return { run: value, pi };
+      const report = codingRunReport(pi, { requestId: run.requestId, status: inspected.status, projectId: project.id, review: inspected.review });
+      return { run: inspected, pi, report };
     } catch (error) {
       if (row.status === "interrupted" && !row.admitted && error instanceof CodingError && error.message.startsWith("No "))
         return { run: value, admissionMissing: true };
