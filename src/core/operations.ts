@@ -76,6 +76,9 @@ import { isPrivateConcept, isPrivateConceptAt, PrivacyPathError } from "./okf/pr
 import { brainStarterCatalog, createBrainStarter, findBrainStarter } from "./okf/starter.ts";
 import { upgradeBundle, type UpgradeResult } from "./okf/upgrade.ts";
 import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
+import {
+  attestComputation, computationRuntime, ComputationError, compute, configureComputation, previewComputation, verifyComputation,
+} from "./okf/computation.ts";
 import { TOOL_ACTOR } from "./version.ts";
 import { askBrain, publicHits, type AskResult } from "./retrieval/ask.ts";
 import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./retrieval/embed.ts";
@@ -607,6 +610,31 @@ async function writing<T>(fn: () => Promise<T>): Promise<T> {
     throw e;
   }
 }
+
+async function localComputation<T>(action: () => Promise<T>): Promise<T> {
+  try { return await writing(action); }
+  catch (error) {
+    if (error instanceof ComputationError) throw new OpError(error.message, error.code);
+    throw error;
+  }
+}
+
+async function computationWrite<T extends { id: string }>(ctx: OpContext, action: () => Promise<T>): Promise<T> {
+  const result = await localComputation(action);
+  // The portable receipt is committed. Refresh local metadata without an embedding request.
+  try {
+    await withIndexWrite(ctx.bundle, async () => {
+      if (ctx.hasIndex()) await updateIndexFor(ctx.bundle, result.id, ctx.engine());
+    });
+  } catch { log.warn("The computation was saved, but the local index needs to be rebuilt."); }
+  return result;
+}
+
+const computationId: ParamSpec = { name: "id", type: "string", required: true, positional: true, description: "Attested Computation concept ID" };
+const computationParameters: ParamSpec = { name: "parameters", type: "string", description: "typed parameter values as JSON" };
+const computationReceipt: ParamSpec = { name: "receipt", type: "string", required: true, stdinFallback: true, description: "computation receipt as JSON" };
+const computationApproval: ParamSpec = { name: "approval", type: "string", required: true, description: "digest from the reviewed preview or verified receipt" };
+const renderComputation = (value: unknown) => JSON.stringify(value, null, 2);
 
 async function refreshPrivateImportIndex(ctx: OpContext, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
@@ -1282,9 +1310,7 @@ export const operations: readonly Operation[] = [
       const r = await writing(async () => {
         const id =
           (p.id as string | undefined) ?? `${slugify(p.type as string)}s/${slugify(p.title as string)}`;
-        if (existsSync(idToAbsPath(ctx.bundle, id)))
-          throw new OpError(`concept exists: ${id} (update it with \`okb write\`)`, "refused");
-        return writeConcept(ctx.bundle, {
+        const note = await writeConcept(ctx.bundle, {
           id,
           type: p.type as string,
           title: p.title as string,
@@ -1294,7 +1320,9 @@ export const operations: readonly Operation[] = [
           tags: parseTags(p.tags),
           status: p.status as string | undefined,
           actor: ctx.actor(),
-        });
+        }, { createOnly: true });
+        if (!note.created) throw new OpError(`concept exists: ${id} (update it with \`okb write\`)`, "refused");
+        return note;
       });
       await reindex(ctx, [r.id]);
       return r;
@@ -1636,6 +1664,55 @@ export const operations: readonly Operation[] = [
       else if (s.remote === null) parts.push("no remote configured (local-only)");
       return parts.join("; ");
     },
+  },
+  {
+    name: "computation_configure",
+    cliName: "computation configure",
+    summary: "Save a built-in CSV aggregate contract on a computation concept",
+    scope: "admin",
+    params: [computationId, { name: "contract", type: "string", required: true, stdinFallback: true, description: "parameters and executor as JSON" }],
+    handler: (ctx, p) => computationWrite(ctx, () => configureComputation(ctx.bundle, p.id as string, p.contract as string)),
+    render: renderComputation,
+  },
+  {
+    name: "computation_preview",
+    cliName: "computation preview",
+    summary: "Review the exact local CSV source, typed parameters, and computation contract",
+    scope: "admin",
+    params: [computationId, computationParameters],
+    handler: (ctx, p) => localComputation(() => previewComputation(ctx.bundle, p.id as string, (p.parameters as string | undefined) ?? "{}")),
+    render: renderComputation,
+  },
+  {
+    name: "computation_run",
+    cliName: "computation run",
+    summary: "Run an approved local CSV aggregate and return its receipt",
+    scope: "admin",
+    params: [computationId, computationParameters, computationApproval],
+    handler: (ctx, p) => localComputation(() => compute(ctx.bundle, p.id as string, (p.parameters as string | undefined) ?? "{}", p.approval as string)),
+    render: renderComputation,
+  },
+  {
+    name: "computation_verify",
+    cliName: "computation verify",
+    summary: "Recompute an attested result from the original local source and contract",
+    scope: "admin",
+    params: [computationId, computationReceipt],
+    handler: (ctx, p) => localComputation(() => verifyComputation(ctx.bundle, p.id as string, p.receipt as string)),
+    render: renderComputation,
+  },
+  {
+    name: "computation_attest",
+    cliName: "computation attest",
+    summary: `Record a verified ${computationRuntime} computation on its concept`,
+    scope: "admin",
+    params: [computationId, computationReceipt, computationApproval,
+      { name: "confirm", type: "boolean", description: "explicitly publish the independently checked process verification" }],
+    handler: (ctx, p) => {
+      if (p.confirm !== true) throw new OpError("Confirm recording the process verification after reviewing the verified receipt.", "refused");
+      return computationWrite(ctx, () => attestComputation(ctx.bundle, p.id as string, p.receipt as string, p.approval as string));
+    },
+    render: renderComputation,
   },
   {
     name: "review_queue",

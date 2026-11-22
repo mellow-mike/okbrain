@@ -148,6 +148,29 @@ Private notes remain in local search. Git sync keeps them out of staging and rec
 
 Ask, ChatGPT previews, focused maps, embeddings, and both export workflows have an explicit private-note option. Ask and embeddings send private text only when enabled for that request. Web enrichment excludes private notes. Authorized MCP clients can still read local notes within their connected brain.
 
+## Verify a local CSV computation
+
+Add an **Attested Computation** concept and place the source CSV inside the writable brain's folder. On the concept screen, open **Configure CSV computation** and save the contract. This example counts rows where the integer `year` column equals the supplied `year` parameter.
+
+```json
+{
+  "parameters": [{ "name": "year", "type": "integer", "required": true }],
+  "executor": {
+    "source": "data/revenue.csv",
+    "operation": "count",
+    "filters": [{ "column": "year", "parameter": "year" }]
+  }
+}
+```
+
+Use `operation: "sum"` with a `column` for integer sums. Use whole units such as cents when decimals need exact results. The runtime accepts a UTF-8 CSV with a header, up to 256 KiB, 10,000 data rows, 32 columns, and four equality filters. Filter values can be strings, integers, or booleans. Declare a private concept for data under `db_only/`.
+
+Enter the parameter values and choose **Preview computation** to review the exact contract and source text. Approve the selection, then choose **Run approved computation**. The receipt includes the result, parameter values, and hashes of the plan and source. You can copy the receipt for another review.
+
+Choose **Verify receipt** to recompute against the original contract and current CSV. A change to the contract, source bytes, or claimed result requires a new matching receipt. To record a passing verification on the concept, separately approve and choose **Record process verification**. okbrain saves a `process:okbrain-csv-aggregate-v1` event and scoped receipt hashes. The event applies to the hashed inputs and result. **Settings → Doctor** reports syntax and conformance.
+
+The CLI equivalents are `okb computation configure`, `okb computation preview`, `okb computation run`, `okb computation verify`, and `okb computation attest`. Run requires the preview's `--approval` digest. Attest requires the verification digest and `--confirm`. The built-in CSV runtime runs locally from the Mac app, local web app, and CLI. External contracts, including the Acme examples, remain available for reference.
+
 ## Connect an MCP client
 
 Select the brain you want to share and open **Settings → MCP agent access**. Choose **Start MCP HTTP**, open **Connection details**, and copy the loopback URL and Authorization header into a client that supports Streamable HTTP with custom headers. The default is read-only. Enable **Allow trusted clients to write to this brain** before starting if the client should edit a writable brain.

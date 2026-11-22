@@ -50,6 +50,10 @@ declare module "*/focused-map.js" {
   const text: string;
   export default text;
 }
+declare module "*/computation.js" {
+  const text: string;
+  export default text;
+}
 // `with { type: "file" }`: a path — on disk in dev, in the binary once compiled.
 declare module "*.woff2" {
   const path: string;

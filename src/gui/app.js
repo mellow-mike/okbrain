@@ -691,11 +691,16 @@ async function renderConcept(id, seq, was) {
     '<button class="small danger" data-act="delete">Delete</button>' +
     '<span id="c-msg" class="muted"></span></div></div>' +
     '<div id="c-suggest"></div>' +
-    '<div class="concept-body md" id="c-body"></div></div>' +
+    '<div class="concept-body md" id="c-body"></div>' +
+    (isComputation ? '<section id="c-computation"></section>' : '') + '</div>' +
     '<aside class="concept-side"><div class="card">' + meta + '</div>' +
     '<div class="card" id="c-links"></div></aside></div>';
 
   renderBody(document.getElementById('c-body'), c.body, id);
+  if (isComputation) window.okbComputation.mount(document.getElementById('c-computation'), {
+    id: id, frontmatter: fm, readonly: STATUS?.readonly === true, api: api,
+    detached: function () { return stale(seq); }, reload: function () { renderConcept(id, seq, s.trust); },
+  });
   if (was && was !== s.trust) Okb.stamp(view.querySelector('.concept-head .badge.trust-' + s.trust));
 
   document.getElementById('c-actions').addEventListener('click', async function (e) {

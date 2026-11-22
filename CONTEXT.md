@@ -66,7 +66,9 @@ terminal sessions while preserving audit records and refusing expired IDs.
 - **Generated / verified** — OKF v0.2 trust family: `generated: { by, at }`
   records the last content change; `verified: [{ by, at }]` records who
   confirmed the content. Trust tier is derived: unverified →
-  machine-confirmed → human-reviewed.
+  machine-confirmed → human-reviewed. A confirmed local CSV attestation
+  records a process event scoped to the contract, source, and receipt hashes.
+  Doctor reports format conformance without creating trust events.
 - **Sources** — OKF v0.2 provenance: `sources: [{ id, resource, title,
   author, last_modified, usage_count }]`; body claims cite them with `[^id]`
   footnotes. If the owner enables local usage, the note view separately shows
@@ -881,8 +883,8 @@ Views:
 - **Concept** — the reader: title and description (the lead) over the
   rendered body with footnote attribution and routed internal links,
   badges, provenance (`generated`, `verified`, `sources` with credibility
-  signals), Attested Computation contract fields
-  when present, links to / cited by (`graph_neighbors`), and actions:
+  signals), Attested Computation contracts and CSV preview/receipt/attestation
+  controls when applicable, links to / cited by (`graph_neighbors`), and actions:
   Edit, Reviewed ✓ (`review_done`), Mark read, Suggest links (accept =
   `link_accept`), Graph, Deprecate/Restore (`write_concept --status`),
   Delete (`delete_concept`, confirm-gated).
@@ -1723,10 +1725,13 @@ sections above as current truth; this log says *why/when*.
 - Concept `type` vocabulary: ship a small non-binding default set (Note, Person,
   Project, Reference, Idea, Meeting…) vs fully free-form? (okbrain writes
   lowercase types; upstream samples use Title Case — both are conformant.)
-- `index.md` style: okbrain generates `##` sections with bundle-absolute
-  links under a preserved human head; the reference agent emits H1 sections
-  with relative links. Both are conformant (§8 fixes neither); offer the
-  upstream style as an option if interop with its tooling ever needs it.
-- Attested Computations (§10): okbrain reads and displays the contract
-  (`runtime`, parameters, executor, attester) and doctor checks `runtime`;
-  executing/attesting is deliberately out of scope for a personal brain.
+
+### Format decisions
+
+- Bundle owners can choose grouped H2 indexes with bundle-absolute links or
+  reference-style H1 indexes with relative links. Both preserve the written
+  title and introduction.
+- Attested Computations (§10) display every runtime contract. The built-in
+  CSV runtime supports approved local execution and independent receipt
+  recomputation. The process verification records evidence for those specific
+  inputs and that result. Other runtimes and the Acme fixture remain readable.

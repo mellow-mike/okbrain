@@ -351,6 +351,37 @@ try {
     assert.equal(await page.locator("main img[src*='example.invalid']").count(), 0);
   }
 
+  const localCsv = "year,cents\n2026,100\n2025,10\n2026,25\n";
+  await mkdir(join(bundle, "data"), { recursive: true });
+  await writeFile(join(bundle, "data", "revenue.csv"), localCsv);
+  await page.evaluate(() => { location.hash = "#editor"; });
+  await page.getByRole("heading", { name: "New concept", exact: true }).waitFor();
+  const noteEditor = page.locator("#edf");
+  await noteEditor.getByLabel("Type", { exact: true }).fill("Attested Computation");
+  await noteEditor.getByLabel("Title", { exact: true }).fill("Reviewed CSV revenue");
+  await noteEditor.getByLabel("Description", { exact: true }).fill("Aggregate the reviewed fixture.");
+  await noteEditor.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("heading", { name: "Reviewed CSV revenue", exact: true }).waitFor();
+  const computation = page.locator("#c-computation");
+  await computation.getByRole("button", { name: "Save CSV contract", exact: true }).click();
+  await computation.getByRole("spinbutton", { name: "year (integer)", exact: true }).fill("2026");
+  await computation.getByRole("button", { name: "Preview computation", exact: true }).click();
+  await computation.getByText("Exact CSV source", { exact: true }).waitFor();
+  assert.equal(await computation.locator("[data-csv]").textContent(), localCsv);
+  const runComputation = computation.getByRole("button", { name: "Run approved computation", exact: true });
+  assert.equal(await runComputation.isEnabled(), false);
+  await computation.getByRole("checkbox", { name: "Approve this contract, source, and parameter values", exact: true }).check();
+  await runComputation.click();
+  await computation.getByText("Computed 125 from 2 matching rows.", { exact: true }).waitFor();
+  await computation.getByRole("button", { name: "Verify receipt", exact: true }).click();
+  await computation.getByText("Recomputed and verified 125 from the original source.", { exact: true }).waitFor();
+  const recordVerification = computation.getByRole("button", { name: "Record process verification", exact: true });
+  assert.equal(await recordVerification.isEnabled(), false);
+  await computation.getByRole("checkbox", { name: "Approve recording the verified result on this concept", exact: true }).check();
+  await recordVerification.click();
+  await page.getByText("process:okbrain-csv-aggregate-v1", { exact: true }).waitFor();
+  assert.match(await Bun.file(join(bundle, "attested-computations", "reviewed-csv-revenue.md")).text(), /receipt_digest:/);
+
   await nav.getByRole("link", { name: "Coding", exact: true }).click();
   await page.getByText("Add a project", { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);

@@ -63,6 +63,7 @@ import renderJs from "./core/viz/render.js" with { type: "text" };
 import safeMarkdownJs from "./core/viz/safe-markdown.js" with { type: "text" };
 import tokensCss from "./core/viz/tokens.css" with { type: "text" };
 import guiAppJs from "./gui/app.js" with { type: "text" };
+import guiComputationJs from "./gui/computation.js" with { type: "text" };
 import guiMcpSettingsJs from "./gui/mcp-settings.js" with { type: "text" };
 import guiCodingJs from "./gui/coding.js" with { type: "text" };
 import guiCodingEvaluationJs from "./gui/coding-evaluation.js" with { type: "text" };
@@ -85,6 +86,7 @@ const CSS = "text/css; charset=utf-8";
  */
 const GUI_ASSETS: Record<string, readonly [string | Blob, string]> = {
   "/gui/app.js": [guiAppJs, JS],
+  "/gui/computation.js": [guiComputationJs, JS],
   "/gui/mcp-settings.js": [guiMcpSettingsJs, JS],
   "/gui/coding.js": [guiCodingJs, JS],
   "/gui/coding-evaluation.js": [guiCodingEvaluationJs, JS],
@@ -796,7 +798,8 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     url.searchParams.get("token");
   if (!tokenMatches(presented, opts.token))
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
-  const ownerFileAction = ["/api/op/export_markdown", "/api/op/inbox_file", "/api/op/keep_private"].includes(url.pathname);
+  const ownerFileAction = url.pathname.startsWith("/api/op/computation_") ||
+    ["/api/op/export_markdown", "/api/op/inbox_file", "/api/op/keep_private"].includes(url.pathname);
   if (ownerFileAction) {
     if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
       return json(401, { error: "missing or invalid local app token" }, cors);

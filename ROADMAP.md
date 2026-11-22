@@ -679,6 +679,11 @@ Goal: the brain improves itself on a schedule.
 - [ ] Security: trust boundary honored on every new op; SSRF guard on `fetch_url`
 - [ ] Docs upkeep: `ROADMAP.md` + `CONTEXT.md` + `docs/context/REFERENCES.md` current
 
+On 2026-11-22, five Linux runs of the compiled CLI against a 512-note
+synthetic bundle measured median process startup of 156 ms, fresh index build
+of 704 ms, and keyword search of 155 ms. Index and search timings include
+process startup.
+
 ---
 
 ## Bug Log
@@ -752,11 +757,11 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [x] Opt-in local `usage_count` / `usage_window` signals for note opens and
       verified Ask citations. The app shows these alongside author-supplied
       sources without modifying their portable provenance.
-- [ ] `verified` events for machine checks (`process:okb-doctor` after a
-      clean doctor run?) — decide whether a conformance pass counts as
-      confirmation; today only humans and agents verify.
-- [ ] Attested Computation execution/attestation (§10) — deliberately out of
-      scope for a personal brain; the contract is displayed, not run.
+- [x] Record `verified` events for explicitly approved successful computation
+      attestations. Doctor reports format conformance separately.
+- [x] Preview, run, and independently attest typed integer count and sum
+      computations over local CSV data. External runtime contracts remain
+      readable with the OKF v0.2 fixtures.
 - [x] Embed the app's licensed fonts on request in `viz.html` from Settings or
       with `okb export-viz --fonts`.
 - [x] Use one graph component for the app and offline HTML export, including
@@ -767,8 +772,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
 - 2026-11-22 — Added approved GitHub PR creation and offline email and calendar
-  import. Enforced per-note privacy and portable path spelling, added local
-  usage counts, and shared the interactive graph between app and export.
+  import. Enforced per-note privacy and path spelling, added local usage,
+  shared the graph component, and added a local CSV computation attester.
 - 2026-11-22 — Added inbox filing with forwarding notes, named-brain provider
   defaults, folder logs, reference-style Markdown indexes, and an approved-source
   lookup tool with real Pi replay and usage accounting.

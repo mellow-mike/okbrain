@@ -88,6 +88,8 @@ interface WriteOptions {
   createOnly?: boolean;
   /** The caller will regenerate the affected index branch after a batch. */
   deferIndex?: boolean;
+  /** Apply a reviewed write only if the concept still has these exact bytes. */
+  expected?: string;
   /** Accumulate derived metadata until the importing operation finishes. */
   batch?: { dirs: Set<string>; log: ConceptLogEntry[] };
 }
@@ -214,6 +216,8 @@ export async function writeConcept(
     );
   if (input.metadataOnly && !existing)
     throw new OkfWriteError(`metadata-only write requires an existing concept: ${input.id}`);
+  if (options.expected !== undefined && existing?.raw !== options.expected)
+    throw new OkfWriteError("The concept changed. Review it again before saving.");
   const prev = existing?.doc.frontmatter ?? {};
   const prevBody = existing?.doc.body ?? "";
 
@@ -298,6 +302,10 @@ export async function writeConcept(
   if (options.createOnly) {
     // Publish complete bytes without ever replacing a concurrent writer's note.
     if (!await publishConcept(path, serialized, mode)) return { id: input.id, path, created: false, noop: true };
+  } else if (options.expected !== undefined) {
+    const info = await lstat(path);
+    if (!info.isFile() || !await publishConcept(path, serialized, mode ?? (info.mode & 0o777), options.expected))
+      throw new OkfWriteError("The concept changed. Review it again before saving.");
   } else {
     await writeFile(path, serialized, { encoding: "utf8", mode });
     if (privateConcept && process.platform !== "win32") await chmod(path, 0o600);
