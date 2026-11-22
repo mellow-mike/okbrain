@@ -25,6 +25,9 @@ Anthropic, and Google Gemini use Pi's model catalogs and explicit credentials.
 The app and CLI report Pi Durable status, active context estimates, and
 recorded usage. Run history shows usage for the selected request and the full
 session, including main and child conversation totals.
+Run inspection projects Pi Durable's live task graph to bounded counts for
+the selected request and its descendants. The control plane forwards those
+counts through the worker pipe and the authenticated inspection route.
 Standalone transcripts share per-user storage between the CLI and the local
 Mac and web apps. Only the local operator can inspect their saved prompts and
 source or start, resume, and cancel requests. The app recovers the workspace

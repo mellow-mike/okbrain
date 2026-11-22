@@ -6,12 +6,18 @@ import {
   canonicalWorkspace, CodingError, maxLiveAnswerLength, prepareCodingInput, runCodingSession,
   type CodingLiveAnswer, type CodingSessionOptions, type PreparedCodingInput,
 } from "./durable.ts";
+import { parseCodingTaskProgress, type CodingTaskProgress } from "./task-progress.ts";
 
 type Request = { stateDir: string; workspaceBinding: string; options: CodingSessionOptions; apiKey?: string };
 type WorkerRequest = Request & { stateBinding?: string; preparedInput?: PreparedCodingInput };
 type Event = { type: "admitted" } | { type: "answer"; answer: CodingLiveAnswer | null }
+  | { type: "task-progress"; progress: CodingTaskProgress | null }
   | { type: "settled"; status: "done" | "unanswered" } | { type: "error"; error: string };
-type WorkerCallbacks = { admitted: () => void; liveAnswer: (answer: CodingLiveAnswer | undefined) => void };
+type WorkerCallbacks = {
+  admitted: () => void;
+  liveAnswer: (answer: CodingLiveAnswer | undefined) => void;
+  taskProgress: (progress: CodingTaskProgress | undefined) => void;
+};
 const maxWorkerInputBytes = 512 * 1024; // Even doubly escaped explicit text must fit the pipe.
 export const projectWorkerArg = "--project-worker";
 export class ProjectWorkerInterrupted extends Error {}
@@ -43,6 +49,7 @@ export async function runProjectWorker(): Promise<number> {
         signal: controller.signal,
         admitted: () => { void send({ type: "admitted" }); },
         liveAnswer: (answer) => send({ type: "answer", answer: answer ?? null }),
+        taskProgress: (progress) => send({ type: "task-progress", progress: progress ?? null }),
       }).then(async (result) => {
         await send({ type: "settled", status: result.status });
         input.close();
@@ -99,6 +106,12 @@ function launchPipe(request: WorkerRequest, signal: AbortSignal, callbacks: Work
           else if (typeof event.answer?.text === "string" && event.answer.text.length <= maxLiveAnswerLength
             && typeof event.answer.truncated === "boolean") {
             callbacks.liveAnswer({ text: event.answer.text, truncated: event.answer.truncated });
+          }
+        } else if (event.type === "task-progress") {
+          if (event.progress === null) callbacks.taskProgress(undefined);
+          else {
+            const progress = parseCodingTaskProgress(event.progress);
+            if (progress) callbacks.taskProgress(progress);
           }
         } else if (event.type === "settled" || event.type === "error") disposition = event;
       }

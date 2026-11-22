@@ -10,7 +10,8 @@
   };
   const statusLabel = (status) => statusLabels[status] || status || 'Saved';
 
-  async function mount(parent, { coding, readonly, detached, defaultModels, entries, field, previewContents, report, sessionUsage, usageText }) {
+  async function mount(parent, { coding, readonly, detached, defaultModels, entries, field, previewContents,
+    report, sessionUsage, usageText, showTaskProgress, taskProgressPanel }) {
     const header = parent.querySelector('header');
     header.innerHTML = '<div class="row coding-project-links"><a href="#coding">Project workspace</a></div>' +
       '<h2 class="display">Standalone sessions</h2><p class="muted">Open sessions from this app or the CLI.</p>';
@@ -201,10 +202,12 @@
       const savedPrompt = request?.savedPrompt;
       const receipt = request?.receipt || active?.receipt;
       const status = active?.cancelled ? 'cancelled' : active?.status || request?.status;
+      const progress = active?.taskProgress ?? request?.taskProgress;
       const runKey = sessionName + '/' + requestId;
       const live = inspectEl.querySelector('[data-live-answer]');
       if (status === 'running' && inspectEl.dataset.running === runKey && live) {
         showLiveAnswer(live, active.liveAnswer);
+        showTaskProgress(inspectEl.querySelector('[data-task-progress]'), progress, true);
         return;
       }
       const snapshot = JSON.stringify({ pi, active, identity, state, pending, requestId });
@@ -225,6 +228,7 @@
       inspectEl.innerHTML = '<div class="coding-result stack"><h4>' + esc(requestId) + '</h4>' +
         '<p>' + esc(statusLabel(status)) + '</p>' +
         (explanation ? '<p class="notice">' + esc(explanation) + '</p>' : '') +
+        taskProgressPanel +
         (status === 'running' ? '<div data-live-answer hidden><p class="muted"></p><pre></pre></div>' : '') +
         (answer ? '<pre data-answer></pre>' : '') +
         (request?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
@@ -238,6 +242,7 @@
           references.length ? '<details><summary>Source references</summary><ul>' + references.map((entry) =>
             '<li><code>' + esc(entry.path + ':' + entry.startLine + '–' + entry.endLine) + '</code></li>').join('') + '</ul></details>' : '') +
         '<div class="row" data-run-actions></div></div>';
+      showTaskProgress(inspectEl.querySelector('[data-task-progress]'), progress, status === 'running');
       if (answer) inspectEl.querySelector('[data-answer]').textContent = answer;
       if (status === 'running') showLiveAnswer(inspectEl.querySelector('[data-live-answer]'), active.liveAnswer);
       if (savedPrompt) inspectEl.querySelector('[data-saved-prompt]').textContent = savedPrompt;

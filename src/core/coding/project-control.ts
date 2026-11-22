@@ -25,6 +25,7 @@ import {
 import { excludedPath, selectRepositoryContext } from "./repository-context.ts";
 import { validateCodingProjectProfile } from "./project-profile.ts";
 import { launchProjectWorker, ProjectWorkerInterrupted } from "./project-worker.ts";
+import type { CodingTaskProgress } from "./task-progress.ts";
 
 type Json = Record<string, unknown>;
 type Actor = { id: string; owner: boolean; project?: string };
@@ -51,7 +52,7 @@ type Running = {
   cancel: AbortController;
   promise: Promise<void>;
   stop?: () => void;
-  progress?: { requestId: string; answer?: CodingLiveAnswer };
+  progress?: { requestId: string; answer?: CodingLiveAnswer; tasks?: CodingTaskProgress };
 };
 
 export class ProjectControlError extends Error {
@@ -450,17 +451,18 @@ export class CodingProjectControl {
     const progress: NonNullable<Running["progress"]> = { requestId: run.requestId };
     const admitted = () => this.#auditAdmitted(project.id, run, actor);
     const liveAnswer = (answer: CodingLiveAnswer | undefined) => { progress.answer = answer; };
+    const taskProgress = (tasks: CodingTaskProgress | undefined) => { progress.tasks = tasks; };
     let stop: (() => void) | undefined;
     let result: Promise<"done" | "unanswered">;
     try {
       if (dependencies.models) {
         stop = () => cancel.abort();
-        result = runCodingSession(run, { ...dependencies, signal: cancel.signal, admitted, liveAnswer }).then((receipt) => receipt.status);
+        result = runCodingSession(run, { ...dependencies, signal: cancel.signal, admitted, liveAnswer, taskProgress }).then((receipt) => receipt.status);
       } else {
         const worker = launchProjectWorker({
           options: run, stateDir: dependencies.stateDir!, workspaceBinding: project.workspace,
           apiKey: codingCredential(project.provider, dependencies),
-        }, cancel.signal, { admitted, liveAnswer }, this.#dockerWorker);
+        }, cancel.signal, { admitted, liveAnswer, taskProgress }, this.#dockerWorker);
         stop = worker.stop;
         result = worker.result;
       }
@@ -552,9 +554,13 @@ export class CodingProjectControl {
     const value = this.#runView(row);
     const active = this.#active.get(`${project.id}/${run.session}`);
     if (active || (row.status !== "interrupted" && !row.admitted)) {
-      const answer = row.status === "running" && active?.progress?.requestId === run.requestId
-        && !active.cancel.signal.aborted ? active.progress.answer : undefined;
-      return { run: value, ...(answer && { liveAnswer: answer }) };
+      const progress = row.status === "running" && active?.progress?.requestId === run.requestId
+        && !active.cancel.signal.aborted ? active.progress : undefined;
+      return {
+        run: value,
+        ...(progress?.answer && { liveAnswer: progress.answer }),
+        ...(progress?.tasks && { taskProgress: progress.tasks }),
+      };
     }
     try {
       const pi = await getCodingSessionStatus(

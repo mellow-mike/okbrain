@@ -53,6 +53,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   and separate the main conversation from package review children.
 - [x] Surface bounded Pi Durable answer text during runs in browser and editor
   inspection, with review controls available after completion.
+- [x] Show Pi Durable task stages and counts for the selected request and
+  its child conversations in app and editor run inspection.
 - [x] Offer an approved-source line lookup for explicit files and scoped
   excerpts, using Pi Durable replay against the saved request bytes.
 - [x] Add versioned project profiles, a rebuildable worktree-aware symbol and
@@ -74,6 +76,9 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Add opt-in Linux Docker worker isolation and owner-configured transcript
   expiry with expired-ID replay protection. Verify with a real offline Docker run
   and application-level retention tests.
+- [x] Exercise offline Linux Docker backup and restore with the real worker.
+  Verify saved receipt replay after checkout removal, member scope, and
+  expired-ID protection across restores.
 - [ ] Verify failure, retention, access policy, and worker isolation on the
   intended enterprise deployment, including actual provider egress and backups.
 - [x] Add explicitly previewed, independent Pi Durable package reviews with
@@ -776,6 +781,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Exposed Pi Durable task stages in app and editor run inspection.
+  Tested private state backup, restore, and expired request replay protection
+  through the offline Linux Docker worker and local project API.
 - 2026-11-22 — Connected standalone CLI sessions to the Mac and web apps,
   with source approval, saved request inspection, resume, and cancellation.
   Added opt-in macOS notarization and Windows Authenticode packaging.

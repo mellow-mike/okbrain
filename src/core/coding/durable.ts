@@ -28,6 +28,9 @@ import {
 } from "./package-review.ts";
 import { RepositoryContextError, type RepositoryContextManifest, type RepositoryContextOptions, type RepositoryContextSelection } from "./repository-context.ts";
 import { openDurableDatabase } from "./sqlite.ts";
+import { observeCodingTaskProgress, readCodingTaskProgress, type CodingTaskProgress } from "./task-progress.ts";
+
+export type { CodingTaskProgress } from "./task-progress.ts";
 
 const context = BACKGROUND_CONTEXT;
 const providers = {
@@ -110,6 +113,7 @@ export interface CodingSessionStatusResult {
     evaluationInput?: EvaluationInput;
     savedPrompt?: string;
     savedSource?: SavedCodingSource;
+    taskProgress?: CodingTaskProgress;
   };
 }
 
@@ -127,6 +131,7 @@ export type CodingDependencies = {
   signal?: AbortSignal;
   admitted?: () => void;
   liveAnswer?: (answer: CodingLiveAnswer | undefined) => void | Promise<void>;
+  taskProgress?: (progress: CodingTaskProgress | undefined) => void | Promise<void>;
 };
 
 function liveAnswer(state: LiveState | null, submission: SubmissionId): CodingLiveAnswer | undefined {
@@ -655,12 +660,17 @@ export async function runCodingSession(
       const signal = dependencies.signal;
       signal?.addEventListener("abort", cancel, { once: true });
       if (signal?.aborted) cancel();
+      let stopProgress: (() => Promise<void>) | undefined;
       try {
+        if (dependencies.taskProgress) {
+          stopProgress = await observeCodingTaskProgress(harness, { task }, dependencies.taskProgress, context).catch(() => undefined);
+        }
         if (cancellation) await cancellation;
         const settled = await harness.waitForTask(task, context);
         return { ...identity, ...packageReviewReceipt(settled.state.outcome) };
       } finally {
         signal?.removeEventListener("abort", cancel);
+        await stopProgress?.();
         await cancellation;
       }
     }
@@ -688,13 +698,20 @@ export async function runCodingSession(
     });
     signal?.addEventListener("abort", cancel, { once: true });
     if (signal?.aborted) cancel();
+    let stopProgress: (() => Promise<void>) | undefined;
     try {
+      if (dependencies.taskProgress) {
+        stopProgress = await observeCodingTaskProgress(harness, {
+          conversation: conversation.id, submission: submission.id,
+        }, dependencies.taskProgress, context).catch(() => undefined);
+      }
       if (cancellation) await cancellation;
       return codingReceipt(storage, await submission.wait(context), identity);
     } finally {
       unsubscribe?.();
       state?.dispose();
       signal?.removeEventListener("abort", cancel);
+      await stopProgress?.();
       await cancellation;
     }
   });
@@ -755,17 +772,24 @@ export async function getCodingSessionStatus(
         const identity = { session: options.session, requestId: options.requestId };
         const receipt = task?.state.status === "terminal" ? { ...identity, ...packageReviewReceipt(task.state.outcome) } : undefined;
         const saved = options.includeEvaluationInput ? evaluatedPackages(task?.input) : undefined;
+        const progress = task && !receipt
+          ? await readCodingTaskProgress(harness, { task: taskId }, context).catch(() => undefined)
+          : undefined;
         result.request = {
           requestId: options.requestId, status: receipt?.status ?? "placed",
           ...(receipt?.status === "done" ? { usage: receipt.usage, stopReason: receipt.stopReason } : {}),
           ...(receipt?.status === "unanswered" ? { reason: receipt.reason } : {}),
           ...(receipt && options.includeReceipt ? { receipt } : {}),
           ...(saved ? { evaluationInput: saved } : {}),
+          ...(progress ? { taskProgress: progress } : {}),
         };
         return result;
       }
       const submission = await storage.submissionByRequest(root.id, options.requestId, context);
       if (!submission) throw new CodingError(`No saved request ${options.requestId} exists in coding session ${options.session}.`);
+      const progress = submission.status === "placed"
+        ? await readCodingTaskProgress(harness, { conversation: root.id, submission: submission.id }, context).catch(() => undefined)
+        : undefined;
       const reason = unansweredReason(submission);
       let content = await savedUserContent(storage, submission);
       if (content === undefined && options.includeSavedSource && submission.status === "queued") {
@@ -792,6 +816,7 @@ export async function getCodingSessionStatus(
         ...(saved ? { evaluationInput: saved } : {}),
         ...(receipt ? { receipt } : {}),
         ...(options.includeSavedSource ? savedSource(content) : {}),
+        ...(progress ? { taskProgress: progress } : {}),
       };
     }
     return result;

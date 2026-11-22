@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,8 +23,18 @@ const standaloneState = join(root, "standalone-coding");
 const standaloneModels = createModels();
 const standaloneFaux = fauxProvider({ provider: "openai", models: [{ id: "browser-coding-fixture" }] });
 standaloneModels.setProvider(standaloneFaux.provider);
-const server = createApiServer({ bundle, port: 0, standaloneCoding: { stateDir: standaloneState, models: standaloneModels } });
+const projectModels = createModels();
+const projectFaux = fauxProvider({ provider: "openai", models: [{ id: "browser-project-fixture" }] });
+projectModels.setProvider(projectFaux.provider);
+projectModels.setProvider(googleProvider());
+const server = createApiServer({
+  bundle, port: 0,
+  coding: { stateDir: join(root, "coding-projects"), models: projectModels },
+  standaloneCoding: { stateDir: standaloneState, models: standaloneModels },
+});
 const finishAnswer = Promise.withResolvers<void>();
+const finishStandalone = Promise.withResolvers<void>();
+const finishProject = Promise.withResolvers<void>();
 let answerSource = "";
 const chatFixture = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
   const input = await req.json() as { stream?: boolean; model?: string; input?: string[] };
@@ -566,6 +577,8 @@ try {
   const resume = page.getByRole("button", { name: "Resume request", exact: true });
   await resume.waitFor();
   assert.equal(await resume.isEnabled(), false);
+  await page.getByRole("heading", { name: "Saved Pi task state", exact: true }).waitFor();
+  await page.getByText("Model response · 1 pending", { exact: true }).waitFor();
   await page.getByText("Saved task and source", { exact: true }).click();
   await page.getByText("Resume this saved task.", { exact: true }).waitFor();
   await page.getByText("browser.ts", { exact: true }).click();
@@ -607,14 +620,19 @@ try {
   await previewStandalone.click();
   await approveStandalone.check();
   assert.equal(standaloneFaux.state.callCount, 2);
-  standaloneFaux.setResponses([(input) => {
+  standaloneFaux.setResponses([async (input) => {
     const prompt = JSON.stringify(input.messages);
     assert.match(prompt, /approved browser source/);
     assert.match(prompt, /Review only the approved browser source/);
+    await finishStandalone.promise;
     return fauxAssistantMessage("Reviewed browser source.");
   }]);
   await sendStandalone.click();
+  await page.getByRole("heading", { name: "Current Pi tasks", exact: true }).waitFor();
+  await page.getByText("Model response · 1 running", { exact: true }).waitFor();
+  finishStandalone.resolve();
   await page.getByText("Reviewed browser source.", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("heading", { name: "Current Pi tasks", exact: true }).count(), 0);
   assert.equal(await page.getByRole("combobox", { name: "Saved session" }).inputValue(), "from-browser");
   assert.equal(standaloneFaux.state.callCount, 3);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
@@ -623,6 +641,41 @@ try {
   await page.getByRole("combobox", { name: "Saved request" }).selectOption("cli-complete");
   await page.getByText("Saved CLI answer.", { exact: true }).waitFor();
 
+  async function codingFixture<T>(path: string, data: unknown): Promise<T> {
+    const response = await fetch(new URL("api/coding" + path, server.url), {
+      method: "POST", headers: { "x-okb-token": server.token, "content-type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    const payload = await response.json() as { result: T; error?: string };
+    assert.ok(response.ok, payload.error);
+    return payload.result;
+  }
+  const project = await codingFixture<{ id: string }>("/projects", {
+    title: "Task progress fixture", workspace, scopes: ["."], provider: "openai", model: "browser-project-fixture",
+  });
+  const projectPath = "/projects/" + project.id;
+  const projectSource = { source: "files", files: ["browser.ts"] };
+  const projectPreview = await codingFixture<{ id: string }>(projectPath + "/preview", projectSource);
+  projectFaux.setResponses([async () => {
+    await finishProject.promise;
+    return fauxAssistantMessage("Project response ready for review.");
+  }]);
+  await codingFixture(projectPath + "/run", {
+    ...projectSource, previewId: projectPreview.id, approved: true, session: "project-browser", requestId: "project-task-progress",
+    prompt: "Review the browser source in this project.",
+  });
+  await page.evaluate((id) => { location.hash = "#coding/" + id; }, project.id);
+  await page.getByRole("button", { name: /project-task-progress/ }).click();
+  await page.getByText("Model response · 1 running", { exact: true }).waitFor();
+  const cancelProject = page.getByRole("button", { name: "Cancel run", exact: true });
+  await cancelProject.focus();
+  await page.waitForResponse((res) => new URL(res.url()).pathname.endsWith(projectPath + "/inspect"));
+  assert.equal(await cancelProject.evaluate((button) => button === document.activeElement), true);
+  finishProject.resolve();
+  await page.getByText("Project response ready for review.", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Accept result", exact: true }).waitFor();
+  assert.equal(await page.getByRole("heading", { name: "Current Pi tasks", exact: true }).count(), 0);
+
   await page.evaluate(() => { location.hash = "#concept/%ZZ"; });
   await page.getByRole("textbox", { name: "Quick note" }).waitFor();
   assert.deepEqual(outbound, []);
@@ -630,6 +683,8 @@ try {
   console.log("375px browser smoke passed with keyboard navigation and outbound requests blocked.");
 } finally {
   finishAnswer.resolve();
+  finishStandalone.resolve();
+  finishProject.resolve();
   await chatFixture.stop(true);
   await browser?.close();
   await server.stop();

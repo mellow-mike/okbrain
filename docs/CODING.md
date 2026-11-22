@@ -129,6 +129,8 @@ In the Coding workspace, choose **Independent package review** for a task spanni
 
 Each Pi Durable child conversation receives the task and only its own package's selected excerpts. It starts without the parent session history and has no workspace tools. The run shows a bounded summary, source references, stable request ID, and recorded usage for each package. Review the combined result and record your decision. A resumed review uses the saved source selection and recovers any unfinished package conversations. Aborting the run cancels its outstanding package reviews.
 
+While a request runs, **Run history** shows the current Pi Durable tasks for that request. It counts tasks per stage, including package coordination and child work. The app also shows saved pending tasks when inspecting an interrupted request. These counts reflect the work Pi has recorded, and can change as tasks start or finish. [Pi Durable task graph](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md)
+
 ## Resume or follow up
 
 Reuse the workspace, session, provider, model, and request ID. Omit the prompt and source-selection flags to resume an admitted request with its saved source snapshot.
@@ -176,7 +178,7 @@ docker build --file packaging/coding-worker/Dockerfile --tag okbrain-coding-work
 export OKB_CODING_WORKER_IMAGE=$(docker image inspect --format '{{.Id}}' okbrain-coding-worker:local)
 ```
 
-`OKB_CODING_WORKER_NETWORK` selects the deployment's Docker bridge network. The default is `bridge`. A deployment can restrict provider egress through that network. Use `none` for offline verification. Run the following smoke check to exercise the production worker through the local Coding API, inspect the container boundary, and confirm that a missing image never starts a local worker. [Docker runtime controls](https://docs.docker.com/reference/cli/docker/container/run/)
+`OKB_CODING_WORKER_NETWORK` selects the deployment's Docker bridge network. The default is `bridge`. A deployment can restrict provider egress through that network. Use `none` for offline verification. Run the following smoke check to exercise the production worker through the local Coding API in disposable directories. It checks the container and network boundary, then closes the controller before copying and restoring its private state. The drill verifies replay after checkout removal, project-token isolation, and expiry records that still prevent replay after a second restore. A missing image fails closed. The drill uses no live provider credential. [Docker runtime controls](https://docs.docker.com/reference/cli/docker/container/run/)
 
 ```sh
 bun run packaging/coding-worker/smoke.ts "$OKB_CODING_WORKER_IMAGE"
@@ -210,4 +212,4 @@ The preview includes a Markdown comment that links GitHub's receipt to the local
 
 ## Validation status
 
-The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, retention, review and approved patch replay. A local HTTPS reverse proxy was exercised in Chromium with a project token. The Linux Docker smoke check exercises the worker filesystem boundary, stale approval, offline Pi admission and fail-closed launch. Live provider evaluation needs an independently reviewed set of tasks and an approved provider account. The intended enterprise host, provider egress, backups and deployment policy still need verification. [Roadmap](../ROADMAP.md)
+The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, retention, review and approved patch replay. A local HTTPS reverse proxy was exercised in Chromium with a project token. The Linux Docker drill exercises offline Pi admission, the worker boundary, fail-closed launch, and a backup and restore using disposable local state. Live provider evaluation needs an independently reviewed set of tasks and an approved provider account. The intended enterprise host, its provider egress, backup policy and access controls still need verification. [Roadmap](../ROADMAP.md)

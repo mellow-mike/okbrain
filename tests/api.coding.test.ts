@@ -6,11 +6,12 @@ import { join, resolve } from "node:path";
 import { createApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
 import { listCodingModels, maxLiveAnswerLength, runCodingSession, type CodingLiveAnswer, type CodingSessionStatusResult } from "../src/core/coding/durable.ts";
+import type { CodingTaskProgress } from "../src/core/coding/task-progress.ts";
 
 const ownerToken = "local-operator-test";
 type Project = { id: string; workspace: string; credential: string };
 type Run = { id: string; status: string; actor: string; admitted: boolean; error: string | null; review: string | null };
-type Inspection = { run: Run; liveAnswer?: CodingLiveAnswer; pi?: { request?: { receipt?: { text?: string } } } };
+type Inspection = { run: Run; liveAnswer?: CodingLiveAnswer; taskProgress?: CodingTaskProgress; pi?: { request?: { receipt?: { text?: string } } } };
 
 async function fixture(prefix: string) {
   const root = await mkdtemp(join(tmpdir(), prefix));
@@ -654,7 +655,7 @@ test("allows an approved source lookup only for the submitted preview and opt-in
   }
 });
 
-test("shows only bounded current answer text before Pi settles and clears it on cancellation", async () => {
+test("scopes bounded answer and task progress to the selected running request", async () => {
   const { root, workspace, stateDir } = await fixture("okb-coding-live-answer-");
   const models = createModels();
   models.setProvider(fauxProvider({ provider: "openai", models: [{ id: "live-test" }] }).provider);
@@ -685,9 +686,12 @@ test("shows only bounded current answer text before Pi settles and clears it on 
     ]);
     streams[0]!.push({ type: "text_delta", contentIndex: 1, delta: firstText, partial });
     await call(path + "/run", { ...body, ...first });
-    const active = await waitFor(() => call<Inspection>(path + "/inspect", first), (value) => Boolean(value.liveAnswer));
+    const active = await waitFor(() => call<Inspection>(path + "/inspect", first),
+      (value) => Boolean(value.liveAnswer && value.taskProgress?.stages.some(({ kind, running }) => kind === "model" && running > 0)));
     expect(active.run).toMatchObject({ status: "running", admitted: true });
     expect(active.liveAnswer).toEqual({ text: firstText.slice(0, maxLiveAnswerLength), truncated: true });
+    expect(active.taskProgress?.stages).toContainEqual(expect.objectContaining({ kind: "model", running: 1 }));
+    expect(JSON.stringify(active.taskProgress)).not.toContain("Review the example");
     expect(active.pi).toBeUndefined();
     expect(JSON.stringify(active)).not.toContain("private reasoning fixture");
     expect((await request(path + "/inspect", first, member.token)).status).toBe(403);
@@ -698,6 +702,7 @@ test("shows only bounded current answer text before Pi settles and clears it on 
     streams[0]!.push({ type: "done", reason: "stop", message: final });
     const finished = await waitFor(() => call<Inspection>(path + "/inspect", first), (value) => value.run.status === "done");
     expect(finished.liveAnswer).toBeUndefined();
+    expect(finished.taskProgress).toBeUndefined();
     expect(finished.pi?.request?.receipt?.text).toBe("Completed first answer.");
 
     const second = { session: body.session, requestId: "second" };
@@ -706,11 +711,14 @@ test("shows only bounded current answer text before Pi settles and clears it on 
     await call(path + "/run", { ...body, ...second });
     const running = await waitFor(() => call<Inspection>(path + "/inspect", second), (value) => Boolean(value.liveAnswer));
     expect(running.liveAnswer).toEqual({ text: secondText, truncated: false });
-    expect((await call<Inspection>(path + "/inspect", first)).liveAnswer).toBeUndefined();
+    const older = await call<Inspection>(path + "/inspect", first);
+    expect(older.liveAnswer).toBeUndefined();
+    expect(older.taskProgress).toBeUndefined();
     await call(path + "/cancel", second);
     const cancelled = await waitFor(() => call<Inspection>(path + "/inspect", second), (value) => value.run.status === "cancelled");
     expect(cancelled.run.status).toBe("cancelled");
     expect(cancelled.liveAnswer).toBeUndefined();
+    expect(cancelled.taskProgress).toBeUndefined();
     expect(calls).toBe(2);
   } finally {
     for (const stream of streams) stream.end(fauxAssistantMessage("", { stopReason: "aborted" }));

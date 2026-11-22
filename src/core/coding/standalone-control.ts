@@ -8,6 +8,7 @@ import {
 } from "./durable.ts";
 import { validateCodingProjectProfile } from "./project-profile.ts";
 import { selectRepositoryContext, type RepositoryContextOptions } from "./repository-context.ts";
+import type { CodingTaskProgress } from "./task-progress.ts";
 
 type Input = Record<string, unknown>;
 type Dependencies = Pick<CodingDependencies, "models" | "stateDir">;
@@ -22,6 +23,7 @@ interface ActiveRun extends SessionRequest {
   cancelled?: boolean;
   error?: string;
   liveAnswer?: CodingLiveAnswer;
+  taskProgress?: CodingTaskProgress;
   receipt?: CodingSessionResult;
 }
 
@@ -199,7 +201,7 @@ export class StandaloneCodingControl {
     }
   }
 
-  #launch(identity: SessionRequest, run: (signal: AbortSignal, updates: Pick<CodingDependencies, "admitted" | "liveAnswer">) => Promise<CodingSessionResult>) {
+  #launch(identity: SessionRequest, run: (signal: AbortSignal, updates: Pick<CodingDependencies, "admitted" | "liveAnswer" | "taskProgress">) => Promise<CodingSessionResult>) {
     const existing = this.#runs.get(identity.session);
     if (existing?.view.status === "running") {
       if (existing.view.requestId === identity.requestId) return existing.view;
@@ -212,6 +214,7 @@ export class StandaloneCodingControl {
         const receipt = await run(abort.signal, {
           admitted: () => { view.admitted = true; },
           liveAnswer: (answer) => { view.liveAnswer = answer; },
+          taskProgress: (progress) => { view.taskProgress = progress; },
         });
         view.receipt = receipt;
         view.status = receipt.status;
@@ -221,6 +224,7 @@ export class StandaloneCodingControl {
           error instanceof CodingError ? error.message : "The local Pi request could not finish.";
       } finally {
         view.liveAnswer = undefined;
+        view.taskProgress = undefined;
         if (abort.signal.aborted) view.cancelled = true;
         // Keep recent failures available for polling. Settled requests are also in Pi storage.
         if (this.#runs.size > 64) {

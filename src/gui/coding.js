@@ -32,6 +32,34 @@
     running: 'Running', interrupted: 'Interrupted', done: 'Ready for review', unanswered: 'Unanswered',
     failed: 'Could not start', cancelled: 'Cancelled', accepted: 'Accepted', changes_requested: 'Changes requested',
   };
+  const taskLabels = {
+    model: 'Model response', 'source-lookup': 'Approved source lookup', 'package-review': 'Package review',
+    'package-work': 'Package work', context: 'Context maintenance', work: 'Run work',
+  };
+  const taskStates = [['pending', 'pending'], ['running', 'running'], ['waiting', 'waiting'], ['completing', 'finishing']];
+
+  function showTaskProgress(panel, progress, active) {
+    const stages = Array.isArray(progress?.stages) ? progress.stages : [];
+    const lines = stages.flatMap((stage) => {
+      if (typeof stage?.kind !== 'string' || !Object.hasOwn(taskLabels, stage.kind)) return [];
+      const counts = taskStates.filter(([key]) => Number.isSafeInteger(stage[key]) && stage[key] > 0)
+        .map(([key, label]) => stage[key] + ' ' + label);
+      return counts.length ? [taskLabels[stage.kind] + ' · ' + counts.join(', ')] : [];
+    });
+    const title = active ? 'Current Pi tasks' : 'Saved Pi task state';
+    const snapshot = [title, ...lines].join('\n');
+    if (panel.dataset.snapshot === snapshot) return;
+    panel.dataset.snapshot = snapshot;
+    panel.hidden = !lines.length;
+    panel.querySelector('h5').textContent = title;
+    panel.querySelector('ul').replaceChildren(...lines.map((line) => {
+      const item = document.createElement('li');
+      item.textContent = line;
+      return item;
+    }));
+  }
+
+  const taskProgressPanel = '<section data-task-progress hidden><h5></h5><ul class="plain"></ul></section>';
   const labelStatus = (run) => statuses[run.review || run.status] || run.status;
   const identity = (run) => ({ session: run.session, requestId: run.id });
   const time = (iso) => new Date(iso).toLocaleString();
@@ -411,9 +439,11 @@
       const receipt = pi?.request?.receipt;
       const error = row.error || receipt?.reason;
       const snippet = receipt?.repositoryContext?.files || pi?.request?.repositoryContext?.files || [];
+      const progress = result.taskProgress ?? pi?.request?.taskProgress;
       const live = inspected.querySelector('[data-live-answer]');
       if (row.status === 'running' && inspected.dataset.run === row.id && inspected.dataset.session === row.session && live) {
         showLiveAnswer(live, result.liveAnswer);
+        showTaskProgress(inspected.querySelector('[data-task-progress]'), progress, true);
         return;
       }
       inspected.dataset.run = row.id;
@@ -428,12 +458,14 @@
           (pi.context.historyCompacted ? ' · Older turns compacted' : '') + '</p>' : '') +
         (pi?.request?.approvedSourceLookup ? '<p class="muted">Approved source lookup enabled for this request.</p>' : '') +
         (receipt?.stopReason === 'length' ? '<p class="muted">The model reached its output limit.</p>' : '') +
+        taskProgressPanel +
         (row.status === 'running' ? '<div data-live-answer hidden><p class="muted"></p><pre></pre></div>' : '') +
         (receipt?.text ? '<pre data-answer></pre><div class="row"><button type="button" data-copy>Copy response</button></div>' : '') +
         (pi ? sessionUsage(pi) : '') +
         (snippet.length ? '<details><summary>Source references</summary><ul>' + snippet.map((file) =>
           '<li><code>' + esc(file.path + ':' + file.startLine + '–' + file.endLine) + '</code></li>').join('') + '</ul></details>' : '') +
         '<div class="row" data-actions></div></div>';
+      showTaskProgress(inspected.querySelector('[data-task-progress]'), progress, row.status === 'running');
       if (row.status === 'running') showLiveAnswer(inspected.querySelector('[data-live-answer]'), result.liveAnswer);
       if (receipt?.text) {
         inspected.querySelector('[data-answer]').textContent = receipt.text;
@@ -838,6 +870,7 @@
       projectsEl.remove();
       await window.okbCodingStandalone.mount(page, {
         coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, report, sessionUsage, usageText,
+        showTaskProgress, taskProgressPanel,
       });
       return;
     }

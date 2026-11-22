@@ -4,7 +4,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createApiServer } from "../src/api.ts";
-import { cancelCodingRequest, getCodingSessionStatus, listStandaloneCodingRequests, runCodingSession, type CodingSessionResult } from "../src/core/coding/durable.ts";
+import { cancelCodingRequest, getCodingSessionStatus, listStandaloneCodingRequests, runCodingSession, type CodingSessionResult,
+  type CodingTaskProgress } from "../src/core/coding/durable.ts";
 import { previewPackageReviews } from "../src/core/coding/package-review.ts";
 
 async function fixture() {
@@ -58,6 +59,9 @@ test("only sends each reviewed package its own source and recovers durable work 
     const inFlight = await getCodingSessionStatus(options, dependencies);
     expect(inFlight.pendingRequestIds).toEqual([options.requestId]);
     expect(inFlight.request?.status).toBe("placed");
+    expect(inFlight.request?.taskProgress).toEqual({
+      stages: [{ kind: "package-review", pending: 1, running: 0, waiting: 0, completing: 0 }],
+    });
     expect((await listStandaloneCodingRequests(options.session, dependencies)).requests).toEqual([
       { requestId: options.requestId, kind: "package-review", status: "placed" },
       { requestId: "parent-context", kind: "request", status: "done" },
@@ -77,7 +81,15 @@ test("only sends each reviewed package its own source and recovers durable work 
       }] });
       return fauxAssistantMessage(`Evidence from ${approved.path}:1.`);
     }));
-    const receipt = await runCodingSession(options, dependencies);
+    const progress: CodingTaskProgress[] = [];
+    const receipt = await runCodingSession(options, {
+      ...dependencies,
+      taskProgress: (update) => { if (update) progress.push(update); },
+    });
+    for (const kind of ["package-review", "package-work", "model"] as const)
+      expect(progress.some(({ stages }) => stages.some((stage) => stage.kind === kind))).toBe(true);
+    expect(progress.at(-1)).toEqual({ stages: [] });
+    expect(JSON.stringify(progress)).not.toMatch(/left|right|review-1|checkpoint|taskId|conversationId/i);
     expect(receipt).toMatchObject({ status: "done", packageReviews: [
       { project: "left", requestId: "review-1-package-1", summary: "Evidence from left/source.ts:1." },
       { project: "right", requestId: "review-1-package-2", summary: "Evidence from right/source.ts:1." },
