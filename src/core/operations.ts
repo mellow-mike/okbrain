@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { createApiServer } from "../api.ts";
 import { runMcpHttp, runMcpStdio } from "../mcp/server.ts";
 import { AiError, createGateway, RECIPES, resolveCall } from "./ai/gateway.ts";
+import { CHATGPT_USAGE, createChatgptPlan, type ChatgptPlanStatus } from "./ai/chatgpt-plan.ts";
 import { openInBrowser } from "./browser.ts";
 import { listBrains, loadConfig, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { calibration, CLAIM_TYPE, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
@@ -122,6 +123,8 @@ export interface Operation {
   ): Promise<unknown>;
   /** CLI-only: never exposed over network adapters (local API, MCP). */
   localOnly?: boolean;
+  /** Runs against per-user application state rather than a brain mount. */
+  bundleIndependent?: boolean;
   /** Human rendering of the result for the CLI (`--json` bypasses it). */
   render(result: unknown): string;
   /** CLI exit status derived from a successful result (default 0). */
@@ -422,6 +425,22 @@ async function runAsk(
   return r;
 }
 
+function renderAnswer(result: unknown): string {
+  const answer = result as AskResult;
+  const lines = [answer.answer.trim()];
+  if (answer.citations.length > 0)
+    lines.push("", "sources:", ...answer.citations.map((c) => `  ${c.id} — ${c.title}`));
+  return lines.join("\n");
+}
+
+function renderChatgptStatus(result: unknown): string {
+  const { account, accounts, connected, sharing, email } = result as ChatgptPlanStatus;
+  if (!account) return "No ChatGPT account selected. Run `okb chatgpt connect`.";
+  const label = email ? `${account} (${email})` : account;
+  const state = connected ? (sharing ? "plan usage enabled" : "plan usage unavailable") : "signed out";
+  return `${label} — ${state}\nsaved accounts: ${accounts.join(", ")}\nmanage usage: ${CHATGPT_USAGE}`;
+}
+
 /**
  * Pull feeds and reindex what landed (`okb rss` + the jobs worker). A single
  * explicit URL fails loudly; a configured multi-pull records per-feed errors
@@ -522,13 +541,87 @@ export const operations: readonly Operation[] = [
     ],
     handler: (ctx, p) => runAsk(ctx, p),
     stream: (ctx, p, emit) => runAsk(ctx, p, emit),
-    render: (r) => {
-      const a = r as AskResult;
-      const lines = [a.answer.trim()];
-      if (a.citations.length > 0)
-        lines.push("", "sources:", ...a.citations.map((c) => `  ${c.id} — ${c.title}`));
-      return lines.join("\n");
+    render: renderAnswer,
+  },
+  {
+    name: "ask_plan",
+    cliName: "ask-plan",
+    summary: "Ask the brain using your ChatGPT plan and local retrieval",
+    scope: "read",
+    localOnly: true,
+    params: [
+      { name: "question", type: "string", required: true, positional: true, description: "question to answer using your notes" },
+      { name: "model", type: "string", description: "model slug from `okb chatgpt models`" },
+    ],
+    handler: async (ctx, p) => {
+      const plan = createChatgptPlan();
+      return askBrain(p.question as string, {
+        bundle: ctx.bundle,
+        arms: { engine: ctx.engine() },
+        chat: async (messages) => ({
+          ...(await plan.complete(messages, p.model as string | undefined)),
+          provider: "chatgpt-plan",
+        }),
+      }, { ...PROFILES.balanced!, vecK: 0, rerank: false });
     },
+    render: renderAnswer,
+  },
+  {
+    name: "chatgpt_connect",
+    cliName: "chatgpt connect",
+    summary: "Sign in with ChatGPT and authorize plan usage",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [{ name: "account", type: "string", description: "local label for a ChatGPT account or workspace" }],
+    handler: (_ctx, p) => createChatgptPlan().connect(p.account as string | undefined),
+    render: renderChatgptStatus,
+  },
+  {
+    name: "chatgpt_status",
+    cliName: "chatgpt status",
+    summary: "Show the active ChatGPT account and saved labels",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [],
+    handler: () => createChatgptPlan().status(),
+    render: renderChatgptStatus,
+  },
+  {
+    name: "chatgpt_use",
+    cliName: "chatgpt use",
+    summary: "Switch to a saved ChatGPT account or workspace",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [{ name: "account", type: "string", required: true, positional: true, description: "saved account label" }],
+    handler: (_ctx, p) => createChatgptPlan().use(p.account as string),
+    render: renderChatgptStatus,
+  },
+  {
+    name: "chatgpt_disconnect",
+    cliName: "chatgpt disconnect",
+    summary: "Sign out of the selected ChatGPT account",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [],
+    handler: () => createChatgptPlan().disconnect(),
+    render: (r) => (r as { revoked: boolean }).revoked
+      ? "ChatGPT account signed out."
+      : `ChatGPT account signed out locally. Confirm remote access removal at ${CHATGPT_USAGE}`,
+  },
+  {
+    name: "chatgpt_models",
+    cliName: "chatgpt models",
+    summary: "List models available to the selected ChatGPT plan",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [],
+    handler: () => createChatgptPlan().models(),
+    render: (r) => ((r as { slug: string; name: string }[]).map((m) => `${m.slug} — ${m.name}`).join("\n")) || "No models available.",
   },
   {
     name: "read_concept",

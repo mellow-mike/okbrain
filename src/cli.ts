@@ -47,7 +47,7 @@ const usageFor = (op: Operation): string =>
 
 function helpText(): string {
   const lines = [
-    "okb — OKF-native personal knowledge manager",
+    "okb — personal knowledge and durable coding sessions",
     "",
     "usage: okb <command> [args] [--json] [--bundle <path>]",
     "",
@@ -173,16 +173,18 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     if (spec.stdinFallback && raw[spec.name] === undefined && io.stdin && !process.stdin.isTTY)
       raw[spec.name] = await io.stdin();
 
-  let bundle: string;
+  let bundle = process.cwd();
   let readonly = false;
   try {
-    const brainName = brainArg ?? (bundleArg === undefined ? process.env.OKB_BRAIN : undefined);
-    if (brainName !== undefined) {
-      const brain = resolveBrain(brainName);
-      bundle = brain.path;
-      readonly = brain.readonly;
-    } else {
-      bundle = resolveBundlePath(bundleArg);
+    if (!op.bundleIndependent) {
+      const brainName = brainArg ?? (bundleArg === undefined ? process.env.OKB_BRAIN : undefined);
+      if (brainName !== undefined) {
+        const brain = resolveBrain(brainName);
+        bundle = brain.path;
+        readonly = brain.readonly;
+      } else {
+        bundle = resolveBundlePath(bundleArg);
+      }
     }
   } catch (e) {
     if (!(e instanceof ConfigError)) throw e;
