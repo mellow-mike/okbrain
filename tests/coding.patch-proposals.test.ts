@@ -10,6 +10,7 @@ test("returns the exact saved diff from a complete fence or a raw Git patch", ()
   const proposal = { paths: ["src/main.ts"], diff };
   expect(codingPatchProposals(`Replace the existing text.\n\n\`\`\`diff\n${diff}\`\`\`\n`, ["src"])).toEqual([proposal]);
   expect(codingPatchProposals(diff, ["."])).toEqual([proposal]);
+  expect(codingPatchProposals("```diff\r\n" + diff + "```\r\n", ["src"])).toEqual([proposal]);
   expect(codingPatchProposals("Example with CRLF.\r\n```diff\r\n" + diff.replaceAll("\n", "\r\n") + "```\r\n", ["src"])).toEqual([]);
   expect(codingPatchProposals(diff.trimEnd(), ["src"])).toEqual([]);
 });
@@ -19,8 +20,10 @@ test("skips nested examples, incomplete fences, malformed patches, and out-of-sc
   const hidden = "````markdown\n```diff\n" + diff + "```\n````\n";
   const wrong = "```diff\n" + patch("separate/private.ts", "do not include") + "```\n";
   const malformed = "```diff\n" + diff.replace("+valid patch", "valid patch") + "```\n";
+  const malformedFence = "```diff\rtext\n" + diff + "```\n";
   const incomplete = "```diff\n" + diff;
   expect(codingPatchProposals(hidden + wrong + malformed + incomplete, ["src"])).toEqual([]);
+  expect(codingPatchProposals(malformedFence, ["src"])).toEqual([]);
 });
 
 test("deduplicates identical diff text and bounds the number and size of proposals", () => {

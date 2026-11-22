@@ -2,7 +2,7 @@ import { ApprovedPatchError, patchPaths } from "./approved-patch.ts";
 
 const maxAnswerBytes = 512 * 1024;
 const maxProposals = 4;
-const fencePattern = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)\r?$/u;
+const fencePattern = /^ {0,3}(`{3,}|~{3,})/u;
 
 export interface CodingPatchProposal {
   diff: string;
@@ -37,7 +37,8 @@ export function codingPatchProposals(text: string, scopes: readonly string[]): C
     const match = fencePattern.exec(line);
     if (!match) continue;
     const marker = match[1]!;
-    const info = match[2]!;
+    const info = line.slice(match[0].length).replace(/\r$/u, "");
+    if (info.includes("\r")) continue;
     if (fence) {
       if (marker[0] !== fence.marker[0] || marker.length < fence.marker.length || !/^[ \t]*$/u.test(info)) continue;
       if (fence.diff) add(text.slice(fence.start, start));
