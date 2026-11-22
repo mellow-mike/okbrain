@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readdir } from "node:fs/promises";
-import { join, posix } from "node:path";
+import { constants } from "node:fs";
+import { lstat, open, opendir, readdir } from "node:fs/promises";
+import { basename, join, posix } from "node:path";
 import { parseHTML } from "linkedom";
 import { resolveLinkTarget, rewriteBodyLinks } from "../graph/links.ts";
 import { readConceptPermissive } from "../okf/bundle.ts";
@@ -9,19 +10,25 @@ import { regenerateIndexes } from "../okf/indexmd.ts";
 import { OkfWriteError, writeConcept, type WriteConceptInput } from "../okf/write.ts";
 import { TOOL_ACTOR } from "../version.ts";
 import { clip } from "./capture.ts";
+import { readCalendar, readMail, type OfflineItem } from "./mail-calendar.ts";
 
 const IMPORT_ROOT = "db_only/imports";
-const KINDS = ["bookmarks", "markdown", "notion", "notion-live"] as const;
+const OFFLINE_KINDS = ["email", "calendar"] as const;
+const KINDS = ["bookmarks", "markdown", "notion", "notion-live", ...OFFLINE_KINDS] as const;
 export const MAX_SOURCE_UPLOAD_BYTES = 24 * 1024 * 1024;
 export const MAX_SOURCE_FILES = 500;
-const MAX_BOOKMARKS = 2000;
+export const MAX_SOURCE_ROWS = 2000;
+export const MAX_OFFLINE_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_OFFLINE_DRAFT_BYTES = 128 * 1024;
 
 export type SourceKind = typeof KINDS[number];
+type OfflineSourceKind = typeof OFFLINE_KINDS[number];
 type HistoryKind = SourceKind | "chatgpt" | "claude";
 
 export interface SourceUploadFile {
   path: string;
   text: string;
+  bytes?: Uint8Array;
   origin?: { resource: string; id: string };
 }
 
@@ -76,9 +83,14 @@ export function isSourceKind(value: unknown): value is SourceKind {
   return typeof value === "string" && (KINDS as readonly string[]).includes(value);
 }
 
-const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
+export function isOfflineSourceKind(value: unknown): value is OfflineSourceKind {
+  return value === "email" || value === "calendar";
+}
+
+const digest = (value: string | Uint8Array): string => createHash("sha256").update(value).digest("hex");
 const display = (value: string, limit = 140): string => clip(value.replace(/[\s\p{Cc}]+/gu, " ").trim(), limit);
 const markdownFile = /\.(?:md|markdown)$/i;
+const offlineFile = { email: /\.eml$/i, calendar: /\.ics$/i };
 
 function sourceLabel(value: string): string {
   const label = value.normalize("NFC").trim();
@@ -176,8 +188,8 @@ function bookmarkEntries(file: SourceUploadFile): (Candidate | Entry)[] {
       nextFolder.delete(list);
     }
     if (localName !== "a" || !list) continue;
-    if (entries.length >= MAX_BOOKMARKS)
-      throw new OkfWriteError(`Choose a bookmark export with up to ${MAX_BOOKMARKS.toLocaleString("en-US")} bookmarks.`);
+    if (entries.length >= MAX_SOURCE_ROWS)
+      throw new OkfWriteError(`Choose a bookmark export with up to ${MAX_SOURCE_ROWS.toLocaleString("en-US")} bookmarks.`);
 
     const row = entries.length + 1;
     const attr = (name: string): string | undefined => {
@@ -210,6 +222,91 @@ function bookmarkEntries(file: SourceUploadFile): (Candidate | Entry)[] {
     });
   }
   return entries;
+}
+
+function offlineEntry(kind: OfflineSourceKind, path: string, row: number, item: OfflineItem): Candidate | Entry {
+  const text = [...item.details, ...(item.text ? ["", item.text] : [])].join("\n").trim();
+  if (Buffer.byteLength(text) > MAX_OFFLINE_DRAFT_BYTES)
+    return { row: { row, path, title: item.title, status: "skipped", reason: "Readable text exceeds 128 KiB." } };
+  // Imported mail and calendar descriptions are plain text, even when their
+  // source includes Markdown syntax that could render an external image.
+  let fenceLength = 3;
+  for (const [run] of text.matchAll(/~{3,}/g)) fenceLength = Math.max(fenceLength, run.length + 1);
+  const fence = "~".repeat(fenceLength);
+  const body = text ? `${fence}text\n${text}\n${fence}\n` : "";
+  return {
+    row, path, key: item.key, identity: digest(JSON.stringify(item)), excerpt: display(item.text || text, 240),
+    note: { title: item.title, type: kind === "email" ? "email" : "event", description: display(item.text || text || item.title, 160), body,
+      tags: [kind, "imported"], sources: [{ id: "export", resource: `file-export:${kind}`, path }] },
+  };
+}
+
+async function offlineEntries(kind: OfflineSourceKind, files: SourceUploadFile[]): Promise<(Candidate | Entry)[]> {
+  const entries: (Candidate | Entry)[] = [];
+  for (const { path, text, bytes } of files) {
+    const skip = (reason: string) => entries.push({ row: { row: entries.length + 1, path, status: "skipped", reason } });
+    const file = bytes ?? text;
+    if (!offlineFile[kind].test(path)) skip(kind === "email" ? "Choose an .eml message file." : "Choose an .ics calendar file.");
+    else if ((bytes?.byteLength ?? Buffer.byteLength(text)) > MAX_OFFLINE_FILE_BYTES) skip("Choose files up to 2 MiB each.");
+    else {
+      let items: (OfflineItem | undefined)[] = [];
+      try {
+        items = kind === "email" ? [await readMail(file, path)] : readCalendar(
+          typeof file === "string" ? file : new TextDecoder("utf-8", { fatal: true }).decode(file), MAX_SOURCE_ROWS + 1 - entries.length,
+        );
+      } catch { /* The preview reports invalid files without returning parser input or internal errors. */ }
+      if (!items.length) skip(kind === "email" ? "Could not read this message." : "No readable calendar events found.");
+      for (const item of items) {
+        if (item) entries.push(offlineEntry(kind, path, entries.length + 1, item));
+        else skip(kind === "email" ? "No readable message text found." : "This event has no valid identifier.");
+      }
+    }
+    if (entries.length > MAX_SOURCE_ROWS) throw new OkfWriteError("Choose a selection with up to 2,000 items.");
+  }
+  return entries;
+}
+
+/** CLI-selected files stay local and use the same byte and row bounds as uploads. */
+export async function readOfflineSourcePath(path: string, kind: OfflineSourceKind): Promise<SourceUploadFile[]> {
+  try {
+    const info = await lstat(path);
+    const selection: string[] = [];
+    if (info.isDirectory()) {
+      for await (const entry of await opendir(path)) {
+        if (!entry.isFile() || !offlineFile[kind].test(entry.name)) continue;
+        if (selection.length === MAX_SOURCE_FILES) throw new OkfWriteError(`Choose between 1 and ${MAX_SOURCE_FILES} files.`);
+        selection.push(join(path, entry.name));
+      }
+      selection.sort();
+    } else if (info.isFile()) selection.push(path);
+    else throw new OkfWriteError("Choose a local file or directory.");
+
+    let total = 0;
+    const files: SourceUploadFile[] = [];
+    for (const file of selection) {
+      const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      try {
+        const stats = await handle.stat();
+        if (!stats.isFile()) throw new OkfWriteError("Choose a regular local export file.");
+        if (stats.size > MAX_OFFLINE_FILE_BYTES) throw new OkfWriteError("Choose files up to 2 MiB each.");
+        total += stats.size;
+        if (total > MAX_SOURCE_UPLOAD_BYTES) throw new OkfWriteError("Choose a selection up to 24 MiB.");
+        const bytes = Buffer.allocUnsafe(stats.size + 1);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+          if (!bytesRead) break;
+          offset += bytesRead;
+        }
+        if (offset !== stats.size) throw new OkfWriteError("An export file changed while reading it. Preview the selection again.");
+        files.push({ path: basename(file), text: "", bytes: bytes.subarray(0, offset) });
+      } finally { await handle.close(); }
+    }
+    return files;
+  } catch (error) {
+    if (error instanceof OkfWriteError) throw error;
+    throw new OkfWriteError("Could not read the selected local export files.");
+  }
 }
 
 function isEntry(value: Candidate | Entry): value is Entry {
@@ -265,14 +362,16 @@ export async function importPersonalSource(
   files = files.map((file) => ({ ...file, path: relativePath(file.path) }));
   if (kind === "bookmarks" && (files.length !== 1 || !/\.html?$/i.test(files[0]!.path)))
     throw new OkfWriteError("Choose one browser bookmarks HTML file.");
+  if (files.reduce((size, file) => size + (file.bytes?.byteLength ?? Buffer.byteLength(file.text)), 0) > MAX_SOURCE_UPLOAD_BYTES)
+    throw new OkfWriteError("Choose a selection up to 24 MiB.");
   const dir = `${IMPORT_ROOT}/${kind}-${digest(source).slice(0, 16)}`;
   const names = await directoryEntries(root, dir);
-  const entries = kind === "bookmarks" ? bookmarkEntries(files[0]!) :
+  const entries = kind === "bookmarks" ? bookmarkEntries(files[0]!) : isOfflineSourceKind(kind) ? await offlineEntries(kind, files) :
     files.map((file, index) => markdownEntry(kind, file, index + 1));
   const candidates = mapCandidates(dir, entries, names);
   const rows = candidates.map((candidate) => candidate.row);
   const preview = digest(JSON.stringify([
-    root, kind, source, files.map(({ path, text, origin }) => [path, digest(text), origin]), rows,
+    root, kind, source, files.map(({ path, text, bytes, origin }) => [path, digest(bytes ?? text), origin]), rows,
   ]));
   const imported: string[] = [];
   if (!confirmation) return { rows, preview, imported };
@@ -297,7 +396,7 @@ export async function importPersonalSource(
       const id = row.id!;
       const written = await writeConcept(root, {
         ...note, id, status: "draft", actor: TOOL_ACTOR,
-        body: kind === "bookmarks" ? note.body : sourceMarkdown(note.body ?? "", entry!.path, targets),
+        body: kind === "bookmarks" || isOfflineSourceKind(kind) ? note.body : sourceMarkdown(note.body ?? "", entry!.path, targets),
         extra: { ...note.extra, source_import: { ...stamp, key: entry!.key } },
       }, { createOnly: true, deferIndex: true });
       row.status = written.created ? "imported" : "unchanged";
@@ -327,7 +426,7 @@ export async function sourceHistory(root: string): Promise<SourceHistoryItem[]> 
     throw error;
   });
   for (const child of children) {
-    if (!child.isDirectory() || !/^(bookmarks|markdown|notion|notion-live)-[a-f0-9]{16}$/.test(child.name)) continue;
+    if (!child.isDirectory() || !/^(bookmarks|markdown|notion|notion-live|email|calendar)-[a-f0-9]{16}$/.test(child.name)) continue;
     const dir = `${IMPORT_ROOT}/${child.name}`;
     for (const name of await directoryEntries(root, dir)) {
       const id = `${dir}/${name}`;

@@ -56,6 +56,18 @@ describe("slugify", () => {
 });
 
 describe("okb new", () => {
+  test("mutations preserve the actual spelling of folders and concept IDs", async () => {
+    expect((await okb(["new", "note", "Research", "Original text", "--id", "Research/Fieldbook"])).code).toBe(0);
+    const wrongFolder = await okb(["new", "note", "Other", "Other text", "--id", "research/Other"]);
+    expect(wrongFolder.code).toBe(2);
+    expect(wrongFolder.stderr).toContain("Use the existing path spelling Research.");
+    const wrongFile = await okb(["rm", "Research/fieldbook"]);
+    expect(wrongFile.code).toBe(2);
+    expect(wrongFile.stderr).toContain("Use the existing path spelling Research/Fieldbook.md.");
+    expect((await concept("Research/Fieldbook")).frontmatter.description).toBe("Original text");
+    expect((await okb(["new", "note", "Reserved", "d", "--id", "Research/Index"])).stderr).toContain("reserved");
+  });
+
   test("derives <type>s/<slug>, writes a conformant concept", async () => {
     const r = await okb(["new", "note", "My First Note", "A note about firsts", "--tags", "a,b"]);
     expect(r.code).toBe(0);

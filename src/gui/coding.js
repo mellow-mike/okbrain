@@ -807,7 +807,9 @@
     }
     if (isDetached()) return;
     const suggestedWorkspace = arg?.startsWith('workspace=') ? arg.slice('workspace='.length) : '';
-    const project = projects.find((item) => item.id === arg || (suggestedWorkspace && item.workspace === suggestedWorkspace)) ||
+    const githubRequest = /^([a-f0-9-]{36})\/github\/([a-z0-9][a-z0-9_-]{0,63})\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})$/.exec(arg || '');
+    const projectId = githubRequest?.[1] || arg;
+    const project = projects.find((item) => item.id === projectId || (suggestedWorkspace && item.workspace === suggestedWorkspace)) ||
       (!arg ? projects[0] : null);
     projectsEl.innerHTML = !teamMode && projects.length ?
       '<div class="row coding-project-links" aria-label="Coding projects">' + projects.map((item) =>
@@ -841,7 +843,8 @@
     const github = document.createElement('div');
     github.dataset.codingGithub = '';
     left.append(github);
-    window.okbGitHub?.mount(github, { project, coding, readonly });
+    const target = githubRequest ? { session: githubRequest[2], id: githubRequest[3] } : undefined;
+    window.okbGitHub?.mount(github, { project, coding, readonly, target });
     if (!teamMode) patchReview(left, project, readonly);
   }
 

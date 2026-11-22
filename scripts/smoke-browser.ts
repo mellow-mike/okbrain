@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, type Browser } from "playwright";
+import { pathToFileURL } from "node:url";
+import { chromium, type Browser, type Page } from "playwright";
 import { createApiServer } from "../src/api.ts";
 import { loadConfig } from "../src/core/config.ts";
 
@@ -38,6 +39,18 @@ process.env.OKB_CHAT_PROVIDER = "ollama";
 process.env.OKB_CHAT_BASE_URL = `http://127.0.0.1:${chatFixture.port}`;
 process.env.OKB_EMBED_BASE_URL = `http://127.0.0.1:${chatFixture.port}`;
 let browser: Browser | undefined;
+
+async function selectGraphNote(page: Page, id: string) {
+  const exists = (note: string) => {
+    const { cy } = window as unknown as { cy?: { getElementById(id: string): { length: number; emit(event: string): void } } };
+    return Boolean(cy?.getElementById(note).length);
+  };
+  await page.waitForFunction(exists, id);
+  await page.evaluate(({ note }) => {
+    const { cy } = window as unknown as { cy: { getElementById(id: string): { emit(event: string): void } } };
+    cy.getElementById(note).emit("tap");
+  }, { note: id });
+}
 
 try {
   browser = await chromium.launch({ executablePath: process.env.OKB_SMOKE_CHROMIUM || undefined });
@@ -139,6 +152,13 @@ try {
   await page.getByRole("link", { name: "Ask with ChatGPT", exact: true }).click();
   await page.getByText("Connect an eligible account to continue.").waitFor();
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Turn on local counts" }).click();
+  await page.getByText("Counting local usage.", { exact: true }).waitFor();
+  await page.evaluate((id) => { location.hash = "#concept/" + encodeURIComponent(id); }, answerSource);
+  await page.getByText("1 open · 0 Ask citations").waitFor();
+  await nav.getByRole("link", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Turn off and clear counts" }).click();
+  await page.getByText("Local counts are off.", { exact: true }).waitFor();
   await page.getByLabel("Folder path in this brain", { exact: true }).fill("inbox");
   await page.getByRole("button", { name: "Enable folder log" }).click();
   await page.getByText("inbox/log.md created.", { exact: true }).waitFor();
@@ -153,6 +173,16 @@ try {
   await page.getByRole("button", { name: "Export viz.html" }).click();
   assert.equal((await exported).status(), 200);
   assert.match(await Bun.file(join(bundle, "viz.html")).text(), /data:font\/woff2;base64,/);
+  const offlineViewer = await browser.newPage({ viewport: { width: 800, height: 560 }, reducedMotion: "reduce" });
+  offlineViewer.on("pageerror", (error) => errors.push(error.message));
+  await offlineViewer.route(/^https?:/, async (route) => { outbound.push(route.request().url()); await route.abort(); });
+  try {
+    await offlineViewer.goto(pathToFileURL(join(bundle, "viz.html")).href);
+    await selectGraphNote(offlineViewer, answerSource);
+    await offlineViewer.locator("#detail").getByRole("heading", { name: "Offline orchid propagation" }).waitFor();
+    await offlineViewer.locator("#filters input[data-type=note]").uncheck();
+    assert.equal(await offlineViewer.locator("#filters input[data-type=note]").isChecked(), false);
+  } finally { await offlineViewer.close(); }
   const markdownExport = page.locator("#markdown-export");
   assert.equal(await markdownExport.getByRole("checkbox", { name: "Include private drafts in Markdown export" }).isChecked(), false);
   const vault = join(root, "exported vault");
@@ -244,6 +274,13 @@ try {
   await page.getByRole("searchbox", { name: "Search notes", exact: true }).press("Enter");
   await page.getByRole("link", { name: "Watched field note", exact: true }).waitFor();
 
+  await nav.getByRole("link", { name: "Graph", exact: true }).click();
+  await selectGraphNote(page, "external");
+  await page.locator("#gdetail").getByRole("heading", { name: "Watched field note" }).waitFor();
+  await page.locator("#gdetail").getByRole("link", { name: "Open", exact: true }).click();
+  await page.locator(".concept-head").getByRole("heading", { name: "Watched field note" }).waitFor();
+  await page.waitForFunction(() => !("cy" in window) || !window.cy);
+
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
   const embed = page.locator("#embedf");
   await embed.getByLabel("Provider override").fill("local");
@@ -292,6 +329,27 @@ try {
   await rss.getByRole("button", { name: "Pull", exact: true }).click();
   await page.getByText("Sample feed: 0 added, 0 known", { exact: true }).waitFor();
   assert.deepEqual(feedRequests, [{ limit: 2 }]);
+
+  const localSourceFiles = [
+    { format: "email", name: "field.eml", title: "Trip email", mime: "message/rfc822",
+      text: "Subject: Trip email\r\nContent-Type: text/html\r\n\r\n<p>Bring the seed packets</p><img src=\"https://example.invalid/pixel\">\r\n",
+      excerpt: "Bring the seed packets" },
+    { format: "calendar", name: "field.ics", title: "Field appointment", mime: "text/calendar",
+      text: "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:field-appointment\r\nDTSTART;VALUE=DATE:20261122\r\nSUMMARY:Field appointment\r\nDESCRIPTION:Visit the seed bank\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+      excerpt: "Visit the seed bank" },
+  ];
+  for (const source of localSourceFiles) {
+    await nav.getByRole("link", { name: "Sources", exact: true }).click();
+    await page.getByRole("combobox", { name: /File format/ }).selectOption(source.format);
+    await page.getByLabel("Export files", { exact: true }).setInputFiles({ name: source.name, mimeType: source.mime, buffer: Buffer.from(source.text) });
+    await page.getByRole("button", { name: "Preview files", exact: true }).click();
+    await page.getByText(source.excerpt, { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Import selected drafts", exact: true }).click();
+    await page.getByText("1 private draft saved.", { exact: true }).waitFor();
+    await page.locator("#source-files-result").getByRole("link", { name: source.title, exact: true }).click();
+    await page.getByRole("heading", { name: source.title, exact: true }).waitFor();
+    assert.equal(await page.locator("main img[src*='example.invalid']").count(), 0);
+  }
 
   await nav.getByRole("link", { name: "Coding", exact: true }).click();
   await page.getByText("Add a project", { exact: true }).waitFor();

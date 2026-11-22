@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { recordCitedNotes } from "../local-usage.ts";
 import type { OpContext } from "../operations.ts";
-import { inDbOnlyDir } from "../okf/paths.ts";
-import { answerFromContext, prepareLocalContext, type AskResult, type PreparedContext } from "../retrieval/ask.ts";
+import { isPrivateConceptAt } from "../okf/privacy.ts";
+import { answerFromContext, prepareLocalContext, publicHits, type AskResult, type PreparedContext } from "../retrieval/ask.ts";
 import { PROFILES } from "../retrieval/profiles.ts";
 import { createChatgptPlan, type ChatgptPlanStatus, type PlanOptions } from "./chatgpt-plan.ts";
 
@@ -11,6 +12,7 @@ interface Preview {
   model: string;
   question: string;
   context: PreparedContext;
+  includePrivate: boolean;
   expires: number;
   answer?: Promise<AskResult>;
 }
@@ -81,21 +83,32 @@ export function createBrowserPlan(options: Pick<PlanOptions, "path" | "fetch"> =
       const account = await selectAccount(input.account);
       const model = required(input.model, "Model", 150);
       const question = required(input.question, "Question", 8000);
+      const includePrivate = input.includePrivate === true;
       const context = await prepareLocalContext(question, ctx.bundle, { engine: ctx.engine() },
-        { ...PROFILES.balanced!, rerank: false }, (hit) => input.includePrivate === true || !inDbOnlyDir(hit.id));
+        { ...PROFILES.balanced!, rerank: false }, includePrivate);
       for (const [id, preview] of previews) if (preview.expires <= Date.now()) previews.delete(id);
       if (previews.size >= 16) previews.delete(previews.keys().next().value!);
       const id = randomUUID();
-      previews.set(id, { account, question, model, context, bundle: ctx.bundle, expires: Date.now() + 10 * 60_000 });
-      return { id, account, model, sources: context.context.map((citation, i) => ({ ...citation, text: context.blocks[i] })) };
+      previews.set(id, { account, question, model, context, includePrivate, bundle: ctx.bundle, expires: Date.now() + 10 * 60_000 });
+      const sources = await Promise.all(context.context.map(async (citation, i) => ({
+        ...citation, text: context.blocks[i], private: includePrivate && await isPrivateConceptAt(ctx.bundle, citation.id),
+      })));
+      return { id, account, model, sources };
     },
     async answer(ctx: OpContext, id: unknown) {
       const key = required(id, "Preview ID", 40);
       const preview = previews.get(key);
       if (!preview || preview.bundle !== ctx.bundle || preview.expires <= Date.now())
         throw new BrowserPlanInputError("Preview sources again for this brain.");
+      if (!preview.answer && !preview.includePrivate && (await publicHits(ctx.bundle, preview.context.context)).length !== preview.context.context.length) {
+        previews.delete(key);
+        throw new BrowserPlanInputError("A source is private or changed. Preview sources again before sending.");
+      }
       preview.answer ??= answerFromContext(preview.question, preview.context, {
         chat: async (messages) => ({ ...(await plan.complete(messages, preview.model, preview.account)), provider: "chatgpt-plan" }),
+      }).then((result) => {
+        recordCitedNotes(ctx, result.citations.map(({ id }) => id));
+        return result;
       });
       return preview.answer;
     },

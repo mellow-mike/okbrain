@@ -60,6 +60,19 @@ const has = (fs: Finding[], check: string, path: string): boolean =>
   fs.some((f) => f.check === check && f.path === path);
 
 describe("runDoctor", () => {
+  test.skipIf(process.platform === "win32" || process.platform === "darwin")("diagnoses legacy case-only folder aliases without rewriting notes", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "okb-doctor-paths-"));
+    try {
+      await mkdir(join(dir, "Notes"));
+      await mkdir(join(dir, "notes"));
+      await writeFile(join(dir, "Notes", "a.md"), FM);
+      await writeFile(join(dir, "notes", "b.md"), FM);
+      const result = await runDoctor(dir);
+      expect(result.findings.find((f) => f.check === "portable-path")).toMatchObject({ severity: "warning", path: "notes/b.md" });
+      expect(result.concepts).toBe(2);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
   test("conformant bundle passes with no findings", async () => {
     const r = await runDoctor(clean);
     expect(r.findings).toEqual([]);

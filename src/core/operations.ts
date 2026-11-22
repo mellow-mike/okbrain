@@ -28,6 +28,7 @@ import { suggestLinks, type LinkSuggestion } from "./graph/link-suggest.ts";
 import { extractTargets } from "./graph/links.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
 import { log } from "./log.ts";
+import { noteUsageSettings, recordCitedNotes, recordNoteOpen, type LocalUsageView } from "./local-usage.ts";
 import { suggestTags } from "./ingest/autotag.ts";
 import { captureNote } from "./ingest/capture.ts";
 import { clipUrl, type ClipOptions, type ClipResult } from "./ingest/clip.ts";
@@ -42,7 +43,7 @@ import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
 import type { NotionSource } from "./ingest/notion-source.ts";
 import {
-  importPersonalSource, isSourceKind, sourceHistory,
+  importPersonalSource, isOfflineSourceKind, isSourceKind, MAX_SOURCE_ROWS, readOfflineSourcePath, sourceHistory,
   type SourceUploadFile, type SourceUploadResult,
 } from "./ingest/personal-sources.ts";
 import { FeedError, pullFeed, type RssPullResult } from "./ingest/rss.ts";
@@ -68,14 +69,15 @@ import {
 } from "./okf/document.ts";
 import { regenerateIndexes, setIndexStyle } from "./okf/indexmd.ts";
 import { fileInboxNote, InboxFilingError, type InboxFiling } from "./okf/inbox-filing.ts";
-import { appendLog, createDirectoryLog, LogFolderError } from "./okf/logmd.ts";
+import { appendLog, createDirectoryLog, LogFolderError, removePrivateLogEntries } from "./okf/logmd.ts";
 import { exportMarkdown, MarkdownExportError, type MarkdownExport } from "./okf/markdown-export.ts";
-import { idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
+import { assertConceptPathSpelling, idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
+import { isPrivateConcept, isPrivateConceptAt, PrivacyPathError } from "./okf/privacy.ts";
 import { brainStarterCatalog, createBrainStarter, findBrainStarter } from "./okf/starter.ts";
 import { upgradeBundle, type UpgradeResult } from "./okf/upgrade.ts";
 import { nowTimestamp, OkfWriteError, writeConcept, type WriteResult } from "./okf/write.ts";
 import { TOOL_ACTOR } from "./version.ts";
-import { askBrain, type AskResult } from "./retrieval/ask.ts";
+import { askBrain, publicHits, type AskResult } from "./retrieval/ask.ts";
 import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./retrieval/embed.ts";
 import { hybridRetrieve, type HybridArms, type HybridHit } from "./retrieval/hybrid.ts";
 import { PROFILES, ProfileError, resolveProfile, type RetrievalProfile } from "./retrieval/profiles.ts";
@@ -85,7 +87,7 @@ import { defaultReviewConfig, reviewQueue, type ReviewItem } from "./review/scor
 import { bookmarkletJs, DEFAULT_MCP_PORT, DEFAULT_PORT, ensureServeToken, publishDesktopAddress } from "./serve-token.ts";
 import { computeStats, type BrainStats } from "./stats.ts";
 import { JobLockError, runJobs, type Job, type JobResult } from "./jobs/worker.ts";
-import { syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
+import { protectUnsharedNote, syncBundle, syncStatus, type SyncResult, type SyncStatus } from "./sync.ts";
 import { buildVizGraph, exportViz, type VizExport, type VizGraph } from "./viz/export.ts";
 
 export type Scope = "read" | "write" | "admin";
@@ -96,6 +98,8 @@ export interface OpContext {
   /** Named mount selected by a long-running local command. */
   brain?: string;
   trusted: boolean;
+  /** Local owner surfaces may contribute to explicitly enabled usage counts. */
+  localUsage?: boolean;
   /** Read-only brain mount (Stage 5): write/admin ops are refused. */
   readonly?: boolean;
   /**
@@ -284,7 +288,10 @@ async function reindex(ctx: OpContext, ids: string[]): Promise<void> {
   if (!ctx.hasVectors()) return;
   try {
     const emb = gatewayEmbedder(ctx.config().ai ?? {});
-    for (const id of ids) await embedConcept(ctx.bundle, id, ctx.vectors(), emb);
+    for (const id of ids) {
+      if (await isPrivateConceptAt(ctx.bundle, id)) ctx.vectors().remove(id);
+      else await embedConcept(ctx.bundle, id, ctx.vectors(), emb);
+    }
   } catch (e) {
     // Never fail a write over a derived cache; `okb embed` reconciles later.
     log.warn("vector refresh failed — run `okb embed` to catch up", {
@@ -456,7 +463,12 @@ async function maybeRerank(
   const ai = ctx.config().ai ?? {};
   if (!profile.rerank || hits.length < 2 || !rerankConfigured(ai)) return hits;
   try {
-    return await rerankHits(query, hits, createGateway(ai));
+    const publicPool = await publicHits(ctx.bundle, hits);
+    if (publicPool.length < 2) return hits;
+    const reranked = await rerankHits(query, publicPool, createGateway(ai));
+    const visible = new Set(publicPool.map((hit) => hit.id));
+    let index = 0;
+    return hits.map((hit) => visible.has(hit.id) ? reranked[index++]! : hit);
   } catch (e) {
     log.warn("rerank skipped", { error: (e as Error).message });
     return hits;
@@ -508,12 +520,14 @@ async function runAsk(
       chat: (messages) => gw.chat(messages, undefined, { signal }),
       synthesize: emit && ((messages) => gw.chat(messages, undefined, { signal, onDelta: (text) => emit("delta", { text }) })),
       signal,
+      includePrivate: p["include-private"] === true,
       rerank: (q, hits) => maybeRerank(ctx, q, hits, profile),
       onContext: emit && ((context) => emit("context", context)),
     },
     profile,
   );
   warnVectorSkip(ctx, r.vectorSkipped);
+  if (!signal?.aborted) recordCitedNotes(ctx, r.citations.map(({ id }) => id));
   emit?.("answer", { answer: r.answer, citations: r.citations });
   return r;
 }
@@ -586,7 +600,7 @@ async function writing<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (e) {
-    if (e instanceof OkfWriteError || e instanceof InvalidIdError)
+    if (e instanceof OkfWriteError || e instanceof InvalidIdError || e instanceof PrivacyPathError)
       throw new OpError(e.message, "bad_params");
     if (e instanceof FetchGuardError || e instanceof FeedError)
       throw new OpError(e.message, "refused");
@@ -637,7 +651,7 @@ export async function runPersonalSourceUpload(
 ): Promise<SourceUploadResult> {
   checkOpScope({ name: "personal source import", scope: "write" }, ctx);
   if (!isSourceKind(kind) || kind === "notion-live")
-    throw new OpError("Choose browser bookmarks, Markdown, or a Notion export.", "bad_params");
+    throw new OpError("Choose a bookmarks, Markdown, Notion, email, or calendar export.", "bad_params");
   const { name, files, selected } = await read();
   const result = await writing(() => importPersonalSource(
     ctx.bundle, kind, name, files, preview === null ? undefined : { preview, selected },
@@ -739,6 +753,7 @@ export const operations: readonly Operation[] = [
       { name: "question", type: "string", required: true, positional: true, description: "the question to answer from your notes" },
       { name: "profile", type: "string", description: "retrieval profile: lean|balanced|max (default balanced)" },
       { name: "stream", type: "boolean", description: "print answer text as it arrives (plain CLI output)" },
+      { name: "include-private", type: "boolean", description: "allow private notes in the answer provider context" },
     ],
     handler: (ctx, p) => runAsk(ctx, p),
     stream: (ctx, p, emit, signal) => runAsk(ctx, p, emit, signal),
@@ -754,17 +769,21 @@ export const operations: readonly Operation[] = [
     params: [
       { name: "question", type: "string", required: true, positional: true, description: "question to answer using your notes" },
       { name: "model", type: "string", description: "model slug from `okb chatgpt models`" },
+      { name: "include-private", type: "boolean", description: "allow private notes in the ChatGPT context" },
     ],
     handler: async (ctx, p) => {
       const plan = createChatgptPlan();
-      return askBrain(p.question as string, {
+      const result = await askBrain(p.question as string, {
         bundle: ctx.bundle,
         arms: { engine: ctx.engine() },
+        includePrivate: p["include-private"] === true,
         chat: async (messages) => ({
           ...(await plan.complete(messages, p.model as string | undefined)),
           provider: "chatgpt-plan",
         }),
       }, { ...PROFILES.balanced!, rerank: false });
+      recordCitedNotes(ctx, result.citations.map(({ id }) => id));
+      return result;
     },
     render: renderAnswer,
   },
@@ -952,7 +971,11 @@ export const operations: readonly Operation[] = [
     params: [
       { name: "id", type: "string", required: true, positional: true, description: "concept id, e.g. notes/foo" },
     ],
-    handler: (ctx, p) => readConceptView(ctx.bundle, p.id as string),
+    handler: async (ctx, p): Promise<ConceptView & { localUsage?: LocalUsageView }> => {
+      const view = await readConceptView(ctx.bundle, p.id as string);
+      const localUsage = recordNoteOpen(ctx, view.id, view.frontmatter);
+      return localUsage ? { ...view, localUsage } : view;
+    },
     render: (r) => (r as ConceptView).raw,
   },
   {
@@ -1058,10 +1081,10 @@ export const operations: readonly Operation[] = [
       if (source && !MAP_SOURCES.includes(source)) throw new OpError("Unknown source filter.", "bad_params");
       if (since && (!/^\d{4}-\d{2}-\d{2}$/.test(since) || !Number.isFinite(Date.parse(since)) || new Date(since).toISOString().slice(0, 10) !== since))
         throw new OpError("Choose a valid start date.", "bad_params");
-      return focusedMap(ctx.engine(), { id: id?.trim(), query: query?.trim(), source, since, includePrivate: p["include-private"] === true });
+      return focusedMap(ctx.bundle, ctx.engine(), { id: id?.trim(), query: query?.trim(), source, since, includePrivate: p["include-private"] === true });
     },
     render(result) {
-      const map = result as ReturnType<typeof focusedMap>;
+      const map = result as Awaited<ReturnType<typeof focusedMap>>;
       return [...map.nodes.map((node) => `${node.id} — ${node.title}`),
         ...map.edges.map((edge) => `${edge.src} → ${edge.dst}${edge.rel ? ` (${edge.rel})` : ""}`),
         ...(map.bounded ? ["Map limited. Narrow the query or focus on one concept."] : []),
@@ -1188,11 +1211,20 @@ export const operations: readonly Operation[] = [
       { name: "status", type: "string", description: "lifecycle: draft|stable|deprecated (empty string clears)" },
       { name: "stale-after", type: "string", description: "ISO instant after which the content is stale, e.g. 2026-12-31T00:00:00Z (empty clears)" },
       { name: "sources", type: "string", description: "provenance: comma-separated URLs/paths, or a JSON array of {resource,id,title,…} (empty clears)" },
+      { name: "private", type: "boolean", description: "create a local-only note using this explicit ID" },
     ],
     handler: async (ctx, p) => {
+      const id = p.id as string;
+      if (p.private === true) {
+        checkOpScope({ name: "private note creation", scope: "admin" }, ctx);
+        if (existsSync(idToAbsPath(ctx.bundle, id))) throw new OpError("To keep an existing note local, use okb keep-private.", "bad_params");
+        if ([p.type, p.title, p.description].some((field) => typeof field !== "string" || !field.trim()))
+          throw new OpError("Enter a type, title, and description to create a private note.", "bad_params");
+        await writing(() => protectUnsharedNote(ctx.bundle, id));
+      }
       const r = await writing(() =>
         writeConcept(ctx.bundle, {
-          id: p.id as string,
+          id,
           type: p.type as string | undefined,
           title: p.title as string | undefined,
           description: p.description as string | undefined,
@@ -1203,12 +1235,33 @@ export const operations: readonly Operation[] = [
           staleAfter: p["stale-after"] as string | undefined,
           sources: parseSources(p.sources),
           actor: ctx.actor(),
-        }),
+          extra: p.private === true ? { db_only: true } : undefined,
+        }, { createOnly: p.private === true }),
       );
+      if (p.private === true && !r.created) throw new OpError("Another note now uses this ID.", "bad_params");
       await reindex(ctx, [r.id]);
       return r;
     },
     render: renderWrite,
+  },
+  {
+    name: "keep_private",
+    cliName: "keep-private",
+    summary: "Keep an existing unpublished note local to this brain",
+    scope: "admin",
+    params: [{ name: "id", type: "string", required: true, positional: true, description: "unpublished concept ID" }],
+    handler: async (ctx, p) => writing(async () => {
+      const id = p.id as string;
+      const note = await readConceptView(ctx.bundle, id);
+      if (!isPrivateConcept(id, note.frontmatter)) {
+        await protectUnsharedNote(ctx.bundle, id);
+        await writeConcept(ctx.bundle, { id, metadataOnly: true, extra: { db_only: true } });
+      }
+      await removePrivateLogEntries(ctx.bundle, new Set([id]));
+      await reindex(ctx, [id]);
+      return { id, private: true };
+    }),
+    render: (r) => `kept ${(r as { id: string }).id} private`,
   },
   {
     name: "new_concept",
@@ -1336,6 +1389,40 @@ export const operations: readonly Operation[] = [
         ...skipped.map(({ row, id, reason }) => `skipped row ${row}${id ? ` (${id})` : ""} — ${reason}`),
         `${imported.length} imported, ${planned.length} planned, ${skipped.length} skipped`,
       ].join("\n");
+    },
+  },
+  {
+    name: "personal_source_import",
+    cliName: "source import",
+    summary: "Preview local email or calendar files and save selected rows as private drafts",
+    scope: "write",
+    localOnly: true,
+    params: [
+      { name: "path", type: "string", required: true, positional: true, description: "one .eml or .ics file, or a directory of files" },
+      { name: "kind", type: "string", required: true, description: "export format: email or calendar" },
+      { name: "name", type: "string", required: true, description: "source name to reuse for later imports" },
+      { name: "preview", type: "string", description: "receipt from a prior preview of this selection" },
+      { name: "selected", type: "string", description: "comma-separated draft row numbers from the preview" },
+    ],
+    handler: (ctx, p) => {
+      if (!isOfflineSourceKind(p.kind)) throw new OpError("Choose email or calendar.", "bad_params");
+      const kind = p.kind;
+      const preview = p.preview as string | undefined;
+      const rows = p.selected as string | undefined;
+      if ((preview === undefined) !== (rows === undefined))
+        throw new OpError("Pass both --preview and --selected to confirm an import.", "bad_params");
+      const selected = rows?.split(",").map((row) => Number(row.trim())) ?? [];
+      if (preview !== undefined && (!/^[a-f0-9]{64}$/.test(preview) || selected.length > MAX_SOURCE_ROWS ||
+          selected.some((row) => !Number.isSafeInteger(row) || row < 1)))
+        throw new OpError("Pass a preview receipt and positive draft row numbers.", "bad_params");
+      return runPersonalSourceUpload(ctx, kind, preview ?? null, async () => ({
+        name: p.name as string, files: await writing(() => readOfflineSourcePath(p.path as string, kind)), selected,
+      }));
+    },
+    render: (result) => {
+      const { rows, preview, imported } = result as SourceUploadResult;
+      return [...rows.map(({ row, title, path, status, reason }) => `${row}. [${status}] ${title ?? path}${reason ? ` — ${reason}` : ""}`),
+        imported.length ? `${imported.length} private drafts saved.` : `Preview receipt ${preview}`].join("\n");
     },
   },
   {
@@ -1497,6 +1584,7 @@ export const operations: readonly Operation[] = [
       { name: "limit", type: "int", description: "max concepts to (re)embed this run (paces API spend)" },
       { name: "provider", type: "string", description: "embedding provider override (default: config/env)" },
       { name: "model", type: "string", description: "embedding model override" },
+      { name: "include-private", type: "boolean", description: "send private notes to the selected embedding provider" },
     ],
     handler: async (ctx, p) => {
       const emb = gatewayEmbedder(ctx.config().ai ?? {}, {
@@ -1504,6 +1592,7 @@ export const operations: readonly Operation[] = [
         model: p.model as string | undefined,
       });
       return embedBundle(ctx.bundle, ctx.vectors(true), emb, {
+        includePrivate: p["include-private"] === true,
         limit: p.limit as number | undefined,
       });
     },
@@ -1812,7 +1901,10 @@ export const operations: readonly Operation[] = [
           throw new OpError(`seed is not an http(s) URL: ${s}`, "bad_params");
       }
       const concept = p.concept as string | undefined;
-      if (concept !== undefined) await readConceptView(ctx.bundle, concept); // not_found early
+      if (concept !== undefined) {
+        const note = await readConceptView(ctx.bundle, concept);
+        if (isPrivateConcept(concept, note.frontmatter)) throw new OpError("Private notes are unavailable to enrichment.", "refused");
+      }
       if (p.task === undefined && seeds.length === 0 && concept === undefined)
         throw new OpError(
           "give okb enrich a task, --concept, and/or --web-seed URLs",
@@ -1836,18 +1928,14 @@ export const operations: readonly Operation[] = [
       const r = await runEnrich(ctx.bundle, task, seeds, limits, {
         chat: async (messages) => (await gw.chat(messages)).text,
         actor: enrichActor(ctx),
-        suggestLinks: ctx.hasIndex() ? (id) => suggestFor(ctx, id) : undefined,
+        suggestLinks: ctx.hasIndex() ? async (id) => await isPrivateConceptAt(ctx.bundle, id)
+          ? [] : publicHits(ctx.bundle, await suggestFor(ctx, id)) : undefined,
         listConcepts: async () => {
-          if (ctx.hasIndex()) {
-            const eng = ctx.engine();
-            return eng.listNodeIds().map((id) => ({ id, title: eng.getNode(id)!.title }));
-          }
           const out: { id: string; title: string }[] = [];
-          for (const id of await listConcepts(ctx.bundle))
-            out.push({
-              id,
-              title: fmString((await readConceptPermissive(ctx.bundle, id)).doc.frontmatter.title),
-            });
+          for (const id of await listConcepts(ctx.bundle)) {
+            const { doc, parsed } = await readConceptPermissive(ctx.bundle, id);
+            if (parsed && !isPrivateConcept(id, doc.frontmatter)) out.push({ id, title: fmString(doc.frontmatter.title) });
+          }
           return out;
         },
       });
@@ -2183,7 +2271,9 @@ export const operations: readonly Operation[] = [
     ],
     handler: async (ctx, p) => {
       const id = p.id as string;
+      await writing(() => assertConceptPathSpelling(ctx.bundle, id));
       const view = await readConceptView(ctx.bundle, id); // not_found / bad id first
+      if (isPrivateConcept(id, view.frontmatter)) await removePrivateLogEntries(ctx.bundle, new Set([id]));
       await unlink(idToAbsPath(ctx.bundle, id));
       // Directories left with nothing but their generated index.md are pruned
       // (so parent listings drop them), then the surviving chain regenerates.
@@ -2196,7 +2286,7 @@ export const operations: readonly Operation[] = [
         dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
       }
       await regenerateIndexes(ctx.bundle, dir);
-      await appendLog(ctx.bundle, "Deletion", id, fmString(view.frontmatter.title) || id);
+      if (!isPrivateConcept(id, view.frontmatter)) await appendLog(ctx.bundle, "Deletion", id, fmString(view.frontmatter.title) || id);
       await withIndexWrite(ctx.bundle, () => {
         if (ctx.hasIndex()) ctx.engine().removeNode(id);
       });
@@ -2252,6 +2342,24 @@ export const operations: readonly Operation[] = [
       return { defaultBundle: ctx.bundle };
     },
     render: (result) => `default brain: ${(result as { defaultBundle: string }).defaultBundle}`,
+  },
+  {
+    name: "note_usage_settings",
+    cliName: "usage settings",
+    summary: "View or change local note usage counting for this brain",
+    scope: "admin",
+    params: [
+      { name: "mode", type: "string", positional: true, description: "on or off (off also clears existing counts)" },
+    ],
+    handler: async (ctx, p) => {
+      if (p.mode === undefined) return noteUsageSettings(ctx.bundle);
+      if (p.mode !== "on" && p.mode !== "off") throw new OpError("Choose on or off for local note usage.", "bad_params");
+      return noteUsageSettings(ctx.bundle, p.mode === "on");
+    },
+    render: (result) => {
+      const settings = result as ReturnType<typeof noteUsageSettings>;
+      return settings.enabled ? `Local note usage counts are enabled (${settings.windowDays} days).` : "Local note usage counts are off.";
+    },
   },
   {
     name: "init",

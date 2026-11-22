@@ -1,4 +1,4 @@
-/** GitHub requests are repository-scoped reads. Publication happens in GitHub's UI. */
+/** GitHub calls use only the repository bound to the project's Git remote. */
 
 export interface GitHubRemote {
   remote: string;
@@ -100,6 +100,42 @@ export function githubComparison(repository: string, rawBase: unknown, rawHead: 
   return `${githubUrl(repository)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?expand=1`;
 }
 
+export interface GitHubPullDraft {
+  base: string;
+  head: string;
+  title: string;
+  body: string;
+  draft: boolean;
+}
+
+export function githubPullDraft(input: Record<string, unknown>): GitHubPullDraft {
+  const base = githubBranch(input.base);
+  const head = githubBranch(input.head);
+  if (base === head) throw new GitHubError("Choose different base and head branches.");
+  const { title, body, draft } = input;
+  if (typeof title !== "string" || !title.trim() || /[\u0000-\u001f\u007f]/u.test(title)
+      || Buffer.byteLength(title) > 256)
+    throw new GitHubError("Enter a single-line pull request title up to 256 UTF-8 bytes.");
+  if (typeof body !== "string" || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(body)
+      || Buffer.byteLength(body) > 16 * 1024 || body.includes("okbrain-pr:"))
+    throw new GitHubError("Enter pull request Markdown up to 16 KiB.");
+  if (typeof draft !== "boolean") throw new GitHubError("Choose whether to open a draft pull request.");
+  return { base, head, title: title.trim(), body: body.replace(/\r\n?/gu, "\n"), draft };
+}
+
+function receiptMarker(approval: string) { return `<!-- okbrain-pr:${approval} -->`; }
+
+export function githubPullBody(body: string, approval: string) {
+  return body ? `${body}\n\n${receiptMarker(approval)}` : receiptMarker(approval);
+}
+
+export interface GitHubPullReceipt {
+  id: number;
+  number: number;
+  draft: boolean;
+  apiRequestId: string | null;
+}
+
 interface GitHubItem {
   number: number;
   title: string;
@@ -111,27 +147,35 @@ interface GitHubItem {
 const asRecord = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
-async function getGitHub(path: string, token: string | null, transport: GitHubFetch): Promise<unknown> {
+async function gitHubRequest(path: string, token: string | null, transport: GitHubFetch, body?: GitHubPullDraft) {
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
     "user-agent": "okbrain",
     "x-github-api-version": "2022-11-28",
   };
   if (token) headers.authorization = `Bearer ${token}`;
+  if (body) headers["content-type"] = "application/json";
   let response;
   try {
     response = await transport(new URL(path, API_ORIGIN), {
-      method: "GET", headers, redirect: "error", signal: AbortSignal.timeout(10000),
+      method: body ? "POST" : "GET", headers, redirect: "error", signal: AbortSignal.timeout(10000),
+      ...(body ? { body: JSON.stringify(body) } : {}),
     });
   } catch {
-    throw new GitHubError("GitHub could not be reached. Try refreshing again.", 502);
+    throw new GitHubError(body ? "GitHub did not confirm creation. Recover the pull request before retrying." : "GitHub could not be reached. Try refreshing again.", 502);
   }
   if (response.status === 401) throw new GitHubError("GitHub rejected the saved access token.", 502);
   if (response.status === 404) throw new GitHubError("GitHub could not find this repository. For a private repository, check the token's repository and permissions.", 502);
   if (response.status === 429 || (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0"))
     throw new GitHubError("GitHub's rate limit was reached. Try again later.", 502);
-  if (response.status === 403) throw new GitHubError("GitHub denied access. Check the token's repository and read permissions.", 502);
-  if (!response.ok) throw new GitHubError("GitHub could not load this repository's activity.", 502);
+  if (response.status === 403) throw new GitHubError(body
+    ? "GitHub denied publication. Check the separate token's Pull requests write permission."
+    : "GitHub denied access. Check the token's repository and read permissions.", 502);
+  if (body && response.status === 422)
+    throw new GitHubError("GitHub rejected creation. Check that both branches exist, that the head has changes, and that the comparison has no open pull request.", 409);
+  if (body ? response.status !== 201 : !response.ok) throw new GitHubError(body
+    ? "GitHub did not confirm creation. Recover the pull request before retrying."
+    : "GitHub could not load this repository's activity.", 502);
   try {
     const reader = response.body?.getReader();
     if (!reader) throw new Error();
@@ -151,10 +195,60 @@ async function getGitHub(path: string, token: string | null, transport: GitHubFe
     } finally {
       reader.releaseLock();
     }
-    return JSON.parse(Buffer.concat(chunks, total).toString("utf8"));
+    const header = response.headers.get("x-github-request-id");
+    return {
+      data: JSON.parse(Buffer.concat(chunks, total).toString("utf8")) as unknown,
+      apiRequestId: header && /^[A-Za-z0-9:-]{1,128}$/u.test(header) ? header : null,
+    };
   } catch {
     throw new GitHubError("GitHub returned unreadable or oversized data.", 502);
   }
+}
+
+async function getGitHub(path: string, token: string | null, transport: GitHubFetch): Promise<unknown> {
+  return (await gitHubRequest(path, token, transport)).data;
+}
+
+function pullMatches(row: Record<string, unknown>, repository: string, base: string, head: string) {
+  const matches = (value: unknown, ref: string) => {
+    const branch = asRecord(value);
+    const name = asRecord(branch.repo).full_name;
+    return branch.ref === ref && typeof name === "string" && name.toLowerCase() === repository;
+  };
+  return matches(row.base, base) && matches(row.head, head);
+}
+
+function pullReceipt(row: Record<string, unknown>, apiRequestId: string | null): GitHubPullReceipt {
+  const { id, number, draft } = row;
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 1
+    || typeof number !== "number" || !Number.isSafeInteger(number) || number < 1 || typeof draft !== "boolean")
+    throw new GitHubError("GitHub returned an unreadable pull request receipt. Recover it before retrying.", 502);
+  return { id, number, draft, apiRequestId };
+}
+
+export async function githubFindPull(repository: string, base: string, head: string, approval: string, token: string, transport: GitHubFetch) {
+  const limit = 50;
+  const query = new URLSearchParams({ state: "all", head: `${repository.split("/")[0]}:${head}`, base,
+    per_page: String(limit), sort: "created", direction: "desc" });
+  const { data, apiRequestId } = await gitHubRequest(`/repos/${repository}/pulls?${query}`, token, transport);
+  if (!Array.isArray(data)) throw new GitHubError("GitHub returned an unreadable pull request list.", 502);
+  const sameBranches = data.map(asRecord).filter((row) => pullMatches(row, repository, base, head));
+  const marker = receiptMarker(approval);
+  const matching = sameBranches.filter(({ body }) => typeof body === "string" && body.trimEnd().endsWith(marker));
+  if (matching.length > 1) throw new GitHubError("Multiple pull requests have this receipt marker. Review them in GitHub.", 409);
+  if (matching[0]) return { pull: pullReceipt(matching[0], apiRequestId), existing: false };
+  if (data.length >= limit)
+    throw new GitHubError("GitHub returned too many matching pull requests to confirm publication safely.", 409);
+  return { pull: null, existing: sameBranches.some(({ state }) => state === "open") };
+}
+
+export async function githubCreatePull(repository: string, input: GitHubPullDraft, token: string, transport: GitHubFetch) {
+  const { data, apiRequestId } = await gitHubRequest(`/repos/${repository}/pulls`, token, transport, input);
+  const row = asRecord(data);
+  if (!pullMatches(row, repository, input.base, input.head)
+    || row.title !== input.title || row.body !== input.body || row.draft !== input.draft)
+    throw new GitHubError("GitHub returned a different pull request. Recover the approved result before retrying.", 502);
+  return pullReceipt(row, apiRequestId);
 }
 
 function activities(repository: string, value: unknown, kind: "issues" | "pull"): GitHubItem[] {

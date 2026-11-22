@@ -25,7 +25,7 @@ import {
   type TrustTier,
 } from "./document.ts";
 import { OKF_VERSION } from "./indexmd.ts";
-import { isReservedName, relPathToId } from "./paths.ts";
+import { isReservedName, portablePathKey, relPathToId } from "./paths.ts";
 
 export interface Finding {
   severity: "error" | "warning";
@@ -151,6 +151,8 @@ export async function runDoctor(root: string, now: Date = new Date()): Promise<D
   // Reserved ids included so links to an index.md/log.md aren't "broken".
   const known = new Set(files.map(relPathToId));
   const findings: Finding[] = [];
+  const portablePaths = new Map<string, string>();
+  const reportedAliases = new Set<string>();
   const conceptDirs = new Set([""]); // root always expects an index.md
   const signals: DoctorSignals = {
     trust: { unverified: 0, "machine-confirmed": 0, "human-reviewed": 0 },
@@ -164,6 +166,20 @@ export async function runDoctor(root: string, now: Date = new Date()): Promise<D
   for (const path of files) {
     const name = posix.basename(path);
     const reserved = isReservedName(name);
+    let prefix = "";
+    for (const part of path.split("/")) {
+      prefix = prefix === "" ? part : `${prefix}/${part}`;
+      const key = portablePathKey(prefix);
+      const existing = portablePaths.get(key);
+      if (existing === undefined) portablePaths.set(key, prefix);
+      else if (existing !== prefix && !reportedAliases.has(prefix)) {
+        reportedAliases.add(prefix);
+        findings.push({ severity: "warning", check: "portable-path", path,
+          message: `${prefix} and ${existing} may resolve to the same path on another filesystem.` });
+      }
+    }
+    if (!reserved && isReservedName(portablePathKey(name)))
+      findings.push({ severity: "warning", check: "portable-path", path, message: "This file's name aliases a reserved index.md or log.md." });
     const id = relPathToId(path);
     if (!reserved) {
       concepts++;

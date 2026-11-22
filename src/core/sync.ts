@@ -6,9 +6,15 @@
 // and pulls/pushes when an `origin` remote is configured.
 
 import { execFile } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
+import { listConcepts, readConceptPermissive } from "./okf/bundle.ts";
+import { OkfParseError, parse } from "./okf/document.ts";
+import { regenerateIndexBranches } from "./okf/indexmd.ts";
+import { removePrivateLogEntries } from "./okf/logmd.ts";
+import { inDbOnlyDir } from "./okf/paths.ts";
+import { checkPrivacyPath } from "./okf/privacy.ts";
 import { nowTimestamp } from "./okf/write.ts";
 
 export class SyncError extends Error {}
@@ -20,9 +26,9 @@ interface GitResult {
 }
 
 /** Spawn git by argv. Never throws on nonzero exit — callers decide. */
-function runGit(cwd: string, args: string[]): Promise<GitResult> {
+function runGit(cwd: string, args: string[], input?: string): Promise<GitResult> {
   return new Promise((done, fail) => {
-    execFile(
+    const child = execFile(
       "git",
       args,
       {
@@ -44,12 +50,16 @@ function runGit(cwd: string, args: string[]): Promise<GitResult> {
         });
       },
     );
+    if (input !== undefined) {
+      child.stdin?.on("error", () => { /* Git errors are reported by execFile. */ });
+      child.stdin?.end(input);
+    }
   });
 }
 
 /** Run git and throw a SyncError (with git's own message) on failure. */
-async function git(cwd: string, args: string[]): Promise<string> {
-  const r = await runGit(cwd, args);
+async function git(cwd: string, args: string[], input?: string): Promise<string> {
+  const r = await runGit(cwd, args, input);
   if (r.code !== 0)
     throw new SyncError(`git ${args[0]} failed: ${(r.stderr || r.stdout).trim()}`);
   return r.stdout;
@@ -81,6 +91,86 @@ const IGNORE_LINES = [".okb/", "/viz.html", "db_only/"];
 const IGNORE_HEADER = "# okb sync keeps these entries present; add your own freely.";
 const ATTR_LINES = ["* text=auto eol=lf"];
 const ATTR_HEADER = "# Normalize to LF so diffs and content hashes are stable across OSes.";
+
+const privatePath = (id: string) => `${id}.md`;
+const gitPathEquals = (path: string) => process.platform === "win32" || process.platform === "darwin" ? path.toLowerCase() : path;
+
+async function notePathsHaveHistory(root: string, paths: string[]): Promise<boolean> {
+  for (let index = 0; index < paths.length; index += 32) {
+    const pathsInHistory = await git(root, ["--literal-pathspecs", "log", "--all", "-1", "--format=%H", "--", ...paths.slice(index, index + 32)]);
+    if (pathsInHistory.trim()) return true;
+  }
+  return false;
+}
+
+async function localExcludes(root: string, ids: ReadonlySet<string>): Promise<void> {
+  if (!ids.size) return;
+  const path = resolve(root, (await git(root, ["rev-parse", "--git-path", "info/exclude"])).trimEnd());
+  const lines = [...ids].map((id) => `/${privatePath(id).replace(/[\\!*[\]? ]/g, "\\$&")}`);
+  await ensureLines(dirname(path), posix.basename(path.replaceAll("\\", "/")), "# Local Git excludes", lines);
+}
+
+/** An owner can mark unpublished notes only. Existing tracked content needs an explicit Git workflow. */
+export async function protectUnsharedNote(root: string, id: string): Promise<void> {
+  await checkPrivacyPath(root, id);
+  let ancestor = realpathSync(root);
+  while (!existsSync(join(ancestor, ".git"))) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) return;
+    ancestor = parent;
+  }
+  const top = await repoRoot(root);
+  if (top === null || !sameDir(top, root))
+    throw new SyncError("This note is inside a different Git repository. Use a separate brain for private notes.");
+  const path = privatePath(id);
+  const tracked = await git(root, ["--literal-pathspecs", "ls-files", "-z", "--", path]);
+  if (tracked || await notePathsHaveHistory(root, [path]))
+    throw new SyncError("Git already tracks this note or has it in history. Its Git history needs explicit review before changing privacy.");
+  await localExcludes(root, new Set([id]));
+}
+
+async function privateNotesForSync(root: string): Promise<Set<string>> {
+  const marked = new Set<string>();
+  for (const id of await listConcepts(root)) {
+    if (inDbOnlyDir(id.toLowerCase())) continue;
+    const { doc } = await readConceptPermissive(root, id);
+    if (doc.frontmatter.db_only === true) {
+      if (/[\x00-\x1f\x7f]/.test(id)) throw new SyncError("A private note has an unsupported path. Review it before syncing.");
+      marked.add(id);
+    }
+  }
+  return marked;
+}
+
+async function verifyPrivatePaths(root: string, marked: ReadonlySet<string>): Promise<void> {
+  const privatePaths = new Set([...marked].map((id) => gitPathEquals(privatePath(id))));
+  const tracked = (await git(root, ["ls-files", "-z"])).split("\0");
+  if (tracked.some((path) => inDbOnlyDir(path.toLowerCase()) || privatePaths.has(gitPathEquals(path))))
+    throw new SyncError("Git tracks a private path. Review the repository before syncing. okbrain kept its Git staging and history intact.");
+  if (await notePathsHaveHistory(root, [...marked].map(privatePath)))
+    throw new SyncError("Git history contains a private note path. Review the repository before syncing.");
+}
+
+async function verifyNoPrivateStagedNotes(root: string): Promise<void> {
+  const changed = await git(root, ["diff", "--cached", "--text", "-G", "db_only", "--name-only", "-z", "--diff-filter=ACMR", "--", "*.md"]);
+  for (const path of changed.split("\0").filter(Boolean)) {
+    const text = await git(root, ["show", `:${path}`]);
+    try {
+      if (parse(text).frontmatter.db_only === true)
+        throw new SyncError("Git stages a private note. Review the index before syncing. okbrain kept its Git staging and history intact.");
+    } catch (error) { if (!(error instanceof OkfParseError)) throw error; }
+  }
+}
+
+/** Stage explicit eligible paths so repository ignore negations cannot expose private notes. */
+async function stagePublicPaths(root: string, privatePaths: ReadonlySet<string>): Promise<void> {
+  const candidates = await git(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]);
+  const selected = [...new Set(candidates.split("\0").filter((path) => path &&
+    !inDbOnlyDir(path.toLowerCase()) && !privatePaths.has(gitPathEquals(path))))];
+  if (selected.length)
+    await git(root, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+      selected.map((path) => `:(top,literal)${path}`).join("\0") + "\0");
+}
 
 /** Append any missing `lines` to `<root>/<name>` (created with `header`). */
 async function ensureLines(
@@ -161,15 +251,27 @@ export async function syncBundle(root: string, message?: string): Promise<SyncRe
     await git(root, ["symbolic-ref", "HEAD", "refs/heads/main"]);
   }
 
+  const marked = await privateNotesForSync(root);
+  const privatePaths = new Set([...marked].map((id) => gitPathEquals(privatePath(id))));
+  await verifyPrivatePaths(root, marked);
+  await verifyNoPrivateStagedNotes(root);
+  await localExcludes(root, marked);
+  if (marked.size) {
+    await regenerateIndexBranches(root, [...marked].map((id) => posix.dirname(id) === "." ? "" : posix.dirname(id)));
+    await removePrivateLogEntries(root, marked);
+  }
+
   const seeded: string[] = [];
   if (await ensureLines(root, ".gitignore", IGNORE_HEADER, IGNORE_LINES))
     seeded.push(".gitignore");
   if (await ensureLines(root, ".gitattributes", ATTR_HEADER, ATTR_LINES))
     seeded.push(".gitattributes");
 
-  await git(root, ["add", "-A"]);
+  await stagePublicPaths(root, privatePaths);
+  await verifyPrivatePaths(root, await privateNotesForSync(root));
+  await verifyNoPrivateStagedNotes(root);
   let committed: string | null = null;
-  const staged = (await git(root, ["status", "--porcelain"])).trim() !== "";
+  const staged = (await git(root, ["diff", "--cached", "--name-only", "-z"])).length > 0;
   if (staged) {
     if ((await runGit(root, ["var", "GIT_COMMITTER_IDENT"])).code !== 0)
       throw new SyncError(
@@ -188,13 +290,20 @@ export async function syncBundle(root: string, message?: string): Promise<SyncRe
     const hasUpstream =
       (await runGit(root, ["rev-parse", "--abbrev-ref", "@{upstream}"])).code === 0;
     if (hasUpstream) {
-      const pull = await runGit(root, ["pull", "--rebase"]);
+      if (marked.size) {
+        await git(root, ["fetch"]);
+        const upstream = (await git(root, ["ls-tree", "-r", "--name-only", "-z", "@{upstream}"])).split("\0");
+        if (upstream.some((path) => inDbOnlyDir(path.toLowerCase()) || privatePaths.has(gitPathEquals(path))))
+          throw new SyncError("An upstream file conflicts with a local private note. Review the repository before syncing.");
+      }
+      const pull = await runGit(root, marked.size ? ["rebase", "@{upstream}"] : ["pull", "--rebase"]);
       if (pull.code !== 0)
         throw new SyncError(
           `git pull --rebase failed (local commits are safe): ${(pull.stderr || pull.stdout).trim()}\nresolve in the bundle with git, then rerun okb sync`,
         );
       pulled = true;
     }
+    await verifyPrivatePaths(root, await privateNotesForSync(root));
     const push = await runGit(root, hasUpstream ? ["push"] : ["push", "-u", "origin", branch]);
     if (push.code !== 0)
       throw new SyncError(

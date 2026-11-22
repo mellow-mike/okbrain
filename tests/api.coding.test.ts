@@ -256,6 +256,142 @@ test("GitHub reads stay on the bound project and comparison requires an accepted
   }
 });
 
+test("publishes only an owner-approved GitHub PR and reconciles a lost receipt after restart", async () => {
+  const { root, workspace, stateDir } = await fixture("okb-coding-github-publish-");
+  const repository = "example-org/product";
+  const readToken = "github_pat_exampleActivityToken0000001";
+  const publishToken = "github_pat_examplePublishingToken0001";
+  const models = createModels();
+  const faux = fauxProvider({ provider: "openai", models: [{ id: "publish-fixture" }] });
+  models.setProvider(faux.provider);
+  const git = (...args: string[]) => {
+    const result = Bun.spawnSync(["git", ...args], { cwd: workspace, stdout: "ignore", stderr: "pipe" });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  };
+  type Payload = { base: string; head: string; title: string; body: string; draft: boolean };
+  type Publication = { approval: string; receipt: { number: number; id: number; draft: boolean; url: string; apiRequestId: string } | null };
+  type Row = Omit<Payload, "base" | "head"> & {
+    base: { ref: string; repo: { full_name: string } }; head: Row["base"]; number: number; id: number; state: string;
+  };
+  const pulls: Row[] = [];
+  const requests: { method: string; authorization: string | null; payload?: Payload }[] = [];
+  const open = () => createApiServer({ bundle: workspace, port: 0, token: ownerToken, coding: {
+    stateDir, models, async githubFetch(url, options) {
+      expect(url.origin).toBe("https://api.github.com");
+      expect(url.pathname).toBe(`/repos/${repository}/pulls`);
+      expect(options.redirect).toBe("error");
+      const authorization = new Headers(options.headers).get("authorization");
+      const method = options.method!;
+      expect(authorization).toBe("Bearer " + publishToken);
+      const headers = { "x-github-request-id": "C0DE:123:ABC" };
+      if (method === "GET") {
+        requests.push({ method, authorization });
+        expect(url.searchParams.get("state")).toBe("all");
+        return Response.json(pulls.filter((row) => url.searchParams.get("head") === `example-org:${row.head.ref}`
+          && url.searchParams.get("base") === row.base.ref), { headers });
+      }
+      const payload = JSON.parse(String(options.body)) as Payload;
+      requests.push({ method, authorization, payload });
+      expect(method).toBe("POST");
+      const number = pulls.length + 1;
+      const branch = (ref: string) => ({ ref, repo: { full_name: repository } });
+      const row = { ...payload, base: branch(payload.base), head: branch(payload.head), number, id: 800 + number, state: "open" };
+      pulls.push(row);
+      if (payload.head === "work/recovery") throw new Error("fixture lost the 201 response");
+      return Response.json(row, { status: 201, headers });
+    },
+  } });
+
+  git("init", "--quiet");
+  git("remote", "add", "origin", `https://github.com/${repository}.git`);
+  let api = open();
+  try {
+    let { call, request } = apiClient(api.url);
+    const project = await call<Project>("/projects", { title: "Publish a review", workspace, provider: "openai", model: "publish-fixture" });
+    const prefix = "/projects/" + project.id;
+    const route = prefix + "/github-pr-";
+    const member = await call<{ token: string }>(prefix + "/members", { name: "reviewer" });
+    await call(prefix + "/github-connect", { remote: "origin", repository, token: readToken });
+    expect((await request(route + "credential", { token: readToken })).status).toBe(400);
+    expect((await request(route + "credential", { token: publishToken }, member.token)).status).toBe(403);
+    const connected = await call(route + "credential", { token: publishToken });
+    expect(connected).toMatchObject({ connection: { hasPublishToken: true, hasToken: true } });
+    expect(JSON.stringify(connected)).not.toContain(publishToken);
+    const memberStatus = await call<{ connection: object }>(prefix + "/github-status", undefined, member.token);
+    expect(memberStatus.connection).not.toHaveProperty("hasPublishToken");
+
+    const source = { source: "files", files: ["src/example.ts"] };
+    const { id: previewId } = await call<{ id: string }>(prefix + "/preview", source);
+    const createRun = async (session: string, requestId: string) => {
+      const identity = { session, requestId };
+      faux.setResponses([fauxAssistantMessage("Private Pi answer.")]);
+      await call(prefix + "/run", { ...source, ...identity, previewId, approved: true, prompt: "Private coding task." });
+      await waitFor(() => call<Inspection>(prefix + "/inspect", identity), ({ run }) => run.status === "done");
+      return identity;
+    };
+    const first = await createRun("publish", "first");
+    const body = { ...first, base: "main", head: "work/new", title: "Operator PR title", body: "Operator Markdown", draft: true };
+    expect((await request(route + "preview", body)).status).toBe(409);
+    await call(prefix + "/review", { ...first, decision: "accepted" }, member.token);
+    expect((await request(route + "preview", body, member.token)).status).toBe(403);
+    expect((await request(route + "preview", { ...body, head: "fork:work/new" })).status).toBe(400);
+    const preview = await call<Payload & { approval: string }>(route + "preview", body);
+    expect(preview.body).toBe(`Operator Markdown\n\n<!-- okbrain-pr:${preview.approval} -->`);
+    expect((await request(route + "publish", { ...body, approval: preview.approval })).status).toBe(409);
+    expect((await request(route + "publish", { ...body, title: "Different", approval: preview.approval, approved: true })).status).toBe(409);
+    const confirmation = { ...body, approval: preview.approval, approved: true };
+    expect((await request(route + "publish", confirmation, member.token)).status).toBe(403);
+    git("remote", "set-url", "origin", "https://github.com/example-org/different");
+    expect((await request(route + "publish", confirmation)).status).toBe(409);
+    expect(requests).toEqual([]);
+    git("remote", "set-url", "origin", `https://github.com/${repository}.git`);
+
+    const [published, duplicate] = await Promise.all([
+      call<Publication>(route + "publish", confirmation), call<Publication>(route + "publish", confirmation),
+    ]);
+    expect(duplicate).toEqual(published);
+    expect(published).toMatchObject({ receipt: { number: 1, id: 801, url: `https://github.com/${repository}/pull/1`, apiRequestId: "C0DE:123:ABC" } });
+    expect(requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+    expect(requests[1]?.payload).toEqual({ base: body.base, head: body.head, title: body.title, body: preview.body, draft: true });
+    expect(JSON.stringify(requests[1]?.payload)).not.toMatch(/Private Pi|Private coding task|answer = 42|first/);
+    expect(await call<Publication>(route + "inspect", first)).toEqual(published);
+
+    const second = await createRun("recover", "second");
+    await call(prefix + "/review", { ...second, decision: "accepted" });
+    const retryBody = { ...body, ...second, head: "work/recovery", draft: false };
+    const retryPreview = await call<{ approval: string }>(route + "preview", retryBody);
+    const retry = { ...retryBody, approval: retryPreview.approval, approved: true };
+    expect((await request(route + "publish", retry)).status).toBe(502);
+    expect(await call(route + "inspect", second)).toMatchObject({ receipt: null, approval: retryPreview.approval });
+    await api.stop();
+    api = open();
+    ({ call, request } = apiClient(api.url));
+    const recovered = await call<Publication>(route + "recover", second);
+    expect(recovered).toMatchObject({ receipt: { number: 2, id: 802, draft: false } });
+    expect(await call<Publication>(route + "publish", retry)).toEqual(recovered);
+    expect(requests.map(({ method }) => method)).toEqual(["GET", "POST", "GET", "POST", "GET"]);
+    expect(await call(prefix + "/audit")).toContainEqual(expect.objectContaining({
+      kind: "github_pr_recovered", session: second.session, request_id: second.requestId,
+    }));
+    expect(await call(prefix + "/audit")).toContainEqual(expect.objectContaining({
+      kind: "github_pr_created", session: first.session, request_id: first.requestId,
+    }));
+    const third = await createRun("competing", "third");
+    await call(prefix + "/review", { ...third, decision: "accepted" });
+    const competing = { ...body, ...third, title: "Another request on the same branches" };
+    const competingPreview = await call<{ approval: string }>(route + "preview", competing);
+    expect((await request(route + "publish", { ...competing, approved: true, approval: competingPreview.approval })).status).toBe(409);
+    expect(await call<Publication | null>(route + "inspect", third)).toBeNull();
+    expect(requests.map(({ method }) => method)).toEqual(["GET", "POST", "GET", "POST", "GET", "GET"]);
+
+    await call(prefix + "/delete-session", { session: first.session, confirm: first.session });
+    expect(await call<Publication>(route + "inspect", first)).toEqual(published);
+  } finally {
+    await api.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("allows an approved source lookup only for the submitted preview and opt-in request", async () => {
   const { root, workspace, stateDir } = await fixture("okb-coding-source-lookup-");
   const models = createModels();

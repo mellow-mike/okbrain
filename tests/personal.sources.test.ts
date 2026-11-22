@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApiServer, type ApiServer } from "../src/api.ts";
 import type { SourceUploadResult } from "../src/core/ingest/personal-sources.ts";
+import { okb } from "./helpers.ts";
 
 const TOKEN = "personal-source-test";
 let root: string;
@@ -51,6 +52,86 @@ async function receipt(response: Response): Promise<SourceUploadResult> {
   expect(response.headers.get("cache-control")).toBe("no-store");
   return ((await response.json()) as { result: SourceUploadResult }).result;
 }
+
+const mail = [
+  "From: Field Guide <guide@example.invalid>",
+  "Message-ID: <field-note@example.invalid>",
+  "Subject: =?UTF-8?Q?Jard=C3=ADn_field_note?=",
+  "Date: Sun, 22 Nov 2026 16:00:00 +0000",
+  "Content-Type: multipart/mixed; boundary=sample",
+  "", "--sample", "Content-Type: text/plain; charset=windows-1252", "Content-Transfer-Encoding: quoted-printable", "",
+  "Caf=E9 with the botanist", "~~~", "![Image](https://example.invalid/pixel)",
+  "--sample", "Content-Type: text/plain", 'Content-Disposition: attachment; filename="attachment.txt"', "", "Attachment secret",
+  "--sample", "Content-Type: message/rfc822", "", "Subject: Forwarded attachment", "", "Nested private text",
+  "--sample--", "",
+].join("\r\n");
+
+test("email preview decodes MIME, discards attachments, and reconciles a renamed message", async () => {
+  const files: [string, string][] = [["note.eml", mail], ["damaged.eml", "unrecognized file"]];
+  const preview = await receipt(await upload("email", files));
+  expect(preview.rows).toMatchObject([
+    { row: 1, title: "Jardín field note", status: "new", excerpt: expect.stringContaining("Café with the botanist") },
+    { row: 2, status: "skipped" },
+  ]);
+  const id = preview.rows[0]!.id!;
+  expect((await post("read_concept", { id })).status).toBe(404);
+  const confirmed = await receipt(await upload("email", files, { preview: preview.preview, selected: [1] }));
+  expect(confirmed.imported).toEqual([id]);
+  const saved = await Bun.file(join(root, `${id}.md`)).text();
+  expect(saved).toContain("~~~~text\nFrom: Field Guide");
+  expect(saved).toContain("Café with the botanist\n~~~\n![Image]");
+  expect(saved).not.toContain("Attachment secret");
+  expect(saved).not.toContain("Nested private text");
+  expect((await receipt(await upload("email", [["renamed.eml", mail]]))).rows[0]).toMatchObject({ id, status: "unchanged" });
+  expect((await upload("email", [["oversized.eml", "a".repeat(2 * 1024 * 1024 + 1)]])).status).toBe(413);
+  const history = await fetch(server.url + "api/personal/sources/history", { headers: { "x-okb-token": TOKEN } });
+  expect(await history.json()).toMatchObject({ result: [{ kind: "email", notes: [{ id, title: "Jardín field note" }] }] });
+});
+
+const calendar = [
+  "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Example//Schedule//EN",
+  "BEGIN:VEVENT", "UID:weekly-study@example.invalid", "DTSTAMP:20261118T000000Z",
+  "SUMMARY:Study group", "DTSTART;TZID=America/Los_Angeles:20261122T173000", "RRULE:FREQ=WEEKLY;COUNT=99999",
+  "DESCRIPTION:Review the notes\\, including the field\r\n  map.", "ATTACH:https://example.invalid/private.pdf",
+  "BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:Private alarm", "TRIGGER:-PT5M", "END:VALARM", "END:VEVENT",
+  "BEGIN:VEVENT", "UID:weekly-study@example.invalid", "DTSTAMP:20261118T000000Z",
+  "SUMMARY:Study group moved", "RECURRENCE-ID;TZID=America/Los_Angeles:20261129T173000", "DTSTART;VALUE=DATE:20261130",
+  "END:VEVENT", "END:VCALENDAR", "",
+].join("\r\n");
+
+test("calendar previews a recurring series and explicit exception, and CLI imports only confirmed rows", async () => {
+  const file = join(root, "schedule.ics");
+  await writeFile(file, calendar);
+  const args = ["--bundle", root, "source", "import", file, "--kind", "calendar", "--name", "Study", "--json"];
+  let cli = await okb(args);
+  expect(cli.code).toBe(0);
+  const preview = JSON.parse(cli.stdout) as SourceUploadResult;
+  expect(preview.rows).toMatchObject([
+    { row: 1, title: "Study group", excerpt: "Review the notes, including the field map.", status: "new" },
+    { row: 2, title: "Study group moved", status: "new" },
+  ]);
+  const id = preview.rows[1]!.id!;
+  expect((await post("read_concept", { id })).status).toBe(404);
+  await writeFile(file, calendar.replace("Study group moved", "Different selection"));
+  expect((await okb([...args, "--preview", preview.preview, "--selected", "2"])).code).toBe(2);
+  await writeFile(file, calendar);
+  cli = await okb([...args, "--preview", preview.preview, "--selected", "2"]);
+  expect(cli.code).toBe(0);
+  expect(JSON.parse(cli.stdout).imported).toEqual([id]);
+  const saved = await Bun.file(join(root, `${id}.md`)).text();
+  expect(saved).toContain("Starts: 2026-11-30");
+  expect(saved).toContain("Recurrence exception: 2026-11-29T17:30:00 (America/Los_Angeles)");
+
+  const files: [string, string][] = [["schedule.ics", calendar]];
+  const apiPreview = await receipt(await upload("calendar", files));
+  const apiResult = await receipt(await upload("calendar", files, { preview: apiPreview.preview, selected: [1] }));
+  const series = await Bun.file(join(root, `${apiResult.imported[0]}.md`)).text();
+  expect(series).toContain("Recurrence rule: FREQ=WEEKLY;COUNT=99999");
+  expect(series).not.toContain("private.pdf");
+  expect(series).not.toContain("Private alarm");
+  expect((await receipt(await upload("calendar", [["renamed.ics", calendar.replace("COUNT=99999", "COUNT=2")]]))).rows[0])
+    .toMatchObject({ previous: apiResult.imported[0], status: "changed" });
+});
 
 test("selected Markdown drafts retain provenance and links, and updates preserve local edits", async () => {
   expect((await post("index", {})).status).toBe(200);

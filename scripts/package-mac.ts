@@ -14,10 +14,13 @@ const appName = `okbrain-${version}-macos-${process.arch}`;
 const app = join(dist, "okbrain.app");
 const contents = join(app, "Contents");
 const executables = join(contents, "MacOS");
+const resources = join(contents, "Resources");
 const staging = await mkdtemp(join(tmpdir(), "okbrain-macos-"));
 try {
   await rm(app, { recursive: true, force: true });
   await mkdir(executables, { recursive: true });
+  await mkdir(resources);
+  await copyFile(join(root, "packaging", "OFFLINE-IMPORT-NOTICES.md"), join(resources, "OFFLINE-IMPORT-NOTICES.md"));
   await copyFile(join(root, "packaging", "macos", "Info.plist"), join(contents, "Info.plist"));
   await $`/usr/libexec/PlistBuddy -c ${`Set :CFBundleShortVersionString ${version}`} ${join(contents, "Info.plist")}`;
   const target = `${process.arch === "arm64" ? "arm64" : "x86_64"}-apple-macosx13.0`;

@@ -8,11 +8,12 @@ function pathFor(project, action) {
   return `/projects/${encodeURIComponent(project.id)}/${action}`;
 }
 
-function openWeb(connection, project) {
+function openWeb(connection, project, githubRun) {
   const target = new URL(connection.url);
   const folder = vscode.workspace.workspaceFolders?.find((item) => item.uri.scheme === 'file');
   target.hash = project ? `coding/${encodeURIComponent(project.id)}` : folder
     ? `coding/${encodeURIComponent(`workspace=${folder.uri.fsPath}`)}` : 'coding';
+  if (project && githubRun) target.hash += `/github/${encodeURIComponent(githubRun.session)}/${encodeURIComponent(githubRun.id)}`;
   return vscode.env.openExternal(vscode.Uri.parse(target.toString()));
 }
 
@@ -100,9 +101,11 @@ async function inspectRun(connection, project, selected) {
   if (run.status === 'done') choices.push(
     { label: 'Accept result', action: 'review', decision: 'accepted' },
     { label: 'Request changes', action: 'review', decision: 'changes_requested' });
+  if (run.review === 'accepted') choices.push({ label: 'Prepare GitHub pull request in okbrain', action: 'github' });
   const action = await vscode.window.showQuickPick(choices, { placeHolder: 'Choose a run action', ignoreFocusOut: true });
   if (!action) return;
   if (action.action === 'open') return openWeb(connection, project);
+  if (action.action === 'github') return openWeb(connection, project, run);
   if (action.action === 'refresh') return inspectRun(connection, project, run);
   if (action.action === 'resume') {
     const proceed = await vscode.window.showWarningMessage('Resuming can make another provider call using the saved context.',

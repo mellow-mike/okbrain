@@ -131,10 +131,10 @@ function renderBody(el, md, baseId) {
 // colours (a mounted graph) follow the attribute, so they change inside the
 // flood rather than after it.
 var themeBtn = document.getElementById('theme');
-var repaint = null; // the mounted graph's restyle, while one is on screen
+var activeGraph = null;
 function themeChanged() {
   themeBtn.textContent = Okb.theme.get() === 'dark' ? '☼ light' : '☾ dark';
-  if (repaint) repaint();
+  activeGraph?.repaint();
 }
 themeChanged();
 new MutationObserver(themeChanged).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
@@ -261,7 +261,8 @@ function route() {
   var shared = name === 'concept' && carry && carry.getAttribute('href') === location.hash ? carry : null;
   carry = null;
   return Okb.go(function () {
-    repaint = null;
+    activeGraph?.destroy();
+    activeGraph = null;
     document.querySelectorAll('#nav > a').forEach(function (a) { // not the wordmark's link
       var target = a.getAttribute('data-nav') || a.getAttribute('href').slice(1);
       var active = target === name || (name === 'editor' && target === 'edit') || (name === 'ask-plan' && target === 'ask') ||
@@ -646,12 +647,18 @@ async function renderConcept(id, seq, was) {
   var isComputation = String(fm.type || '').toLowerCase() === 'attested computation';
 
   var meta = '<dl class="kv">';
-  if (fm.resource) meta += '<dt>Resource</dt><dd><a href="' + esc(fm.resource) + '" target="_blank" rel="noopener">' + esc(fm.resource) + '</a></dd>';
+  if (fm.resource) meta += '<dt>Resource</dt><dd>' + R.resourceLink(fm.resource) + '</dd>';
   if (tags.length) meta += '<dt>Tags</dt><dd>' + chips(tags) + '</dd>';
   meta += '<dt>Generated</dt><dd>' + R.actorLine(fm.generated) + (fm.timestamp && !fm.generated ? ' <span class="muted">(v0.1 timestamp ' + esc(fm.timestamp) + ')</span>' : '') + '</dd>';
   meta += '<dt>Verified</dt><dd>' + (verified.length ? verified.map(R.actorLine).join('<br>') : '<span class="muted">never</span>') + '</dd>';
   if (fm.stale_after) meta += '<dt>Stale after</dt><dd>' + esc(fm.stale_after) + '</dd>';
-  meta += '<dt>Sources</dt><dd>' + R.sourcesList(sources) + '</dd>';
+  if (c.localUsage) {
+    var uses = c.localUsage.note;
+    meta += '<dt>Local usage</dt><dd>' + esc(uses.opens) + ' ' + (uses.opens === 1 ? 'open' : 'opens') + ' · ' +
+      esc(uses.citations) + ' Ask ' + (uses.citations === 1 ? 'citation' : 'citations') +
+      '<br><span class="muted">' + esc(uses.usage_window.from.slice(0, 10) + ' to ' + uses.usage_window.to.slice(0, 10)) + '</span></dd>';
+  }
+  meta += '<dt>Sources</dt><dd>' + R.sourcesList(sources, c.localUsage?.sources) + '</dd>';
   if (isComputation) {
     meta += '<dt>Runtime</dt><dd>' + esc(fm.runtime || '(missing — required)') + '</dd>';
     if (fm.parameters) meta += '<dt>Parameters</dt><dd><code>' + esc(JSON.stringify(fm.parameters)) + '</code></dd>';
@@ -766,6 +773,7 @@ async function renderEdit(id, seq) {
     if (stale(seq)) return;
   }
   var tags = Array.isArray(fm.tags) ? fm.tags.join(', ') : (fm.tags || '');
+  var privateNote = fm.db_only === true || String(id || '').toLowerCase().split('/').slice(0, -1).includes('db_only');
   var sources = Array.isArray(fm.sources) ? fm.sources : (fm.sources ? [fm.sources] : []);
   var statusOpts = ['stable', 'draft', 'deprecated'].map(function (s) {
     return '<option' + ((fm.status || 'stable') === s ? ' selected' : '') + '>' + s + '</option>';
@@ -785,6 +793,7 @@ async function renderEdit(id, seq) {
     '<span class="muted">attribute claims in the body with [^id]</span></div></div>' +
     '<label class="field"><span>Body (markdown; links normalize on save)</span>' +
     '<textarea id="ed-body" rows="18"></textarea></label>' +
+    (!exists && !STATUS?.readonly ? '<label class="row"><input id="ed-private" type="checkbox"> Keep this note private</label>' : '') +
     '<div class="row">' +
     '<button class="primary">Save</button>' +
     '<select id="ed-linkpick"><option value="">insert link to…</option></select>' +
@@ -793,9 +802,25 @@ async function renderEdit(id, seq) {
     '<span id="ed-msg" class="muted"></span></div>' +
     (exists ? '<p class="muted">generated: ' + R.actorLine(fm.generated) + ' · verified: ' +
       (Array.isArray(fm.verified) ? fm.verified.length : fm.verified ? 1 : 0) + ' event(s)</p>' : '') +
-    '</form><div id="ed-sugg"></div></div>';
+    '</form>' + (exists && !STATUS?.readonly ? '<section class="card stack"><h3>Note privacy</h3>' +
+      (privateNote ? '<p>Private to this brain by default.</p>' : '<p>Keep an unpublished note out of Git sync and shared exports.</p>' +
+        '<div><button id="ed-keep-private" type="button">Keep note private</button></div><p id="ed-private-status" role="status"></p>') +
+      '</section>' : '') + '<div id="ed-sugg"></div></div>';
   document.getElementById('ed-body').value = body;
   if (exists) document.getElementById('ed-id').readOnly = true;
+  var protect = document.getElementById('ed-keep-private');
+  if (protect) protect.addEventListener('click', async function () {
+    if (!confirm('Keep this note private in this brain? Git history will stay as it is.')) return;
+    protect.disabled = true;
+    var status = document.getElementById('ed-private-status');
+    try {
+      await api('keep_private', { id: id });
+      if (!stale(seq)) { protect.hidden = true; status.textContent = 'Private to this brain by default.'; }
+    } catch (error) {
+      if (!stale(seq)) status.innerHTML = errorBox(error);
+      protect.disabled = false;
+    }
+  });
 
   var srcEl = document.getElementById('ed-sources');
   function addSource(s) {
@@ -877,6 +902,10 @@ async function renderEdit(id, seq) {
     Okb.working(msgEl, 'saving');
     try {
       var r;
+      if (document.getElementById('ed-private')?.checked) {
+        if (!val('id')) throw new Error('Enter a concept ID to create a private note.');
+        params.private = true;
+      }
       if (val('id')) { params.id = val('id'); r = await api('write_concept', params); }
       else {
         // No id: derive it from type + title (the `new` op), which refuses to clobber.
@@ -897,9 +926,6 @@ async function renderEdit(id, seq) {
 
 // ---- graph view ---------------------------------------------------------
 
-/** A duration token in ms (0 under prefers-reduced-motion). */
-function ms(token) { return parseFloat(Okb.token(token)) || 0; }
-
 async function renderGraph(focusId, seq) {
   view.innerHTML =
     '<div id="gwrap"><div id="gmain">' +
@@ -915,147 +941,24 @@ async function renderGraph(focusId, seq) {
   catch (e) { if (!stale(seq)) { view.className = ''; view.innerHTML = errorBox(e); } return; }
   if (stale(seq)) return;
 
-  var byId = {}, linksTo = {}, citedBy = {}, typeCount = {};
-  g.nodes.forEach(function (n) {
-    byId[n.id] = n;
-    typeCount[typeName(n.type)] = (typeCount[typeName(n.type)] || 0) + 1;
-  });
-  g.edges.forEach(function (e) {
-    (linksTo[e.src] = linksTo[e.src] || []).push(e.dst);
-    (citedBy[e.dst] = citedBy[e.dst] || []).push(e.src);
-  });
-  setTypes(g.nodes.map(function (n) { return n.type; }));
+  setTypes(g.nodes.map(function (note) { return note.type; }));
   document.getElementById('gstats').textContent = g.nodes.length + ' concepts · ' + g.edges.length + ' links';
-
-  // The canvas takes concrete colours: the current theme's, re-read when it flips.
-  var fill = {}, tok = {};
-  function readTheme() {
-    var p = Okb.graphPalette();
-    TYPES.forEach(function (t, i) { fill[t] = i < 8 ? p.slots[i] : p.other; });
-    ['ink-2', 'surface', 'danger', 'edge-line', 'accent'].forEach(function (k) { tok[k] = Okb.token(k); });
-  }
-  function themed(k) { return function () { return tok[k]; }; }
-  readTheme();
-
-  var cy = cytoscape({
-    container: document.getElementById('gcy'),
-    elements: g.nodes.map(function (n) {
-      return { data: { id: n.id, label: n.title || n.id, type: typeName(n.type),
-        status: n.status, stale: n.stale,
-        size: 16 + 4 * Math.sqrt(Math.min(n.bodyLen, 20000) / 100) } };
-    }).concat(g.edges.map(function (e) {
-      return { data: { id: JSON.stringify([e.src, e.dst]), source: e.src, target: e.dst } };
-    })),
-    style: [
-      { selector: 'node', style: {
-        'background-color': function (ele) { return fill[ele.data('type')]; },
-        width: 'data(size)', height: 'data(size)', label: 'data(label)',
-        'font-family': Okb.token('font-read'), 'font-size': 9, color: themed('ink-2'),
-        'text-outline-color': themed('surface'), 'text-outline-width': 2,
-        'text-valign': 'bottom', 'text-margin-y': 4,
-        'text-wrap': 'ellipsis', 'text-max-width': '120px' } },
-      { selector: 'node[?stale]', style: { 'border-width': 2, 'border-style': 'dashed', 'border-color': themed('danger') } },
-      { selector: 'node[status = "deprecated"]', style: { opacity: Number(Okb.token('opacity-deprecated')) } },
-      { selector: 'edge', style: {
-        width: 1.2, 'line-color': themed('edge-line'), 'target-arrow-color': themed('edge-line'),
-        'target-arrow-shape': 'triangle', 'arrow-scale': 0.8, 'curve-style': 'bezier' } },
-      { selector: 'node:selected', style: { 'border-width': 2, 'border-style': 'solid', 'border-color': themed('accent') } },
-      { selector: '.dim, .faded', style: { opacity: Number(Okb.token('opacity-dim')) } },
-    ],
-    layout: { name: 'cose', animate: false },
-    wheelSensitivity: 0.2,
+  activeGraph = window.okbGraphView.mount(g, {
+    canvas: document.getElementById('gcy'),
+    detail: document.getElementById('gdetail'),
+    filters: document.getElementById('glegend'),
+    search: document.getElementById('gsearch'),
+    layout: document.getElementById('glayout'),
+    fit: document.getElementById('gfit'),
+  }, {
+    descriptionClass: 'why',
+    metadataClass: 'kv',
+    actions: function (note) {
+      return '<div class="row"><a href="' + conceptHref(note.id) + '" class="link-button small">Open</a>' +
+        (STATUS?.readonly ? '' : '<a href="' + editHref(note.id) + '" class="link-button small">Edit</a>') + '</div>';
+    },
   });
-  window.cy = cy; // console/driver access, like the static viewer
-  repaint = function () { readTheme(); cy.style().update(); };
-
-  // Hover dims everything outside the node's neighbourhood.
-  cy.on('mouseover', 'node', function (e) { cy.elements().difference(e.target.closedNeighborhood()).addClass('faded'); });
-  cy.on('mouseout', 'node', function () { cy.elements().removeClass('faded'); });
-
-  var checked = {};
-  var legend = document.getElementById('glegend');
-  legend.innerHTML = TYPES.map(function (t) {
-    checked[t] = true;
-    return '<label><input type="checkbox" checked data-type="' + esc(t) + '"><span class="swatch" style="background:var(--' +
-      slotOf(t) + ')"></span>' + esc(t) + '<span class="count">' + typeCount[t] + '</span></label>';
-  }).join('');
-  var search = document.getElementById('gsearch');
-  function applyFilters() {
-    var q = search.value.trim().toLowerCase();
-    cy.batch(function () {
-      cy.nodes().forEach(function (node) {
-        node.style('display', checked[node.data('type')] ? 'element' : 'none');
-      });
-      cy.elements().removeClass('dim');
-      if (!q) return;
-      cy.elements().addClass('dim');
-      cy.nodes().forEach(function (node) {
-        var n = byId[node.id()];
-        if ((n.id + ' ' + n.title + ' ' + n.tags.join(' ')).toLowerCase().indexOf(q) >= 0) {
-          node.removeClass('dim');
-          node.connectedEdges().removeClass('dim');
-        }
-      });
-    });
-  }
-  legend.addEventListener('change', function (e) {
-    var cb = e.target;
-    if (cb.getAttribute('data-type') !== null) { checked[cb.getAttribute('data-type')] = cb.checked; applyFilters(); }
-  });
-  search.addEventListener('input', applyFilters);
-  document.getElementById('glayout').addEventListener('change', function (e) {
-    var d = ms('dur-deliberate');
-    cy.layout({ name: e.target.value, animate: d > 0 ? 'end' : false, animationDuration: d,
-      animationEasing: Okb.token('ease-in-out') }).run();
-  });
-  document.getElementById('gfit').addEventListener('click', function () { cy.fit(undefined, 40); });
-
-  var detail = document.getElementById('gdetail');
-  function conceptList(ids) {
-    return '<ul>' + ids.map(function (cid) {
-      return '<li><a href="#focus" data-id="' + esc(cid) + '">' + esc((byId[cid] && byId[cid].title) || cid) + '</a></li>';
-    }).join('') + '</ul>';
-  }
-  function showDetail(id) {
-    var n = byId[id];
-    if (!n) return;
-    var h = '<h2>' + esc(n.title || n.id) + '</h2>' +
-      '<div class="meta">' + typeChip(n.type) + '<code>' + esc(n.id) + '</code></div>' +
-      '<div class="meta">' + badges(n) + '</div>' +
-      '<div class="row"><a href="' + conceptHref(id) + '" class="link-button small">Open</a>' +
-      '<a href="' + editHref(id) + '" class="link-button small">Edit</a></div>';
-    if (n.description) h += '<p class="why">' + esc(n.description) + '</p>';
-    if (n.tags.length) h += '<div class="meta">' + chips(n.tags) + '</div>';
-    h += '<dl class="kv"><dt>Generated</dt><dd>' + R.actorLine(n.generated) + '</dd>' +
-      '<dt>Verified</dt><dd>' + (n.verified.length ? n.verified.map(R.actorLine).join('<br>') : '—') + '</dd>' +
-      '<dt>Sources</dt><dd>' + R.sourcesList(n.sources) + '</dd></dl>';
-    h += '<div class="body md" id="gbody"></div>';
-    var out = linksTo[id] || [], back = citedBy[id] || [];
-    if (out.length) h += '<h3>Links to</h3>' + conceptList(out);
-    if (back.length) h += '<h3>Cited by</h3>' + conceptList(back);
-    detail.innerHTML = h;
-    var bodyEl = document.getElementById('gbody');
-    bodyEl.innerHTML = R.renderMarkdown(n.body);
-    // In-graph navigation: internal links focus the node instead of leaving the view.
-    R.wireLinks(bodyEl, { baseId: id, hrefFor: function () { return '#focus'; }, known: function (x) { return !!byId[x]; } });
-  }
-  function focusNode(id) {
-    var node = cy.getElementById(id);
-    if (node.nonempty()) {
-      cy.$(':selected').unselect();
-      node.select();
-      cy.animate({ center: { eles: node } }, { duration: ms('dur-slow'), easing: Okb.token('ease-in-out') });
-    }
-    showDetail(id);
-  }
-  detail.addEventListener('click', function (e) {
-    var a = e.target.closest('a[href="#focus"]');
-    if (!a) return;
-    e.preventDefault();
-    focusNode(a.getAttribute('data-id'));
-  });
-  cy.on('tap', 'node', function (e) { showDetail(e.target.id()); });
-  if (focusId) focusNode(focusId);
+  if (focusId) activeGraph.focus(focusId);
 }
 
 // ---- search view --------------------------------------------------------
@@ -1155,6 +1058,7 @@ function renderAsk(_arg, seq) {
     '<form id="askf" class="row">' +
     '<input id="askq" style="flex:1" aria-label="Question" placeholder="What do my notes say about…" maxlength="8000" required autofocus>' +
     '<select id="askp" aria-label="Retrieval profile"><option value="">Configured default</option><option>lean</option><option>balanced</option><option>max</option></select>' +
+    '<label class="row"><input id="ask-private" type="checkbox"> Include private notes</label>' +
     '<button id="asksend" class="primary">Ask</button><button id="askstop" type="button" hidden>Stop</button></form>' +
     '<p id="askstatus" role="status"></p><div id="askctx"></div><div id="askout" class="md"></div><div id="asksrc"></div></div>';
   var ctxEl = document.getElementById('askctx');
@@ -1183,7 +1087,8 @@ function renderAsk(_arg, seq) {
     try {
       var response = await fetch('/api/ask/stream', {
         method: 'POST', headers: headers({ 'content-type': 'application/json' }),
-        body: JSON.stringify({ question: q, profile: profile || undefined }), signal: request.signal,
+        body: JSON.stringify({ question: q, profile: profile || undefined,
+          'include-private': document.getElementById('ask-private').checked }), signal: request.signal,
       });
       await readAnswerEvents(response, function (event, data) {
         if (stale(seq)) return;
@@ -1567,24 +1472,26 @@ async function uploadSourceFiles(files, folder, kind, name, confirmation) {
   var res = await fetch('/api/personal/sources/upload?kind=' + encodeURIComponent(kind), {
     method: 'POST', headers: requestHeaders, body: form,
   });
-  if (res.status === 413) throw new Error('Choose a selection up to 24 MiB.');
   var body = await res.json();
   if (!res.ok) throw new Error(body.error || res.statusText);
   return body.result;
 }
 
-var SOURCE_LABELS = { bookmarks: 'Browser bookmarks', markdown: 'Markdown library', notion: 'Notion workspace' };
+var SOURCE_LABELS = { bookmarks: 'Browser bookmarks', markdown: 'Markdown library', notion: 'Notion workspace', email: 'Email archive', calendar: 'Calendar export' };
+var SOURCE_EXTENSIONS = { email: '.eml', calendar: '.ics' };
 
 function sourceFilesPanel(name, readonly) {
-  return '<section class="card source-panel" aria-labelledby="source-files"><h3 id="source-files">Bookmarks and Markdown</h3>' +
-    '<p>Preview a bookmarks HTML file, Markdown notes, or files from an extracted Notion Markdown &amp; CSV export. ' +
+  return '<section class="card source-panel" aria-labelledby="source-files"><h3 id="source-files">Import files</h3>' +
+    '<p>Preview bookmarks, Markdown, a Notion export, email, or calendar events. ' +
     'The selected items become private drafts in <strong>' + esc(name) + '</strong>.</p>' +
     (readonly ? '<p class="notice">Choose a writable brain to import files.</p>' :
     '<form id="source-files-form" class="source-panel"><div class="grid">' +
     '<label class="field"><span>File format</span><select id="source-kind">' +
-    '<option value="bookmarks">Browser bookmarks (HTML)</option><option value="markdown">Markdown</option><option value="notion">Notion export</option></select></label>' +
+    '<option value="bookmarks">Browser bookmarks (HTML)</option><option value="markdown">Markdown</option><option value="notion">Notion export</option>' +
+    '<option value="email">Email (.eml)</option><option value="calendar">Calendar (.ics)</option></select></label>' +
     '<label class="field"><span>Source name</span><input id="source-name" maxlength="80" value="Browser bookmarks" required></label></div>' +
     '<p class="muted" id="source-name-guide">Use the same source name next time to see what changed.</p>' +
+    '<p class="muted" id="source-offline-guide" hidden></p>' +
     '<label class="field"><span>Export files</span><input id="source-pick-files" type="file" accept=".html,.htm,text/html"></label>' +
     '<label class="field" id="source-folder-picker" hidden><span>Or choose the extracted folder</span>' +
     '<input id="source-pick-folder" type="file" webkitdirectory multiple></label>' +
@@ -1600,6 +1507,7 @@ function setupSourceFiles(seq, brain, onImport) {
   var filesInput = document.getElementById('source-pick-files');
   var folderInput = document.getElementById('source-pick-folder');
   var folderPicker = document.getElementById('source-folder-picker');
+  var offlineGuide = document.getElementById('source-offline-guide');
   var status = document.getElementById('source-files-status');
   var result = document.getElementById('source-files-result');
   var previewButton = document.getElementById('source-files-preview');
@@ -1614,9 +1522,13 @@ function setupSourceFiles(seq, brain, onImport) {
 
   function updateFormat() {
     var bookmarks = kind.value === 'bookmarks';
-    filesInput.accept = bookmarks ? '.html,.htm,text/html' : '.md,.markdown,text/markdown';
+    var extension = SOURCE_EXTENSIONS[kind.value];
+    filesInput.accept = extension || (bookmarks ? '.html,.htm,text/html' : '.md,.markdown,text/markdown');
     filesInput.multiple = !bookmarks;
     folderPicker.hidden = bookmarks || !('webkitdirectory' in folderInput);
+    offlineGuide.hidden = !extension;
+    offlineGuide.textContent = kind.value === 'email' ? 'Import readable message text from files up to 2 MiB each. Attachments are skipped.' :
+      kind.value === 'calendar' ? 'Import event snapshots from files up to 2 MiB each. Recurring series stay as single drafts.' : '';
     filesInput.value = folderInput.value = '';
     clear();
   }
@@ -1673,6 +1585,8 @@ function setupSourceFiles(seq, brain, onImport) {
   async function run(selected) {
     var folder = folderInput.files.length > 0;
     var files = Array.from(folder ? folderInput.files : filesInput.files);
+    var extension = SOURCE_EXTENSIONS[kind.value];
+    if (folder && extension) files = files.filter(function (file) { return file.name.toLowerCase().endsWith(extension); });
     if (busy || stale(seq) || brain !== BRAIN || (selected && !preview)) return;
     if (!files.length || files.length > 500) {
       status.innerHTML = errorBox('Choose between 1 and 500 export files.');
@@ -1680,6 +1594,10 @@ function setupSourceFiles(seq, brain, onImport) {
     }
     if (files.reduce(function (size, file) { return size + file.size; }, 0) > 24 * 1024 * 1024) {
       status.innerHTML = errorBox('Choose a selection up to 24 MiB.');
+      return;
+    }
+    if (extension && files.some(function (file) { return file.size > 2 * 1024 * 1024; })) {
+      status.innerHTML = errorBox('Choose email and calendar files up to 2 MiB each.');
       return;
     }
     var confirmation = selected ? { preview: preview, selected: selected } : null;
@@ -2258,6 +2176,25 @@ function mountBundleWatch(panel, readonly, seq) {
   void update();
 }
 
+function mountNoteUsageSettings(panel) {
+  var enable = panel.querySelector('[data-usage-enable]');
+  var disable = panel.querySelector('[data-usage-disable]');
+  var status = panel.querySelector('[role="status"]');
+  async function update(enabled) {
+    enable.disabled = disable.disabled = true;
+    try {
+      var state = await api('note_usage_settings', enabled === undefined ? {} : { mode: enabled ? 'on' : 'off' });
+      enable.hidden = state.enabled;
+      disable.hidden = !state.enabled;
+      status.textContent = state.enabled ? 'Counting local usage.' : 'Local counts are off.';
+    } catch (error) { status.textContent = error.message; }
+    finally { enable.disabled = disable.disabled = false; }
+  }
+  enable.addEventListener('click', function () { void update(true); });
+  disable.addEventListener('click', function () { void update(false); });
+  void update();
+}
+
 async function renderSettings(_arg, seq) {
   var st = STATUS || {};
   var mcpArgs = st.brain ? ['--brain', st.brain, 'mcp'] : ['--bundle', st.bundle || '<bundle>', 'mcp'];
@@ -2275,6 +2212,10 @@ async function renderSettings(_arg, seq) {
     (st.readonly ? '' : '<div class="row"><button id="set-default-brain" type="button"' + (st.isDefaultBundle ? ' disabled' : '') +
       '>Use as default brain</button><span id="default-brain-status" role="status">' +
       (st.isDefaultBundle ? 'This folder is the default.' : 'Used when okb starts without a folder argument.') + '</span></div>') +
+    (st.readonly ? '' : '<section id="note-usage-settings" class="stack"><h3>Local note usage</h3>' +
+      '<p class="muted">Count opens and verified Ask citations for this brain on this device. The last 30 days of counts appear on notes.</p>' +
+      '<div class="row"><button data-usage-enable type="button" hidden>Turn on local counts</button>' +
+      '<button data-usage-disable type="button" hidden>Turn off and clear counts</button></div><div role="status"></div></section>') +
     '<h3>Identity</h3><form id="actf" class="row">' +
     '<label class="field" style="flex:1"><span>Actor (generated.by / verified.by on your writes)</span>' +
     '<input id="act-in" value="' + esc(st.actor || '') + '" placeholder="human:alice"></label>' +
@@ -2329,6 +2270,7 @@ async function renderSettings(_arg, seq) {
     field('run-embed-model', 'Model override', '', 'Configured model') +
     '<label class="field"><span>Max notes this run</span><input id="embed-limit" type="number" min="0" placeholder="All pending notes"></label>' +
     '</div><p class="muted">Changing the provider or model rebuilds the vector cache.</p>' +
+    '<label class="row"><input type="checkbox" id="embed-private"> Include private notes in embeddings</label>' +
     '<div class="row"><button>Embed</button></div><div id="embed-out" aria-live="polite"></div></form>' +
     '<section id="bundle-watch" class="stack"><h4>Watch brain folder</h4>' +
     '<p class="muted">Keep keyword search and graph links current when you edit Markdown in another app.</p>' +
@@ -2356,6 +2298,8 @@ async function renderSettings(_arg, seq) {
     '<h3>Bookmarklet</h3><div id="bm-out"></div></div>';
 
   var show = setHtml;
+  var usagePanel = document.getElementById('note-usage-settings');
+  if (usagePanel) mountNoteUsageSettings(usagePanel);
   showBookmarklet();
   mountBundleWatch(document.getElementById('bundle-watch'), Boolean(st.readonly), seq);
   renderBrainMounts(document.getElementById('brain-mount-settings'), Boolean(st.readonly), seq);
@@ -2490,6 +2434,7 @@ async function renderSettings(_arg, seq) {
     if (provider) params.provider = provider;
     if (model) params.model = model;
     if (Number.isFinite(limit)) params.limit = limit;
+    if (document.getElementById('embed-private').checked) params['include-private'] = true;
     maint('embed', 'embedding', params, null, 'embed-out');
   });
   document.getElementById('mx-doctor').addEventListener('click', function () { maint('doctor', 'checking', {}, doctorSummary); });

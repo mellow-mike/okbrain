@@ -12,6 +12,7 @@
 import { parseHTML } from "linkedom";
 import type { ChatMessage } from "../ai/gateway.ts";
 import { readConceptPermissive } from "../okf/bundle.ts";
+import { isPrivateConceptAt } from "../okf/privacy.ts";
 import { fmSources, type SourceEntry } from "../okf/document.ts";
 import { idToAbsPath, validateId, InvalidIdError } from "../okf/paths.ts";
 import { OkfWriteError, writeConcept } from "../okf/write.ts";
@@ -207,6 +208,7 @@ export async function runEnrich(
       throw new WebPassError((e as InvalidIdError).message);
     }
     const exists = existsSync(idToAbsPath(root, id));
+    if (exists && await isPrivateConceptAt(root, id)) throw new WebPassError("The selected note is unavailable to enrichment.");
     if (!exists && !id.startsWith("references/"))
       throw new WebPassError(
         `new concepts must live under references/ (got ${id}); existing concepts may be enriched in place`,
@@ -273,6 +275,7 @@ export async function runEnrich(
           case "read_concept": {
             const id = String(action.id ?? "");
             validateId(id);
+            if (await isPrivateConceptAt(root, id)) throw new WebPassError("The selected note is unavailable to enrichment.");
             const { doc } = await readConceptPermissive(root, id);
             observation = { id, frontmatter: doc.frontmatter, body: doc.body };
             break;

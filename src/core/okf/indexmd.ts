@@ -10,7 +10,8 @@ import { basename, join, posix, resolve } from "node:path";
 import { markdownOutsideCode } from "../graph/links.ts";
 import { listMdFiles, readConceptPermissive } from "./bundle.ts";
 import { fmString, OkfParseError, parse, serialize } from "./document.ts";
-import { isReservedName } from "./paths.ts";
+import { inDbOnlyDir, isReservedName } from "./paths.ts";
+import { isPrivateConcept } from "./privacy.ts";
 
 /** The OKF spec version okbrain writes (declared in the root index.md). */
 export const OKF_VERSION = "0.2";
@@ -78,7 +79,7 @@ export async function generateIndexMd(root: string, dir: string, selectedStyle?:
   const dirRows: string[] = [];
   const subdirs = entries.filter((e) => e.isDirectory() && !skipDir(e.name));
   for (const name of subdirs.map((e) => e.name).sort()) {
-    if (name === "db_only") continue; // private: never listed in a committed parent index
+    if (name.toLowerCase() === "db_only") continue; // private: never listed in a committed parent index
     const child = await readExisting(join(abs, name, "index.md"));
     if (!child) continue;
     const desc = child.intro?.split("\n")[0]?.replace(/\.$/, "");
@@ -94,6 +95,7 @@ export async function generateIndexMd(root: string, dir: string, selectedStyle?:
   for (const name of files.map((e) => e.name).sort()) {
     const id = isRoot ? name.slice(0, -3) : `${dir}/${name.slice(0, -3)}`;
     const { doc } = await readConceptPermissive(root, id);
+    if (!inDbOnlyDir(id.toLowerCase()) && isPrivateConcept(id, doc.frontmatter)) continue;
     const type = fmString(doc.frontmatter.type) || "untyped";
     const title = fmString(doc.frontmatter.title) || id;
     const desc = fmString(doc.frontmatter.description);

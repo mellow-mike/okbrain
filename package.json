@@ -33,8 +33,10 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@mozilla/readability": "^0.6.0",
     "eventsource-parser": "3.1.0",
+    "ical.js": "2.2.1",
     "jose": "6.2.3",
     "linkedom": "^0.18.13",
+    "postal-mime": "4.2.1",
     "sqlite-vec": "^0.1.9",
     "turndown": "^7.2.4",
     "yaml": "^2.9.0"

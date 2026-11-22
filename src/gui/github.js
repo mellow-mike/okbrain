@@ -11,7 +11,7 @@
       (item.draft ? ' <span class="chip">Draft</span>' : '') + '</li>').join('') + '</ul>';
   }
 
-  function mount(parent, { project, coding, readonly }) {
+  function mount(parent, { project, coding, readonly, target }) {
     const path = '/projects/' + encodeURIComponent(project.id) + '/github-';
     parent.className = 'coding-panel stack';
     parent.innerHTML = '<h3>GitHub</h3><div data-github-body><p class="muted">Loading connection…</p></div>' +
@@ -48,19 +48,32 @@
         '<label class="field"><span>Fine-grained token (optional for public repositories)</span>' +
         '<input type="password" name="token" autocomplete="off" spellcheck="false" maxlength="280"></label>' +
         '<div class="row"><button type="submit" disabled>Save connection</button>' +
-        (state.connection ? '<button type="button" data-disconnect>Disconnect</button>' : '') + '</div></form></details>';
+        (state.connection ? '<button type="button" data-disconnect>Disconnect</button>' : '') + '</div></form>' +
+        (state.connection ? '<form class="stack coding-form" data-pr-token><p class="muted">To publish pull requests, use a separate fine-grained token limited to this repository with Pull requests write access.</p>' +
+        '<label class="field"><span>Pull request publishing token</span><input type="password" name="token" required autocomplete="off" spellcheck="false" maxlength="280"></label>' +
+        '<div class="row"><button type="submit">Save publishing token</button>' +
+        (state.connection.hasPublishToken ? '<button type="button" data-remove-pr-token>Remove publishing token</button>' : '') +
+        '</div></form>' : '') + '</details>';
     }
 
-    function handoff() {
+    function handoff(state) {
       if (readonly) return '';
       return '<details data-github-handoff><summary>Prepare GitHub review</summary><form class="stack coding-form">' +
         '<p class="muted">Choose an accepted coding request and branches that are already on GitHub. ' +
-        'Review the comparison and open the pull request in GitHub.</p>' +
+        'Open the comparison to review the proposed branch changes.</p>' +
         '<label class="field"><span>Accepted request</span><select name="request" required></select></label>' +
         '<div class="row"><button type="button" data-load-runs>Refresh accepted requests</button></div>' +
         '<div class="coding-grid"><label class="field"><span>Base branch</span><input name="base" maxlength="255" required></label>' +
         '<label class="field"><span>Head branch</span><input name="head" maxlength="255" required></label></div>' +
-        '<div class="row"><button type="submit">Prepare comparison</button></div><div data-comparison></div></form></details>';
+        '<div class="row"><button type="submit">Prepare comparison</button></div><div data-comparison></div>' +
+        (state.canConfigure ? '<details data-pr-options><summary>Create a pull request</summary><div class="stack coding-form">' +
+        (state.connection.hasPublishToken ? '<label class="field"><span>Pull request title</span><input name="prTitle" maxlength="256"></label>' +
+        '<label class="field"><span>Pull request Markdown</span><textarea name="prBody" rows="5" maxlength="16384"></textarea></label>' +
+        '<label class="row"><input type="checkbox" name="prDraft" checked><span>Open as a draft</span></label>' +
+        '<div class="row"><button type="button" data-preview-pr>Preview pull request</button>' :
+        '<p class="muted">Save a publishing token in Connection settings to create pull requests.</p><div class="row">') +
+        '<button type="button" data-recover-pr>Find or recover pull request</button></div><div class="stack" data-pr-receipt></div></div></details>' : '') +
+        '</form></details>';
     }
 
     function show(state) {
@@ -70,7 +83,7 @@
         '<div class="row"><strong>' + external(connection.url, connection.repository) + '</strong><span class="muted">' +
         esc(connection.remote) + (connection.hasToken ? ' · project token saved' : ' · public access') + '</span></div>' +
         '<div class="row"><button type="button" data-github-refresh>Refresh GitHub activity</button></div>' +
-        '<div data-github-activity class="stack"></div>' + handoff() :
+        '<div data-github-activity class="stack"></div>' + handoff(state) :
         '<p class="muted">This project has no connected GitHub repository.</p>') + settings(state);
 
       const configuration = area.querySelector('[data-github-settings] form');
@@ -110,6 +123,26 @@
         }));
       }
 
+      const prToken = area.querySelector('[data-pr-token]');
+      if (prToken) {
+        const token = prToken.elements.token;
+        const save = prToken.querySelector('button[type=submit]');
+        prToken.addEventListener('submit', (event) => {
+          event.preventDefault();
+          perform(save, async () => {
+            try {
+              show(await coding(path + 'pr-credential', { token: token.value }));
+              notice('Pull request publishing token saved.');
+            } finally { token.value = ''; }
+          });
+        });
+        const remove = prToken.querySelector('[data-remove-pr-token]');
+        remove?.addEventListener('click', () => perform(remove, async () => {
+          show(await coding(path + 'pr-credential', { token: '' }));
+          notice('Pull request publishing token removed.');
+        }));
+      }
+
       const prepare = area.querySelector('[data-github-handoff]');
       const form = prepare?.querySelector('form');
       const refresh = area.querySelector('[data-github-refresh]');
@@ -129,20 +162,39 @@
       const comparison = form.querySelector('[data-comparison]');
       const load = form.querySelector('[data-load-runs]');
       const submit = form.querySelector('button[type=submit]');
+      const previewPr = form.querySelector('[data-preview-pr]');
+      const recoverPr = form.querySelector('[data-recover-pr]');
+      const prReceipt = form.querySelector('[data-pr-receipt]');
       let accepted = [];
+      let revision = 0;
       async function loadRuns() {
+        const selected = accepted[Number(request.value)] ?? target;
         const rows = await coding('/projects/' + encodeURIComponent(project.id) + '/runs');
         accepted = rows.filter((run) => run.status === 'done' && run.review === 'accepted');
         request.replaceChildren(...accepted.map((run, index) => new Option(run.session + ' / ' + run.id, String(index))));
         if (!accepted.length) request.replaceChildren(new Option('Accept a run in Review first', ''));
+        const index = selected && accepted.findIndex((run) => run.session === selected.session && run.id === selected.id);
+        if (index >= 0) request.value = String(index);
+        else clearPreview();
         submit.disabled = !accepted.length;
+        if (previewPr) previewPr.disabled = !accepted.length;
+        if (recoverPr) recoverPr.disabled = !accepted.length;
       }
       submit.disabled = true;
+      if (previewPr) previewPr.disabled = true;
+      if (recoverPr) recoverPr.disabled = true;
       prepare.addEventListener('toggle', () => {
         if (prepare.open) perform(load, loadRuns);
       });
       load.addEventListener('click', () => perform(load, loadRuns));
-      form.addEventListener('input', () => comparison.replaceChildren());
+      function clearPreview() {
+        revision++;
+        comparison.replaceChildren();
+        prReceipt?.replaceChildren();
+      }
+      form.addEventListener('input', (event) => {
+        if (!prReceipt?.contains(event.target)) clearPreview();
+      });
       form.addEventListener('submit', (event) => {
         event.preventDefault();
         const run = accepted[Number(request.value)];
@@ -155,6 +207,71 @@
           comparison.querySelector('a').focus();
         });
       });
+
+      function showReceipt(result) {
+        prReceipt.replaceChildren();
+        if (result?.receipt) {
+          prReceipt.innerHTML = external(result.receipt.url, 'Open pull request #' + result.receipt.number);
+          prReceipt.querySelector('a').focus();
+        } else {
+          const message = document.createElement('p');
+          message.className = 'muted';
+          message.textContent = result ? 'GitHub has not returned this receipt. You can check again or preview the same details to retry.'
+            : 'This accepted request has no publishing approval yet.';
+          prReceipt.append(message);
+        }
+      }
+
+      recoverPr?.addEventListener('click', () => {
+        const run = accepted[Number(request.value)];
+        if (!run) return;
+        const identity = { session: run.session, requestId: run.id };
+        const current = revision;
+        perform(recoverPr, async () => {
+          const saved = await coding(path + 'pr-inspect', identity);
+          const result = saved && !saved.receipt ? await coding(path + 'pr-recover', identity) : saved;
+          if (revision === current) showReceipt(result);
+        });
+      });
+
+      previewPr?.addEventListener('click', () => {
+        const run = accepted[Number(request.value)];
+        if (!run || !form.reportValidity()) return;
+        const details = { session: run.session, requestId: run.id, base: form.elements.base.value, head: form.elements.head.value,
+          title: form.elements.prTitle.value, body: form.elements.prBody.value, draft: form.elements.prDraft.checked };
+        const current = revision;
+        perform(previewPr, async () => {
+          const preview = await coding(path + 'pr-preview', details);
+          if (revision !== current) return;
+          prReceipt.innerHTML = '<p data-pr-summary></p><pre data-pr-markdown></pre>' +
+            '<div>' + external(preview.comparison, 'Review the comparison on GitHub') + '</div>' +
+            '<label class="row"><input type="checkbox" data-pr-confirm><span>Approve this exact title, Markdown and branch comparison</span></label>' +
+            '<div class="row"><button type="button" class="primary" data-pr-publish disabled>Publish to GitHub</button></div>';
+          prReceipt.querySelector('[data-pr-summary]').textContent = preview.title + ' · ' + preview.repository +
+            ' · ' + preview.head + ' → ' + preview.base + (preview.draft ? ' · Draft' : '');
+          prReceipt.querySelector('[data-pr-markdown]').textContent = preview.body;
+          const confirm = prReceipt.querySelector('[data-pr-confirm]');
+          const publish = prReceipt.querySelector('[data-pr-publish]');
+          confirm.addEventListener('change', () => { publish.disabled = !confirm.checked; });
+          confirm.focus();
+          publish.addEventListener('click', () => {
+            if (!confirm.checked || revision !== current) return;
+            perform(publish, async () => {
+              const result = await coding(path + 'pr-publish', { ...details, approval: preview.approval, approved: true });
+              if (revision === current) {
+                showReceipt(result);
+                notice('GitHub pull request recorded.');
+              }
+            });
+          });
+        });
+      });
+      if (target) {
+        prepare.open = true;
+        const pullOptions = prepare.querySelector('[data-pr-options]');
+        if (pullOptions) pullOptions.open = true;
+        (pullOptions || prepare).querySelector('summary').focus();
+      }
     }
 
     coding(path + 'status').then(show, (error) => {

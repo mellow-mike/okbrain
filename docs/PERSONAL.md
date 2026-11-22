@@ -18,7 +18,7 @@ Open **Add** to give a capture its own title and tags, include a quote and comme
 
 Open **Focused map** with a question, project, or note. Filter by source, date, or private drafts. Each row explains the link direction and can move the map to the linked note.
 
-Use **Sources** to import conversations, browser bookmarks, Markdown, and Notion export files, find web capture and RSS tools, or get to AI settings. The import forms show which brain receives drafts. If you have multiple brains mounted, select a writable brain before importing.
+Use **Sources** to import conversations, bookmarks, Markdown, Notion exports, email, and calendar events. It also links to web capture, RSS, and AI settings. The import forms show which brain receives drafts. If you have multiple brains mounted, select a writable brain before importing.
 
 In **Add → Manage saved feeds**, enter one URL per line and select **Save feed URLs**. The list is shared across brain folders on this device. In **Pull RSS feeds**, enter one URL or leave it blank to pull every saved feed into the selected brain. Set **Max new items per feed** to limit how many entries each feed can add. The terminal equivalent for viewing the saved list is `okb rss settings`.
 
@@ -31,6 +31,8 @@ Choose **Use as default brain** in Settings to select the active writable folder
 In **Settings → Folder change log**, enter a public folder path such as `notes/projects` to create its `log.md`. It records subsequent changes in that folder and its descendants. The root log records changes across the brain. Private drafts are excluded from both logs. The CLI equivalent is `okb log create notes/projects`.
 
 In **Settings → Markdown indexes**, choose **OKF reference headings and relative links** for a brain you share with reference tooling. The layout choice travels in the root `index.md`. You can restore the grouped layout at any time, including with `okb manifests style grouped`.
+
+In **Settings → Local note usage**, choose **Turn on local counts** for the current brain. Notes show the last 30 days of explicit opens and citations verified by Ask. A note’s internal sources also show their own local counts when recorded. These aggregate counts stay in per-user application data on this device. They survive an index rebuild and exclude MCP activity. **Turn off and clear counts** deletes the current brain’s counts. In the CLI, use `okb usage settings on` and read the `localUsage` field from `okb read <id> --json`.
 
 Set **Default retrieval profile** on a named brain folder to choose how Search and Ask use that brain by default. Use **Use app default** to inherit the global retrieval setting. A profile selected for a specific search or answer takes precedence.
 
@@ -63,7 +65,7 @@ okb ask-plan 'What did I conclude about spacing my reviews?'
 
 `--account` gives the connection a local label. Without it, `connect` uses the selected label or creates `default` on first sign-in. Use `okb chatgpt use personal` to select an existing connection. To choose a specific model, pass `--model <slug>` from the `chatgpt models` list.
 
-`ask-plan` searches the local keyword index and expands matches through the knowledge graph. It sends your question and selected excerpts, titles, and note IDs to OpenAI for the answer. This can include drafts from `db_only/` in the chosen bundle. The answer lists citations that match the supplied context. Use `--json` to inspect the full list of notes supplied as context.
+`ask-plan` searches the local keyword index and expands matches through the knowledge graph. It sends your question and selected excerpts, titles, and note IDs to OpenAI for the answer. Add `--include-private` to allow private notes in that context. The answer lists citations that match the supplied context. Use `--json` to inspect the full list of notes supplied as context.
 
 Model calls use the selected account's ChatGPT plan allowance or available credits. If permission, usage, or the connection is unavailable when okbrain needs a model, the command returns an error on that route. An empty retrieval result ends before inference. Account credentials are stored per user outside the bundle. `okb chatgpt disconnect` clears the selected connection's local credentials and attempts remote revocation. If revocation fails, remove the connection from ChatGPT. [ChatGPT usage and connection controls](https://chatgpt.com/settings/usage)
 
@@ -93,15 +95,25 @@ okb search 'spaced repetition'
 
 Both import flows accept one JSON file up to 128 MiB and write text transcripts as `conversation` drafts under `db_only/conversations/<provider>/`. The import includes user and assistant text from the selected ChatGPT branch or the Claude message list, plus source provenance. Attachments and hidden messages stay in the original export. Existing notes keep their contents when you import the same provider conversation again, including when a newer archive contains additional turns.
 
-## Import bookmarks, Markdown, and Notion pages
+## Import files and Notion pages
 
-In **Sources → Bookmarks and Markdown**, choose the format, name the source, and select the files. Use a browser's bookmarks HTML export for bookmarks. For Notion, extract the **Markdown & CSV** ZIP first, then pick the Markdown files or an extracted folder. Selecting a folder preserves relative paths. Choose up to 500 files and 24 MiB total, or up to 2,000 items in one bookmarks export. [Export Firefox bookmarks](https://support.mozilla.org/en-US/kb/export-firefox-bookmarks-to-backup-or-transfer) · [Export content from Notion](https://www.notion.com/help/export-your-content)
+In **Sources → Import files**, choose the format, name the source, and select the files. Use a browser's bookmarks HTML export for bookmarks. For Notion, extract the **Markdown & CSV** ZIP first, then pick the Markdown files or an extracted folder. Selecting a folder preserves relative paths. Choose up to 500 files and 24 MiB total, or up to 2,000 items in one bookmarks export. [Export Firefox bookmarks](https://support.mozilla.org/en-US/kb/export-firefox-bookmarks-to-backup-or-transfer) · [Export content from Notion](https://www.notion.com/help/export-your-content)
 
 Select **Preview files** to see new, changed, saved, and skipped items. Markdown imports carry text and source paths. Links between selected Markdown notes point to their drafts. Bookmark import keeps folder names and web addresses. CSV tables and attachments appear as skipped items. Review the checkboxes and select **Import selected drafts**.
 
 Use the same source name and relative paths for a later import. A Notion page ID in the exported filename also identifies renamed pages. A changed source is an optional new draft. Earlier drafts retain any local edits, and files absent from the new selection leave the existing notes intact. Save location and source history stay within the selected brain.
 
 Expand a source in **Import history** to review recent imports and open drafts. **Import from this source again** reuses the format and source name. The history is derived from saved draft provenance and follows the drafts if you move the bundle. Deleting a draft removes it from the history. Earlier ChatGPT and Claude drafts may lack the date of import.
+
+### Import email and calendar files
+
+In **Sources → Import files**, choose **Email (.eml)** or **Calendar (.ics)**. Select the files, choose **Preview files**, and select the items you want to save as private drafts. These imports work offline. The app accepts up to 2 MiB per file, 24 MiB per selection, 2,000 preview items, and 128 KiB of readable text per draft.
+
+Email drafts keep the subject, sender, date, and readable message text. The importer converts HTML-only messages to inert text and skips attachments, including forwarded messages attached as files. Calendar drafts keep the event time and any supplied time zone, summary, location, and description. A recurring series is one draft with its rule. Explicit exceptions appear as their own drafts. The importer skips attachments and alarms and never schedules or expands an event.
+
+Use the same source name to preview later exports. Email Message-IDs and calendar UIDs identify the same items when filenames change. An email without a Message-ID uses its file path. Existing drafts retain edits when you save a changed source as a separate draft.
+
+The terminal uses the same two steps. First run `okb source import ~/Downloads/schedule.ics --kind calendar --name "Calendar export"`. To save selected rows, repeat the command with `--preview <receipt> --selected 1,3`. For email use `--kind email` and an `.eml` file. A directory imports matching files from its top level.
 
 ### Connect selected Notion pages
 
@@ -124,9 +136,17 @@ The local GUI can browse, search, and edit conversation drafts in its selected b
 
 From a writable brain, open **Settings → Markdown and Obsidian export**. Enter the absolute path to a new folder outside the brain. The new folder's parent must already exist. Choose **Export Markdown**, then use Obsidian's **Open folder as vault** or open the files in any Markdown editor.
 
-The export copies the note folders and YAML frontmatter, including custom fields. Markdown body links between exported notes use relative paths. Generated indexes, logs, attachments, app caches, and private `db_only/` notes are omitted by default. Text and metadata already present in exported notes remain visible, including references to notes or attachments outside the export. Review the folder before sharing it.
+The export copies the note folders and YAML frontmatter, including custom fields. Markdown body links between exported notes use relative paths. Generated indexes, logs, attachments, app caches, and private notes are omitted by default. Text and metadata already present in exported notes remain visible, including references to notes or attachments outside the export. Review the folder before sharing it.
 
 Select **Include private drafts in Markdown export** and confirm to include those notes. The CLI equivalent is `okb export-markdown /absolute/path/to/new-vault` with the optional `--include-private` flag. An export supports up to 10,000 notes, 16 MiB per source note, and 256 MiB total.
+
+### Keep a note private
+
+Set an explicit concept ID and select **Keep this note private** when creating a note. For an existing unpublished note, open **Edit → Note privacy → Keep note private**. The equivalents are `okb write <id> --type note --title "Title" --description "Summary" --private` and `okb keep-private <id>`. Both save `db_only: true` in the note's YAML. Notes under a `db_only/` directory remain private.
+
+Private notes remain in local search. Git sync keeps them out of staging and records their paths only in the repository's local `info/exclude`. Generated public indexes and logs omit them. okbrain refuses to change the privacy of a note already tracked or recorded by Git, and sync stops if Git currently tracks a private path. Earlier Git history and previously shared copies remain visible to their existing recipients.
+
+Ask, ChatGPT previews, focused maps, embeddings, and both export workflows have an explicit private-note option. Ask and embeddings send private text only when enabled for that request. Web enrichment excludes private notes. Authorized MCP clients can still read local notes within their connected brain.
 
 ## Connect an MCP client
 

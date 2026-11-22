@@ -5,6 +5,7 @@
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { markdownOutsideCode } from "../graph/links.ts";
+import { walkMarkdownFiles } from "./bundle.ts";
 import { inDbOnlyDir, validateId } from "./paths.ts";
 
 export type LogKind = "Creation" | "Update" | "Deprecation" | "Deletion";
@@ -54,6 +55,22 @@ async function appendDateSection(path: string, entry: string, date: string): Pro
 
 export function formatLogEntry(kind: LogKind, id: string, title: string, summary = ""): string {
   return `**${kind}**: [${title}](/${id}.md)${summary ? ` — ${summary}` : ""}`;
+}
+
+/** Remove generated entries for newly local notes while preserving manually written log prose. */
+export async function removePrivateLogEntries(root: string, ids: ReadonlySet<string>): Promise<void> {
+  if (ids.size === 0) return;
+  for await (const path of walkMarkdownFiles(root)) {
+    if (posix.basename(path) !== "log.md" || inDbOnlyDir(path.toLowerCase())) continue;
+    const file = join(root, ...path.split("/"));
+    const content = await readFile(file, "utf8");
+    const visible = markdownOutsideCode(content).split(/(?<=\n)/);
+    const filtered = content.split(/(?<=\n)/).filter((line, index) => {
+      if (!/^\*\*(?:Creation|Update|Deprecation|Deletion)\*\*: /.test(visible[index] ?? "")) return true;
+      return ![...line.matchAll(/\]\(\/(.+?)\.md\)/g)].some((match) => ids.has(match[1]!));
+    }).join("");
+    if (filtered !== content) await writeFile(file, filtered, "utf8");
+  }
 }
 
 async function lstatIfPresent(path: string) {

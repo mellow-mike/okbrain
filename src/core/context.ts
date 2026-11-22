@@ -28,6 +28,7 @@ export function openLocalContext(
     bundle,
     trusted,
     readonly,
+    localUsage: actor === undefined,
     actor: () => actor ?? resolveActor((cfg ??= loadConfig())),
     engine: (createIfMissing = false) => {
       if (!engine) {

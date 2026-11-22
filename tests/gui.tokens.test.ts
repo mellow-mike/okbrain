@@ -31,7 +31,7 @@ describe("design tokens", () => {
   });
 
   test("every token the GUI, the viewer and Okb read is defined", () => {
-    const files = ["gui/style.css", "gui/app.js", "core/viz/export.ts", "core/viz/okb.js"].map(read);
+    const files = ["gui/style.css", "gui/app.js", "core/viz/export.ts", "core/viz/okb.js", "core/viz/graph-view.js"].map(read);
     const defined = new Set([
       ...names(tokens, /--([a-z0-9-]+)\s*:/g),
       ...files.flatMap((f) => [...names(f, /--([a-z0-9-]+)\s*:/g), ...names(f, /setProperty\('--([a-z0-9-]+)'/g)]),

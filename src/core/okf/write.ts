@@ -10,7 +10,7 @@
 
 import { randomUUID } from "node:crypto";
 import { readFileSync, renameSync } from "node:fs";
-import { link, lstat, mkdir, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 import { resolveActor } from "../config.ts";
 import { normalizeLinks } from "../graph/links.ts";
@@ -29,7 +29,8 @@ import {
 } from "./document.ts";
 import { regenerateIndexBranches, regenerateIndexes } from "./indexmd.ts";
 import { appendConceptLogs, appendLog, formatLogEntry, todayUtc, type ConceptLogEntry } from "./logmd.ts";
-import { idToAbsPath, inDbOnlyDir, isReservedName, slugify } from "./paths.ts";
+import { assertConceptPathSpelling, idToAbsPath, isReservedName, slugify } from "./paths.ts";
+import { isPrivateConcept } from "./privacy.ts";
 
 export class OkfWriteError extends Error {}
 
@@ -179,7 +180,8 @@ async function publishConcept(path: string, bytes: string, mode: number | undefi
 export async function writeFilingDocument(root: string, id: string, doc: OkfDocument, expected?: string): Promise<boolean> {
   const path = idToAbsPath(root, id);
   if (isReservedName(posix.basename(id) + ".md")) throw new OkfWriteError("Choose a concept path for filing.");
-  const privateConcept = inDbOnlyDir(id);
+  await assertConceptPathSpelling(root, id);
+  const privateConcept = isPrivateConcept(id, doc.frontmatter);
   return publishConcept(path, serialize(doc), privateConcept ? 0o600 : undefined, expected);
 }
 
@@ -194,6 +196,7 @@ export async function writeConcept(
     throw new OkfWriteError(
       `${input.id} is a reserved file, not a concept; index.md/log.md are maintained by okbrain`,
     );
+  await assertConceptPathSpelling(root, input.id);
 
   let existing;
   try {
@@ -288,7 +291,7 @@ export async function writeConcept(
     if (asIs === existing.raw) return { id: input.id, path, created: false, noop: true };
   }
 
-  const privateConcept = inDbOnlyDir(input.id);
+  const privateConcept = isPrivateConcept(input.id, fm);
   await mkdir(dirname(path), { recursive: true, mode: privateConcept ? 0o700 : undefined });
   const serialized = serialize({ frontmatter: fm, body });
   const mode = privateConcept ? 0o600 : undefined;
@@ -297,6 +300,7 @@ export async function writeConcept(
     if (!await publishConcept(path, serialized, mode)) return { id: input.id, path, created: false, noop: true };
   } else {
     await writeFile(path, serialized, { encoding: "utf8", mode });
+    if (privateConcept && process.platform !== "win32") await chmod(path, 0o600);
   }
   const dir = posix.dirname(input.id) === "." ? "" : posix.dirname(input.id);
   const kind = existing === undefined ? "Creation" : "Update";

@@ -4,12 +4,25 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { relativeConceptLinks } from "../graph/links.ts";
 import { walkMarkdownFiles } from "./bundle.ts";
 import { idToAbsPath, inDbOnlyDir, isReservedName, validateId } from "./paths.ts";
+import { OkfParseError, parse } from "./document.ts";
 
 const maxNotes = 10_000;
 const noteLimit = 16 * 1024 * 1024;
 const totalLimit = 256 * 1024 * 1024;
 const frontmatter = /^\uFEFF?---(?:\r\n|\n|\r)(?:[\s\S]*?(?:\r\n|\n|\r))?---[ \t]*(?:\r\n|\n|\r|$)/;
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+function declaredPrivate(text: string): boolean {
+  try { return parse(text).frontmatter.db_only === true; }
+  catch (error) {
+    if (!(error instanceof OkfParseError)) throw error;
+    return false;
+  }
+}
+
+function decode(bytes: Buffer): string | undefined {
+  try { return utf8.decode(bytes); } catch { return undefined; } // Export non-UTF-8 legacy notes verbatim.
+}
 
 export class MarkdownExportError extends Error {}
 export interface MarkdownExport {
@@ -68,6 +81,10 @@ export async function exportMarkdown(bundle: string, destination: string, includ
     const id = path.slice(0, -3);
     if (!includePrivate && inDbOnlyDir(id.toLowerCase())) continue;
     validateId(id);
+    if (!includePrivate) {
+      const raw = await readNote(idToAbsPath(root, id), noteLimit);
+      if (declaredPrivate(raw.toString("utf8"))) continue;
+    }
     if (selected.size === maxNotes) throw new MarkdownExportError("Export supports up to 10,000 notes.");
     selected.add(id);
   }
@@ -90,8 +107,9 @@ export async function exportMarkdown(bundle: string, destination: string, includ
         throw new MarkdownExportError("A note path changed during export. Review the brain and try again.");
       const raw = await readNote(physical, totalLimit - readBytes);
       readBytes += raw.length;
-      let original: string | undefined;
-      try { original = utf8.decode(raw); } catch { /* Copy non-UTF-8 legacy notes verbatim. */ }
+      const original = decode(raw);
+      if (!includePrivate && declaredPrivate(original ?? raw.toString("utf8")))
+        throw new MarkdownExportError("A note became private during export. Try the export again.");
       let output = raw;
       if (original !== undefined) {
         const yaml = frontmatter.exec(original)?.[0] ?? "";

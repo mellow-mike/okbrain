@@ -78,6 +78,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   after accepting a result. Record approval and reconcile interrupted writes.
 - [x] Bind GitHub repositories, show activity, and prepare a GitHub browser
   comparison for accepted results.
+- [x] Preview and publish an owner-approved GitHub pull request from an accepted
+  run using a separate publishing credential and a durable PR receipt.
 - [x] Package VS Code and Cursor integration for approved active-file requests
   and reviewing runs.
 
@@ -408,7 +410,8 @@ Goal: the brain improves itself on a schedule.
       rest; a single explicit feed fails loudly); `rss.maxItems` config
 - [x] `import.ts` (bulk md) and `capture.ts` landed at 1.3, clip at F-A —
       this stage's remaining source was feeds
-- [ ] (Later) browser grab; email/calendar
+- [x] Capture browser pages and selected text with the local clip bookmarklet.
+- [x] Preview and import saved email (`.eml`) and calendar (`.ics`) files into private drafts from the web app, macOS app, or CLI.
 - [x] Tests: RSS+Atom parse (rel=alternate, content:encoded, dc:creator,
       relative links, linkless items), idempotent re-pull, in-run dedupe,
       limit paging, doctor-clean output, CLI no-feeds error + live guard
@@ -728,10 +731,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 - [x] One-way Markdown and Obsidian vault export in Settings and `okb export-markdown`. Keeps frontmatter, makes links between exported notes relative, and excludes private notes unless selected.
 - [x] Preserve fenced Markdown examples when recognizing links and the
       `index.md` and `log.md` section headings.
-- [ ] Concept-id case sensitivity differs across filesystems (macOS/Windows
-      case-insensitive); decide on a canonical-casing policy before it matters.
-- [ ] Per-page `db_only` (frontmatter flag → sync appends the path to
-      `.gitignore`); v1 privacy is per-directory only.
+- [x] Preserve existing concept path spelling on writes and delete. Doctor
+      reports aliases that break portability across filesystems.
+- [x] Per-note `db_only: true` in the editor and CLI. Sync stores exact exclusions in local Git metadata, refuses tracked private paths, and leaves Git history intact. Public manifests and default outgoing context omit private notes.
 - [x] `viz.html` and the GUI render concept bodies through
       `core/viz/safe-markdown.js` (raw HTML escaped, URL schemes gated — B9);
       the shared `core/viz/render.js` builds on it.
@@ -747,9 +749,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       Settings or `okb log create`.
 - [x] Generate reference-style `index.md` files with H1 sections and relative
       links through Settings or `okb manifests style reference`.
-- [ ] `usage_count` / `usage_window` credibility signals from local usage
-      (reads, ask citations) — the spec's adoption signal, sourced from
-      the brain's own telemetry, opt-in.
+- [x] Opt-in local `usage_count` / `usage_window` signals for note opens and
+      verified Ask citations. The app shows these alongside author-supplied
+      sources without modifying their portable provenance.
 - [ ] `verified` events for machine checks (`process:okb-doctor` after a
       clean doctor run?) — decide whether a conformance pass counts as
       confirmation; today only humans and agents verify.
@@ -757,14 +759,16 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       scope for a personal brain; the contract is displayed, not run.
 - [x] Embed the app's licensed fonts on request in `viz.html` from Settings or
       with `okb export-viz --fonts`.
-- [ ] One graph component for both surfaces: the GUI graph view and the
-      static viewer duplicate their Cytoscape wiring (styles, filters,
-      detail panel); a shared `core/viz` module would halve it
+- [x] Use one graph component for the app and offline HTML export, including
+      Cytoscape styling, filters, and the note inspector.
 
 ---
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added approved GitHub PR creation and offline email and calendar
+  import. Enforced per-note privacy and portable path spelling, added local
+  usage counts, and shared the interactive graph between app and export.
 - 2026-11-22 — Added inbox filing with forwarding notes, named-brain provider
   defaults, folder logs, reference-style Markdown indexes, and an approved-source
   lookup tool with real Pi replay and usage accounting.

@@ -146,6 +146,7 @@ describe("ChatGPT plan", () => {
       expect(await call("models", { account: "personal" })).toEqual([{ slug: "visible", name: "Visible" }]);
       for (const [id, body] of [["notes/published", "databases public-snapshot"], ["db_only/private", "databases secret-snapshot"]])
         await writeConcept(root, { id: id!, type: "note", title: body!, description: "databases", body: body! });
+      await writeConcept(root, { id: "notes/flagged", type: "note", title: "databases flagged-snapshot", description: "databases", extra: { db_only: true } });
       expect(await runCli(["--bundle", root, "index"], { out() {}, err() {} })).toBe(0);
       const input = { account: "personal", model: "visible", question: "databases" };
       const preview = await call("preview", input);
@@ -153,17 +154,23 @@ describe("ChatGPT plan", () => {
       expect(preview.sources[0]?.text).toContain("public-snapshot");
       const withPrivate = await call("preview", { ...input, includePrivate: true });
       expect(withPrivate.sources.map((source: { id: string }) => source.id)).toContain("db_only/private");
+      expect(withPrivate.sources.map((source: { id: string }) => source.id)).toContain("notes/flagged");
       expect(provider.requests.filter(({ path }) => path === "/v1/responses")).toHaveLength(0);
       await writeConcept(root, { id: "notes/published", type: "note", title: "Changed", description: "databases", body: "databases newer-snapshot" });
       provider.inspectAnswer((body) => {
         const json = JSON.stringify(body);
         expect(json).toContain("public-snapshot");
         expect(json).not.toContain("secret-snapshot");
+        expect(json).not.toContain("flagged-snapshot");
         expect(json).not.toContain("newer-snapshot");
       });
       const results = await Promise.all([call("answer", { id: preview.id }), call("answer", { id: preview.id })]);
       expect(results[0]?.answer).toBe("An answer");
       expect(results[1]).toEqual(results[0]);
+      expect(provider.requests.filter(({ path }) => path === "/v1/responses")).toHaveLength(1);
+      const next = await call("preview", input);
+      await writeConcept(root, { id: "notes/published", metadataOnly: true, extra: { db_only: true } });
+      await expect(call("answer", { id: next.id })).rejects.toThrow(/Preview sources again/);
       expect(provider.requests.filter(({ path }) => path === "/v1/responses")).toHaveLength(1);
       expect(await call("disconnect", { account: "personal" })).toEqual({ revoked: true });
       expect((await call("status")).connected).toBe(false);

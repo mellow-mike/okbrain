@@ -30,7 +30,7 @@ import { SyncError } from "./core/sync.ts";
 import { defaultVectorsPath } from "./core/engine/vectors.ts";
 import { MAX_CONVERSATION_EXPORT_BYTES } from "./core/ingest/conversations.ts";
 import { createNotionSource, NotionSourceError, type NotionSource, type NotionSourceOptions } from "./core/ingest/notion-source.ts";
-import { MAX_SOURCE_FILES, MAX_SOURCE_UPLOAD_BYTES } from "./core/ingest/personal-sources.ts";
+import { isOfflineSourceKind, MAX_OFFLINE_FILE_BYTES, MAX_SOURCE_FILES, MAX_SOURCE_ROWS, MAX_SOURCE_UPLOAD_BYTES } from "./core/ingest/personal-sources.ts";
 import { OKF_VERSION } from "./core/okf/indexmd.ts";
 import {
   checkOpCall,
@@ -58,6 +58,7 @@ import { fontAssets, hostedFontCss } from "./core/viz/fonts.ts";
 import cytoscapeJs from "./core/viz/vendor/cytoscape.min.js" with { type: "text" };
 import markedJs from "./core/viz/vendor/marked.umd.js" with { type: "text" };
 import okbJs from "./core/viz/okb.js" with { type: "text" };
+import graphViewJs from "./core/viz/graph-view.js" with { type: "text" };
 import renderJs from "./core/viz/render.js" with { type: "text" };
 import safeMarkdownJs from "./core/viz/safe-markdown.js" with { type: "text" };
 import tokensCss from "./core/viz/tokens.css" with { type: "text" };
@@ -95,6 +96,7 @@ const GUI_ASSETS: Record<string, readonly [string | Blob, string]> = {
   "/gui/style.css": [`${hostedFontCss}\n${guiStyleCss}`, CSS],
   "/gui/tokens.css": [tokensCss, CSS],
   "/gui/okb.js": [okbJs, JS],
+  "/gui/graph-view.js": [graphViewJs, JS],
   "/gui/cytoscape.js": [cytoscapeJs, JS],
   "/gui/marked.js": [markedJs, JS],
   "/gui/safe-markdown.js": [safeMarkdownJs, JS],
@@ -578,15 +580,16 @@ async function conversationUpload(req: Request, url: URL, scope: Scope, cors: Hd
   }
 }
 
-async function sourceUpload(req: Request, url: URL, scope: Scope, cors: Hdrs): Promise<Response> {
+async function sourceUpload(req: Request, url: URL, scope: Scope, opts: ServeState, cors: Hdrs): Promise<Response> {
   const headers = { ...cors, "cache-control": "no-store" };
   const contentType = req.headers.get("content-type") ?? "";
   if (contentType.split(";")[0]?.trim().toLowerCase() !== "multipart/form-data")
-    return json(415, { error: "Choose bookmark or Markdown export files." }, headers);
+    return json(415, { error: "Choose supported export files." }, headers);
+  const kind = url.searchParams.get("kind");
   const local = open(scope);
   try {
     const result = await runPersonalSourceUpload(
-      local.ctx, url.searchParams.get("kind"), req.headers.get("x-okb-preview"),
+      local.ctx, kind, req.headers.get("x-okb-preview"),
       async () => {
         const tooLarge = "Choose a selection up to 24 MiB.";
         const raw = await readUpload(req, MAX_SOURCE_UPLOAD_BYTES + 2 * 1024 * 1024, tooLarge);
@@ -605,11 +608,19 @@ async function sourceUpload(req: Request, url: URL, scope: Scope, cors: Hdrs): P
         if (typeof name !== "string" || !Array.isArray(paths) || !uploads.length || uploads.length > MAX_SOURCE_FILES ||
             paths.length !== uploads.length || !paths.every((path) => typeof path === "string") ||
             !uploads.every((file) => typeof file !== "string") ||
-            !Array.isArray(selected) || selected.length > 2000 || !selected.every((row) => Number.isSafeInteger(row)))
+            !Array.isArray(selected) || selected.length > MAX_SOURCE_ROWS || !selected.every((row) => Number.isSafeInteger(row)))
           throw new OpError("The source upload is invalid. Choose the files again.", "bad_params");
         if (uploads.reduce((size, file) => size + file.size, 0) > MAX_SOURCE_UPLOAD_BYTES)
           throw new UploadTooLarge(tooLarge);
-        const files = await Promise.all(uploads.map(async (file, index) => ({ path: paths[index] as string, text: await file.text() })));
+        const offline = isOfflineSourceKind(kind);
+        if (offline && uploads.some((file) => file.size > MAX_OFFLINE_FILE_BYTES))
+          throw new UploadTooLarge("Choose email and calendar files up to 2 MiB each.");
+        const files = await Promise.all(uploads.map(async (file, index) => ({ path: paths[index] as string, ...(offline
+          ? { text: "", bytes: new Uint8Array(await file.arrayBuffer()) }
+          : { text: await file.text() }) })));
+        const current = scopeOf(req, url, opts);
+        if (current.readonly || current.bundle !== scope.bundle)
+          throw new OpError("The brain folder or its write permission changed. Preview the files again.", "refused");
         return { name, files, selected };
       },
     );
@@ -785,7 +796,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     url.searchParams.get("token");
   if (!tokenMatches(presented, opts.token))
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
-  const ownerFileAction = url.pathname === "/api/op/export_markdown" || url.pathname === "/api/op/inbox_file";
+  const ownerFileAction = ["/api/op/export_markdown", "/api/op/inbox_file", "/api/op/keep_private"].includes(url.pathname);
   if (ownerFileAction) {
     if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
       return json(401, { error: "missing or invalid local app token" }, cors);
@@ -857,7 +868,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   if (req.method === "POST" && url.pathname === "/api/conversations/upload")
     return conversationUpload(req, url, scope, cors ?? {});
   if (req.method === "POST" && url.pathname === "/api/personal/sources/upload")
-    return sourceUpload(req, url, scope, cors ?? {});
+    return sourceUpload(req, url, scope, opts, cors ?? {});
   if (m && req.method === "POST") {
     const op = operations.find((o) => o.name === m[1] && !o.localOnly);
     if (!op) return json(404, { error: `unknown op: ${m[1]}` }, cors);

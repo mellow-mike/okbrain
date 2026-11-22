@@ -196,7 +196,7 @@ async function renderPlanAsk() {
         esc(result.account) + ' using ' + esc(result.model) + '.</p>' +
         result.sources.map(function (source) {
           return '<details class="card"><summary>' + esc(source.title) +
-            (source.id.startsWith('db_only/') ? ' (private)' : '') + '</summary><pre>' + esc(source.text) + '</pre><p>' +
+            (source.private ? ' (private)' : '') + '</summary><pre>' + esc(source.text) + '</pre><p>' +
             conceptLink(source.id, 'Open note') + '</p></details>';
         }).join('') + '<div><button class="primary" type="button">Send question and excerpts</button></div>';
       var send = preview.querySelector('button');

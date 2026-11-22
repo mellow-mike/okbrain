@@ -16,6 +16,7 @@ import type { VectorStore } from "../engine/interface.ts";
 import { VecError } from "../engine/vectors.ts";
 import { listConcepts, readConceptPermissive } from "../okf/bundle.ts";
 import { fmString, type OkfDocument } from "../okf/document.ts";
+import { isPrivateConcept } from "../okf/privacy.ts";
 import { chunkText, type Chunk } from "./chunk.ts";
 
 /** What the pipeline needs from AI: a pinned identity plus the embed call. */
@@ -60,6 +61,7 @@ export interface EmbedOptions {
   limit?: number;
   /** Texts per embed call. */
   batchSize?: number;
+  includePrivate?: boolean;
 }
 
 interface Job {
@@ -114,7 +116,11 @@ export async function embedBundle(
   const jobs: Job[] = [];
   let skipped = 0;
   for (const id of ids) {
-    const { doc } = await readConceptPermissive(root, id);
+    const { doc, parsed } = await readConceptPermissive(root, id);
+    if (!opts.includePrivate && (!parsed || isPrivateConcept(id, doc.frontmatter))) {
+      if (have.has(id)) { store.remove(id); removed++; }
+      continue;
+    }
     const p = prepare(doc);
     if (have.get(id) === p.hash) {
       skipped++;

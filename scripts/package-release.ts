@@ -88,6 +88,7 @@ for (const t of local ? [hostTarget()] : TARGETS) {
     rmSync(work, { recursive: true, force: true });
   }
   for (const f of ["LICENSE", "README.md"]) await copyFile(join(root, f), join(stage, f));
+  await copyFile(join(root, "packaging", "OFFLINE-IMPORT-NOTICES.md"), join(stage, "OFFLINE-IMPORT-NOTICES.md"));
   mkdirSync(join(stage, "docs"));
   for (const f of ["PERSONAL.md", "CODING.md", "PRODUCT-PLAN.md"])
     await copyFile(join(root, "docs", f), join(stage, "docs", f));

@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { rebaseBodyLinks, resolvePathField } from "../graph/links.ts";
+import { protectUnsharedNote } from "../sync.ts";
 import { listConcepts } from "./bundle.ts";
 import { fmString, fmTags, OkfParseError, parse, serialize, type OkfDocument } from "./document.ts";
 import { regenerateIndexBranches } from "./indexmd.ts";
-import { inDbOnlyDir, isReservedName, validateId } from "./paths.ts";
+import { assertConceptPathSpelling, inDbOnlyDir, isReservedName, validateId } from "./paths.ts";
 import { nowTimestamp, writeFilingDocument } from "./write.ts";
 
 export class InboxFilingError extends Error {}
@@ -86,6 +87,8 @@ export async function fileInboxNote(bundle: string, id: string, destination: str
   if (inDbOnlyDir(id) !== inDbOnlyDir(destination))
     throw new InboxFilingError("File the note within its current privacy scope.");
   const root = await realpath(bundle);
+  await assertConceptPathSpelling(root, id);
+  await assertConceptPathSpelling(root, destination);
   const raw = await checkPaths(root, id, false);
   if (raw === undefined) throw new InboxFilingError("This capture is missing. Open the inbox and choose an existing note.");
   let doc: OkfDocument;
@@ -119,6 +122,10 @@ export async function fileInboxNote(bundle: string, id: string, destination: str
   if (approval === undefined) return result;
   if (approval !== result.preview) throw new InboxFilingError("The capture, actor, brain, or destination changed. Preview the filing again.");
   if (result.status !== "filed") {
+    if (doc.frontmatter.db_only === true && !inDbOnlyDir(id)) {
+      await protectUnsharedNote(root, id);
+      await protectUnsharedNote(root, destination);
+    }
     const present = await checkPaths(root, destination, true);
     if (present !== undefined && present !== serialize(doc)) throw new InboxFilingError("A note already exists at that destination.");
     if (present === undefined && !await writeFilingDocument(root, destination, doc))
@@ -129,6 +136,7 @@ export async function fileInboxNote(bundle: string, id: string, destination: str
       frontmatter: {
         type: "forwarding", title, description: "This captured note was filed.", status: "deprecated",
         generated: { by: actor, at: nowTimestamp() }, filed_to: destination, filing_preview: result.preview,
+        ...(doc.frontmatter.db_only === true ? { db_only: true } : {}),
       },
       body: `Filed at [${destination}](${pathLink(destination)}).\n`,
     };

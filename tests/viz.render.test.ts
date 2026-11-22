@@ -87,6 +87,11 @@ describe("badges + sources", () => {
     expect(R.sourcesList([])).toContain("—");
   });
 
+  test("metadata resource links use the same scheme guard as Markdown links", () => {
+    expect(R.sourcesList([{ resource: "java\nscript:alert(1)", title: "Unsafe source" }])).toBe('<ul class="sources"><li>Unsafe source</li></ul>');
+    expect(R.resolveInternal("#concept:%GG", "note")).toBeNull();
+  });
+
   test("actor lines set the actor apart (mono) and escape it", () => {
     expect(R.actorLine({ by: "human:<ada>", at: "2026-06-15T00:00:00Z" })).toBe(
       '<span class="actor">human:&lt;ada&gt;</span> <span class="muted">· 2026-06-15T00:00:00Z</span>',

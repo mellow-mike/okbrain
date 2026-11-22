@@ -69,7 +69,9 @@ terminal sessions while preserving audit records and refusing expired IDs.
   machine-confirmed → human-reviewed.
 - **Sources** — OKF v0.2 provenance: `sources: [{ id, resource, title,
   author, last_modified, usage_count }]`; body claims cite them with `[^id]`
-  footnotes.
+  footnotes. If the owner enables local usage, the note view separately shows
+  `usage_count` and `usage_window` derived from note opens and verified Ask
+  citations over 30 days. Daily aggregates stay in per-user application data.
 - **Status / stale_after** — OKF v0.2 lifecycle: `draft | stable |
   deprecated` and the instant after which content is stale.
 
@@ -164,6 +166,9 @@ Every write produces a conformant bundle (`writeConcept`, exposed as the
   survive; destinations with spaces/parens get `<…>` wrapped).
 - Reserved ids (`index`, `log` basenames) are refused; a concept whose
   frontmatter won't parse is never overwritten (fix by hand, per doctor).
+  Mutations use the exact filesystem spelling of each component and reject
+  case-only or Unicode-normalization aliases. Doctor reports portable-path
+  conflicts in older bundles while their notes remain readable.
 - `index.md` regenerated for the touched directory and every ancestor
   (`core/okf/indexmd.ts`): each index keeps a human-editable head (H1 +
   intro paragraphs before the first `##`, preserved on regeneration) above
@@ -274,7 +279,12 @@ rejects on any warning class — doctor is the only strict surface.
   its concepts for local browsing). Scope is "under a `db_only/` directory"
   (`inDbOnlyDir`), matching git's directory-pattern semantics. Static HTML
   excludes those concepts by default. Local retrieval, the live GUI, and
-  MCP clients attached to that brain can read them.
+  MCP clients attached to that brain can read them. A note may also declare
+  `db_only: true`. The writer omits that note from generated public index and
+  log entries. Git sync excludes its precise path from staging and adds it to
+  the local `info/exclude`. Owner privacy changes refuse tracked or historical
+  note paths. Shared exports, provider retrieval and focused maps omit private
+  notes by default, with explicit inclusion controls on those surfaces.
 
 ### Conversation exports
 
@@ -378,8 +388,9 @@ footnote attribution, swapped in after rendering so it never bypasses the
 sanitizer → internal-link resolution (`#concept:` anchors, bundle-absolute,
 or relative to the concept). Look and theming come from the design system
 (§Surfaces → Look & feel): **dark default**, light an explicit persisted
-choice; both surfaces share `core/viz/tokens.css` and the `window.Okb`
-helpers (`core/viz/okb.js`), and the Cytoscape styles take the current
+choice. Both surfaces share `core/viz/tokens.css`, the `window.Okb` helpers
+(`core/viz/okb.js`), and the canvas, filters, and inspector in
+`core/viz/graph-view.js`. The Cytoscape styles take the current
 theme's concrete token values (`Okb.graphPalette()`, `Okb.token()`),
 re-read when the theme flips. Types take the slots `graph-1…8` in sorted
 order (a validated CVD-safe palette per theme); a ninth type onward folds
@@ -774,6 +785,7 @@ account and coding commands that operate independently of a selected brain.
 | `okb import <path>` | write | Map existing markdown (file/tree) → concepts; dedupe by id |
 | `okb import-conversations <path> --provider <provider>` | write (localOnly) | Import ChatGPT or Claude text as private drafts |
 | `okb write <id> [--status …] [--stale-after …] [--sources …]` | write | Create/update through the conformance writer |
+| `okb keep-private <id>` | admin | Set the `db_only` flag on an existing unpublished note without rewriting Git history |
 | `okb rm <id>` | write | Delete a concept (indexes, log, caches follow) |
 | `okb enrich [--web-seed …]` | write | Run the enrichment agent (guardrailed, sources-cited) |
 | `okb search <query>` | read | Hybrid + graph retrieval (`--json` for agents) |
