@@ -39,9 +39,10 @@ Compaction reduces active context while preserving the original transcript.
 The project control plane scopes credentials, members, worker runs, and
 review decisions to registered projects. Owners can save named task, query,
 and repository profile presets in the project catalog. Project members can
-load them in the team web app, and local operators can load them in the Mac
-app, web app, or editor. Each request requires approval of a new preview of
-the current source. Independent package review uses Pi
+load them in the team web app or editor. The editor stores the team token,
+HTTPS origin, and project identity together in SecretStorage and uses the
+member route for repository previews and run review. Each request requires
+approval of a new preview of the current source. Independent package review uses Pi
 Durable child conversations with explicit package previews and combined usage.
 Project reviewers can explicitly reopen a selected request's saved task and
 source from Pi admission records, including each package's excerpts.

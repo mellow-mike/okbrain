@@ -111,6 +111,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   from a verified base, recover a lost response, and use the branch in the PR flow.
 - [x] Package VS Code and Cursor integration for approved active-file requests
   and reviewing runs.
+- [x] Connect the VS Code and Cursor extension to an HTTPS team workspace
+  for approved repository requests, saved source inspection, and review.
 
 Stages 0–6 and the logs below are historical records.
 
@@ -803,6 +805,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Connected team members to HTTPS Coding workspaces from VS Code
+  and Cursor, with project-bound credentials and reviewed repository previews.
 - 2026-11-22 — Added per-brain maintenance schedules to the Mac and web apps,
   with persisted outcomes and separate RSS and embedding approval.
 - 2026-11-22 — Added in-app GitHub brain restore with local checkout validation,

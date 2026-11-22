@@ -4,11 +4,98 @@ const vscode = require('vscode');
 const { randomUUID } = require('node:crypto');
 const { connect, projectFile, matchesProjectWorkspace } = require('./connection.cjs');
 const { taskProgressLines } = require('./run-progress.cjs');
+const { teamUrl, isTeamToken, connectTeam } = require('./team-connection.cjs');
 
 const savedSourceScheme = 'okbrain-saved-source';
+const teamSecret = 'okbrain.team.connection';
 const openingSources = new Map();
 let inspection = 0;
 let presetReview = 0;
+let teamRevision = 0;
+let teamChange = 0;
+let secretWrites = Promise.resolve();
+
+function trustedEditor() {
+  return vscode.workspace.isTrusted && !vscode.env.remoteName;
+}
+
+function changeTeamSecret(change, write) {
+  const update = secretWrites.then(async () => {
+    if (change !== teamChange) return false;
+    await write();
+    return change === teamChange;
+  });
+  secretWrites = update.catch(() => {});
+  return update;
+}
+
+async function addTeamConnection(secrets) {
+  const change = ++teamChange;
+  ++teamRevision;
+  const address = await vscode.window.showInputBox({ prompt: 'Team workspace HTTPS address', ignoreFocusOut: true,
+    validateInput: (value) => {
+      try { teamUrl(value); return null; }
+      catch { return 'Enter the team workspace HTTPS origin without a path, query, or fragment.'; }
+    } });
+  if (address === undefined || change !== teamChange) return;
+  const origin = teamUrl(address).origin;
+  const token = await vscode.window.showInputBox({ prompt: `Project token for ${origin}`, password: true, ignoreFocusOut: true,
+    validateInput: (value) => isTeamToken(value.trim()) ? null : 'Enter the project token supplied by the team operator.' });
+  if (token === undefined || change !== teamChange || !trustedEditor()) return;
+  const credential = token.trim();
+  const { projectId, projects } = await connectTeam(origin, credential);
+  if (!trustedEditor()) return;
+  const stored = await changeTeamSecret(change, async () => {
+    if (!trustedEditor()) throw new Error('Open a trusted local editor to connect to a team workspace.');
+    await secrets.store(teamSecret, JSON.stringify({ origin, projectId, token: credential }));
+    ++teamRevision;
+  });
+  if (stored) await vscode.window.showInformationMessage(`Connected to ${projects[0].title} at ${origin}.`);
+}
+
+async function removeTeamConnection(secrets) {
+  const change = ++teamChange;
+  ++teamRevision;
+  const removed = await changeTeamSecret(change, async () => {
+    await secrets.delete(teamSecret);
+    ++teamRevision;
+  });
+  if (removed) await vscode.window.showInformationMessage('Disconnected from the team workspace in this editor.');
+}
+
+function teamBinding(saved) {
+  if (!saved) throw new Error('Choose okbrain: Connect to Team Workspace first.');
+  try {
+    const binding = JSON.parse(saved);
+    if (teamUrl(binding.origin).origin !== binding.origin || !isTeamToken(binding.token) ||
+        typeof binding.projectId !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(binding.projectId)) throw new Error();
+    return binding;
+  } catch { throw new Error('Reconnect to the team workspace to refresh its saved connection.'); }
+}
+
+async function openTeamSignIn(secrets) {
+  const revision = teamRevision;
+  const saved = await secrets.get(teamSecret);
+  if (revision !== teamRevision || !trustedEditor()) return;
+  return vscode.env.openExternal(vscode.Uri.parse(teamBinding(saved).origin + '/'));
+}
+
+async function openTeamConnection(secrets) {
+  const revision = teamRevision;
+  const current = () => revision === teamRevision && trustedEditor();
+  const saved = await secrets.get(teamSecret);
+  if (!current()) return undefined;
+  const binding = teamBinding(saved);
+  const isBound = async () => current() && (await secrets.get(teamSecret)) === saved && current();
+  const connection = await connectTeam(binding.origin, binding.token, binding.projectId);
+  if (!await isBound() || !current()) return undefined;
+  return { ...connection, current, isBound, async api(path, data, timeoutMs) {
+    if (!await isBound() || !current()) throw new Error('The team connection changed. Reopen this action.');
+    const result = await connection.api(path, data, timeoutMs);
+    if (!await isBound() || !current()) throw new Error('The team connection changed. Reopen this action.');
+    return result;
+  } };
+}
 
 function pathFor(project, action) {
   return `/projects/${encodeURIComponent(project.id)}/${action}`;
@@ -16,6 +103,7 @@ function pathFor(project, action) {
 
 function openWeb(connection, project, run, section) {
   const target = new URL(connection.url);
+  if (connection.mode === 'team') return vscode.env.openExternal(vscode.Uri.parse(target.origin + '/'));
   const folder = vscode.workspace.workspaceFolders?.find((item) => item.uri.scheme === 'file');
   target.hash = project ? `coding/${encodeURIComponent(project.id)}` : folder
     ? `coding/${encodeURIComponent(`workspace=${folder.uri.fsPath}`)}` : 'coding';
@@ -86,6 +174,10 @@ async function submitApprovedRequest(connection, project, request, canSubmit = (
   let run;
   try { run = await connection.api(pathFor(project, 'run'), request); }
   catch (error) {
+    if (connection.mode === 'team') {
+      if (!await canSubmit()) return;
+      if ([401, 403, 410].includes(error.status)) throw error;
+    }
     const retry = await vscode.window.showErrorMessage(`${error.message} Request ID: ${request.requestId}.`, 'Try Same Request');
     if (!retry || !await canSubmit()) return;
     run = await connection.api(pathFor(project, 'run'), request);
@@ -178,21 +270,78 @@ async function runPreset(connection) {
   if (!item || !isCurrent()) return;
   const { name, prompt, query, profile } = item.preset;
   const session = await chooseSession();
-  if (!session || !await confirmWorkspace()) return;
+  if (!session) return;
+  await reviewRepositoryRequest(connection, project, { name, prompt, session, source: { source: 'repository', query, profile } },
+    isCurrent, confirmWorkspace);
+}
 
-  const source = { source: 'repository', query, profile };
-  const preview = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Previewing repository source locally' },
+function narrowerTeamDirectories(scopes, value) {
+  if (!value.trim()) return scopes;
+  const entries = value.split(',').map((path) => path.trim().replaceAll('\\', '/'));
+  if (entries.length > 8 || entries.some((path) => !path || Buffer.byteLength(path) > 4096 || path.startsWith('/') ||
+      /[:\x00-\x1f\x7f]/u.test(path) || path.split('/').includes('..'))) return undefined;
+  const paths = [...new Set(entries.map((path) => path.split('/').filter((segment) => segment && segment !== '.').join('/') || '.'))];
+  return paths.every((path) => scopes.some((scope) => scope === '.' || path === scope || path.startsWith(scope + '/'))) ? paths : undefined;
+}
+
+async function teamRequestDraft(project) {
+  const prompt = await vscode.window.showInputBox({ prompt: 'What should Pi review or propose?', ignoreFocusOut: true,
+    validateInput: (value) => value.trim() && Buffer.byteLength(value) <= 16384 ? null : 'Enter a task up to 16 KiB.' });
+  if (!prompt?.trim()) return;
+  const query = await vscode.window.showInputBox({ prompt: 'Search the team repository for source', ignoreFocusOut: true,
+    validateInput: (value) => value.trim() && Buffer.byteLength(value) <= 1024 ? null : 'Enter a search query up to 1 KiB.' });
+  if (!query?.trim()) return;
+  const selected = await vscode.window.showQuickPick(project.scopes.map((path) => ({ label: path, path })),
+    { placeHolder: 'Choose approved team repository directories', canPickMany: true, ignoreFocusOut: true });
+  if (!selected?.length) return;
+  const scopes = selected.map(({ path }) => path);
+  const narrower = await vscode.window.showInputBox({ prompt: 'Narrow to repository subdirectories (optional)',
+    placeHolder: 'Keep the selected directories by leaving this blank', ignoreFocusOut: true,
+    validateInput: (value) => narrowerTeamDirectories(scopes, value) ? null : 'Enter up to eight comma-separated paths within the selected directories.' });
+  if (narrower === undefined) return;
+  const projects = narrowerTeamDirectories(scopes, narrower);
+  if (!projects) return;
+  return { prompt: prompt.trim(), source: { source: 'repository', query: query.trim(), projects } };
+}
+
+async function runTeamRequest(connection) {
+  const review = ++presetReview;
+  const isCurrent = () => review === presetReview && connection.current();
+  const canSubmit = async () => isCurrent() && await connection.isBound() && isCurrent();
+  const [project] = connection.projects;
+  const { presets } = await connection.api(pathFor(project, 'presets'));
+  if (!isCurrent()) return;
+  const item = await vscode.window.showQuickPick([
+    { label: 'New repository request' }, ...presets.map((preset) => ({ label: preset.name, description: 'Saved preset', preset })),
+  ], { placeHolder: `Choose a request for ${project.title}`, ignoreFocusOut: true });
+  if (!item || !isCurrent()) return;
+  const draft = item.preset ? { name: item.preset.name, prompt: item.preset.prompt,
+    source: { source: 'repository', query: item.preset.query, profile: item.preset.profile } } : await teamRequestDraft(project);
+  if (!draft || !isCurrent()) return;
+  const session = await chooseSession();
+  if (!session) return;
+  await reviewRepositoryRequest(connection, project, { ...draft, session }, isCurrent, canSubmit);
+}
+
+async function reviewRepositoryRequest(connection, project, { name, prompt, session, source }, isCurrent, canSubmit) {
+  if (!await canSubmit()) return;
+  const team = connection.mode === 'team';
+  const preview = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
+    title: team ? 'Previewing scope in the team repository' : 'Previewing repository source locally' },
     () => connection.api(pathFor(project, 'preview'), source));
   if (!isCurrent()) return;
-  if (!preview.excerpts.length) return vscode.window.showInformationMessage('No source matched this preset. Edit its query or profile in the Coding workspace and try again.');
+  if (!preview.excerpts.length) return vscode.window.showInformationMessage(team
+    ? 'No source matched this request. Choose a different query or approved directory and try again.'
+    : 'No source matched this preset. Edit its query or profile in the Coding workspace and try again.');
 
   const lookup = await vscode.window.showQuickPick([
     { label: 'Keep source lookup off', enabled: false },
     { label: 'Allow lookups in approved excerpts', enabled: true },
   ], { placeHolder: 'Choose source lookup for this request', ignoreFocusOut: true });
-  if (!lookup || !await confirmWorkspace()) return;
-  await showReadOnlyText('Project preset preview', [
-    `Project: ${project.title}`, `Preset: ${name}`, `Provider and model: ${project.provider} / ${project.model}`, `Session: ${session}`,
+  if (!lookup || !await canSubmit()) return;
+  await showReadOnlyText(team ? 'Team request preview' : 'Project preset preview', [
+    `Project: ${project.title}`, ...(team ? [`Team workspace: ${connection.url.origin}`, `Repository search: ${source.query}`] : []),
+    ...(name ? [`Preset: ${name}`] : []), `Provider and model: ${project.provider} / ${project.model}`, `Session: ${session}`,
     `Source lookup: ${lookup.enabled ? 'Allowed within the approved excerpts' : 'Off'}`,
     '', 'Task', prompt,
     ...(preview.guidance ? ['', 'Project guidance', preview.guidance] : []),
@@ -200,26 +349,28 @@ async function runPreset(connection) {
   ].join('\n'), isCurrent);
   if (!isCurrent()) return;
   const send = await vscode.window.showInformationMessage(
-    `Review the task and excerpts in the editor. Sending includes active session history and uses ${project.provider} / ${project.model}.`,
+    `Review the task and excerpts in the editor. Sending includes active session history and uses ${project.provider} / ${project.model}${team ? ` through ${connection.url.origin}` : ''}.`,
     'Send Request');
   if (send !== 'Send Request') return;
 
   await submitApprovedRequest(connection, project, {
     ...source, session, requestId: `ide-${randomUUID()}`, prompt, previewId: preview.manifest.id, approved: true,
     ...(lookup.enabled ? { approvedSourceLookup: true } : {}),
-  }, confirmWorkspace);
+  }, canSubmit);
 }
 
 async function inspectRun(connection, project, selected) {
   const current = ++inspection;
-  const isCurrent = () => current === inspection;
+  const team = connection.mode === 'team';
+  const isCurrent = () => current === inspection && (!team || connection.current());
   const identity = { session: selected.session, requestId: selected.id };
   const { run, pi, admissionMissing, liveAnswer, taskProgress } = await connection.api(pathFor(project, 'inspect'), identity);
   if (!isCurrent()) return;
   const receipt = pi?.request?.receipt;
   const progress = taskProgressLines(taskProgress ?? pi?.request?.taskProgress, run.status === 'running');
-  await showText([
-    project.title, `Session: ${run.session}`, `Request: ${run.id}`, `Status: ${run.status}`,
+  const contents = [
+    project.title, ...(team ? [`Team workspace: ${connection.url.origin}`] : []),
+    `Session: ${run.session}`, `Request: ${run.id}`, `Status: ${run.status}`,
     ...(run.review ? [`Review: ${run.review} by ${run.reviewer}`] : []),
     ...(run.error ? ['', run.error] : []),
     ...(admissionMissing ? ['', 'This request has no saved admission. Resume to recover its status.'] : []),
@@ -229,7 +380,9 @@ async function inspectRun(connection, project, selected) {
     ...(receipt?.text ? ['', 'Pi response', receipt.text] : []),
     ...(receipt?.reason ? ['', receipt.reason] : []),
     ...(pi?.usage ? ['', 'Recorded session usage', JSON.stringify(pi.usage, null, 2)] : []),
-  ].join('\n'));
+  ].join('\n');
+  if (team) await showReadOnlyText('Team coding run', contents, isCurrent);
+  else await showText(contents);
 
   if (!isCurrent()) return;
   const choices = [{ label: 'Refresh', action: 'refresh' }, { label: 'Open in okbrain', action: 'open' }];
@@ -240,11 +393,11 @@ async function inspectRun(connection, project, selected) {
   if (run.status === 'done') choices.push(
     { label: 'Accept result', action: 'review', decision: 'accepted' },
     { label: 'Request changes', action: 'review', decision: 'changes_requested' });
-  if (run.status === 'done' && run.review === 'accepted')
+  if (!team && run.status === 'done' && run.review === 'accepted')
     choices.push({ label: 'Review proposed patch in okbrain', action: 'patch' });
-  if (run.review === 'accepted') choices.push({ label: 'Prepare GitHub pull request in okbrain', action: 'github' });
+  if (!team && run.review === 'accepted') choices.push({ label: 'Prepare GitHub pull request in okbrain', action: 'github' });
   const action = await vscode.window.showQuickPick(choices, { placeHolder: 'Choose a run action', ignoreFocusOut: true });
-  if (!action || !isCurrent()) return;
+  if (!action || !isCurrent() || (team && !await connection.isBound())) return;
   if (action.action === 'open') return openWeb(connection, project);
   if (action.action === 'patch' || action.action === 'github') return openWeb(connection, project, run, action.action);
   if (action.action === 'refresh') return inspectRun(connection, project, run);
@@ -252,7 +405,7 @@ async function inspectRun(connection, project, selected) {
   if (action.action === 'resume') {
     const proceed = await vscode.window.showWarningMessage('Resuming can make another provider call using the saved context.',
       { modal: true }, 'Resume');
-    if (!proceed) return;
+    if (!proceed || (team && !isCurrent())) return;
   }
   const result = await connection.api(pathFor(project, action.action), action.decision ? { ...identity, decision: action.decision } : identity);
   await vscode.window.showInformationMessage(`Request ${result.id} · ${result.review || result.status}`);
@@ -275,18 +428,30 @@ function activate(context) {
   context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(savedSourceScheme, {
     provideTextDocumentContent: (uri) => openingSources.get(uri.toString()) ?? '',
   }));
+  context.subscriptions.push(context.secrets.onDidChange(({ key }) => { if (key === teamSecret) ++teamRevision; }));
   const register = (command, action) => context.subscriptions.push(vscode.commands.registerCommand(command, async () => {
     try {
-      if (!vscode.workspace.isTrusted || vscode.env.remoteName) throw new Error('Open a trusted local folder to use okbrain Coding.');
-      const settings = vscode.workspace.getConfiguration('okbrain').inspect('server');
-      const connection = await connect(settings?.globalValue);
-      await action(connection);
+      if (!trustedEditor()) throw new Error('Open a trusted local folder to use okbrain Coding.');
+      await action();
     } catch (error) { await vscode.window.showErrorMessage(error.message); }
   }));
-  register('okbrain.open', openWeb);
-  register('okbrain.runFile', runActiveFile);
-  register('okbrain.runPreset', runPreset);
-  register('okbrain.runs', listRuns);
+  const owner = (command, action) => register(command, async () => {
+    const settings = vscode.workspace.getConfiguration('okbrain').inspect('server');
+    await action(await connect(settings?.globalValue));
+  });
+  const team = (command, action) => register(command, async () => {
+    const connection = await openTeamConnection(context.secrets);
+    if (connection) await action(connection);
+  });
+  owner('okbrain.open', openWeb);
+  owner('okbrain.runFile', runActiveFile);
+  owner('okbrain.runPreset', runPreset);
+  owner('okbrain.runs', listRuns);
+  register('okbrain.connectTeam', () => addTeamConnection(context.secrets));
+  register('okbrain.disconnectTeam', () => removeTeamConnection(context.secrets));
+  register('okbrain.openTeam', () => openTeamSignIn(context.secrets));
+  team('okbrain.runTeam', runTeamRequest);
+  team('okbrain.teamRuns', listRuns);
 }
 
 module.exports = { activate };

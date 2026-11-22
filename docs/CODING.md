@@ -39,6 +39,14 @@ In **Coding → Team browser access**, start a separate listener. A member opens
 
 The team listener binds to `127.0.0.1`. For remote access, an operator can configure a TLS reverse proxy that directs the declared HTTPS origin to the team listener and sets the upstream Host header to `127.0.0.1:<team port>`. The listener serves only the coding workspace and its project-token routes. Keep the separate local operator listener private. Team listener settings reset when the okbrain server stops.
 
+### Connect from VS Code or Cursor
+
+Install the okbrain VSIX and choose **okbrain: Connect to Team Workspace** from the Command Palette. Enter the HTTPS origin and project token from the operator. The editor saves them together with the project identity in its secret store. [Install the editor extension](../integrations/vscode/README.md) · [VS Code secret storage](https://code.visualstudio.com/api/extension-capabilities/common-capabilities#data-storage)
+
+Choose **okbrain: Preview Team Coding Request**. Pick a saved preset or enter a task, repository query, and permitted directories. Inspect the fresh server-side excerpts in the editor, then approve the send. You can allow Pi to look up lines within those excerpts for this request. A local checkout is optional because the team server reads the registered repository.
+
+Use **okbrain: Inspect and Review Team Coding Runs** to see progress and results, open saved request sources, record a review, cancel, or resume. Use **okbrain: Open Team Workspace in Browser** to open the HTTPS origin and sign in there. **okbrain: Disconnect from Team Workspace** clears the editor’s saved connection. The operator can revoke the project token from **Team access**.
+
 ## Start a request in the CLI
 
 Set `OPENAI_API_KEY` in your environment and choose an exact model ID from Pi 1.0's OpenAI catalog. For Anthropic, set `ANTHROPIC_API_KEY` and use `--provider anthropic --model claude-sonnet-4-6`. For Gemini, set `GEMINI_API_KEY` and use `--provider google --model gemini-3.5-flash-lite`. Coding sessions use provider API keys and their billing accounts. [Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key), [Gemini 3.5 Flash-Lite](https://aistudio.google.com/docs/models/gemini-3.5-flash-lite)

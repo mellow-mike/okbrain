@@ -19,7 +19,12 @@
       { "command": "okbrain.open", "title": "Open Coding Workspace", "category": "okbrain" },
       { "command": "okbrain.runFile", "title": "Preview Active File for Coding Request", "category": "okbrain" },
       { "command": "okbrain.runPreset", "title": "Preview Saved Request Preset", "category": "okbrain" },
-      { "command": "okbrain.runs", "title": "Inspect and Review Coding Runs", "category": "okbrain" }
+      { "command": "okbrain.runs", "title": "Inspect and Review Coding Runs", "category": "okbrain" },
+      { "command": "okbrain.connectTeam", "title": "Connect to Team Workspace", "category": "okbrain" },
+      { "command": "okbrain.runTeam", "title": "Preview Team Coding Request", "category": "okbrain" },
+      { "command": "okbrain.teamRuns", "title": "Inspect and Review Team Coding Runs", "category": "okbrain" },
+      { "command": "okbrain.openTeam", "title": "Open Team Workspace in Browser", "category": "okbrain" },
+      { "command": "okbrain.disconnectTeam", "title": "Disconnect from Team Workspace", "category": "okbrain" }
     ],
     "menus": { "editor/context": [{ "command": "okbrain.runFile", "when": "resourceScheme == file && isWorkspaceTrusted", "group": "navigation@90" }] },
     "configuration": {

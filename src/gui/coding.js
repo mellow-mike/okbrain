@@ -963,12 +963,17 @@
       field('HTTPS proxy origin (optional)', '', 'url', 'name="publicOrigin" placeholder="https://coding.example.com"') +
       '</div><div class="row"><button type="submit">Start team listener</button>' +
       '<button type="button" data-stop hidden>Stop listener</button></div>' +
-      '<div class="coding-feedback" role="status"></div></form>';
+      '<div class="coding-feedback" role="status"></div></form>' +
+      '<div class="stack coding-form"><h3>Connect VS Code or Cursor</h3>' +
+      '<p>Use <strong>Extensions → Install from VSIX</strong> to install <code>okbrain-coding.vsix</code>. ' +
+      'From a trusted local editor window, choose <strong>okbrain: Connect to Team Workspace</strong> in the Command Palette.</p>' +
+      '<p class="muted" data-team-editor-help>Set an HTTPS proxy origin when starting the listener to connect an editor.</p></div>';
     parent.append(panel);
     const form = panel.querySelector('form');
     const feedback = form.querySelector('[role="status"]');
     const start = form.querySelector('button[type="submit"]');
     const stop = form.querySelector('[data-stop]');
+    const editorHelp = panel.querySelector('[data-team-editor-help]');
     let status = null;
 
     function update(value) {
@@ -979,10 +984,13 @@
       stop.hidden = status === null;
       start.disabled = stop.disabled = readonly;
       form.elements.port.disabled = form.elements.publicOrigin.disabled = status !== null;
+      editorHelp.textContent = status?.publicOrigin
+        ? 'In the editor, enter the HTTPS team origin shown above and a project token from Project settings → Team access.'
+        : 'Set an HTTPS proxy origin when starting the listener to connect an editor.';
       if (!status) return;
       form.elements.port.value = status.port;
       form.elements.publicOrigin.value = status.publicOrigin || '';
-      feedback.append('Team workspace ', Object.assign(document.createElement('a'), {
+      feedback.append(status.publicOrigin ? 'HTTPS team origin ' : 'Local team browser ', Object.assign(document.createElement('a'), {
         href: status.publicOrigin || status.url, textContent: status.publicOrigin || status.url,
         target: '_blank', rel: 'noopener noreferrer',
       }));
@@ -1284,6 +1292,12 @@
 
   const entrance = document.querySelector('#team-entrance');
   if (entrance) {
+    const editorOrigin = entrance.querySelector('[data-team-editor-origin]');
+    if (editorOrigin && window.location.protocol === 'https:') {
+      const address = document.createElement('code');
+      address.textContent = window.location.origin;
+      editorOrigin.replaceChildren('Enter ', address, ' and your project token in the editor.');
+    }
     const form = entrance.querySelector('form');
     const feedback = form.querySelector('[role="status"]');
     const submit = form.querySelector('button[type="submit"]');

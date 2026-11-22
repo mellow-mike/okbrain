@@ -822,6 +822,28 @@ try {
 
   await nav.getByRole("link", { name: "Coding", exact: true }).click();
   await page.getByText("Add a project", { exact: true }).waitFor();
+  const teamAccess = page.locator(".coding-projects details").filter({
+    has: page.getByText("Team browser access", { exact: true }),
+  });
+  await teamAccess.getByText("Team browser access", { exact: true }).click();
+  await teamAccess.getByText("okbrain: Connect to Team Workspace", { exact: true }).waitFor();
+  const editorTeamOrigin = "https://team.example.invalid";
+  await teamAccess.getByLabel("Local port", { exact: true }).fill("0");
+  await teamAccess.getByLabel("HTTPS proxy origin (optional)", { exact: true }).fill(editorTeamOrigin);
+  const startedTeam = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding/team" &&
+    response.request().method() === "POST");
+  await teamAccess.getByRole("button", { name: "Start team listener", exact: true }).click();
+  const teamListener = await startedTeam;
+  assert.ok(teamListener.ok());
+  const { url: teamPage } = (await teamListener.json()).result;
+  const teamLink = teamAccess.getByRole("link", { name: editorTeamOrigin, exact: true });
+  await teamLink.waitFor();
+  assert.equal(await teamLink.getAttribute("href"), editorTeamOrigin);
+  const landing = await (await fetch(teamPage)).text();
+  assert.match(landing, /okbrain: Connect to Team Workspace/);
+  assert.equal(landing.includes(server.token), false);
+  await teamAccess.getByRole("button", { name: "Stop listener", exact: true }).click();
+  await teamLink.waitFor({ state: "hidden" });
   await page.getByRole("combobox", { name: "Provider", exact: true }).selectOption("google");
   assert.equal(await page.getByRole("combobox", { name: "Model", exact: true }).inputValue(), "gemini-3.5-flash-lite");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
