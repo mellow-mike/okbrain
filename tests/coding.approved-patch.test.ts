@@ -227,6 +227,9 @@ test.skipIf(process.platform === "win32")("rejects files replaced by worktree sy
     await symlink(outside, join(workspace, "src", "redirect"));
     await expect(withPreparedPatch(workspace, ["src"], addDiff("src/redirect/new.ts"), async () => {})).rejects.toThrow("symlink");
     await expect(stat(join(outside, "new.ts"))).rejects.toThrow();
+    const aliasedWorkspace = join(workspace, "alias");
+    await symlink(workspace, aliasedWorkspace);
+    await expect(withPreparedPatch(aliasedWorkspace, ["src"], addDiff("src/new.ts"), async () => {})).rejects.toThrow("workspace path changed");
   });
 });
 
