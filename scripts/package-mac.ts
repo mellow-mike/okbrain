@@ -44,7 +44,7 @@ try {
 
   if (process.argv.includes("--smoke")) {
     const child = Bun.spawn([join(executables, "Okbrain"), "--smoke-test"], { stdout: "inherit", stderr: "inherit" });
-    const timer = setTimeout(() => child.kill(), 20_000);
+    const timer = setTimeout(() => child.kill(), 25_000);
     try {
       if (await child.exited) throw new Error("The packaged macOS app did not load its local web interface.");
     } finally { clearTimeout(timer); }

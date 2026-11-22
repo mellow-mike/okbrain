@@ -26,6 +26,9 @@ The project control plane scopes credentials, members, worker runs, and
 review decisions to registered projects. Independent package review uses Pi
 Durable child conversations with explicit package previews and combined usage.
 GitHub activity and compare handoff use a bound project remote.
+The local patch workflow requires an accepted request and a separately approved
+diff. A disposable Git index checks exact worktree data and the project audit
+records the approval and applied result without copying the patch into the audit.
 
 ---
 

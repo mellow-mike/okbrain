@@ -643,6 +643,99 @@
     });
   }
 
+  function patchReview(parent, project, readonly) {
+    const prefix = projectUrl(project.id);
+    const panel = document.createElement('details');
+    panel.className = 'coding-panel';
+    panel.innerHTML = '<summary>Apply a reviewed patch</summary><form class="stack coding-form">' +
+      '<label class="field"><span>Accepted result</span><select name="run"><option value="">Choose a result</option></select></label>' +
+      '<label class="field"><span>Git unified diff</span><textarea name="diff" rows="9" spellcheck="false" placeholder="diff --git a/src/example.ts b/src/example.ts"></textarea></label>' +
+      '<p class="muted">Edit existing tracked text files inside this project. This changes the local worktree and leaves the staging area alone.</p>' +
+      '<div class="row"><button type="button" data-check>Preview patch</button></div><div data-summary aria-live="polite"></div>' +
+      '<label class="row" data-confirm hidden><input type="checkbox" name="approved"><span>Apply this exact diff to the listed files.</span></label>' +
+      '<div class="row"><button type="submit" class="primary" disabled>Apply to worktree</button></div><div class="coding-feedback" role="status"></div></form>';
+    parent.append(panel);
+    const form = panel.querySelector('form');
+    const { run, diff, approved } = form.elements;
+    const check = panel.querySelector('[data-check]');
+    const summary = panel.querySelector('[data-summary]');
+    const confirm = panel.querySelector('[data-confirm]');
+    const submit = panel.querySelector('[type="submit"]');
+    const feedback = panel.querySelector('[role="status"]');
+    let preview = null;
+    let revision = 0;
+    let busy = false;
+    function update() {
+      check.disabled = readonly || busy || !run.value || !diff.value;
+      submit.disabled = readonly || busy || !preview || !approved.checked;
+    }
+    function clear() {
+      revision++;
+      preview = null;
+      approved.checked = false;
+      confirm.hidden = true;
+      summary.replaceChildren();
+      update();
+    }
+    panel.addEventListener('toggle', async () => {
+      if (!panel.open || readonly) return;
+      try {
+        const accepted = (await coding(prefix + '/runs')).filter((entry) => entry.status === 'done' && entry.review === 'accepted');
+        const selected = run.value;
+        run.replaceChildren(new Option(accepted.length ? 'Choose a result' : 'No accepted results', ''),
+          ...accepted.map((entry) => new Option(entry.session + ' · ' + entry.id, JSON.stringify(identity(entry)))));
+        run.value = accepted.length === 1 && !selected ? run.options[1].value : selected;
+        clear();
+      } catch (error) { report(feedback, error); }
+    });
+    run.addEventListener('change', clear);
+    diff.addEventListener('input', clear);
+    approved.addEventListener('change', update);
+    check.addEventListener('click', async () => {
+      if (check.disabled) return;
+      clear();
+      const current = revision;
+      const input = { ...JSON.parse(run.value), diff: diff.value };
+      busy = true;
+      update();
+      report(feedback);
+      try {
+        const result = await coding(prefix + '/patch-preview', input);
+        if (revision !== current) return;
+        if (result.applied) {
+          summary.textContent = 'Applied ' + time(result.applied) + '.';
+          return;
+        }
+        const list = document.createElement('ul');
+        for (const { path } of result.files) {
+          const item = document.createElement('li');
+          item.textContent = path;
+          list.append(item);
+        }
+        summary.replaceChildren(list);
+        preview = { ...input, previewId: result.id };
+        confirm.hidden = false;
+        approved.focus();
+      } catch (error) {
+        if (revision === current) report(feedback, error);
+      } finally { busy = false; update(); }
+    });
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (submit.disabled) return;
+      busy = true;
+      update();
+      report(feedback);
+      try {
+        const result = await coding(prefix + '/patch-apply', { ...preview, approved: true });
+        clear();
+        feedback.textContent = 'Applied to the local worktree ' + time(result.applied) + '.';
+      } catch (error) { report(feedback, error); }
+      finally { busy = false; update(); }
+    });
+    update();
+  }
+
   async function mount(view, arg, isDetached, readonly, teamMode = false) {
     view.innerHTML =
       '<div class="stack wide coding-page"><header><h2 class="display">Coding workspace</h2>' +
@@ -693,6 +786,7 @@
     github.dataset.codingGithub = '';
     left.append(github);
     window.okbGitHub?.mount(github, { project, coding, readonly });
+    if (!teamMode) patchReview(left, project, readonly);
   }
 
   window.okbCoding = { mount };

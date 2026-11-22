@@ -219,7 +219,8 @@ export async function previewCodingAttachments(workspace: string, paths: string[
       throw new CodingError(`Attachment ${path} must resolve inside the coding workspace.`);
     }
     const portable = name.split(sep).join("/");
-    if (scopes && (excludedPath(portable) || !scopes.some((scope) => scope === "." || portable.startsWith(`${scope}/`)))) {
+    if (scopes && (/[\x00-\x1f\x7f:]/u.test(portable) || excludedPath(portable) || portable === ".git"
+      || !scopes.some((scope) => scope === "." || portable.startsWith(`${scope}/`)))) {
       throw new CodingError(`Attachment ${path} is outside the permitted project source.`);
     }
     if (seen.has(absolute)) continue;

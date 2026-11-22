@@ -51,16 +51,24 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Compare explicit attachments, scoped lexical previews, and indexed
   previews in a pinned synthetic monorepo with latency, evidence, and simulated
   token and cache measurements.
-- [ ] Measure retrieval and live provider usage on representative monorepos with
+- [x] Measure evidence recall and preview latency on pinned public Vite source
+  across six repository tasks and two scope and budget settings.
+- [ ] Measure live provider usage and tokens per accepted result with
   independent human review of citations and outcomes.
-- [ ] Add tenant/project authorization, isolated workers, per-project
-  credentials, and team run status and cancellation.
-- [ ] Verify failure and replay semantics in deployment, with audit events,
-  retention, and change review and approvals.
+- [x] Add project authorization, expiring member tokens, dedicated worker
+  subprocesses, per-project credentials, and team status and cancellation.
+- [x] Verify local crash recovery and request replay, project-scoped audit,
+  transcript deletion, review and approval, and a team browser through local HTTPS.
+- [ ] Verify failure, retention, access policy, and worker isolation on the
+  intended enterprise deployment. Local workers use the server's OS account.
 - [x] Add explicitly previewed, independent Pi Durable package reviews with
   task-owned child conversations, combined usage, and a human-reviewed handoff.
-- [ ] Add approved execution and repository integration after the control
-  plane and worker boundaries are verified.
+- [x] Preview and apply owner-approved local patches to existing tracked files
+  after accepting a result. Record approval and reconcile interrupted writes.
+- [x] Bind GitHub repositories, show activity, and prepare a GitHub browser
+  comparison for accepted results.
+- [x] Package VS Code and Cursor integration for approved active-file requests
+  and reviewing runs.
 
 Stages 0–6 and the logs below are historical records.
 
@@ -749,6 +757,11 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added both macOS and browser workflows, editor packaging,
+  source reconciliation, consent and focused maps. Coding gained project and
+  team access, subprocess workers, independent package reviews, approved
+  patch application, and GitHub handoff. Live provider and hosted deployment
+  verification remain open.
 - 2026-11-22 — Added local source onboarding and private export previews, and
   added scoped coding context previews, Pi Durable compaction, and usage inspection.
   Next milestones are evaluated monorepo indexing and personal source management.

@@ -117,7 +117,7 @@ export interface ApiServer {
   url: string;
   port: number;
   token: string;
-  stop(): void;
+  stop(): Promise<void>;
 }
 
 export { hostAllowed };
@@ -708,12 +708,12 @@ export function createApiServer(opts: ApiOptions): ApiServer {
     url: `http://127.0.0.1:${port}/`,
     port,
     token,
-    stop() {
+    async stop() {
       plan.close();
       notion.close();
-      void server.stop(true);
-      void team.stop().catch(() => {});
-      void controller?.close().catch(() => {});
+      const stopped = await Promise.allSettled([server.stop(true), team.stop(), controller?.close()]);
+      const failures = stopped.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      if (failures.length) throw new AggregateError(failures, "Could not close the okbrain server.");
     },
   };
 }

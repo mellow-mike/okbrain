@@ -30,11 +30,11 @@ async function connect(override) {
     if (!candidate.trim()) continue;
     try {
       const url = localUrl(candidate.trim());
-      async function api(path, data) {
+      async function api(path, data, timeoutMs = 30_000) {
         const request = new URL('/api/coding' + path, url);
         const response = await fetch(request, {
           method: data === undefined ? 'GET' : 'POST',
-          redirect: 'error', signal: AbortSignal.timeout(30_000),
+          redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
           headers: { 'x-okb-token': token.trim(), ...(data === undefined ? {} : { 'content-type': 'application/json' }) },
           ...(data === undefined ? {} : { body: JSON.stringify(data) }),
         });
@@ -42,7 +42,7 @@ async function connect(override) {
         if (!response.ok) throw new Error(payload.error || `okbrain returned HTTP ${response.status}.`);
         return payload.result;
       }
-      const projects = await api('/projects');
+      const projects = await api('/projects', undefined, 2500);
       if (!Array.isArray(projects)) continue;
       return { url, api, projects };
     } catch {

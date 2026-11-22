@@ -228,13 +228,26 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
             guard let self else { return }
             do {
                 let value = try await webView.callAsyncJavaScript("""
-                    for (let i = 0; i < 100; i++) {
-                        if (document.title === 'okbrain' && window.OKB_TOKEN && document.querySelector('#h-cap')) return true;
-                        await new Promise(resolve => setTimeout(resolve, 100));
+                    async function ready(selector) {
+                        for (let i = 0; i < 80; i++) {
+                            if (document.querySelector(selector)) return true;
+                            await new Promise(resolve => setTimeout(resolve, 100));
+                        }
+                        return false;
                     }
-                    return false;
+                    if (!await ready('#h-cap') || !window.OKB_TOKEN) return 'Personal Home did not initialize.';
+                    const indexed = await fetch('/api/op/index', {
+                        method: 'POST', headers: { 'x-okb-token': window.OKB_TOKEN }, body: '{}',
+                    });
+                    if (!indexed.ok) return 'The bundled runtime could not open the local index.';
+                    location.hash = 'coding';
+                    if (!await ready('.coding-projects form')) return 'The Coding workspace did not initialize.';
+                    return true;
                     """, arguments: [:], in: nil, contentWorld: .page)
-                guard value as? Bool == true else { self.show("The okbrain page did not initialize."); return }
+                guard value as? Bool == true else {
+                    self.show((value as? String) ?? "The okbrain page did not initialize.")
+                    return
+                }
                 NSApp.terminate(nil)
             } catch { self.show(error.localizedDescription) }
         }

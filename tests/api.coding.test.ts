@@ -126,7 +126,7 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     await call(path + "/members", { revoke: member.id });
     expect((await request(path + "/runs", undefined, member.token)).status).toBe(401);
   } finally {
-    api.stop();
+    await api.stop();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -153,7 +153,7 @@ test("the production worker rejects a stale approval across a real child process
     );
     expect(result.run).toMatchObject({ status: "failed", admitted: false, error: expect.stringContaining("selected files changed") });
   } finally {
-    api.stop();
+    await api.stop();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -250,7 +250,7 @@ test("GitHub reads stay on the bound project and comparison requires an accepted
     expect(seen).toHaveLength(3);
     expect(await call(endpoint + "disconnect", {})).toMatchObject({ connection: null });
   } finally {
-    api.stop();
+    await api.stop();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -287,7 +287,7 @@ test("cancels a running provider request through the coding API", async () => {
     expect(cancelled.run).toMatchObject({ status: "cancelled", admitted: true });
     expect(faux.state.callCount).toBe(1);
   } finally {
-    api.stop();
+    await api.stop();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -353,7 +353,7 @@ test("resumes an interrupted HTTP run from the admitted source after the control
     clearTimeout(timeout);
     worker.kill("SIGKILL");
     await worker.exited;
-    recovery?.stop();
+    await recovery?.stop();
     await rm(root, { recursive: true, force: true });
   }
 }, 15_000);
@@ -395,7 +395,7 @@ test("the dedicated team listener serves only coding assets and project token ro
     expect((await originRequest("https://other.example")).status).toBe(403);
     expect(await local.call("/team", { action: "stop" })).toBeNull();
   } finally {
-    api.stop();
+    await api.stop();
     await rm(root, { recursive: true, force: true });
   }
 });

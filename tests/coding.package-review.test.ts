@@ -149,7 +149,7 @@ test("coding API requires project access and explicit approval for each package 
     }
     expect(await api(`${prefix}/review`, { ...identity, decision: "accepted" })).toMatchObject({ review: "accepted" });
   } finally {
-    server.stop();
+    await server.stop();
     await rm(root, { force: true, recursive: true });
   }
 }, 15_000);

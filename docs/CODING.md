@@ -75,6 +75,25 @@ The CLI accepts `--profile-json` in place of `--projects` for preview and submis
 
 Run `bun run scripts/benchmark-coding-context.ts` to compare explicit files, lexical preview, and indexed profile preview on a generated 1,024-file monorepo fixture. It reports evidence recall, deterministic citation acceptance, p50 and p95 preview latency, context bytes, and Pi's simulated input, output, and cache counters across eight tasks. The fixture covers direct cross-package evidence, similarly named services, a worktree edit, and repeated requests in a session. Human acceptance and live-model performance require separate evaluation.
 
+### Measure repository previews on Vite
+
+`bun run scripts/benchmark-coding-vite.ts` clones a temporary Vite checkout and measures six development traces across 2,380 tracked files. The suite covers a failed dynamic import, scaffold template selection, legacy build targets, HMR lifecycle, split CSS in the build manifest, and dependency scan inputs. Use `--workspace /path/to/vite` to reuse a clean checkout at the pinned commit. The script checks the revision and hand-labeled evidence before timing and reads the checkout without running its install, build, or test scripts. [Vite v7.0.0 at b85f322](https://github.com/vitejs/vite/tree/b85f32275b443bf6b647572a9209f1e078b5b4dd)
+
+The wide setting uses package directories and a 4,096-token excerpt budget. `--narrow --token-budget 12288` uses tighter subsystem directories and a larger budget. Within each setting, automatic strategies share the same authorized directories. Explicit attachments use the already known evidence files as a reference. File recall counts expected paths that appeared. Evidence recall counts excerpts containing the specific expected text.
+
+One Linux x64 run with Bun 1.3.14 and an Intel i7-1260P used eight repetitions per task. Each row summarizes 48 previews with 120 expected evidence targets.
+
+| Settings | Strategy | File recall | Evidence recall | p50 / p95 preview | Mean context |
+|---|---|---:|---:|---:|---:|
+| Package, 4,096 tokens | Explicit known files | 100% | 100% | 0.65 / 1.58 ms | 31.1 KB |
+| Package, 4,096 tokens | Lexical | 66.7% | 33.3% | 242.02 / 277.02 ms | 8.2 KB |
+| Package, 4,096 tokens | Indexed | 66.7% | 20.0% | 295.97 / 336.82 ms | 7.8 KB |
+| Subsystem, 12,288 tokens | Explicit known files | 100% | 100% | 0.56 / 1.54 ms | 31.1 KB |
+| Subsystem, 12,288 tokens | Lexical | 100% | 60.0% | 60.01 / 108.13 ms | 11.5 KB |
+| Subsystem, 12,288 tokens | Indexed | 66.7% | 20.0% | 30.43 / 87.92 ms | 8.0 KB |
+
+At package scope, both automatic strategies reached a preview limit on every task and returned incomplete evidence. At subsystem scope, lexical preview returned every target for two of the six traces, and the indexed setting returned fewer supporting lines despite faster previews. Review the chosen excerpts before sending. The Vite suite makes zero provider calls. Live provider token use, cache reuse, answer quality, and independent human acceptance remain unmeasured.
+
 ### Review independent packages
 
 In the Coding workspace, choose **Independent package review** for a task spanning two or three separate directories. Enter a search query and optional excerpt budget for each directory. **Preview source** shows each package separately. Approve the shared task and selected text before sending.
@@ -115,6 +134,14 @@ The transcript stores prompts, selected source, and responses as local SQLite da
 
 Browser, Mac and IDE projects use a separate `coding-projects` directory within the same per-user application data. Each project has its own transcript directory. The project database holds the run index, review state, metadata-only audit, hashed team tokens, and any provider credentials the operator saved. A local worker subprocess receives one scoped request and the selected provider credential over its private input pipe. It reports admission and completion separately. Workers run under the server's operating-system account and have no model-facing workspace tools. A server restart leaves unsettled work available by the same request ID. An interrupted provider attempt can still have incurred upstream charges.
 
+## Apply a reviewed patch locally
+
+After accepting a finished request, open **Apply a reviewed patch** as the local project owner. Choose the result and paste the Git unified diff. **Preview patch** checks the changes against the tracked worktree files in a temporary checkout and lists the affected paths. Confirm the exact diff and choose **Apply to worktree**. The staging area, commits, and remote remain untouched.
+
+The patch can edit up to eight existing tracked UTF-8 files within the project scope. It accepts portable unquoted paths and a diff up to 48 KiB. File creation, deletion, renames, binary patches, symlinks, hard links, and permission changes are outside this workflow. A change to the previewed worktree bytes or diff requires a fresh preview.
+
+The audit records separate patch-approval and application events. Repeating the same completed approval returns its receipt. After interruption, the same approval can recover against the recorded before or after bytes. Inspect the listed files manually if the worktree matches neither state.
+
 ## Review a project on GitHub
 
 Open the project in **Coding**, then open **GitHub → Connection settings** and choose **Detect GitHub remotes**. Select the repository already configured in the project's Git checkout and save the connection. The current integration supports GitHub.com. To read a private repository, use a fine-grained personal access token restricted to that repository with **Issues** and **Pull requests** read permissions. The token stays in the project's local application data. Disconnecting removes the saved binding and credential. [Create a fine-grained personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token)
@@ -123,9 +150,6 @@ Choose **Refresh GitHub activity** to load recent open issues and pull requests.
 
 After accepting a coding request, open **Prepare GitHub review**, choose the accepted request, and enter the base and head branches already on GitHub. **Open GitHub comparison** opens GitHub's review screen so you can inspect and publish there. okbrain records the handoff against the accepted request in the project audit log. Your coding transcript and source excerpts stay on the local device during the handoff. [Compare branches in GitHub](https://docs.github.com/en/pull-requests/committing-changes-to-your-project/viewing-and-comparing-commits/comparing-commits)
 
-## Enterprise deployment milestones
+## Validation status
 
-1. Evaluate retrieval quality, runtime, and tokens per accepted result on monorepo tasks. Add reusable project profiles, revision-aware context indexes, and measured cache reuse.
-2. Add an authenticated control plane, project policies, isolated workers, per-project credentials, and short-lived repository access. Validate worker recovery, cancellation, and concurrency before enabling shared deployments.
-3. Add change review and approval state, audit events, and transcript retention and deletion controls.
-4. Evaluate Pi Durable child conversations for scoped package review, then introduce approved execution and repository integration after the worker controls are verified. Record who approved each side effect and apply replay policy to the associated task. [Product plan](PRODUCT-PLAN.md)
+The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, review and approved patch replay. A local HTTPS reverse proxy was exercised in Chromium with a project token. Live provider evaluation needs an independently reviewed set of tasks and an approved provider account. Shared deployment needs validation of the target host, worker isolation, and retention policy. [Roadmap](../ROADMAP.md)

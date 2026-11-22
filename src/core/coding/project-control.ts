@@ -7,6 +7,9 @@ import { isAbsolute, join, resolve } from "node:path";
 import { dataDir, resolveActor } from "../config.ts";
 import { ensureExtensionCapableSqlite } from "../engine/custom-sqlite.ts";
 import {
+  ApprovedPatchError, approvedPatchBytes, approvedPatchState, patchDigest, withPreparedPatch, type PatchFileReceipt,
+} from "./approved-patch.ts";
+import {
   cancelCodingRequest, canonicalWorkspace, codingCredential, CodingError, getCodingSessionStatus, hasCodingCredential,
   listCodingModels, previewCodingAttachments, runCodingSession,
   type CodingDependencies, type CodingProvider, type CodingSessionOptions,
@@ -31,6 +34,9 @@ type RunRow = {
   project: string; session: string; id: string; actor: string; status: RunStatus; signature: string;
   admitted: number; created: string; updated: string; error: string | null;
   review: "accepted" | "changes_requested" | null; reviewer: string | null; reviewed: string | null;
+};
+type PatchRow = {
+  preview_id: string; diff_hash: string; files: string; status: "prepared" | "applied"; applied: string | null;
 };
 type AuditRow = { kind: string; actor: string; session: string | null; request_id: string | null; at: string };
 type GitHubRow = { remote: string; repository: string; token: string | null };
@@ -117,6 +123,7 @@ export class CodingProjectControl {
   readonly #models: CodingDependencies["models"];
   readonly #githubFetch: GitHubFetch;
   readonly #active = new Map<string, Running>();
+  #patchInFlight = false;
   readonly #gates = new Map<string, Promise<void>>();
   readonly #requests = new Set<Promise<unknown>>();
   #closing = false;
@@ -165,6 +172,13 @@ export class CodingProjectControl {
         CREATE TABLE IF NOT EXISTS github_projects(
           project TEXT PRIMARY KEY REFERENCES projects(id), remote TEXT NOT NULL, repository TEXT NOT NULL, token TEXT
         );
+        CREATE TABLE IF NOT EXISTS applied_patches(
+          project TEXT NOT NULL, session TEXT NOT NULL, request_id TEXT NOT NULL,
+          preview_id TEXT NOT NULL, diff_hash TEXT NOT NULL, files TEXT NOT NULL,
+          status TEXT NOT NULL, applied TEXT,
+          PRIMARY KEY (project, session, request_id),
+          FOREIGN KEY (project, session, request_id) REFERENCES runs(project, session, id) ON DELETE CASCADE
+        );
       `);
       // A prior process may have exited after either catalog or Pi committed.
       // An interrupted run can be inspected and resumed with the same ID.
@@ -177,8 +191,8 @@ export class CodingProjectControl {
         this.#finishDeletion(deletion.project, deletion.session, deletion.actor);
       }
     } catch (error) {
-      db?.close();
-      this.#lease.close();
+      db?.close(true);
+      this.#lease.close(true);
       if ((error as { code?: string }).code === "SQLITE_BUSY")
         throw new ProjectControlError("Coding projects are already open in another okbrain server.", 409);
       throw error;
@@ -190,8 +204,11 @@ export class CodingProjectControl {
     const active = [...this.#active.values()];
     for (const { stop } of active) stop?.();
     await Promise.allSettled([...active.map(({ promise }) => promise), ...this.#requests]);
-    this.#db.close();
-    this.#lease.close();
+    try {
+      this.#db.close(true);
+    } finally {
+      this.#lease.close(true);
+    }
   }
 
   #get<T>(sql: string, ...bindings: SQLQueryBindings[]): T | null {
@@ -356,6 +373,7 @@ export class CodingProjectControl {
     let result: Promise<"done" | "unanswered">;
     try {
       if (dependencies.models) {
+        stop = () => cancel.abort();
         result = runCodingSession(run, { ...dependencies, signal: cancel.signal, admitted }).then((receipt) => receipt.status);
       } else {
         const worker = launchProjectWorker({
@@ -414,8 +432,8 @@ export class CodingProjectControl {
     if (blocking) throw new ProjectControlError(`Resume or cancel interrupted request ${blocking.id} before starting another in this session.`, 409);
     this.#db.transaction(() => {
       if (prior) {
-        this.#write("UPDATE runs SET status = 'running', signature = ?, updated = ?, error = NULL WHERE project = ? AND session = ? AND id = ?",
-          signature, now(), project.id, run.session, run.requestId);
+        this.#write("UPDATE runs SET status = 'running', signature = ?, actor = ?, updated = ?, error = NULL WHERE project = ? AND session = ? AND id = ?",
+          signature, actor.id, now(), project.id, run.session, run.requestId);
       } else {
         const time = now();
         this.#write("INSERT INTO runs(project, session, id, actor, status, signature, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -509,6 +527,71 @@ export class CodingProjectControl {
       })();
     }
     return this.#runView(this.#readRun(project.id, run.session, run.requestId));
+  }
+
+  #finishPatch(project: ProjectRow, row: RunRow, actor: Actor) {
+    const applied = now();
+    this.#db.transaction(() => {
+      this.#write("UPDATE applied_patches SET status = 'applied', applied = ? WHERE project = ? AND session = ? AND request_id = ?",
+        applied, project.id, row.session, row.id);
+      this.#audit(project.id, "patch_applied", actor.id, row.session, row.id);
+    })();
+    return applied;
+  }
+
+  async #patch(project: ProjectRow, body: Json, actor: Actor, apply: boolean) {
+    this.#requireOwner(actor);
+    const run = this.#runParts(body);
+    const row = this.#readRun(project.id, run.session, run.requestId);
+    if (row.status !== "done" || row.review !== "accepted")
+      throw new ProjectControlError("Accept the finished result before reviewing a patch.", 409);
+    const diff = body.diff;
+    if (typeof diff !== "string" || Buffer.byteLength(diff) > approvedPatchBytes)
+      throw new ProjectControlError("Paste a Git unified diff up to 48 KiB.");
+    if (apply && body.approved !== true) throw new ProjectControlError("Confirm the previewed patch before applying it.");
+    const approval = apply ? field(body, "previewId", 64) : undefined;
+    const diffHash = patchDigest(diff);
+    const prior = this.#get<PatchRow>("SELECT * FROM applied_patches WHERE project = ? AND session = ? AND request_id = ?", project.id, row.session, row.id);
+    if (prior && (prior.diff_hash !== diffHash || (approval !== undefined && prior.preview_id !== approval))) {
+      throw new ProjectControlError("This result already has a different approved patch.", 409);
+    }
+    if (prior?.status === "applied") {
+      return { id: prior.preview_id, files: JSON.parse(prior.files) as PatchFileReceipt[], applied: prior.applied, reused: true };
+    }
+    if (apply && this.#patchInFlight) throw new ProjectControlError("Another patch is being applied. Try again when it finishes.", 409);
+    if (apply) this.#patchInFlight = true;
+    try {
+      const workspace = await this.#workspace(project);
+      const scopes = JSON.parse(project.scopes) as string[];
+      if (prior) {
+        const files = JSON.parse(prior.files) as PatchFileReceipt[];
+        const state = await approvedPatchState(workspace, scopes, files);
+        if (state === "different") throw new ProjectControlError("The worktree differs from both recorded patch states. Inspect the files before proceeding.", 409);
+        if (!apply || state === "after") {
+          return { id: prior.preview_id, files, applied: apply ? this.#finishPatch(project, row, actor) : null, reused: true };
+        }
+      }
+      return await withPreparedPatch(workspace, scopes, diff, async (prepared) => {
+        const files = prepared.files;
+        const id = digest(JSON.stringify([1, project.id, row.session, row.id, row.reviewed, diffHash, files]));
+        if (!apply) return { id, files, applied: null, reused: false };
+        if (id !== approval) throw new ProjectControlError("The patch or worktree changed. Preview it again before applying.", 409);
+        if (!prior) {
+          this.#db.transaction(() => {
+            this.#write("INSERT INTO applied_patches VALUES (?, ?, ?, ?, ?, ?, 'prepared', NULL)",
+              project.id, row.session, row.id, id, diffHash, JSON.stringify(files));
+            this.#audit(project.id, "patch_approved", actor.id, row.session, row.id);
+          })();
+        }
+        await prepared.apply();
+        return { id, files, applied: this.#finishPatch(project, row, actor), reused: Boolean(prior) };
+      });
+    } catch (error) {
+      if (error instanceof ApprovedPatchError) throw new ProjectControlError(error.message, 409);
+      throw error;
+    } finally {
+      if (apply) this.#patchInFlight = false;
+    }
   }
 
   #sessionDirectory(project: string, session: string) {
@@ -689,6 +772,8 @@ export class CodingProjectControl {
       if (action === "resume") return this.#withSession(project, body, () => this.#resume(project, body, actor));
       if (action === "cancel") return this.#withSession(project, body, () => this.#cancel(project, body, actor));
       if (action === "review") return this.#withSession(project, body, async () => this.#review(project, body, actor));
+      if (action === "patch-preview" || action === "patch-apply")
+        return this.#withSession(project, body, () => this.#patch(project, body, actor, action === "patch-apply"));
       if (action === "delete-session") return this.#withSession(project, body, () => this.#deleteSession(project, body, actor));
       if (action === "credential") return this.#credentials(project, body, actor);
       if (action === "members") return this.#members(project, method, body, actor);
