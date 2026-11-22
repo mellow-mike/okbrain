@@ -1200,12 +1200,110 @@
     };
   }
 
+  function mountBranchComparison(panel, { project, prefix, detached, selectRun }) {
+    panel.innerHTML = '<button type="button" aria-haspopup="dialog">Compare with original</button>' +
+      '<dialog class="coding-panel coding-comparison" aria-labelledby="coding-comparison-title" data-branch-comparison>' +
+      '<div class="stack"><div class="row"><h3 id="coding-comparison-title">Compare review results</h3>' +
+      '<button type="button" class="small right" data-close-comparison>Close</button></div>' +
+      '<p class="coding-feedback" role="status"></p><div class="coding-comparison-grid" data-comparison-results></div></div></dialog>';
+    const open = panel.querySelector('button');
+    const dialog = panel.querySelector('dialog');
+    const close = dialog.querySelector('[data-close-comparison]');
+    const feedback = dialog.querySelector('[role="status"]');
+    const results = dialog.querySelector('[data-comparison-results]');
+    let target = null;
+    let revision = 0;
+
+    function clear() {
+      ++revision;
+      results.replaceChildren();
+      report(feedback);
+    }
+    function matches(side, expected) {
+      return side?.session === expected.session && side.requestId === expected.requestId && side.status === 'done' &&
+        typeof side.answer?.text === 'string' && typeof side.answer.truncated === 'boolean' &&
+        side.report?.version === 1 && side.report.projectId === project && side.report.session === side.session &&
+        side.report.request?.requestId === side.requestId && side.report.runStatus === side.status;
+    }
+    function card(kind, side) {
+      const article = document.createElement('article');
+      article.className = 'stack coding-comparison-side';
+      article.dataset.comparisonSide = kind.toLowerCase();
+      article.innerHTML = '<h4></h4><p class="muted" data-comparison-run></p><p data-comparison-review></p>' +
+        '<h5>Task</h5><pre data-comparison-task></pre><h5>Response</h5><pre data-comparison-answer></pre>' +
+        '<p class="muted" data-comparison-truncated hidden>Response excerpt limit reached. Open this run to read the full response.</p>' +
+        '<p class="muted" data-comparison-usage></p><h5>Source references</h5><ul class="plain" data-comparison-sources></ul>' +
+        '<p class="muted" data-comparison-empty hidden>No saved source references.</p>' +
+        '<div class="row"><button type="button" class="small"></button></div>';
+      article.querySelector('h4').textContent = kind;
+      article.querySelector('[data-comparison-run]').textContent = side.session + ' · ' + side.requestId;
+      const review = side.review ? statuses[side.review] || side.review : 'Awaiting review';
+      article.querySelector('[data-comparison-review]').textContent = 'Completed · ' + review;
+      article.querySelector('[data-comparison-task]').textContent = typeof side.task === 'string' && side.task ? side.task : 'No saved task.';
+      article.querySelector('[data-comparison-answer]').textContent = side.answer.text || 'No saved response text.';
+      article.querySelector('[data-comparison-truncated]').hidden = !side.answer.truncated;
+      article.querySelector('[data-comparison-usage]').textContent = 'Request usage · ' + usageText(side.report.request.usage ?? side.report.receipt?.usage);
+      const references = side.report.request.repositoryContext?.files ?? side.report.request.files ?? [];
+      const sources = article.querySelector('[data-comparison-sources]');
+      for (const ref of references) {
+        const item = document.createElement('li');
+        const code = document.createElement('code');
+        code.textContent = ref.path + (ref.startLine === undefined ? '' : ':' + ref.startLine +
+          (ref.endLine === ref.startLine ? '' : '–' + ref.endLine));
+        item.append(code);
+        sources.append(item);
+      }
+      sources.hidden = !sources.childElementCount;
+      article.querySelector('[data-comparison-empty]').hidden = !!sources.childElementCount;
+      const openRun = article.querySelector('button');
+      openRun.textContent = 'Open ' + kind.toLowerCase() + ' run';
+      openRun.addEventListener('click', () => {
+        dialog.close();
+        if (!detached()) void selectRun({ session: side.session, id: side.requestId });
+      });
+      return article;
+    }
+
+    close.addEventListener('click', () => dialog.close());
+    dialog.addEventListener('close', () => { if (!dialog.open) clear(); });
+    open.addEventListener('click', async () => {
+      if (!target || detached() || dialog.open) return;
+      clear();
+      const current = revision;
+      const { original, alternative } = target;
+      const isCurrent = () => !detached() && panel.isConnected && dialog.open && current === revision;
+      report(feedback, undefined, 'Loading saved comparison…');
+      dialog.showModal();
+      dialog.scrollTop = 0;
+      close.focus();
+      try {
+        const comparison = await coding(prefix + '/branch-comparison-inspect', alternative);
+        if (!isCurrent()) return;
+        if (!matches(comparison?.original, original) || !matches(comparison.alternative, alternative))
+          throw new Error('Could not verify the saved comparison. Close it and select the alternative run again.');
+        results.replaceChildren(card('Original', comparison.original), card('Alternative', comparison.alternative));
+        report(feedback);
+      } catch (error) { if (isCurrent()) report(feedback, error); }
+    });
+    return (row) => {
+      const next = row?.branch && row.status === 'done' && row.admitted
+        ? { original: row.branch, alternative: identity(row) } : null;
+      if (next?.original.session === target?.original.session && next?.original.requestId === target?.original.requestId &&
+          next?.alternative.session === target?.alternative.session && next?.alternative.requestId === target?.alternative.requestId) return;
+      target = next;
+      clear();
+      panel.hidden = !target;
+      if (dialog.open) dialog.close();
+    };
+  }
+
   function activity(parent, project, readonly, detached, { reviewPatch, ownerActions, initialRun }) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
     panel.className = 'coding-panel coding-activity stack';
     panel.innerHTML = '<div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh</button></div>' +
       '<div class="stack coding-runs" data-runs></div><div class="stack" data-inspect aria-live="polite"></div>' +
+      '<div class="row" data-compare-branch hidden></div>' +
       '<section class="stack" data-saved-request-source hidden></section>' +
       (ownerActions ? '<section class="stack" data-branch-preview hidden></section>' +
         '<details data-saved-branches></details><section class="stack" data-context-controls hidden></section>' : '') +
@@ -1224,6 +1322,9 @@
       prefix, detached, useBranch: ownerActions.useBranch,
       refreshBranches: mountSavedBranches(panel.querySelector('[data-saved-branches]'), { prefix, detached, useBranch: ownerActions.useBranch }),
     }) : null;
+    const setComparisonRun = mountBranchComparison(panel.querySelector('[data-compare-branch]'), {
+      project: project.id, prefix, detached, selectRun,
+    });
     let selected = initialRun || null;
     let timer;
     let generation = 0;
@@ -1244,6 +1345,7 @@
       const row = result.run;
       const compactionPending = pi?.context?.compactionPending === true;
       const branch = row.branch || alternativeSessionName.test(row.session);
+      setComparisonRun(row);
       if (pi && !branch) ownerActions?.markCompactionPending(row.session, compactionPending);
       setContextSession?.(!branch && idle && pi && !pi.pendingRequestIds.length ? row.session : null, compactionPending);
       setBranchTarget?.(!branch && result.alternativeBranchEligible === true ? row : null);
@@ -1301,7 +1403,7 @@
       if (row.status === 'done') {
         appendAction(bar, 'Accept result', '/review', row, { decision: 'accepted' });
         appendAction(bar, 'Request changes', '/review', row, { decision: 'changes_requested' });
-        if (!branch && row.review === 'accepted' && reviewPatch) {
+        if (row.review === 'accepted' && reviewPatch) {
           const patch = document.createElement('button');
           patch.type = 'button';
           patch.dataset.reviewPatch = '';
@@ -1361,6 +1463,7 @@
           setSavedSourceRun(null);
           setContextSession?.(null);
           setBranchTarget?.(null);
+          setComparisonRun(null);
           inspected.replaceChildren();
           if (focusResult) report(feedback, new Error('That request is no longer in Run history.'));
         }
@@ -1381,6 +1484,7 @@
         setSavedSourceRun(null);
         setContextSession?.(null);
         setBranchTarget?.(null);
+        setComparisonRun(null);
         inspected.replaceChildren();
       }
       selected = row;
@@ -1770,8 +1874,7 @@
     async function loadRuns(target, intent) {
       const current = ++runsRevision;
       try {
-        const accepted = (await coding(prefix + '/runs')).filter((entry) =>
-          entry.status === 'done' && entry.review === 'accepted' && !entry.branch && !alternativeSessionName.test(entry.session));
+        const accepted = (await coding(prefix + '/runs')).filter((entry) => entry.status === 'done' && entry.review === 'accepted');
         if (detached() || !panel.open || current !== runsRevision) return false;
         const selected = target && intent === proposalRevision ? JSON.stringify(target) : run.value;
         run.replaceChildren(new Option(accepted.length ? 'Choose a result' : 'No accepted results', ''),

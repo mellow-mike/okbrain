@@ -4,7 +4,7 @@ const vscode = require('vscode');
 const { randomUUID } = require('node:crypto');
 const { connect, projectFile, matchesProjectWorkspace } = require('./connection.cjs');
 const { taskProgressLines } = require('./run-progress.cjs');
-const { teamUrl, isTeamToken, connectTeam } = require('./team-connection.cjs');
+const { teamUrl, isTeamToken, connectTeam, isBranchComparisonSide } = require('./team-connection.cjs');
 
 const savedSourceScheme = 'okbrain-saved-source';
 const teamSecret = 'okbrain.team.connection';
@@ -170,6 +170,46 @@ async function showSavedRequestSource(connection, project, identity, isCurrent) 
     }
   }
   await showReadOnlyText('Saved request source', lines.join('\n'), isCurrent);
+}
+
+function comparisonLines(label, side) {
+  const { request } = side.report;
+  const files = request.repositoryContext?.files ?? request.files;
+  const evidence = Array.isArray(files) ? files.flatMap((file) => {
+    if (typeof file?.path !== 'string') return [];
+    const range = Number.isSafeInteger(file.startLine) && Number.isSafeInteger(file.endLine) ? `:${file.startLine}–${file.endLine}` : '';
+    return [file.path + range];
+  }) : [];
+  const usage = [
+    ['input', request.usage?.input], ['output', request.usage?.output], ['cache read', request.usage?.cacheRead],
+    ['cache write', request.usage?.cacheWrite], ['total', request.usage?.totalTokens],
+  ].flatMap(([name, value]) => Number.isSafeInteger(value) && value >= 0 ? [`${value.toLocaleString()} ${name}`] : []);
+  return [label, `Session ${side.session} · request ${side.requestId}`,
+    `Status ${side.status} · ${side.review?.replaceAll('_', ' ') ?? 'awaiting review'}`,
+    ...(usage.length ? ['Request usage (tokens) · ' + usage.join(' · ')] : []),
+    ...(evidence.length ? ['', 'Source references', ...evidence] : []),
+    ...(side.task === undefined ? [] : ['', 'Saved task', side.task]),
+    '', 'Saved answer', side.answer.text || 'No saved answer text.',
+    ...(side.answer.truncated ? ['Preview limit reached.'] : []),
+  ];
+}
+
+async function showBranchComparison(connection, project, identity, original, isCurrent) {
+  let comparison;
+  try {
+    comparison = await connection.api(pathFor(project, 'branch-comparison-inspect'), identity);
+  } catch (error) {
+    if (isCurrent()) throw error;
+    return;
+  }
+  if (!isCurrent()) return;
+  if (!isBranchComparisonSide(comparison?.original, project.id, original) ||
+      !isBranchComparisonSide(comparison?.alternative, project.id, identity)) {
+    throw new Error('Could not verify the saved comparison for this alternative run. Refresh Run history and try again.');
+  }
+  const lines = [project.title, '', ...comparisonLines('Original run', comparison.original),
+    '', ...comparisonLines('Alternative run', comparison.alternative)];
+  await showReadOnlyText('Alternative run comparison', lines.join('\n'), isCurrent);
 }
 
 function chooseSession() {
@@ -484,10 +524,15 @@ async function inspectRun(connection, project, selected) {
     report.request?.requestId === identity.requestId && report.runStatus === run.status;
   const canOpenAlternative = !team && alternativeBranchEligible === true && sameRun &&
     run.status === 'done' && run.review === 'accepted';
+  const original = run.branch;
+  const canCompare = sameRun && !admissionMissing && run.admitted === true && run.status === 'done' &&
+    typeof original?.session === 'string' && original.session !== identity.session && typeof original?.requestId === 'string';
+  const canHandoffReview = !team && sameRun && run.status === 'done' && run.review === 'accepted';
   const choices = [{ label: 'Refresh', action: 'refresh' }, { label: 'Open in okbrain', action: 'open' }];
   if (run.status !== 'running' && (run.admitted || pi?.request || (run.status === 'interrupted' && !admissionMissing)))
     choices.push({ label: 'View saved request source', action: 'source-inspect' });
   if (canCopyReport && sameInspection()) choices.push({ label: 'Copy run report', action: 'copy-report' });
+  if (canCompare && sameInspection()) choices.push({ label: 'Compare with original', action: 'branch-comparison-inspect' });
   if ((!team || !run.branch) && (run.status === 'running' || run.status === 'interrupted')) choices.push({ label: 'Cancel request', action: 'cancel' });
   if ((!team || !run.branch) && run.status === 'interrupted') choices.push({ label: 'Resume from saved context', action: 'resume' });
   if (run.status === 'done') choices.push(
@@ -497,14 +542,21 @@ async function inspectRun(connection, project, selected) {
     if (!compactionPending) choices.push({ label: 'Start fresh context', action: 'reset-context' });
     choices.push({ label: 'Compact context locally', action: 'compact-context' });
   }
-  if (!team && !run.branch && run.status === 'done' && run.review === 'accepted')
-    choices.push({ label: 'Review proposed patch in okbrain', action: 'patch' });
+  if (canHandoffReview && sameInspection()) choices.push(
+    { label: 'Review proposed patch in okbrain', action: 'patch' },
+    { label: 'Prepare GitHub pull request in okbrain', action: 'github' });
   if (canOpenAlternative && sameInspection()) choices.push({ label: 'Preview alternative branch in okbrain', action: 'alternative-branch' });
-  if (!team && !run.branch && run.review === 'accepted') choices.push({ label: 'Prepare GitHub pull request in okbrain', action: 'github' });
   const action = await vscode.window.showQuickPick(choices, { placeHolder: 'Choose a run action', ignoreFocusOut: true });
   if (!action || !isCurrent() || (team && !await connection.isBound())) return;
   if (action.action === 'open') return openWeb(connection, project);
-  if (action.action === 'patch' || action.action === 'github') return openWeb(connection, project, run, action.action);
+  if (action.action === 'patch' || action.action === 'github') {
+    if (canHandoffReview && sameInspection()) return openWeb(connection, project, run, action.action);
+    return;
+  }
+  if (action.action === 'branch-comparison-inspect') {
+    if (canCompare && sameInspection()) return showBranchComparison(connection, project, identity, original, sameInspection);
+    return;
+  }
   if (action.action === 'alternative-branch') {
     if (canOpenAlternative && sameInspection()) return openWeb(connection, project, run, action.action);
     return;

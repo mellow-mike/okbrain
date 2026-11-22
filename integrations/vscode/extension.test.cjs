@@ -28,6 +28,13 @@ function activateExtension(vscode, connection, options = {}) {
   module.exports.activate({ subscriptions: [], secrets: options.secrets ?? { onDidChange() {} } });
 }
 
+function comparisonSide(projectId, run, text, fields = {}) {
+  return { session: run.session, requestId: run.id, status: run.status, review: run.review ?? null,
+    answer: { text, truncated: false },
+    report: { version: 1, projectId, session: run.session, runStatus: run.status, request: { requestId: run.id } },
+    ...fields };
+}
+
 test('editor inspection shows the context budget and opens approved source only on request', async () => {
   const project = { id: 'fixture', title: 'Project fixture' };
   const runs = [
@@ -213,6 +220,8 @@ test('editor sends the accepted request to patch review without calling another 
     { id: 'review.1', session: 'main_branch', status: 'done' },
     { id: 'review.2', session: 'main_branch', status: 'done', review: 'changes_requested' },
     { id: 'review.3', session: 'branch-two', status: 'done', review: 'accepted' },
+    { id: 'review.4', session: 'alternative', status: 'done', review: 'accepted', admitted: true,
+      branch: { session: 'branch-two', requestId: 'review.3' } },
   ];
   const url = new URL('http://127.0.0.1:6522/');
   const commands = new Map();
@@ -274,6 +283,17 @@ test('editor sends the accepted request to patch review without calling another 
   nextAction = github;
   await inspect();
   assert.equal(opened[1], `${url.href}#coding/${project.id}/github/${accepted.session}/${accepted.id}`);
+
+  const alternative = runs[3];
+  runId = alternative.id;
+  nextAction = patch;
+  await inspect();
+  nextAction = github;
+  await inspect();
+  assert.deepEqual(opened.slice(2), [
+    `${url.href}#coding/${project.id}/patch/${alternative.session}/${alternative.id}`,
+    `${url.href}#coding/${project.id}/github/${alternative.session}/${alternative.id}`,
+  ]);
 });
 
 test('editor opens the exact eligible alternative branch source run in the owner app', async () => {
@@ -343,6 +363,79 @@ test('editor opens the exact eligible alternative branch source run in the owner
   await inspect();
   assert.deepEqual(calls, [`/projects/${project.id}/runs`, `/projects/${project.id}/inspect`]);
   assert.deepEqual(opened, [`${url.href}#coding/${project.id}?session=${selected.session}&request=${selected.id}`]);
+});
+
+test('editor compares only the exact settled alternative and its original in a read-only document', async () => {
+  const project = { id: 'fixture', title: 'Review fixture' };
+  const original = { session: 'main', id: 'same-id', status: 'done', review: 'accepted', admitted: true };
+  const run = { session: 'alt-review', id: original.id, status: 'done', admitted: true,
+    branch: { session: original.session, requestId: original.id } };
+  const selected = { session: run.session, requestId: run.id };
+  const originalSide = comparisonSide(project.id, original, '<original saved answer>', { task: 'Original fixture task.' });
+  originalSide.report.request.usage = { input: 4, output: 3, totalTokens: 7 };
+  originalSide.report.request.repositoryContext = { files: [{ path: 'src/entry.ts', startLine: 4, endLine: 7 }] };
+  const branchSide = comparisonSide(project.id, run, 'Alternative saved answer', {
+    answer: { text: 'Alternative saved answer', truncated: true },
+  });
+  const compare = 'Compare with original';
+  const commands = new Map();
+  const comparisons = [];
+  const documents = [];
+  const errors = [];
+  let provide;
+  let changeWorkspace;
+  let scope = 'dismiss';
+  let available;
+  const vscode = {
+    Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }) },
+    commands: { registerCommand: (name, handler) => commands.set(name, handler) },
+    env: {},
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      onDidChangeWorkspaceFolders(listener) { changeWorkspace = listener; },
+      registerTextDocumentContentProvider(_scheme, provider) { provide = provider.provideTextDocumentContent; },
+      async openTextDocument(input) { return input.scheme ? { uri: input, languageId: 'plaintext', text: provide(input) } : input; },
+    },
+    window: {
+      async showTextDocument(doc) { if (doc.uri) documents.push(doc); },
+      async showQuickPick(choices, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return choices[0];
+        available = choices.find((item) => item.label === compare);
+        return scope === 'dismiss' ? undefined : available;
+      },
+      async showErrorMessage(message) { errors.push(message); },
+    },
+  };
+  activateExtension(vscode, { projects: [project], async api(path, data) {
+    if (path === '/projects/fixture/runs') return [run];
+    if (path === '/projects/fixture/inspect') return { run: { ...run, admitted: scope !== 'no-admission' } };
+    assert.equal(path, '/projects/fixture/branch-comparison-inspect');
+    comparisons.push({ ...data });
+    if (scope === 'stale') changeWorkspace();
+    return { original: scope === 'wrong-original' ? comparisonSide(project.id, { ...original, session: 'other' }, 'Wrong answer') : originalSide,
+      alternative: branchSide };
+  } });
+  const inspect = commands.get('okbrain.runs');
+  await inspect();
+  assert.equal(available.label, compare);
+  scope = 'no-admission';
+  await inspect();
+  assert.equal(available, undefined);
+  assert.deepEqual(comparisons, []);
+  scope = 'stale';
+  await inspect();
+  scope = 'wrong-original';
+  await inspect();
+  assert.deepEqual(documents, []);
+  assert.match(errors.pop(), /Could not verify the saved comparison/);
+  scope = 'valid';
+  await inspect();
+  assert.deepEqual(comparisons, [selected, selected, selected]);
+  assert.equal(documents.length, 1);
+  assert.equal(documents[0].uri.scheme, 'okbrain-saved-source');
+  assert.match(documents[0].text, /Original run[\s\S]*Session main · request same-id[\s\S]*7 total[\s\S]*src\/entry\.ts:4–7[\s\S]*<original saved answer>/);
+  assert.match(documents[0].text, /Alternative run[\s\S]*Session alt-review · request same-id[\s\S]*Alternative saved answer\nPreview limit reached\./);
 });
 
 test('editor previews a matching preset, requires approval, and retries exactly one stable request', async () => {
@@ -478,6 +571,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   const preview = { source: 'repository', manifest: { id: 'a'.repeat(64) },
     excerpts: [{ path: 'core/sample.ts', startLine: 3, endLine: 4, content: '<literal source>' }] };
   const done = { id: 'result', session: 'team', status: 'done', review: 'accepted', admitted: true };
+  const branch = { ...done, session: 'alt-team', branch: { session: done.session, requestId: done.id } };
   const interrupted = { id: 'interrupted', session: 'team', status: 'interrupted', admitted: true };
   const active = { id: 'active', session: 'team', status: 'running', admitted: true };
   const commands = new Map();
@@ -545,7 +639,7 @@ test('team commands bind SecretStorage to one project and gate server-side previ
         if (options.placeHolder === `Choose a request for ${project.title}`) return items[mode.startsWith('manual') ? 0 : 1];
         if (options.placeHolder === 'Choose approved team repository directories') return [items[mode === 'manual-literal' ? 2 : 1]];
         if (options.placeHolder === 'Choose source lookup for this request') return items[lookup ? 1 : 0];
-        if (options.placeHolder === 'Choose a request to inspect') return items.find(({ label }) => label === selectedRun.id);
+        if (options.placeHolder === 'Choose a request to inspect') return items.find(({ run }) => run.id === selectedRun.id && run.session === selectedRun.session);
         assert.equal(options.placeHolder, 'Choose a run action');
         availableActions = Array.from(items, ({ label }) => label);
         const action = items.find(({ label }) => label === nextRunAction);
@@ -593,10 +687,14 @@ test('team commands bind SecretStorage to one project and gate server-side previ
         if (mode === 'denied-retry') throw Object.assign(new Error('The team token expired.'), { status: 401 });
         return { id: data.requestId, status: 'running' };
       }
-      if (action === 'runs') return [done, interrupted, active];
+      if (action === 'runs') return [done, interrupted, active, branch];
       if (action === 'inspect') return { run: selectedRun, ...(selectedRun === done ? { report: savedTeamReport, alternativeBranchEligible: true } : {}),
         pi: { pendingRequestIds: [], request: { receipt: { text: 'Shared result.' } } } };
       if (action === 'source-inspect') return { prompt: 'Saved shared task.', groups: [{ files: [{ path: 'core/sample.ts', text: '<literal source>' }] }] };
+      if (action === 'branch-comparison-inspect') {
+        if (mode === 'disconnect-comparison') await invoke('disconnectTeam');
+        return { original: comparisonSide(projectId, done, 'Original team answer'), alternative: comparisonSide(projectId, branch, 'Alternative team answer') };
+      }
       if (action === 'cancel' || action === 'resume') return selectedRun;
       assert.equal(action, 'review');
       return { ...done, review: data.decision };
@@ -695,6 +793,23 @@ test('team commands bind SecretStorage to one project and gate server-side previ
   mode = 'disconnect-resume';
   await invoke('teamRuns');
   assert.deepEqual(calls.map(([action]) => action), ['runs', 'inspect']);
+  assert.equal(entries.size, 0);
+
+  mode = 'connect';
+  await invoke('connectTeam');
+  selectedRun = branch;
+  nextRunAction = 'Compare with original';
+  calls.length = 0;
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).at(-1), ['branch-comparison-inspect', { session: branch.session, requestId: branch.id }]);
+  assert.ok(!availableActions.includes('Review proposed patch in okbrain'));
+  assert.ok(!availableActions.includes('Prepare GitHub pull request in okbrain'));
+  assert.equal(lastDocument.uri.path, '/Alternative run comparison.txt');
+  assert.match(lastDocument.text, /Original team answer[\s\S]*Alternative team answer/);
+  mode = 'disconnect-comparison';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.map(([action]) => action), ['runs', 'inspect', 'branch-comparison-inspect']);
+  assert.equal(lastDocument.uri.path, '/Team coding run.txt');
   assert.equal(entries.size, 0);
   assert.deepEqual(errors, []);
 });

@@ -201,3 +201,30 @@ transportTest('a successful response cannot reflect the bearer or replace the se
   response = result(null);
   assert.equal(await api(`${projectPath}/source-inspect`, identity), null);
 });
+
+transportTest('branch comparison POST stays on the bound project and verifies both reported sides', async (mockFetch) => {
+  const alternative = { session: 'alternative', requestId: identity.requestId };
+  const side = (runIdentity) => ({ ...runIdentity, status: 'done', review: null, answer: { text: 'Saved answer', truncated: false },
+    report: { version: 1, projectId, session: runIdentity.session, request: { requestId: runIdentity.requestId }, runStatus: 'done' } });
+  const comparison = { original: side(identity), alternative: side(alternative) };
+  let returned = comparison;
+  const calls = mockFetch(async (url, options) => {
+    if (url.pathname === '/api/coding/projects') return result([project]);
+    assert.equal(url.origin, origin);
+    assert.equal(url.pathname, `/api/coding${projectPath}/branch-comparison-inspect`);
+    assert.equal(options.method, 'POST');
+    assert.deepEqual(JSON.parse(options.body), alternative);
+    return result(returned);
+  });
+  const { api } = await connectTeam(origin, token, projectId);
+  const path = `${projectPath}/branch-comparison-inspect`;
+  await assert.rejects(api(`/projects/${otherProjectId}/branch-comparison-inspect`, alternative), /connected coding project/);
+  await assert.rejects(api(path, { ...alternative, original: identity }), /Choose one saved alternative/);
+  assert.equal(calls(), 1);
+  assert.deepEqual(await api(path, alternative), comparison);
+  for (returned of [
+    { ...comparison, alternative: side({ ...alternative, requestId: 'another-id' }) },
+    { ...comparison, original: { ...comparison.original, report: { ...comparison.original.report, projectId: otherProjectId } } },
+    { ...comparison, original: comparison.alternative },
+  ]) await assert.rejects(api(path, alternative), /invalid okbrain team workspace response/);
+});

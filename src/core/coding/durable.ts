@@ -458,6 +458,16 @@ async function withCodingStorage<T>(
   } finally { session.lease.close(); }
 }
 
+async function requireCodingAgentBinding(
+  options: CodingSessionIdentity, conversation: Conversation, workspace: string, provider: CodingProvider,
+): Promise<void> {
+  const agent = await conversation.agent(context);
+  if (agent.cwd !== workspace || agent.model?.provider !== provider || agent.model.modelId !== options.model)
+    throw new CodingError(`Coding session ${options.session} belongs to a different workspace or model.`);
+  if (options.thinkingLevel !== undefined && agent.thinkingLevel !== options.thinkingLevel)
+    throw new CodingError(`Coding session ${options.session} uses a different reasoning level.`);
+}
+
 async function withCodingSession<T>(
   options: CodingSessionStatusOptions,
   dependencies: CodingDependencies,
@@ -516,14 +526,7 @@ async function withCodingSession<T>(
         root = await harness.conversation(conversationId, context);
         if (!root) throw new CodingError("No saved alternative branch conversation exists.");
       }
-      if (root) {
-        const agent = await root.agent(context);
-        if (agent.cwd !== workspace || agent.model?.provider !== provider || agent.model.modelId !== options.model) {
-          throw new CodingError(`Coding session ${options.session} belongs to a different workspace or model.`);
-        }
-        if (options.thinkingLevel !== undefined && agent.thinkingLevel !== options.thinkingLevel)
-          throw new CodingError(`Coding session ${options.session} uses a different reasoning level.`);
-      }
+      if (root) await requireCodingAgentBinding(options, root, workspace, provider);
       return await use({ harness, storage, root, workspace, provider, budget, history, sourceTool, parent });
     } finally {
       if (harness) await harness.close(context);
@@ -908,7 +911,7 @@ export function compactStandaloneCodingContext(
 async function savedUserContent(storage: SqliteStorage, submission: SubmissionRecord, entryContext = context): Promise<string | undefined> {
   if (submission.entry === undefined) return undefined;
   const entry = (await storage.entry(submission.conversationId, submission.entry, entryContext))?.entry;
-  const user = entry && UserEntry.is(entry) ? entry.model?.[0] : undefined;
+  const user = entry?.conversationId === submission.conversationId && UserEntry.is(entry) ? entry.model?.[0] : undefined;
   if (user?.role === "user" && typeof user.content === "string") return user.content;
 }
 
@@ -995,7 +998,7 @@ function evaluatedPackages(input: unknown): EvaluationInput | undefined {
 async function savedAnswer(storage: SqliteStorage, submission: SubmissionRecord): Promise<AssistantMessage | undefined> {
   if (submission.answer === undefined) return undefined;
   const entry = (await storage.entry(submission.conversationId, submission.answer, context))?.entry;
-  const answer = entry && AssistantEntry.is(entry) ? entry.model?.[0] : undefined;
+  const answer = entry?.conversationId === submission.conversationId && AssistantEntry.is(entry) ? entry.model?.[0] : undefined;
   if (answer?.role !== "assistant") throw new CodingError("The stored assistant message could not be loaded.");
   return answer;
 }
@@ -1274,6 +1277,98 @@ export async function getSavedCodingRequestInput(
   }
 }
 
+type CodingStatusSession = {
+  harness: Harness; storage: SqliteStorage; root: Conversation; provider: CodingProvider; budget: CodingBudget | undefined;
+};
+
+async function readCodingSessionStatus(
+  options: CodingSessionStatusOptions,
+  { harness, storage, root, provider, budget }: CodingStatusSession,
+  comparison = false,
+): Promise<CodingSessionStatusResult> {
+  const inspection = await harness.inspect(context);
+  const view = await root.context(context);
+  const { own, combined } = await codingConversationUsage(harness, storage, root, !options.branch);
+  const result: CodingSessionStatusResult = {
+    session: options.session,
+    provider,
+    model: options.model,
+    pendingRequestIds: [...inspection.submissions.flatMap((submission) =>
+      submission.conversationId === root.id && submission.type === "input" && submission.requestId ? [submission.requestId] : []),
+      ...(options.branch ? [] : packageReviewIds(inspection))],
+    usage: combined,
+    rootUsage: own,
+    context: {
+      ...budget,
+      estimatedTokens: estimateCodingContext(view.messages),
+      historyCompacted: view.head !== undefined && CompactionEntry.is(view.head),
+      ...(pendingCompaction(inspection) ? { compactionPending: true as const } : {}),
+    },
+  };
+  if (options.requestId !== undefined) {
+    const taskId = options.branch ? undefined : await packageReviewTask(harness, options.requestId, context);
+    if (taskId) {
+      if (comparison) throw new CodingError("Compare completed ordinary coding requests.");
+      const task = await harness.getTask(taskId, context);
+      const identity = { session: options.session, requestId: options.requestId };
+      const receipt = task?.state.status === "terminal" ? { ...identity, ...packageReviewReceipt(task.state.outcome) } : undefined;
+      const saved = options.includeEvaluationInput ? evaluatedPackages(task?.input) : undefined;
+      const progress = task && !receipt
+        ? await readCodingTaskProgress(harness, { task: taskId }, context).catch(() => undefined)
+        : undefined;
+      result.request = {
+        requestId: options.requestId, status: receipt?.status ?? "placed",
+        ...(receipt?.status === "done" ? { usage: receipt.usage, stopReason: receipt.stopReason } : {}),
+        ...(receipt?.status === "unanswered" ? { reason: receipt.reason } : {}),
+        ...(receipt && options.includeReceipt ? { receipt } : {}),
+        ...(saved ? { evaluationInput: saved } : {}),
+        ...(progress ? { taskProgress: progress } : {}),
+      };
+      return result;
+    }
+    const submission = await storage.submissionByRequest(root.id, options.requestId, context);
+    if (!submission) throw new CodingError(`No saved request ${options.requestId} exists in coding session ${options.session}.`);
+    if (comparison && (submission.type !== "input" || submission.status !== "done"))
+      throw new CodingError("Compare completed ordinary coding requests.");
+    const progress = submission.status === "placed"
+      ? await readCodingTaskProgress(harness, { conversation: root.id, submission: submission.id }, context).catch(() => undefined)
+      : undefined;
+    const reason = unansweredReason(submission);
+    const content = await savedUserContent(storage, submission) ??
+      (options.includeSavedSource || options.includeSourcePaths ? await queuedUserContent(harness, submission) : undefined);
+    const lookup = approvedSourceLookupEnabled(content);
+    const repositoryContext = savedManifest(content);
+    const saved = !options.includeEvaluationInput || content === undefined ? undefined : evaluationInput(content);
+    const receipt = options.includeReceipt && (submission.status === "done" || submission.status === "unanswered")
+      ? await codingReceipt(storage, submission, { session: options.session, requestId: options.requestId }) : undefined;
+    const answer = receipt ? undefined : await savedAnswer(storage, submission);
+    const accounting = receipt?.status === "done" ? { usage: receipt.usage, stopReason: receipt.stopReason } : answer ? {
+      usage: await requestUsage(storage, submission, answer.usage, lookup),
+      stopReason: answer.stopReason,
+    } : {};
+    const input = comparison || options.includeSavedSource || (options.includeSourcePaths && !repositoryContext)
+      ? savedSource(content) : undefined;
+    if (comparison && (receipt?.status !== "done" || input?.savedPrompt === undefined || input.savedSource === undefined))
+      throw new CodingError("The saved task, source, or result could not be loaded for comparison.");
+    const files = input?.savedSource?.source === "files" ? input.savedSource.files : undefined;
+    result.request = {
+      requestId: options.requestId,
+      status: submission.status,
+      ...(lookup ? { approvedSourceLookup: true } : {}),
+      ...(repositoryContext ? { repositoryContext } : {}),
+      ...accounting,
+      ...(reason ? { reason } : {}),
+      ...(saved ? { evaluationInput: saved } : {}),
+      ...(receipt ? { receipt } : {}),
+      ...(options.includeSavedSource ? input : {}),
+      ...(comparison ? { savedPrompt: input?.savedPrompt } : {}),
+      ...(options.includeSourcePaths && files ? { sourcePaths: files.map(({ path }) => path) } : {}),
+      ...(progress ? { taskProgress: progress } : {}),
+    };
+  }
+  return result;
+}
+
 /** Inspect saved context and accounting without starting or resuming any model request. */
 export async function getCodingSessionStatus(
   options: CodingSessionStatusOptions,
@@ -1281,80 +1376,39 @@ export async function getCodingSessionStatus(
 ): Promise<CodingSessionStatusResult> {
   return withCodingSession(options, dependencies, false, async ({ harness, storage, root, provider, budget }) => {
     if (!root) throw new CodingError(`No coding session ${options.session} exists.`);
-    const inspection = await harness.inspect(context);
-    const view = await root.context(context);
-    const { own, combined } = await codingConversationUsage(harness, storage, root, !options.branch);
-    const result: CodingSessionStatusResult = {
-      session: options.session,
-      provider,
-      model: options.model,
-      pendingRequestIds: [...inspection.submissions.flatMap((submission) =>
-        submission.conversationId === root.id && submission.type === "input" && submission.requestId ? [submission.requestId] : []),
-        ...(options.branch ? [] : packageReviewIds(inspection))],
-      usage: combined,
-      rootUsage: own,
-      context: {
-        ...budget,
-        estimatedTokens: estimateCodingContext(view.messages),
-        historyCompacted: view.head !== undefined && CompactionEntry.is(view.head),
-        ...(pendingCompaction(inspection) ? { compactionPending: true as const } : {}),
-      },
-    };
-    if (options.requestId !== undefined) {
-      const taskId = options.branch ? undefined : await packageReviewTask(harness, options.requestId, context);
-      if (taskId) {
-        const task = await harness.getTask(taskId, context);
-        const identity = { session: options.session, requestId: options.requestId };
-        const receipt = task?.state.status === "terminal" ? { ...identity, ...packageReviewReceipt(task.state.outcome) } : undefined;
-        const saved = options.includeEvaluationInput ? evaluatedPackages(task?.input) : undefined;
-        const progress = task && !receipt
-          ? await readCodingTaskProgress(harness, { task: taskId }, context).catch(() => undefined)
-          : undefined;
-        result.request = {
-          requestId: options.requestId, status: receipt?.status ?? "placed",
-          ...(receipt?.status === "done" ? { usage: receipt.usage, stopReason: receipt.stopReason } : {}),
-          ...(receipt?.status === "unanswered" ? { reason: receipt.reason } : {}),
-          ...(receipt && options.includeReceipt ? { receipt } : {}),
-          ...(saved ? { evaluationInput: saved } : {}),
-          ...(progress ? { taskProgress: progress } : {}),
-        };
-        return result;
-      }
-      const submission = await storage.submissionByRequest(root.id, options.requestId, context);
-      if (!submission) throw new CodingError(`No saved request ${options.requestId} exists in coding session ${options.session}.`);
-      const progress = submission.status === "placed"
-        ? await readCodingTaskProgress(harness, { conversation: root.id, submission: submission.id }, context).catch(() => undefined)
-        : undefined;
-      const reason = unansweredReason(submission);
-      const content = await savedUserContent(storage, submission) ??
-        (options.includeSavedSource || options.includeSourcePaths ? await queuedUserContent(harness, submission) : undefined);
-      const lookup = approvedSourceLookupEnabled(content);
-      const repositoryContext = savedManifest(content);
-      const saved = !options.includeEvaluationInput || content === undefined ? undefined : evaluationInput(content);
-      const receipt = options.includeReceipt && (submission.status === "done" || submission.status === "unanswered")
-        ? await codingReceipt(storage, submission, { session: options.session, requestId: options.requestId }) : undefined;
-      const answer = receipt ? undefined : await savedAnswer(storage, submission);
-      const accounting = receipt?.status === "done" ? { usage: receipt.usage, stopReason: receipt.stopReason } : answer ? {
-        usage: await requestUsage(storage, submission, answer.usage, lookup),
-        stopReason: answer.stopReason,
-      } : {};
-      const input = options.includeSavedSource || (options.includeSourcePaths && !repositoryContext) ? savedSource(content) : undefined;
-      const files = input?.savedSource?.source === "files" ? input.savedSource.files : undefined;
-      result.request = {
-        requestId: options.requestId,
-        status: submission.status,
-        ...(lookup ? { approvedSourceLookup: true } : {}),
-        ...(repositoryContext ? { repositoryContext } : {}),
-        ...accounting,
-        ...(reason ? { reason } : {}),
-        ...(saved ? { evaluationInput: saved } : {}),
-        ...(receipt ? { receipt } : {}),
-        ...(options.includeSavedSource ? input : {}),
-        ...(options.includeSourcePaths && files ? { sourcePaths: files.map(({ path }) => path) } : {}),
-        ...(progress ? { taskProgress: progress } : {}),
-      };
-    }
-    return result;
+    return readCodingSessionStatus(options, { harness, storage, root, provider, budget });
+  });
+}
+
+/** Read a branch result and the exact original result it forked from under one physical lease. */
+export async function getCodingRunComparison(
+  left: CodingSessionIdentity & { requestId: string },
+  right: CodingSessionIdentity & { requestId: string },
+  dependencies: CodingDependencies & { workspaceBinding: string },
+): Promise<[CodingSessionStatusResult, CodingSessionStatusResult]> {
+  const branch = right.branch;
+  if (left.branch || !branch || branch.parentSession !== left.session || !contextVersionPattern.test(branch.id) ||
+      right.session !== `alt-${branch.id.slice(0, 60)}` ||
+      typeof left.requestId !== "string" || typeof right.requestId !== "string" ||
+      right.workspace !== left.workspace || right.provider !== left.provider || right.model !== left.model ||
+      right.thinkingLevel !== left.thinkingLevel)
+    throw new CodingError("Choose an original request and its alternative branch in the same transcript.");
+  const branchProvider = validateOptions(right);
+  return withCodingSession(left, { ...dependencies, apiKey: undefined, allowEnvKey: false }, false, async (opened) => {
+    const { root, harness, storage, workspace } = opened;
+    if (!root) throw sessionMissing(left.session);
+    const transcript = transcriptPath(codingStateRoot(dependencies), left.session);
+    const receipt = await readConversationBranch({ root, harness, storage, session: left.session, transcript }, branch.id);
+    if (receipt?.requestId !== left.requestId)
+      throw new CodingError("The saved branch does not belong to this original request.");
+    const alternative = await harness.conversation(receipt.conversationId, context);
+    if (!alternative) throw new CodingError("No saved alternative branch conversation exists.");
+    await requireCodingAgentBinding(right, alternative, workspace, branchProvider);
+    const include = { includeReceipt: true, includeSourcePaths: true, includeSavedSource: false, includeEvaluationInput: false };
+    return [
+      await readCodingSessionStatus({ ...left, ...include }, { ...opened, root }, true),
+      await readCodingSessionStatus({ ...right, ...include }, { ...opened, root: alternative }, true),
+    ];
   });
 }
 

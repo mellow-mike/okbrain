@@ -78,6 +78,7 @@
       return '<details data-github-handoff><summary>Prepare GitHub review</summary><form class="stack coding-form">' +
         '<p class="muted">Choose an accepted coding request and the GitHub branches for its review.</p>' +
         '<label class="field"><span>Accepted request</span><select name="request" required></select></label>' +
+        '<p class="muted" data-alternative-guidance hidden>Apply this alternative’s reviewed patch, then publish its branch here. The pull request uses the repository, branches, and head commit recorded for this result.</p>' +
         '<div class="row"><button type="button" data-load-runs>Refresh accepted requests</button></div>' +
         '<div class="coding-grid"><label class="field"><span>Base branch</span><input name="base" maxlength="255" required></label>' +
         '<label class="field"><span>Head branch</span><input name="head" maxlength="255" required></label></div>' +
@@ -177,6 +178,7 @@
       if (!prepare || !form) return;
 
       const request = form.elements.request;
+      const alternativeGuidance = form.querySelector('[data-alternative-guidance]');
       const comparison = form.querySelector('[data-comparison]');
       const load = form.querySelector('[data-load-runs]');
       const submit = form.querySelector('button[type=submit]');
@@ -190,24 +192,28 @@
       let accepted = [];
       let revision = 0;
       let branchRevision = 0;
-      async function loadRuns() {
-        const selected = accepted[Number(request.value)] ?? target;
-        const rows = await coding('/projects/' + encodeURIComponent(project.id) + '/runs');
-        accepted = rows.filter((run) => run.status === 'done' && run.review === 'accepted');
-        request.replaceChildren(...accepted.map((run, index) => new Option(run.session + ' / ' + run.id, String(index))));
-        if (!accepted.length) request.replaceChildren(new Option('Accept a run in Review first', ''));
-        const index = selected && accepted.findIndex((run) => run.session === selected.session && run.id === selected.id);
-        if (index >= 0) request.value = String(index);
-        else clearPreview();
-        submit.disabled = !accepted.length;
+      const selectedRun = () => request.value === '' ? undefined : accepted[Number(request.value)];
+      function updateSelection() {
+        const selected = selectedRun();
+        alternativeGuidance.hidden = !selected?.branch;
+        submit.disabled = !selected;
         for (const button of [previewBranch, recoverBranch, previewPr, recoverPr]) {
-          if (button) button.disabled = !accepted.length;
+          if (button) button.disabled = !selected;
         }
       }
-      submit.disabled = true;
-      for (const button of [previewBranch, recoverBranch, previewPr, recoverPr]) {
-        if (button) button.disabled = true;
+      async function loadRuns() {
+        const selected = selectedRun() ?? target;
+        const rows = await coding('/projects/' + encodeURIComponent(project.id) + '/runs');
+        accepted = rows.filter((run) => run.status === 'done' && run.review === 'accepted');
+        request.replaceChildren(new Option(accepted.length ? 'Choose an accepted request' : 'Accept a run in Review first', ''),
+          ...accepted.map((run, index) => new Option(run.session + ' / ' + run.id + (run.branch ? ' · Alternative' : ''), String(index))));
+        const index = selected ? accepted.findIndex((run) => run.session === selected.session && run.id === selected.id) : -1;
+        if (index >= 0) request.value = String(index);
+        else if (!selected && accepted.length === 1) request.value = '0';
+        clearPreview();
+        updateSelection();
       }
+      updateSelection();
       prepare.addEventListener('toggle', () => {
         if (prepare.open) perform(load, loadRuns);
       });
@@ -229,16 +235,21 @@
         if (branchResult?.contains(event.target) || prReceipt?.contains(event.target)) return;
         if (event.target.name === 'branchMessage') clearBranchPreview();
         else if (['prTitle', 'prBody', 'prDraft'].includes(event.target.name)) clearPullPreview();
-        else clearPreview();
+        else {
+          clearPreview();
+          if (event.target === request) updateSelection();
+        }
       });
       form.addEventListener('submit', (event) => {
         event.preventDefault();
-        const run = accepted[Number(request.value)];
+        const run = selectedRun();
         if (!run) return;
+        const current = revision;
         perform(submit, async () => {
           const receipt = await coding(path + 'handoff', {
             session: run.session, requestId: run.id, base: form.elements.base.value, head: form.elements.head.value,
           });
+          if (current !== revision) return;
           comparison.innerHTML = external(receipt.url, 'Open GitHub comparison');
           comparison.querySelector('a').focus();
         });
@@ -262,7 +273,7 @@
       }
 
       recoverBranch?.addEventListener('click', () => {
-        const run = accepted[Number(request.value)];
+        const run = selectedRun();
         if (!run) return;
         const identity = { session: run.session, requestId: run.id };
         const current = branchRevision;
@@ -274,7 +285,7 @@
       });
 
       previewBranch?.addEventListener('click', () => {
-        const run = accepted[Number(request.value)];
+        const run = selectedRun();
         if (!run || !form.reportValidity()) return;
         const details = { session: run.session, requestId: run.id, base: form.elements.base.value, head: form.elements.head.value,
           message: form.elements.branchMessage.value };
@@ -332,7 +343,7 @@
       }
 
       recoverPr?.addEventListener('click', () => {
-        const run = accepted[Number(request.value)];
+        const run = selectedRun();
         if (!run) return;
         const identity = { session: run.session, requestId: run.id };
         const current = revision;
@@ -344,7 +355,7 @@
       });
 
       previewPr?.addEventListener('click', () => {
-        const run = accepted[Number(request.value)];
+        const run = selectedRun();
         if (!run || !form.reportValidity()) return;
         const details = { session: run.session, requestId: run.id, base: form.elements.base.value, head: form.elements.head.value,
           title: form.elements.prTitle.value, body: form.elements.prBody.value, draft: form.elements.prDraft.checked };
@@ -352,12 +363,17 @@
         perform(previewPr, async () => {
           const preview = await coding(path + 'pr-preview', details);
           if (revision !== current) return;
-          prReceipt.innerHTML = '<p data-pr-summary></p><pre data-pr-markdown></pre>' +
+          prReceipt.innerHTML = '<p data-pr-summary></p><p data-pr-head hidden></p><pre data-pr-markdown></pre>' +
             '<div>' + external(preview.comparison, 'Review the comparison on GitHub') + '</div>' +
             '<label class="row"><input type="checkbox" data-pr-confirm><span>Approve this exact title, Markdown and branch comparison</span></label>' +
             '<div class="row"><button type="button" class="primary" data-pr-publish disabled>Publish to GitHub</button></div>';
           prReceipt.querySelector('[data-pr-summary]').textContent = preview.title + ' · ' + preview.repository +
             ' · ' + preview.head + ' → ' + preview.base + (preview.draft ? ' · Draft' : '');
+          const head = prReceipt.querySelector('[data-pr-head]');
+          if (preview.headCommit) {
+            head.textContent = 'Recorded head commit ' + preview.headCommit;
+            head.hidden = false;
+          }
           prReceipt.querySelector('[data-pr-markdown]').textContent = preview.body;
           const confirm = prReceipt.querySelector('[data-pr-confirm]');
           const publish = prReceipt.querySelector('[data-pr-publish]');

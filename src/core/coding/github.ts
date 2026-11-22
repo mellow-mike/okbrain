@@ -226,7 +226,14 @@ function pullReceipt(row: Record<string, unknown>, apiRequestId: string | null):
   return { id, number, draft, apiRequestId };
 }
 
-export async function githubFindPull(repository: string, base: string, head: string, approval: string, token: string, transport: GitHubFetch) {
+function verifyPullHead(row: Record<string, unknown>, expectedHead?: string) {
+  if (expectedHead && asRecord(row.head).sha !== expectedHead)
+    throw new GitHubError("GitHub reports a different head commit for this pull request. Inspect the pull request on GitHub.", 409);
+}
+
+export async function githubFindPull(
+  repository: string, base: string, head: string, approval: string, token: string, transport: GitHubFetch, expectedHead?: string,
+) {
   const limit = 50;
   const query = new URLSearchParams({ state: "all", head: `${repository.split("/")[0]}:${head}`, base,
     per_page: String(limit), sort: "created", direction: "desc" });
@@ -236,18 +243,22 @@ export async function githubFindPull(repository: string, base: string, head: str
   const marker = receiptMarker(approval);
   const matching = sameBranches.filter(({ body }) => typeof body === "string" && body.trimEnd().endsWith(marker));
   if (matching.length > 1) throw new GitHubError("Multiple pull requests have this receipt marker. Review them in GitHub.", 409);
-  if (matching[0]) return { pull: pullReceipt(matching[0], apiRequestId), existing: false };
+  if (matching[0]) {
+    verifyPullHead(matching[0], expectedHead);
+    return { pull: pullReceipt(matching[0], apiRequestId), existing: false };
+  }
   if (data.length >= limit)
     throw new GitHubError("GitHub returned too many matching pull requests to confirm publication safely.", 409);
   return { pull: null, existing: sameBranches.some(({ state }) => state === "open") };
 }
 
-export async function githubCreatePull(repository: string, input: GitHubPullDraft, token: string, transport: GitHubFetch) {
+export async function githubCreatePull(repository: string, input: GitHubPullDraft, token: string, transport: GitHubFetch, expectedHead?: string) {
   const { data, apiRequestId } = await gitHubRequest(`/repos/${repository}/pulls`, token, transport, input);
   const row = asRecord(data);
   if (!pullMatches(row, repository, input.base, input.head)
     || row.title !== input.title || row.body !== input.body || row.draft !== input.draft)
     throw new GitHubError("GitHub returned a different pull request. Recover the approved result before retrying.", 502);
+  verifyPullHead(row, expectedHead);
   return pullReceipt(row, apiRequestId);
 }
 

@@ -1870,7 +1870,8 @@ try {
   await savedBranches.getByRole("button", { name: "Use branch session", exact: true }).click();
   assert.equal(await projectComposer.getByLabel("Session", { exact: true }).inputValue(), branchPreview.branchSession);
   await projectComposer.getByRole("combobox", { name: "Source", exact: true }).selectOption("files");
-  await projectComposer.getByLabel("Task", { exact: true }).fill("Compare a separate alternative against the accepted original.");
+  const branchPrompt = "Compare <em>a separate alternative</em> against the accepted original.";
+  await projectComposer.getByLabel("Task", { exact: true }).fill(branchPrompt);
   const reviewedAlternative = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding" + projectPath + "/preview");
   await projectComposer.getByRole("button", { name: "Preview source", exact: true }).click();
   const branchSourcePreview = await reviewedAlternative;
@@ -1883,7 +1884,7 @@ try {
   const branchSend = projectComposer.getByRole("button", { name: "Send request", exact: true });
   assert.equal(await branchSend.isEnabled(), false);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
-  const branchAnswer = "Alternative review response on the separate session.";
+  const branchAnswer = "Alternative review response on the separate session.\n\n```diff\n" + alternatePatch + "```";
   projectFaux.setResponses([(input) => {
     assert.match(JSON.stringify(input.messages), /Project response ready for review/);
     return fauxAssistantMessage(branchAnswer);
@@ -1893,10 +1894,51 @@ try {
   await branchSend.click();
   const branchRunResponse = await branchRun;
   assert.ok(branchRunResponse.ok(), await branchRunResponse.text());
-  assert.equal(branchRunResponse.request().postDataJSON().branchContextId, savedBranchContext.id);
+  const sentBranchRun = branchRunResponse.request().postDataJSON();
+  assert.equal(sentBranchRun.branchContextId, savedBranchContext.id);
+  const alternativeRun = { session: branchPreview.branchSession, requestId: sentBranchRun.requestId };
   await projectResponse.filter({ hasText: branchAnswer }).waitFor();
   await page.locator(".coding-activity").getByText("Alternative to project-browser · project-task-progress", { exact: true }).waitFor();
   assert.equal(await startFresh.isVisible(), false);
+  const compare = page.getByRole("button", { name: "Compare with original", exact: true });
+  const compared = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding" + projectPath + "/branch-comparison-inspect");
+  await compare.click();
+  const comparisonResponse = await compared;
+  assert.ok(comparisonResponse.ok(), await comparisonResponse.text());
+  assert.deepEqual(comparisonResponse.request().postDataJSON(), alternativeRun);
+  const comparison = page.getByRole("dialog", { name: "Compare review results", exact: true });
+  const original = comparison.locator('[data-comparison-side="original"]');
+  const alternative = comparison.locator('[data-comparison-side="alternative"]');
+  assert.equal(await original.locator("[data-comparison-task]").textContent(), projectPrompt);
+  assert.equal(await alternative.locator("[data-comparison-task]").textContent(), branchPrompt);
+  assert.equal(await original.locator("[data-comparison-answer]").textContent(), projectAnswer);
+  assert.equal(await alternative.locator("[data-comparison-answer]").textContent(), branchAnswer);
+  assert.equal(await comparison.locator("pre strong, pre em, pre script").count(), 0);
+  await original.getByText("Completed · Accepted", { exact: true }).waitFor();
+  await alternative.getByText("Completed · Awaiting review", { exact: true }).waitFor();
+  await original.getByText("browser.ts", { exact: true }).waitFor();
+  await alternative.getByText("No saved source references.", { exact: true }).waitFor();
+  assert.match(await alternative.locator("[data-comparison-usage]").textContent() ?? "", /^Request usage · [\d,]+ input · /);
+  const comparisonGrid = comparison.locator("[data-comparison-results]");
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  assert.equal(await comparisonGrid.evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length), 1);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  try {
+    assert.equal(await comparisonGrid.evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length), 2);
+  } finally { await page.setViewportSize({ width: 375, height: 700 }); }
+  await comparison.getByRole("button", { name: "Open original run", exact: true }).click();
+  await comparison.waitFor({ state: "hidden" });
+  await projectResponse.filter({ hasText: "Project response ready for review." }).waitFor();
+  await compare.waitFor({ state: "hidden" });
+  assert.equal(await page.locator("[data-comparison-side]").count(), 0);
+  await page.locator(".coding-activity [data-runs]").getByRole("button", { name: new RegExp(alternativeRun.requestId) }).click();
+  await projectResponse.filter({ hasText: branchAnswer }).waitFor();
+  await page.locator(".coding-activity").getByRole("button", { name: "Accept result", exact: true }).click();
+  await reviewPatch.click();
+  await page.getByText("Proposed diff loaded for review.", { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("Git unified diff", { exact: true }).inputValue(), alternatePatch);
+  assert.deepEqual(proposalRequests, [alternativeRun]);
+  assert.equal(await Bun.file(file).text(), branchBefore);
   assert.equal(projectFaux.state.callCount, callsBeforeAlternative + 1);
   await page.locator(".coding-activity [data-runs]").getByRole("button", { name: /project-task-progress/ }).click();
   await reviewPatch.waitFor();
@@ -1932,7 +1974,7 @@ try {
   const proposalChoice = page.getByRole("combobox", { name: "Proposed diff", exact: true });
   await proposalChoice.waitFor();
   const targetPatch = { session: "project-browser", requestId: "project-task-progress" };
-  assert.deepEqual(proposalRequests, [targetPatch]);
+  assert.deepEqual(proposalRequests, [alternativeRun, targetPatch]);
   const diffEditor = page.getByLabel("Git unified diff", { exact: true });
   const previewPatch = page.getByRole("button", { name: "Preview patch", exact: true });
   assert.equal(await diffEditor.inputValue(), "");
@@ -2014,7 +2056,7 @@ try {
 
   await page.evaluate((id) => { location.hash = "#coding/" + id + "/patch/project-browser/project-task-progress"; }, project.id);
   await proposalChoice.waitFor();
-  assert.deepEqual(proposalRequests, [targetPatch, targetPatch]);
+  assert.deepEqual(proposalRequests, [alternativeRun, targetPatch, targetPatch]);
   assert.deepEqual(JSON.parse(await page.getByRole("combobox", { name: "Accepted result", exact: true }).inputValue()), targetPatch);
 
   const remote = Bun.spawnSync(["git", "remote", "add", "origin", `https://github.com/${githubFixture.repository}.git`], { cwd: workspace });
@@ -2032,6 +2074,7 @@ try {
   await github.getByRole("button", { name: "Save publishing token", exact: true }).click();
   await github.getByText("Pull request publishing token saved.", { exact: true }).waitFor();
   await github.getByText("Prepare GitHub review", { exact: true }).click();
+  await github.getByRole("combobox", { name: "Accepted request", exact: true }).selectOption({ label: "project-browser / project-task-progress" });
   await github.getByLabel("Base branch", { exact: true }).fill(githubFixture.base);
   await github.getByLabel("Head branch", { exact: true }).fill(githubFixture.head);
   await github.getByText("Create branch from applied patch", { exact: true }).click();

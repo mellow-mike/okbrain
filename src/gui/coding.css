@@ -30,6 +30,21 @@
 .coding-panel [data-run-copy-actions] button:hover:not(:disabled) { font-weight: 560; }
 .coding-branch-history { max-height: 24rem; overflow: auto; min-width: 0; }
 .coding-branch-history pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.coding-comparison {
+  width: min(64rem, calc(100% - 2 * var(--space-4)));
+  max-height: calc(100% - 2 * var(--space-4));
+  margin: auto;
+  overflow: auto;
+  color: var(--ink);
+}
+.coding-comparison::backdrop { background: rgb(0 0 0 / 55%); }
+.coding-comparison > .stack { max-width: none; }
+.coding-comparison-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+.coding-comparison-side { min-width: 0; padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.coding-comparison-side pre { max-height: 22rem; overflow: auto; overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+  .coding-comparison-grid { grid-template-columns: minmax(0, 1fr); }
+}
 .coding-form { padding-top: var(--space-4); }
 .coding-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr)); }
 .coding-panel input, .coding-panel select { min-width: 0; }

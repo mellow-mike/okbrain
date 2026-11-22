@@ -12,10 +12,10 @@ import {
 } from "./approved-patch.ts";
 import {
   cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, compactCodingContext, createCodingBranch,
-  getCodingSessionStatus, getSavedCodingRequestInput, hasCodingCredential, listCodingModels, parseCodingHandoff,
+  getCodingRunComparison, getCodingSessionStatus, getSavedCodingRequestInput, hasCodingCredential, listCodingModels, parseCodingHandoff,
   previewCodingAttachments, previewCodingBranch, previewCodingBranchContext, previewCodingContextCompaction, previewCodingContextReset, requireNoPendingCodingContextCompaction,
   resetCodingContext, runCodingSession,
-  type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions,
+  type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions, type CodingSessionStatusResult,
 } from "./durable.ts";
 import { CodingEvaluationError, CodingEvaluations, parseEvaluation, pinnedEvaluationBinding, presentEvidence } from "./evaluation.ts";
 import { pinnedEvaluationRubric, PinnedEvaluationWorkspaceError, verifyPinnedEvaluationWorkspace } from "./evaluation-rubric.ts";
@@ -104,6 +104,7 @@ const now = () => new Date().toISOString();
 const digest = (input: string) => createHash("sha256").update(input).digest("hex");
 const retentionActor = "system:transcript-retention";
 const retentionBatchSize = 24;
+const maxComparisonAnswerLength = 64_000;
 const retentionSweepInterval = 60 * 60 * 1000;
 const githubPullActions = ["github-pr-inspect", "github-pr-recover", "github-pr-preview", "github-pr-publish"];
 const githubBranchActions = ["github-branch-inspect", "github-branch-recover", "github-branch-preview", "github-branch-publish"];
@@ -910,6 +911,38 @@ export class CodingProjectControl {
     return getSavedCodingRequestInput(this.#session(project, run), this.#dependencies(project, actor));
   }
 
+  async #compareBranch(project: ProjectRow, body: Json, actor: Actor) {
+    const run = this.#runParts(body);
+    const alternative = this.#readRun(project.id, run.session, run.requestId);
+    const branch = this.#branch(project.id, run.session);
+    if (branch?.status !== "ready" || alternative.status !== "done" || !alternative.admitted)
+      throw new ProjectControlError("Choose a finished alternative review to compare with its original result.", 409);
+    const original = this.#readRun(project.id, branch.parent_session, branch.parent_request);
+    if (original.status !== "done" || !original.admitted)
+      throw new ProjectControlError("The original saved result is unavailable.", 409);
+    if (this.#sessionDeleting(project.id, run.session)) throw new ProjectControlError("This transcript is being deleted.", 409);
+    if (this.#active.has(this.#sessionKey(project.id, run.session)))
+      throw new ProjectControlError("Wait for the active request in this transcript before comparing saved answers.", 409);
+
+    const views = await getCodingRunComparison(
+      this.#session(project, { session: original.session, requestId: original.id }),
+      this.#session(project, run), this.#dependencies(project, actor),
+    );
+    const comparison = (row: RunRow, pi: CodingSessionStatusResult) => {
+      const receipt = pi.request?.receipt;
+      const report = codingRunReport(pi, { projectId: project.id, requestId: row.id, status: row.status, review: row.review });
+      if (receipt?.status !== "done" || !report)
+        throw new ProjectControlError("A saved answer could not be loaded for comparison.", 409);
+      return {
+        session: row.session, requestId: row.id, review: row.review, status: row.status,
+        task: pi.request?.savedPrompt,
+        answer: { text: receipt.text.slice(0, maxComparisonAnswerLength).toWellFormed(), truncated: receipt.text.length > maxComparisonAnswerLength },
+        report,
+      };
+    };
+    return { original: comparison(original, views[0]), alternative: comparison(alternative, views[1]) };
+  }
+
   async #changeContext(project: ProjectRow, body: Json, actor: Actor, compact: boolean, preview: boolean, canWrite: () => boolean) {
     const session = field(body, "session", 64);
     if (this.#branch(project.id, session)) throw new ProjectControlError("Manual context changes are available in the parent session.", 409);
@@ -1050,30 +1083,36 @@ export class CodingProjectControl {
   }
 
   #acceptedPatchRun(project: ProjectRow, run: { session: string; requestId: string }) {
-    if (this.#branch(project.id, run.session)) throw new ProjectControlError("Use alternative branches for review. Apply changes from an accepted parent session run.", 409);
     const row = this.#readRun(project.id, run.session, run.requestId);
     if (row.status !== "done" || row.review !== "accepted")
       throw new ProjectControlError("Accept the finished result before reviewing a patch.", 409);
     return row;
   }
 
+  #requirePatchSlot(project: ProjectRow, session: string) {
+    if (this.#sessionDeleting(project.id, session)) throw new ProjectControlError("This transcript is being deleted.", 409);
+    if (this.#active.has(this.#sessionKey(project.id, session)))
+      throw new ProjectControlError("Wait for the active request in this transcript before reviewing a patch.", 409);
+  }
+
   async #patchProposals(project: ProjectRow, body: Json, actor: Actor) {
     this.#requireOwner(actor);
     const run = this.#runParts(body);
     this.#acceptedPatchRun(project, run);
-    if (this.#get("SELECT session FROM session_deletions WHERE project = ? AND session = ?", project.id, run.session))
-      throw new ProjectControlError("This transcript is being deleted.", 409);
-    if (this.#active.has(this.#sessionKey(project.id, run.session)))
-      throw new ProjectControlError("Wait for the active request in this session before reviewing a proposed patch.", 409);
+    this.#requirePatchSlot(project, run.session);
     const saved = await getCodingSessionStatus({ ...this.#session(project, run), includeReceipt: true }, this.#dependencies(project, actor));
     const receipt = saved.request?.receipt;
     return { proposals: receipt?.status === "done" ? codingPatchProposals(receipt.text, JSON.parse(project.scopes) as string[]) : [] };
   }
 
-  async #patch(project: ProjectRow, body: Json, actor: Actor, apply: boolean) {
+  async #patch(project: ProjectRow, body: Json, actor: Actor, apply: boolean, canWrite: () => boolean) {
     this.#requireOwner(actor);
     const run = this.#runParts(body);
     const row = this.#acceptedPatchRun(project, run);
+    this.#requirePatchSlot(project, run.session);
+    const authorize = () => {
+      if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to apply the patch.", 403);
+    };
     const diff = body.diff;
     if (typeof diff !== "string" || Buffer.byteLength(diff) > approvedPatchBytes)
       throw new ProjectControlError("Paste a Git unified diff up to 48 KiB.");
@@ -1097,6 +1136,7 @@ export class CodingProjectControl {
         const state = await approvedPatchState(workspace, scopes, files);
         if (state === "different") throw new ProjectControlError("The worktree differs from both recorded patch states. Inspect the files before proceeding.", 409);
         if (!apply || state === "after") {
+          if (apply) authorize();
           return { id: prior.preview_id, files, applied: apply ? this.#finishPatch(project, row, actor) : null, reused: true };
         }
       }
@@ -1105,6 +1145,7 @@ export class CodingProjectControl {
         const id = digest(JSON.stringify([1, project.id, row.session, row.id, row.reviewed, diffHash, files]));
         if (!apply) return { id, files, applied: null, reused: false };
         if (id !== approval) throw new ProjectControlError("The patch or worktree changed. Preview it again before applying.", 409);
+        authorize();
         if (!prior) {
           this.#db.transaction(() => {
             this.#write("INSERT INTO applied_patches VALUES (?, ?, ?, ?, ?, ?, 'prepared', NULL)",
@@ -1182,8 +1223,10 @@ export class CodingProjectControl {
       HAVING MAX(runs.status IN ('running', 'interrupted')) = 0
         AND MAX(julianday(MAX(runs.updated, COALESCE(runs.reviewed, runs.updated), COALESCE(coding_evaluations.reviewed, runs.updated))))
           <= julianday(?) - transcript_retention.days
-        AND NOT EXISTS (SELECT 1 FROM applied_patches p WHERE p.project = runs.project AND p.status = 'prepared'
-          AND p.session = COALESCE(b.parent_session, runs.session))
+        AND NOT EXISTS (SELECT 1 FROM applied_patches p
+          LEFT JOIN conversation_branches pb ON pb.project = p.project AND pb.session = p.session
+          WHERE p.project = runs.project AND p.status = 'prepared'
+          AND COALESCE(pb.parent_session, p.session) = COALESCE(b.parent_session, runs.session))
         AND NOT EXISTS (SELECT 1 FROM conversation_branches recent WHERE recent.project = runs.project
           AND recent.parent_session = COALESCE(b.parent_session, runs.session) AND julianday(recent.created) > julianday(?) - transcript_retention.days)
       ORDER BY MAX(runs.updated), runs.project, session LIMIT ?
@@ -1309,15 +1352,34 @@ export class CodingProjectControl {
 
   #finishPublication(project: string, run: RunRow, actor: Actor, pull: GitHubPullReceipt, recovered: boolean) {
     this.#db.transaction(() => {
+      const time = now();
       this.#write(`UPDATE github_publications SET created = ?, pull_id = ?, pull_number = ?, draft = ?, api_request_id = ?
         WHERE project = ? AND session = ? AND request_id = ?`,
-      now(), pull.id, pull.number, Number(pull.draft), pull.apiRequestId, project, run.session, run.id);
+      time, pull.id, pull.number, Number(pull.draft), pull.apiRequestId, project, run.session, run.id);
+      this.#write("UPDATE runs SET updated = ? WHERE project = ? AND session = ? AND id = ?", time, project, run.session, run.id);
       this.#audit(project, recovered ? "github_pr_recovered" : "github_pr_created", actor.id, run.session, run.id);
     })();
     return this.#publicationView(this.#publication(project, run)!);
   }
 
-  async #publishGitHub(project: ProjectRow, run: RunRow, bound: GitHubRow, action: string, body: Json, actor: Actor) {
+  #publishedAlternativeCommit(project: ProjectRow, run: RunRow, repository: string, base: string, head: string) {
+    if (!this.#branch(project.id, run.session)) return undefined;
+    const published = this.#branchPublication(project.id, run);
+    if (!published?.created || !published.commit_sha)
+      throw new ProjectControlError("Publish the applied patch from this alternative run before preparing its GitHub review.", 409);
+    if (published.repository !== repository || published.base !== base || published.head !== head)
+      throw new ProjectControlError("Use the GitHub repository and branches recorded for this alternative run.", 409);
+    return published.commit_sha;
+  }
+
+  async #verifyAlternativeHead(project: ProjectRow, repository: string, head: string, expectedCommit: string) {
+    const token = this.#githubContentsToken(project.id);
+    if (!token) throw new ProjectControlError("Restore the branch publishing token to verify this alternative's GitHub commit.", 409);
+    if (await githubBranchRef(repository, head, token, this.#githubFetch) !== expectedCommit)
+      throw new ProjectControlError("The published head no longer points to this alternative's recorded commit. Review the branch on GitHub.", 409);
+  }
+
+  async #publishGitHub(project: ProjectRow, run: RunRow, bound: GitHubRow, action: string, body: Json, actor: Actor, authorize: () => void) {
     const saved = this.#publication(project.id, run);
     const currentBinding = this.#get<GitHubRow>("SELECT remote, repository, token FROM github_projects WHERE project = ?", project.id);
     if (currentBinding?.remote !== bound.remote || currentBinding.repository !== bound.repository)
@@ -1328,39 +1390,53 @@ export class CodingProjectControl {
       if (!saved) throw new ProjectControlError("Confirm the pull request preview before attempting recovery.", 409);
       if (saved.repository !== bound.repository) throw new ProjectControlError("Reconnect the approved repository to recover this pull request.", 409);
       if (saved.pull_number !== null) return this.#publicationView(saved);
-      const found = await githubFindPull(saved.repository, saved.base, saved.head, saved.approval, token, this.#githubFetch);
+      const expectedHead = this.#publishedAlternativeCommit(project, run, saved.repository, saved.base, saved.head);
+      const found = await githubFindPull(saved.repository, saved.base, saved.head, saved.approval, token, this.#githubFetch, expectedHead);
+      if (found.pull) authorize();
       return found.pull ? this.#finishPublication(project.id, run, actor, found.pull, true) : this.#publicationView(saved);
     }
 
     const draft = githubPullDraft(body);
-    const approval = digest(JSON.stringify([1, project.id, bound.repository, run.session, run.id, run.signature, run.reviewed, draft]));
+    const expectedHead = this.#publishedAlternativeCommit(project, run, bound.repository, draft.base, draft.head);
+    const approval = digest(JSON.stringify([1, project.id, bound.repository, run.session, run.id, run.signature, run.reviewed, draft,
+      ...(expectedHead ? [expectedHead] : []),
+    ]));
     const approvedDraft = { ...draft, body: githubPullBody(draft.body, approval) };
-    if (action === "github-pr-preview")
-      return { approval, repository: bound.repository, ...approvedDraft, comparison: githubComparison(bound.repository, draft.base, draft.head) };
+    if (action === "github-pr-preview") {
+      if (expectedHead) await this.#verifyAlternativeHead(project, bound.repository, draft.head, expectedHead);
+      return { approval, repository: bound.repository, ...approvedDraft, comparison: githubComparison(bound.repository, draft.base, draft.head),
+        ...(expectedHead ? { headCommit: expectedHead } : {}),
+      };
+    }
     if (body.approved !== true || body.approval !== approval)
       throw new ProjectControlError("Review the exact pull request and confirm creation again.", 409);
     if (saved && saved.approval !== approval)
       throw new ProjectControlError("This run already has a different publishing approval. Recover its receipt or retry the original approval.", 409);
     if (saved?.pull_number != null) return this.#publicationView(saved);
 
-    const found = await githubFindPull(bound.repository, draft.base, draft.head, approval, token, this.#githubFetch);
+    const found = await githubFindPull(bound.repository, draft.base, draft.head, approval, token, this.#githubFetch, expectedHead);
     if (found.pull) {
       if (!saved) throw new ProjectControlError("GitHub already has a pull request with this receipt marker. Review it before continuing.", 409);
+      authorize();
       return this.#finishPublication(project.id, run, actor, found.pull, true);
     }
     if (found.existing)
       throw new ProjectControlError("An open pull request already uses those branches. Review it on GitHub.", 409);
 
     await this.#checkGitHubRemote(project, bound);
+    if (expectedHead) await this.#verifyAlternativeHead(project, bound.repository, draft.head, expectedHead);
     const current = this.#get<GitHubRow>("SELECT remote, repository, token FROM github_projects WHERE project = ?", project.id);
     if (current?.remote !== bound.remote || current.repository !== bound.repository || this.#githubPublishToken(project.id) !== token)
       throw new ProjectControlError("The GitHub connection or publishing token changed. Review the preview again.", 409);
+    authorize();
     if (!saved) this.#db.transaction(() => {
+      const time = now();
       this.#write(`INSERT INTO github_publications(project, session, request_id, approval, repository, base, head, approved)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, project.id, run.session, run.id, approval, bound.repository, draft.base, draft.head, now());
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, project.id, run.session, run.id, approval, bound.repository, draft.base, draft.head, time);
+      this.#write("UPDATE runs SET updated = ? WHERE project = ? AND session = ? AND id = ?", time, project.id, run.session, run.id);
       this.#audit(project.id, "github_pr_approved", actor.id, run.session, run.id);
     })();
-    const pull = await githubCreatePull(bound.repository, approvedDraft, token, this.#githubFetch);
+    const pull = await githubCreatePull(bound.repository, approvedDraft, token, this.#githubFetch, expectedHead);
     return this.#finishPublication(project.id, run, actor, pull, false);
   }
 
@@ -1397,12 +1473,13 @@ export class CodingProjectControl {
       throw new ProjectControlError("The GitHub connection or branch publishing token changed. Review the branch preview again.", 409);
   }
 
-  async #githubPatchBranch(project: ProjectRow, bound: GitHubRow | null, action: string, body: Json, actor: Actor) {
+  async #githubPatchBranch(project: ProjectRow, bound: GitHubRow | null, action: string, body: Json, actor: Actor, authorize: () => void) {
     this.#requireOwner(actor);
     const request = this.#runParts(body);
     const runId = { session: request.session, id: request.requestId };
     const saved = this.#branchPublication(project.id, runId);
     if (action === "github-branch-inspect") return saved ? this.#branchView(saved) : null;
+    this.#requirePatchSlot(project, runId.session);
     if (!bound) throw new ProjectControlError("Connect a local GitHub remote for this project first.", 409);
     if (saved && saved.repository !== bound.repository)
       throw new ProjectControlError("Reconnect the approved repository to recover this branch.", 409);
@@ -1422,14 +1499,16 @@ export class CodingProjectControl {
     };
     const createRef = async (head: string, commitSha: string) => {
       await this.#verifyBranchConnection(project, bound, token);
+      authorize();
       await githubCreatePatchRef(repository, head, commitSha, token, transport);
       return this.#finishBranch(project.id, runId, actor, false);
     };
     if (action === "github-branch-recover") {
       if (!saved) throw new ProjectControlError("Confirm a branch preview before attempting recovery.", 409);
       if (saved.created || !saved.commit_sha) return this.#branchView(saved);
-      return await remoteHead(saved.head, saved.commit_sha)
-        ? this.#finishBranch(project.id, runId, actor, true) : this.#branchView(saved);
+      if (!await remoteHead(saved.head, saved.commit_sha)) return this.#branchView(saved);
+      authorize();
+      return this.#finishBranch(project.id, runId, actor, true);
     }
 
     const run = this.#readRun(project.id, runId.session, runId.id);
@@ -1456,7 +1535,10 @@ export class CodingProjectControl {
       if (body.approval !== saved.approval)
         throw new ProjectControlError("Review the exact branch and confirm publication again.", 409);
       if (saved.created) return this.#branchView(saved);
-      if (await remoteHead(saved.head, saved.commit_sha)) return this.#finishBranch(project.id, runId, actor, true);
+      if (await remoteHead(saved.head, saved.commit_sha)) {
+        authorize();
+        return this.#finishBranch(project.id, runId, actor, true);
+      }
       // A prior attempt saved the exact commit before trying to expose the ref.
       return createRef(saved.head, saved.commit_sha);
     }
@@ -1475,6 +1557,7 @@ export class CodingProjectControl {
       throw new ProjectControlError("The GitHub base, patch, or requested branch changed. Preview it again before publishing.", 409);
 
     await this.#verifyBranchConnection(project, bound, token);
+    authorize();
     if (saved?.approval !== approval) this.#db.transaction(() => {
       // Until a commit is saved, no create-ref request can have been sent.
       this.#write(`INSERT INTO github_branch_publications(project, session, request_id, approval, repository, base, head, base_sha, base_tree)
@@ -1492,7 +1575,10 @@ export class CodingProjectControl {
     return createRef(head, commitSha);
   }
 
-  async #github(project: ProjectRow, action: string, method: string, body: Json, actor: Actor) {
+  async #github(project: ProjectRow, action: string, method: string, body: Json, actor: Actor, canWrite: () => boolean) {
+    const authorize = () => {
+      if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to update the GitHub review.", 403);
+    };
     const bound = this.#get<GitHubRow>("SELECT remote, repository, token FROM github_projects WHERE project = ?", project.id);
     const status = (row: GitHubRow | null) => ({
       canConfigure: actor.owner,
@@ -1563,7 +1649,7 @@ export class CodingProjectControl {
         return status(bound);
       }
       if (method === "POST" && githubBranchActions.includes(action))
-        return await this.#githubPatchBranch(project, bound, action, body, actor);
+        return await this.#githubPatchBranch(project, bound, action, body, actor, authorize);
       if (method === "POST" && githubPullActions.includes(action)) {
         this.#requireOwner(actor);
         const request = this.#runParts(body);
@@ -1576,7 +1662,8 @@ export class CodingProjectControl {
         const run = this.#readRun(project.id, request.session, request.requestId);
         if (run.status !== "done" || run.review !== "accepted")
           throw new ProjectControlError("Accept the coding request in Review before publishing a GitHub pull request.", 409);
-        return await this.#publishGitHub(project, run, bound, action, body, actor);
+        this.#requirePatchSlot(project, run.session);
+        return await this.#publishGitHub(project, run, bound, action, body, actor, authorize);
       }
       if ((method === "GET" && action === "github-activity") || (method === "POST" && action === "github-handoff")) {
         if (!bound) throw new ProjectControlError("Connect a local GitHub remote for this project first.", 409);
@@ -1586,7 +1673,10 @@ export class CodingProjectControl {
         const run = this.#readRun(project.id, request.session, request.requestId);
         if (run.status !== "done" || run.review !== "accepted")
           throw new ProjectControlError("Accept the coding request in Review before preparing a GitHub handoff.", 409);
-        const url = githubComparison(bound.repository, body.base, body.head);
+        const base = githubBranch(body.base);
+        const head = githubBranch(body.head);
+        this.#publishedAlternativeCommit(project, run, bound.repository, base, head);
+        const url = githubComparison(bound.repository, base, head);
         this.#audit(project.id, "github_handoff", actor.id, run.session, run.id);
         return { url, repository: bound.repository, session: run.session, requestId: run.id };
       }
@@ -1633,7 +1723,7 @@ export class CodingProjectControl {
       return projects.map((row) => this.#projectView(row, actor));
     }
     if (method === "POST" && readonly && !path.endsWith("/preview") && !path.endsWith("/inspect") &&
-        !path.endsWith("/evaluation-inspect") && !path.endsWith("/source-inspect"))
+        !path.endsWith("/evaluation-inspect") && !path.endsWith("/source-inspect") && !path.endsWith("/branch-comparison-inspect"))
       throw new ProjectControlError("This server is attached to a read-only brain mount.", 403);
     if (path === "/projects" && method === "POST") return this.#addProject(body, actor);
     const match = /^\/projects\/([a-f0-9-]{36})\/([a-z-]+)$/.exec(path);
@@ -1642,12 +1732,9 @@ export class CodingProjectControl {
     const action = match[2];
     if (action === "retention" && (method === "GET" || method === "POST")) return this.#retention(project, method, body, actor);
     if (action === "presets" && (method === "GET" || method === "POST")) return this.#presets(project, method, body, actor);
-    if (action && method === "POST" && (githubPullActions.includes(action) || githubBranchActions.includes(action))) {
-      if (typeof body.session === "string" && this.#branch(project.id, body.session))
-        throw new ProjectControlError("Publish changes from an accepted parent session run.", 409);
-      return this.#withSession(project, body, () => this.#github(project, action, method, body, actor));
-    }
-    if (action?.startsWith("github-")) return this.#github(project, action, method, body, actor);
+    if (action && method === "POST" && (githubPullActions.includes(action) || githubBranchActions.includes(action)))
+      return this.#withSession(project, body, () => this.#github(project, action, method, body, actor, canWrite));
+    if (action?.startsWith("github-")) return this.#github(project, action, method, body, actor, canWrite);
     if (method === "GET") {
       if (action === "evaluation-rubric") return pinnedEvaluationRubric;
       if (action === "evaluations") return { provider: project.provider, model: project.model, ...this.#evaluations.report(project.id, actor.id) };
@@ -1670,6 +1757,7 @@ export class CodingProjectControl {
       if (action === "run") return this.#withSession(project, body, () => this.#start(project, body, actor, canWrite));
       if (action === "inspect") return this.#withSession(project, body, () => this.#inspect(project, body, actor, canWrite));
       if (action === "source-inspect") return this.#withSession(project, body, () => this.#sourceInspect(project, body, actor));
+      if (action === "branch-comparison-inspect") return this.#withSession(project, body, () => this.#compareBranch(project, body, actor));
       if (action === "reset-context-preview" || action === "reset-context" || action === "compact-context-preview" || action === "compact-context") {
         this.#requireOwner(actor);
         return this.#withSession(project, body, () => this.#changeContext(project, body, actor,
@@ -1680,7 +1768,7 @@ export class CodingProjectControl {
       if (action === "review") return this.#withSession(project, body, async () => this.#review(project, body, actor));
       if (action === "patch-proposals") return this.#withSession(project, body, () => this.#patchProposals(project, body, actor));
       if (action === "patch-preview" || action === "patch-apply")
-        return this.#withSession(project, body, () => this.#patch(project, body, actor, action === "patch-apply"));
+        return this.#withSession(project, body, () => this.#patch(project, body, actor, action === "patch-apply", canWrite));
       if (action === "delete-session") return this.#withSession(project, body, () => this.#deleteSession(project, body, actor));
       if (action === "credential") return this.#credentials(project, body, actor);
       if (action === "members") return this.#members(project, method, body, actor);

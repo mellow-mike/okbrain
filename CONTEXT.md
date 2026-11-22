@@ -63,10 +63,15 @@ New branch requests bind a fresh scoped source preview and the current branch
 history digest. They have their own request and review records and their own
 Pi usage totals. The project admits work through the original transcript
 lease and treats the parent and branches as a single retention and deletion
-unit. Authorized project members can inspect and review branch runs. Branches
-cover ordinary file and repository reviews. Independent package reviews,
-evaluations, manual context maintenance, and patch or GitHub publication use
-regular project sessions.
+unit. Authorized project members can inspect, compare and review branch runs.
+A comparison loads the exact fork anchor and alternative answer under one
+transcript lease and returns saved task, review, source references, and request
+usage. Branches cover ordinary file and repository reviews. Independent
+package reviews, evaluations, and manual context maintenance use regular
+project sessions. The local owner can apply and publish a reviewed branch
+patch through the usual approvals. Its pull request binds the exact branch
+publication receipt and checks the recorded GitHub head. A prepared patch on
+any branch keeps the shared transcript eligible for recovery.
 The project control plane scopes credentials, members, worker runs, and
 review decisions to registered projects. Owners can save named task, query,
 and repository profile presets in the project catalog. Project members can

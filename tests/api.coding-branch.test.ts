@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApiServer, type ApiServer } from "../src/api.ts";
@@ -21,9 +21,14 @@ type Branch = Identity & { branchSession: string; status: "pending" | "ready" };
 type BranchContext = { id: string; history: unknown[]; inheritedEntries: number; estimatedTokens: number; providerContinuity: boolean };
 type ForkPreview = Omit<BranchContext, "id"> & Identity & { branchSession: string; previewId: string };
 type SourcePreview = { id: string; files: { path: string; content: string }[]; branchContext?: BranchContext };
+type ComparisonSide = Identity & {
+  status: "done"; review: string | null; task: string; answer: { text: string; truncated: boolean }; report: CodingRunReport;
+};
+type Comparison = { original: ComparisonSide; alternative: ComparisonSide };
 
 test("owner alternative reviews bind inherited context and source, isolate usage, and survive API restart", async () => {
   const root = await mkdtemp(join(tmpdir(), "okb-api-alternative-review-"));
+  const brain = join(root, "brain");
   const workspace = join(root, "workspace");
   const stateDir = join(root, "state");
   const models = createModels();
@@ -39,7 +44,7 @@ test("owner alternative reviews bind inherited context and source, isolate usage
     return fauxAssistantMessage(answer);
   }));
 
-  const boot = () => createApiServer({ bundle: workspace, port: 0, token: ownerToken, coding: { stateDir, models } });
+  const boot = (readonly = false) => createApiServer({ bundle: brain, port: 0, token: ownerToken, readonly, coding: { stateDir, models } });
   let server: ApiServer | undefined;
   const request = (path: string, data?: unknown, member?: string) => fetch(new URL(`api/coding${path}`, server!.url), {
     method: data === undefined ? "GET" : "POST",
@@ -62,6 +67,7 @@ test("owner alternative reviews bind inherited context and source, isolate usage
   };
 
   try {
+    await mkdir(brain);
     await mkdir(join(workspace, "src"), { recursive: true });
     server = boot();
     const { id: projectId } = await call<{ id: string }>("/projects", {
@@ -69,6 +75,10 @@ test("owner alternative reviews bind inherited context and source, isolate usage
     });
     const base = `/projects/${projectId}`;
     const { token: member } = await call<{ token: string }>(base + "/members", { name: "branch-reviewer" });
+    const { id: unrelatedProject } = await call<{ id: string }>("/projects", {
+      title: "Separate review project", workspace, scopes: ["src"], provider: "openai", model,
+    });
+    const { token: unrelatedMember } = await call<{ token: string }>(`/projects/${unrelatedProject}/members`, { name: "unrelated" });
     const file = "src/review.ts";
     const source = { source: "files", files: [file] };
     const setSource = (text: string) => writeFile(join(workspace, "src", "review.ts"), text);
@@ -144,8 +154,11 @@ test("owner alternative reviews bind inherited context and source, isolate usage
     const alternative = { session: fork.branchSession, requestId: accepted.requestId };
     const alternativePrompt = "Assess an alternative interpretation of the fixture.";
     const alternativeBytes = "export const alternativeFileFixture = 'alternative';\n";
-    await setSource(alternativeBytes);
-    const selection = { ...source, session: alternative.session };
+    const alternativeFile = "src/alternative.ts";
+    const setAlternativeSource = (text: string) => writeFile(join(workspace, alternativeFile), text);
+    await setAlternativeSource(alternativeBytes);
+    const alternativeSource = { source: "files", files: [alternativeFile] };
+    const selection = { ...alternativeSource, session: alternative.session };
 
     await server.stop();
     server = undefined;
@@ -166,21 +179,21 @@ test("owner alternative reviews bind inherited context and source, isolate usage
 
     await denied(base + "/preview", selection, 403, undefined, member);
     const preview = await call<SourcePreview>(base + "/preview", selection);
-    expect(preview.files).toEqual([{ path: file, content: alternativeBytes }]);
+    expect(preview.files).toEqual([{ path: alternativeFile, content: alternativeBytes }]);
     expect(preview.branchContext?.id).toMatch(contentId);
     expect(preview.branchContext).toMatchObject({ history: fork.history,
       inheritedEntries: fork.inheritedEntries, providerContinuity: false });
-    const task = { ...source, ...alternative, prompt: alternativePrompt, previewId: preview.id, approved: true };
+    const task = { ...alternativeSource, ...alternative, prompt: alternativePrompt, previewId: preview.id, approved: true };
     const approved = { ...task, branchContextId: preview.branchContext!.id };
     await denied(base + "/run", approved, 403, undefined, member);
     await denied(base + "/run", task, 400, "branchContextId");
     await denied(base + "/run", { ...approved, approved: false }, 400, "confirm");
     await denied(base + "/run", { ...approved, branchContextId: "f".repeat(64) }, 409, "branch context changed");
-    await setSource("export const rejectedUnapprovedFileFixture = true;\n");
+    await setAlternativeSource("export const rejectedUnapprovedFileFixture = true;\n");
     await call(base + "/run", approved);
     expect((await waitForRun(alternative, "failed")).run.error).toContain("selected files changed");
     expect(faux.state.callCount).toBe(3);
-    await setSource(alternativeBytes);
+    await setAlternativeSource(alternativeBytes);
 
     expect(await call(base + "/run", approved)).toMatchObject({ session: alternative.session, id: alternative.requestId, status: "running", branch: accepted });
     const alternativeView = await waitForRun(alternative);
@@ -201,8 +214,31 @@ test("owner alternative reviews bind inherited context and source, isolate usage
     const reviewed = await call<Run>(base + "/review", { ...alternative, decision: "accepted" }, member);
     expect(reviewed).toMatchObject({ review: "accepted", reviewer: "human:branch-reviewer", branch: accepted });
     expect(await call<SavedCodingRequestInput>(base + "/source-inspect", alternative, member)).toEqual({
-      prompt: alternativePrompt, groups: [{ files: [{ path: file, text: alternativeBytes }] }],
+      prompt: alternativePrompt, groups: [{ files: [{ path: alternativeFile, text: alternativeBytes }] }],
     });
+    const comparePath = base + "/branch-comparison-inspect";
+    const comparison = await call<Comparison>(comparePath, alternative, member);
+    expect(comparison.original).toMatchObject({
+      ...accepted, status: "done", review: "accepted", task: acceptedPrompt,
+      answer: { text: acceptedAnswer, truncated: false },
+      report: { session: accepted.session, request: { requestId: accepted.requestId, files: [{ path: file }],
+        usage: { totalTokens: requestTokens(acceptedView) } } },
+    });
+    expect(comparison.alternative).toMatchObject({
+      ...alternative, status: "done", review: "accepted", task: alternativePrompt,
+      answer: { text: alternativeAnswer, truncated: false },
+      report: { session: alternative.session, request: { requestId: alternative.requestId, files: [{ path: alternativeFile }],
+        usage: { totalTokens: requestTokens(alternativeView) } } },
+    });
+    expect(comparison.original.report.request.usage).toEqual(acceptedView.pi?.request?.usage);
+    expect(comparison.alternative.report.request.usage).toEqual(alternativeView.pi?.request?.usage);
+    const comparisonJson = JSON.stringify(comparison);
+    for (const value of ["boundarySourceFixture", "alternativeFileFixture", "parentOnlyFileFixture", laterPrompt, laterAnswer])
+      expect(comparisonJson).not.toContain(value);
+    await denied(comparePath, alternative, 403, "does not have access", unrelatedMember);
+    await denied(comparePath, accepted, 409, "finished alternative review", member);
+    await denied(comparePath, later, 409, "finished alternative review", member);
+    expect(faux.state.callCount).toBe(4);
     expect((await inspect(alternative, member)).alternativeBranchEligible).toBeUndefined();
     expect((await inspect(accepted, member)).pi?.request?.receipt).toMatchObject({ text: acceptedAnswer });
     const after = await call<SourcePreview>(base + "/preview", selection);
@@ -225,6 +261,18 @@ test("owner alternative reviews bind inherited context and source, isolate usage
     expect(await call(base + "/run", approved)).toMatchObject({ session: alternative.session, id: alternative.requestId, status: "done" });
     expect(faux.state.callCount).toBe(4);
 
+    await server.stop();
+    server = undefined;
+    await rename(workspace, join(root, "detached-workspace"));
+    server = boot(true);
+    expect(await call<Comparison>(comparePath, alternative, member)).toEqual(comparison);
+    expect(await call<Comparison>(comparePath, alternative)).toEqual(comparison);
+    expect(faux.state.callCount).toBe(4);
+    await server.stop();
+    server = undefined;
+    await rename(join(root, "detached-workspace"), workspace);
+    server = boot();
+
     const transcript = join(stateDir, `project-${projectId}`, `session-${accepted.session}`, "transcript.sqlite");
     expect(await Bun.file(transcript).exists()).toBe(true);
     await denied(base + "/delete-session", { session: alternative.session, confirm: alternative.session }, 409, "parent transcript");
@@ -236,6 +284,7 @@ test("owner alternative reviews bind inherited context and source, isolate usage
     await denied(base + "/inspect", accepted, 404);
     await denied(base + "/inspect", alternative, 404, undefined, member);
     await denied(base + "/source-inspect", alternative, 404, undefined, member);
+    await denied(comparePath, alternative, 404, undefined, member);
     await denied(base + "/preview", selection, 404, "alternative branch is unavailable");
     expect(await Bun.file(transcript).exists()).toBe(false);
     expect(faux.state.callCount).toBe(4);

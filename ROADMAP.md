@@ -75,6 +75,9 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   ordinary answer. Review inherited context and approve a fresh source and
   branch context preview on each send. Keep separate usage and review with
   shared transcript retention and an exact editor handoff.
+- [x] Compare saved alternative and original answers, evidence references, and
+  request usage in the Mac and web apps and the editor. Apply a reviewed
+  alternative patch and bind GitHub publication to that run's recorded commit.
 - [x] Support Gemini through Pi AI. Show Pi Durable session usage by model
   and separate the main conversation from package review children.
 - [x] Surface bounded Pi Durable answer text during runs in browser and editor
@@ -832,6 +835,8 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added saved-answer comparison and review in the apps and editor.
+  Tested alternative patch approval, GitHub head checks, and pull request recovery.
 - 2026-11-22 — Added Pi alternative reviews with per-send context approval,
   separate usage and review, and an editor handoff. Verified the browser,
   API recovery, transcript expiry, and Docker backup and restore.

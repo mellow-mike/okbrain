@@ -7,7 +7,7 @@ Install `okbrain-coding.vsix` with **Extensions → Install from VSIX**.
 In the Command Palette, choose **okbrain: Connect to Team Workspace** and enter the HTTPS origin and project token from your operator. The editor keeps this project connection in its secret store.
 
 - **okbrain: Preview Team Coding Request** previews server-side excerpts from a saved preset or an explicit task and repository query. Review the exact text and approve sending it with the task and active session history. The team server supplies the repository, so a local clone is optional.
-- **okbrain: Inspect and Review Team Coding Runs** opens progress, results, and saved request source. You can review, cancel, or resume a run.
+- **okbrain: Inspect and Review Team Coding Runs** opens progress, results, and saved request source. You can compare a finished alternative run with its original and review either result. Cancel and resume are available for the team’s regular requests.
 - **okbrain: Open Team Workspace in Browser** opens the HTTPS workspace sign-in page. **okbrain: Disconnect from Team Workspace** removes the saved editor connection.
 
 See the [team setup guide](https://github.com/mellow-mike/okbrain/blob/main/docs/CODING.md#give-a-team-member-access) for issuing project tokens and configuring the HTTPS listener.
@@ -24,6 +24,8 @@ Open a trusted local workspace and start the okbrain macOS app or the local web 
 6. On an accepted result, choose **Review proposed patch in okbrain** to open that request in the patch review form. Preview the diff in okbrain and confirm it before applying.
 
 Choose **Preview alternative branch in okbrain** on an eligible accepted run to open its exact entry in the local Coding workspace. Preview and approve the new review session there.
+
+Choose **Compare with original** on a finished alternative run to open both saved answers, review decisions, source references, and request usage in a read-only editor. An accepted alternative has the same patch and GitHub handoffs as an accepted original run.
 
 Choose **Copy run report** on a saved request to copy JSON with the run status, model, context limits, usage, and relative source references. The task, response, and source contents stay in their existing inspection views. Project members can copy the report for runs they can inspect.
 

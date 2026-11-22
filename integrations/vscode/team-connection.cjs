@@ -5,7 +5,7 @@ const projectPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]
 const requestPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const sessionPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const readActions = new Set(['presets', 'runs']);
-const writeActions = new Set(['preview', 'run', 'inspect', 'source-inspect', 'cancel', 'resume', 'review']);
+const postActions = new Set(['preview', 'run', 'inspect', 'source-inspect', 'branch-comparison-inspect', 'cancel', 'resume', 'review']);
 const previewFields = new Set(['source', 'query', 'projects', 'profile', 'tokenBudget']);
 const runFields = new Set([...previewFields, 'session', 'requestId', 'prompt', 'previewId', 'approved', 'approvedSourceLookup']);
 const runStatuses = new Set(['running', 'interrupted', 'done', 'unanswered', 'failed', 'cancelled']);
@@ -42,6 +42,20 @@ function isProjectId(value) {
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isRunIdentity(value) {
+  return isRecord(value) && typeof value.session === 'string' && sessionPattern.test(value.session) &&
+    typeof value.requestId === 'string' && requestPattern.test(value.requestId);
+}
+
+function isBranchComparisonSide(side, projectId, expected) {
+  return isRunIdentity(side) && (!expected || (side.session === expected.session && side.requestId === expected.requestId)) &&
+    side.status === 'done' && (side.review === null || side.review === 'accepted' || side.review === 'changes_requested') &&
+    (side.task === undefined || typeof side.task === 'string') &&
+    typeof side.answer?.text === 'string' && typeof side.answer.truncated === 'boolean' &&
+    side.report?.version === 1 && side.report.projectId === projectId && side.report.session === side.session &&
+    side.report.request?.requestId === side.requestId && side.report.runStatus === side.status;
 }
 
 function isText(value, bytes) {
@@ -104,6 +118,10 @@ function validateResult(action, result, projectId, data) {
     case 'source-inspect':
       if (result !== null && (typeof result?.prompt !== 'string' || !Array.isArray(result.groups))) throw invalidResponse();
       break;
+    case 'branch-comparison-inspect':
+      if (!isBranchComparisonSide(result?.original, projectId) || !isBranchComparisonSide(result?.alternative, projectId, data) ||
+          result.original.session === result.alternative.session) throw invalidResponse();
+      break;
     default:
       if (!validRun(result)) throw invalidResponse();
   }
@@ -162,8 +180,11 @@ async function connectTeam(origin, token, projectId) {
   const prefix = `/projects/${boundProjectId}/`;
   async function api(path, data, timeoutMs = 30_000) {
     const action = typeof path === 'string' && path.startsWith(prefix) ? path.slice(prefix.length) : '';
-    if (data === undefined ? !readActions.has(action) : !writeActions.has(action) || !isRecord(data)) {
+    if (data === undefined ? !readActions.has(action) : !postActions.has(action) || !isRecord(data)) {
       throw new TeamConnectionError('Choose a supported action on the connected coding project.');
+    }
+    if (action === 'branch-comparison-inspect' && (!isRunIdentity(data) || Object.keys(data).length !== 2)) {
+      throw new TeamConnectionError('Choose one saved alternative run to compare.');
     }
     if (action === 'preview' || action === 'run') {
       const fields = action === 'preview' ? previewFields : runFields;
@@ -177,4 +198,4 @@ async function connectTeam(origin, token, projectId) {
   return { url, api, projects: [project], mode: 'team', projectId: boundProjectId };
 }
 
-module.exports = { connectTeam, isTeamToken, teamUrl, TeamConnectionError };
+module.exports = { connectTeam, isBranchComparisonSide, isTeamToken, teamUrl, TeamConnectionError };

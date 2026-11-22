@@ -24,7 +24,10 @@ export function githubBranchBrowserFixture(path: string, before: string, after: 
     sha, truncated: false,
     tree: [{ path, mode: "100644", type: "blob", sha: blobSha(content), size: Buffer.byteLength(content) }],
   });
-  let published = false;
+  let currentHead: string | null = null;
+  let pull: Record<string, unknown> | undefined;
+  let dropPullResponse = false;
+  const pullHead = () => ({ ref: head, sha: currentHead, repo: { full_name: repository } });
   const fetch: GitHubFetch = async (url, options) => {
     assert.equal(url.origin, "https://api.github.com");
     assert.ok(url.pathname.startsWith(repoPath + "/"));
@@ -35,8 +38,8 @@ export function githubBranchBrowserFixture(path: string, before: string, after: 
     if (options.method === "GET") {
       switch (action) {
         case `/git/ref/heads/${base}`: return Response.json(ref(base, baseSha));
-        case `/git/ref/heads/${head}`: return published
-          ? Response.json(ref(head, commitSha)) : Response.json({}, { status: 404 });
+        case `/git/ref/heads/${head}`: return currentHead
+          ? Response.json(ref(head, currentHead)) : Response.json({}, { status: 404 });
         case `/git/commits/${baseSha}`: return Response.json({ sha: baseSha, tree: { sha: baseTree } });
         case `/git/trees/${baseTree}`: return Response.json(tree(baseTree, before));
         case `/git/trees/${branchTree}`: return Response.json(tree(branchTree, after));
@@ -44,9 +47,9 @@ export function githubBranchBrowserFixture(path: string, before: string, after: 
           sha: blobSha(before), encoding: "base64", content: Buffer.from(before).toString("base64"), size: Buffer.byteLength(before),
         });
         case "/pulls":
-          assert.equal(published, true);
+          assert.ok(currentHead);
           assert.deepEqual([url.searchParams.get("base"), url.searchParams.get("head")], [base, `fixture-owner:${head}`]);
-          return Response.json([]);
+          return Response.json(pull ? [{ ...pull, head: pullHead() }] : []);
       }
     } else {
       assert.equal(options.method, "POST");
@@ -64,21 +67,28 @@ export function githubBranchBrowserFixture(path: string, before: string, after: 
           assert.deepEqual(body, { message, tree: branchTree, parents: [baseSha] });
           return Response.json({ sha: commitSha, message, tree: { sha: branchTree }, parents: [{ sha: baseSha }] }, created);
         case "/git/refs":
-          assert.equal(published, false);
+          assert.equal(currentHead, null);
           assert.deepEqual(body, { ref: `refs/heads/${head}`, sha: commitSha });
-          published = true;
+          currentHead = commitSha;
           return Response.json(ref(head, commitSha), created);
         case "/pulls":
-          assert.equal(published, true);
+          assert.ok(currentHead);
+          assert.equal(pull, undefined);
           assert.deepEqual([body.base, body.head, body.title, body.draft], [base, head, "Browser review", true]);
           assert.match(String(body.body), /^Approved branch for review\.\n\n<!-- okbrain-pr:[0-9a-f]{64} -->$/u);
-          return Response.json({
-            ...body, id: 500, number: 22,
-            base: { ref: base, repo: { full_name: repository } }, head: { ref: head, repo: { full_name: repository } },
-          }, created);
+          pull = {
+            ...body, id: 500, number: 22, state: "open",
+            base: { ref: base, repo: { full_name: repository } }, head: pullHead(),
+          };
+          if (dropPullResponse) throw new Error("Fixture dropped the response after creating the pull request.");
+          return Response.json(pull, created);
       }
     }
     throw new Error(`Unexpected GitHub browser fixture request to ${action}`);
   };
-  return { fetch, repository, base, head, baseSha, commitSha, branchToken, pullToken, message, writes };
+  return {
+    fetch, repository, base, head, baseSha, commitSha, branchToken, pullToken, message, writes,
+    moveHead(sha: string) { currentHead = sha; },
+    losePullResponse() { dropPullResponse = true; },
+  };
 }

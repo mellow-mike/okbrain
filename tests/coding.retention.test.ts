@@ -240,6 +240,21 @@ test("retention uses alternative branch activity and expires the shared transcri
     withCatalog((db) => {
       using finishBranch = db.prepare("UPDATE runs SET status = 'done' WHERE session = ?");
       finishBranch.run(branch.session);
+      using prepare = db.prepare("INSERT INTO applied_patches VALUES (?, ?, ?, 'fixture-preview', 'fixture-hash', '[]', 'prepared', NULL)");
+      prepare.run(project.id, branch.session, branch.requestId);
+    });
+    open();
+    // A prepared patch is catalogued under the alias. Its parent transcript
+    // is still required to verify the saved response during recovery.
+    expect(await sweep(30)).toMatchObject({ removed: 0 });
+    expect(await Bun.file(transcript(parent.session)).exists()).toBe(true);
+    expect(await runs()).toContainEqual(expect.objectContaining({ session: branch.session, status: "done" }));
+    await sweep(null);
+    await close();
+
+    withCatalog((db) => {
+      using markApplied = db.prepare("UPDATE applied_patches SET status = 'applied' WHERE project = ? AND session = ? AND request_id = ?");
+      markApplied.run(project.id, branch.session, branch.requestId);
     });
     open();
     expect(await sweep(30)).toMatchObject({ removed: 1 });
