@@ -129,12 +129,38 @@
     return '<a href="' + esc(target) + '"' + external + '>' + label + '</a>';
   }
 
+  /** Preserve the graph's relative-first path-field resolution and bundle-root fallback. */
+  function sourceNoteCandidates(resource, baseId) {
+    if (typeof resource !== 'string') return null;
+    var target = okbSafeUrl(resource);
+    if (!target) return null;
+    var end = target.charAt(0) === '<' ? target.indexOf('>') : -1;
+    var dest = end >= 0 ? target.slice(1, end) : target.split(/\s/, 1)[0];
+    if (/^(?:#|\/\/|[a-z][a-z0-9+.-]*:)/i.test(dest) || dest.includes('\\')) return null;
+    var relative = resolveInternal(dest, baseId);
+    if (!relative || /[\\\u0000-\u001f\u007f]/.test(relative)) return null;
+    var root = /^[/.]/.test(resource) ? null : resolveInternal(dest);
+    return root && root !== relative ? [relative, root] : [relative];
+  }
+
+  function sourceLink(resource, title, opts) {
+    var label = esc(title || resource);
+    var target = okbSafeUrl(resource);
+    if (!target) return label;
+    if (/^(?:(?:https?|ftp):\/\/[^/\\?#]|mailto:)/i.test(target)) return resourceLink(resource, title);
+    var candidates = opts && sourceNoteCandidates(resource, opts.baseId);
+    var id = candidates && candidates.find(function (candidate) { return opts.known(candidate); });
+    return id ? '<a href="' + esc(opts.hrefFor(id)) + '" class="internal" data-id="' + esc(id) + '">' + label + '</a>' : label;
+  }
+
   /** `sources` entries as a list with credibility signals. */
-  function sourcesList(sources, localUsage) {
-    if (!sources || !sources.length) return '<span class="muted">—</span>';
-    return '<ul class="sources">' + sources.map(function (s) {
-      var res = String(s.resource || '');
-      var link = resourceLink(res, s.title);
+  function sourcesList(sources, localUsage, opts) {
+    var entries = (sources || []).map(function (s) { return typeof s === 'string' ? { resource: s } : s; })
+      .filter(function (s) { return s && typeof s.resource === 'string' && s.resource !== ''; });
+    if (!entries.length) return '<span class="muted">—</span>';
+    return '<ul class="sources">' + entries.map(function (s) {
+      var res = s.resource;
+      var link = sourceLink(res, s.title, opts);
       var sig = [];
       if (s.author) sig.push(esc(s.author));
       if (s.last_modified) sig.push('modified ' + esc(String(s.last_modified).slice(0, 10)));
@@ -158,6 +184,7 @@
     badges: badges,
     actorLine: actorLine,
     resourceLink: resourceLink,
+    sourceNoteCandidates: sourceNoteCandidates,
     sourcesList: sourcesList,
   };
 })();

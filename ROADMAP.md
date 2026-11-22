@@ -43,6 +43,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   app, validate the bundle, and rebuild local search and graph data.
 - [x] Schedule recurring maintenance in the Mac and web apps with per-brain
   status, pause and resume, and approval for network jobs.
+- [x] Inspect and copy a note’s saved Markdown and YAML from the Mac and web
+  apps, clear its resource URI, and set the search result limit and profile.
 
 ### Stage 8 — Enterprise coding
 
@@ -761,7 +763,7 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B13 | 2026-09-03 | med | gui | `jobs` (admin, not localOnly) had no GUI home although the 3.2 decision promised every network-facing op one; the wiring test listed ops by hand and simply omitted it | hand-maintained expectation list | fixed | Settings → Maintenance runs `jobs` (job subset); the API test now derives the required op set from the registry |
 | B14 | 2026-09-03 | low | authoring | `okb new` derived the directory from the raw type (`Attested Computation` → `Attested Computations/x`, with the space) | `${type}s/` without slugifying | fixed | `slugify(type)+"s"`; test in `tests/okf.v02.test.ts` |
 | B16 | 2026-09-26 | low | gui | The router toggled `active` on every `#nav a`, including the wordmark's own `#home` link — on Home the wordmark took the nav highlight (under the design system: the active tick and weight 720) | selector matched the brand link | fixed | router uses `#nav > a`; found and re-checked by the Chromium drive (no unit surface for it) |
-| B17 | 2026-09-26 | low | viz/gui | `sources[].resource` bundle paths (root-relative per OKF, e.g. `policies/x.md`) render as struck-through "broken" links in `viz.html` (the viewer runs `wireLinks` over the whole detail panel, which resolves them relative to the concept) and navigate to a 401/404 JSON page from the GUI reader | `sourcesList` emits the raw path as `href`; neither surface routes it through `resolvePathField` semantics | open | — |
+| B17 | 2026-09-26 | low | viz/gui | `sources[].resource` bundle paths such as `policies/x.md` show as broken links in the offline graph and open a JSON error page from the note reader | `sourcesList` emitted file paths directly | fixed | Resolve source paths against available notes, including a bundle-root fallback, then route them inside the reader or graph. |
 | B15 | 2026-09-03 | med | ingest | `okb capture` wrote to the `inbox/` directory but never tagged `inbox`, so captures were invisible to `okb inbox`, the Inbox view, and the review queue's inbox signal (the reading inbox is the tag, not the directory) | capture didn't add the tag | fixed | captures carry the `inbox` tag; regression in `tests/authoring.test.ts` |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
@@ -826,6 +828,9 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added note source access, resource clearing, and offline search
+  result controls to the Mac and web apps. Fixed internal provenance links in
+  the note reader and offline graph.
 - 2026-11-22 — Bound guarded Clip, RSS, and enrichment requests to checked
   addresses and verified TLS and proxy handling on Bun 1.4.3.
 - 2026-11-22 — Fixed the SQLite cache startup race between watch and foreground

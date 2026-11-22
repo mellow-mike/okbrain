@@ -954,21 +954,25 @@ Views:
   trust tier, staleness, tags; client-side filter and sort.
 - **Concept** — the reader: title and description (the lead) over the
   rendered body with footnote attribution and routed internal links,
+  a collapsible Markdown source view with an exact copy action,
   badges, provenance (`generated`, `verified`, `sources` with credibility
-  signals), Attested Computation contracts and CSV preview/receipt/attestation
+  signals and links to notes within the bundle), Attested Computation contracts
+  and CSV preview/receipt/attestation
   controls when applicable, links to / cited by (`graph_neighbors`), and actions:
   Edit, Reviewed ✓ (`review_done`), Mark read, Suggest links (accept =
   `link_accept`), Graph, Deprecate/Restore (`write_concept --status`),
   Delete (`delete_concept`, confirm-gated).
 - **Edit / New** — scaffold fields, status, `stale_after`, a sources editor
-  (id / resource / title / author rows), markdown body with a concept-id
+  (id / resource / title / author rows), a clearable top-level resource URI,
+  and a Markdown body with a concept-id
   link picker and insert-only link suggestions; saves via `write_concept`,
   or `new_concept` when no id is given (derived from type + title).
 - **Graph** — live Cytoscape fed by `graph_data`; type legend with toggles
   and counts, search and hover-neighbourhood dimming, stale/deprecated
-  styling, detail panel with badges and provenance, Open/Edit.
-- **Search** — hybrid `search` with per-hit recall-source chips and
-  snippets. **Ask** — SSE streaming: context chips before the answer;
+  styling, detail panel with badges, provenance links to included notes, and Open/Edit.
+- **Search** — offline or hybrid `search` with a configurable result maximum,
+  retrieval profile, per-hit recall-source chips, and snippets.
+  **Ask** — SSE streaming: context chips before the answer;
   verified citations link to the reader.
 - **Add** — quick `capture`, `clip` (with auto-tag opt-in), `rss` (one URL
   or every configured feed), bulk `import`, and the bookmarklet.

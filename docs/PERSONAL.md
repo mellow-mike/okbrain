@@ -8,6 +8,10 @@ Open **okbrain.app** and choose **File → Open Brain Folder** if you have an ex
 
 On **Home**, enter a **Quick note**, select **Capture**, and open the saved note. Select **Enable search and review** to build the local index. **Search** uses local keywords by default and highlights matches in result excerpts. Open **Review** to see suggested notes and the reasons they surfaced. Overdue claims link directly to the outcome controls. These actions work offline. **Browse** can open notes before the index is built.
 
+In **Search**, set **Maximum results** and choose your retrieval profile before submitting. Leave semantic retrieval off to search without provider calls.
+
+In an open note, expand **View Markdown source** to inspect or copy its saved Markdown and YAML, including on a read-only brain. To remove a note’s resource URL, open **Edit**, clear **Resource (URI)**, and save. Its source citations stay in the **Sources** field. Provenance entries for notes in the bundle open those notes from the reader or graph. The offline graph links to notes included in the export.
+
 Open **Inbox** and choose **File note** on an unread capture. Enter a new concept ID such as `projects/garden-notes`, preview the destination, then confirm. Filing preserves the note and its provenance in the chosen folder and removes the inbox tag. A forwarding note at the old address lets existing links reach the filed note. Links to old heading anchors land on the forwarding note, and the graph shows the forward as a separate link. Keep private notes within `db_only/`. If interrupted after copying, preview the same destination and confirm to finish an unchanged filing.
 
 The terminal equivalent is `okb inbox file <inbox-id> <destination-id>`. Run it again with `--confirm <preview-id>` to approve the displayed move.

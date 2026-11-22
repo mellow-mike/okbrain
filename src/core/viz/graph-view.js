@@ -113,6 +113,7 @@
       var note = nodes.get(id);
       if (!note) return;
       var type = typeName(note.type);
+      var links = { baseId: id, hrefFor: hrefFor, known: function (other) { return nodes.has(other); } };
       var h = '<h2>' + esc(note.title || note.id) + '</h2>' +
         '<div class="meta"><span class="chip">' + swatch(type) + esc(type) + '</span><code>' + esc(note.id) + '</code></div>' +
         '<div class="meta">' + R.badges(note) + '</div>';
@@ -125,14 +126,14 @@
       if (options.showResource && note.resource) h += '<dt>Resource</dt><dd>' + R.resourceLink(note.resource) + '</dd>';
       h += '<dt>Generated</dt><dd>' + R.actorLine(note.generated) + '</dd>' +
         '<dt>Verified</dt><dd>' + (note.verified.length ? note.verified.map(R.actorLine).join('<br>') : '—') + '</dd>' +
-        '<dt>Sources</dt><dd>' + R.sourcesList(note.sources) + '</dd></dl>' +
+        '<dt>Sources</dt><dd>' + R.sourcesList(note.sources, undefined, links) + '</dd></dl>' +
         '<div class="body md">' + R.renderMarkdown(note.body) + '</div>';
       var out = outgoing.get(id), back = incoming.get(id);
       if (out?.length) h += '<h3>Links to</h3>' + linkList(out);
       if (back?.length) h += '<h3>Cited by</h3>' + linkList(back);
       controls.detail.innerHTML = h;
       controls.detail.querySelectorAll('.body, dl').forEach(function (section) {
-        R.wireLinks(section, { baseId: id, hrefFor: hrefFor, known: function (other) { return nodes.has(other); } });
+        R.wireLinks(section, links);
       });
     }
     function focus(id) {

@@ -259,6 +259,9 @@ ul.plain a { font-family: var(--font-read); font-size: 14px; }
 .concept-head .meta { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
 .concept-head .meta code { color: var(--muted); }
 .concept-head .row { margin-top: var(--space-2); }
+.note-source { margin-bottom: var(--space-4); }
+.note-source > summary { cursor: pointer; }
+.note-source > textarea { margin-top: var(--space-3); }
 .concept-body { padding-top: var(--space-6); border-top: 1px solid var(--line); }
 .concept-side { display: flex; flex-direction: column; gap: var(--space-3); font-size: 12px; }
 .concept-side h3 { margin: var(--space-4) 0 var(--space-2); }

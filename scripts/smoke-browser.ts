@@ -11,7 +11,7 @@ import { runCodingSession } from "../src/core/coding/durable.ts";
 import type { CodingRunReport } from "../src/core/coding/run-report.ts";
 import { loadConfig } from "../src/core/config.ts";
 import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/core/engine/cache-settings.ts";
-import { parse } from "../src/core/okf/document.ts";
+import { fmGenerated, parse } from "../src/core/okf/document.ts";
 import { githubBranchBrowserFixture } from "./github-branch-browser-fixture.ts";
 
 const root = await mkdtemp(join(tmpdir(), "okbrain-browser-smoke-"));
@@ -125,12 +125,17 @@ try {
   await page.getByRole("searchbox", { name: "Search notes", exact: true }).focus();
   const semantic = page.getByRole("checkbox", { name: "Use configured semantic retrieval" });
   assert.equal(await semantic.isChecked(), false);
-  await semantic.check();
   await page.getByRole("combobox", { name: "Retrieval profile" }).selectOption("lean");
-  await semantic.uncheck();
+  const maximumResults = page.getByRole("spinbutton", { name: "Maximum results", exact: true });
+  assert.equal(await maximumResults.inputValue(), "20");
+  await maximumResults.fill("35");
   await page.getByRole("searchbox", { name: "Search notes", exact: true }).focus();
   await page.keyboard.type("orchid");
+  const orchidSearch = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/search");
   await page.keyboard.press("Enter");
+  const orchidResults = await orchidSearch;
+  assert.ok(orchidResults.ok(), await orchidResults.text());
+  assert.deepEqual(orchidResults.request().postDataJSON(), { query: "orchid", limit: 35, profile: "lean", "keyword-only": true });
   await page.getByRole("link", { name: "Offline orchid propagation", exact: true }).waitFor();
   await page.locator("#sout mark", { hasText: "orchid" }).waitFor();
   await page.locator("#sout").getByRole("link", { name: "Focused map" }).click();
@@ -222,6 +227,16 @@ try {
   await page.getByRole("button", { name: "Update index files" }).click();
   await page.getByText("Markdown index files updated.", { exact: true }).waitFor();
   assert.match(await Bun.file(join(bundle, "inbox", "index.md")).text(), /^# note$/m);
+  const policyId = "policies/browser-provenance";
+  const policyTitle = "Browser provenance policy";
+  const policySource = { id: "policy", resource: `${policyId}.md`, title: "Bundle-root policy source" };
+  const policyYaml = `  - id: ${policySource.id}\n    resource: ${policySource.resource}\n    title: ${policySource.title}\n`;
+  await mkdir(join(bundle, "policies"), { recursive: true });
+  await writeFile(join(bundle, policySource.resource), `---\ntype: note\ntitle: ${policyTitle}\ndescription: A local fixture for a source link.\n---\nThe policy source lives at the bundle root.\n`);
+  const orchidPath = join(bundle, `${answerSource}.md`);
+  const orchidMarkdown = await Bun.file(orchidPath).text();
+  assert.equal(parse(orchidMarkdown).frontmatter.sources, undefined);
+  await writeFile(orchidPath, orchidMarkdown.replace(/^---\n/u, "---\nsources:\n" + policyYaml));
   assert.equal(await page.getByRole("checkbox", { name: "Include private drafts in graph export" }).isChecked(), false);
   await page.getByRole("checkbox", { name: "Embed app fonts in graph export" }).check();
   const exported = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/export_viz");
@@ -234,7 +249,12 @@ try {
   try {
     await offlineViewer.goto(pathToFileURL(join(bundle, "viz.html")).href);
     await selectGraphNote(offlineViewer, answerSource);
-    await offlineViewer.locator("#detail").getByRole("heading", { name: "Offline orchid propagation" }).waitFor();
+    const detail = offlineViewer.locator("#detail");
+    await detail.getByRole("heading", { name: "Offline orchid propagation" }).waitFor();
+    const policyLink = detail.locator("dl .sources").getByRole("link", { name: policySource.title, exact: true });
+    assert.equal(await policyLink.getAttribute("href"), "#concept:" + encodeURIComponent(policyId));
+    await policyLink.click();
+    await detail.getByRole("heading", { name: policyTitle, exact: true }).waitFor();
     await offlineViewer.locator("#filters input[data-type=note]").uncheck();
     assert.equal(await offlineViewer.locator("#filters input[data-type=note]").isChecked(), false);
   } finally { await offlineViewer.close(); }
@@ -740,16 +760,43 @@ try {
   await laterDraft.waitFor();
   const draftHref = decodeURIComponent(await laterDraft.getAttribute("href") || "");
   assert.match(draftHref, /^#concept\/db_only\/conversations\/claude\//);
-  const draftFile = Bun.file(join(bundle, draftHref.slice("#concept/".length) + ".md"));
-  const initialDraft = parse(await draftFile.text());
+  const draftPath = join(bundle, draftHref.slice("#concept/".length) + ".md");
+  const draftFile = Bun.file(draftPath);
+  const draftResource = "https://archive.example.invalid/original-conversation";
+  const draftMarkup = "</textarea><span data-smoke-markdown-injected>Source remains literal</span>";
+  const fixtureMarkdown = (await draftFile.text()).replace(/^---\n/u,
+    `---\nresource: ${draftResource}\nreader_fixture:\n  label: "Preserve this YAML notation"\n  values: [one, two]\n`)
+    .replace(/^sources:\n/mu, "sources:\n" + policyYaml) +
+    "\n```html\n" + draftMarkup + "\n```\n";
+  await writeFile(draftPath, fixtureMarkdown);
+  const initialDraft = parse(fixtureMarkdown);
   const draftSources = initialDraft.frontmatter.sources;
-  assert.deepEqual(draftSources, [{
+  const conversationSource = {
     id: "export", resource: "claude-export:conversation", conversation_id: "browser-conversation-52",
     created_at: "2026-01-02T03:04:05Z", last_modified: "2026-02-03T04:05:06Z",
-  }]);
+  };
+  assert.deepEqual(draftSources, [policySource, conversationSource]);
   await laterDraft.click();
   const draftHeading = page.getByRole("heading", { name: "Browser conversation 52", exact: true });
   await draftHeading.waitFor();
+  const draftPolicy = page.locator("#c-sources").getByRole("link", { name: policySource.title, exact: true });
+  assert.equal(await draftPolicy.getAttribute("href"), "#concept/" + encodeURIComponent(policyId));
+  await draftPolicy.click();
+  await page.getByRole("heading", { name: policyTitle, exact: true }).waitFor();
+  await page.goBack();
+  await draftHeading.waitFor();
+  async function verifyDraftMarkdown(markdown: string) {
+    await page.getByText("View Markdown source", { exact: true }).click();
+    const source = page.getByRole("textbox", { name: "Markdown source", exact: true });
+    await source.waitFor();
+    assert.equal(await source.inputValue(), markdown);
+    assert.equal(await source.evaluate((field: HTMLTextAreaElement) => field.readOnly), true);
+    assert.equal(await page.locator("[data-smoke-markdown-injected]").count(), 0);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  }
+  assert.equal(await draftFile.text(), fixtureMarkdown);
+  await verifyDraftMarkdown(fixtureMarkdown);
+  await page.locator("#c-body").getByText(draftMarkup, { exact: true }).waitFor();
   const editDraft = page.locator("#c-actions").getByRole("link", { name: "Edit", exact: true });
   const draftEditor = page.locator("#edf");
   const saveDraft = draftEditor.getByRole("button", { name: "Save", exact: true });
@@ -764,12 +811,35 @@ try {
   assert.match(editedDraft.body, /This is a local addition to the imported conversation\./);
   assert.deepEqual(editedDraft.frontmatter.sources, draftSources);
   assert.deepEqual(editedDraft.frontmatter.source_import, initialDraft.frontmatter.source_import);
+  assert.deepEqual(editedDraft.frontmatter.reader_fixture, initialDraft.frontmatter.reader_fixture);
 
   await editDraft.click();
-  await draftEditor.locator("#ed-sources").getByPlaceholder("title", { exact: true }).fill("Original Claude conversation");
+  const resource = draftEditor.getByLabel("Resource (URI)", { exact: true });
+  assert.equal(await resource.inputValue(), draftResource);
+  await resource.fill("");
+  const clearResource = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/write_concept");
+  await saveDraft.click();
+  const clearedResource = await clearResource;
+  assert.ok(clearedResource.ok(), await clearedResource.text());
+  const clearInput = clearedResource.request().postDataJSON();
+  assert.equal(clearInput.resource, "");
+  assert.equal(Object.hasOwn(clearInput, "sources"), false);
+  await draftHeading.waitFor();
+  const clearedMarkdown = await draftFile.text();
+  const clearedDraft = parse(clearedMarkdown);
+  const expectedMetadata: Record<string, unknown> = { ...editedDraft.frontmatter, generated: clearedDraft.frontmatter.generated };
+  delete expectedMetadata.resource;
+  assert.deepEqual(clearedDraft.frontmatter, expectedMetadata);
+  assert.equal(fmGenerated(clearedDraft.frontmatter)?.by, fmGenerated(editedDraft.frontmatter)?.by);
+  assert.equal(clearedDraft.body, editedDraft.body);
+  await verifyDraftMarkdown(clearedMarkdown);
+
+  await editDraft.click();
+  await draftEditor.locator('#ed-sources .srow:has(input[data-k="id"][value="export"])')
+    .getByPlaceholder("title", { exact: true }).fill("Original Claude conversation");
   await saveDraft.click();
   await draftHeading.waitFor();
-  assert.deepEqual(parse(await draftFile.text()).frontmatter.sources, [{ ...draftSources[0], title: "Original Claude conversation" }]);
+  assert.deepEqual(parse(await draftFile.text()).frontmatter.sources, [policySource, { ...conversationSource, title: "Original Claude conversation" }]);
 
   const localSourceFiles = [
     { format: "email", name: "field.eml", title: "Trip email", mime: "message/rfc822",

@@ -627,6 +627,26 @@ async function renderBrowse(initialType, seq) {
 
 // ---- concept (reader) ----------------------------------------------------
 
+function mountMarkdownSource(container, raw) {
+  container.innerHTML = '<details class="card note-source"><summary>View Markdown source</summary>' +
+    '<textarea aria-label="Markdown source" rows="10" wrap="off" readonly spellcheck="false"></textarea>' +
+    '<div class="row"><button class="small" type="button">Copy Markdown</button><span class="muted" role="status"></span></div></details>';
+  var source = container.querySelector('textarea');
+  var status = container.querySelector('[role="status"]');
+  source.value = raw;
+  container.querySelector('button').addEventListener('click', async function () {
+    try {
+      await navigator.clipboard.writeText(raw);
+      status.textContent = 'Markdown copied.';
+    } catch {
+      if (!source.isConnected) return;
+      source.focus();
+      source.select();
+      status.textContent = 'Use your copy shortcut to copy the selected Markdown.';
+    }
+  });
+}
+
 /** The reader; `was` (the trust tier before an act) stamps a tier that just changed. */
 async function renderConcept(id, seq, was) {
   if (!id) { location.hash = '#browse'; return; }
@@ -637,7 +657,8 @@ async function renderConcept(id, seq, was) {
   var fm = c.frontmatter, s = c.signals;
   if (fm.type === 'forwarding' && typeof fm.filed_to === 'string') {
     view.innerHTML = '<div class="stack"><h2>' + esc(fm.title || id) + '</h2>' +
-      '<p>This capture was filed at ' + conceptLink(fm.filed_to) + '.</p></div>';
+      '<p>This capture was filed at ' + conceptLink(fm.filed_to) + '.</p><div id="c-source"></div></div>';
+    mountMarkdownSource(view.querySelector('#c-source'), c.raw);
     return;
   }
   var tags = Array.isArray(fm.tags) ? fm.tags : (typeof fm.tags === 'string' ? [fm.tags] : []);
@@ -658,7 +679,7 @@ async function renderConcept(id, seq, was) {
       esc(uses.citations) + ' Ask ' + (uses.citations === 1 ? 'citation' : 'citations') +
       '<br><span class="muted">' + esc(uses.usage_window.from.slice(0, 10) + ' to ' + uses.usage_window.to.slice(0, 10)) + '</span></dd>';
   }
-  meta += '<dt>Sources</dt><dd>' + R.sourcesList(sources, c.localUsage?.sources) + '</dd>';
+  meta += '<dt>Sources</dt><dd id="c-sources"></dd>';
   if (isComputation) {
     meta += '<dt>Runtime</dt><dd>' + esc(fm.runtime || '(missing — required)') + '</dd>';
     if (fm.parameters) meta += '<dt>Parameters</dt><dd><code>' + esc(JSON.stringify(fm.parameters)) + '</code></dd>';
@@ -691,12 +712,34 @@ async function renderConcept(id, seq, was) {
     '<button class="small danger" data-act="delete">Delete</button>' +
     '<span id="c-msg" class="muted"></span></div></div>' +
     '<div id="c-suggest"></div>' +
+    '<div id="c-source"></div>' +
     '<div class="concept-body md" id="c-body"></div>' +
     (isComputation ? '<section id="c-computation"></section>' : '') + '</div>' +
     '<aside class="concept-side"><div class="card">' + meta + '</div>' +
     '<div class="card" id="c-links"></div></aside></div>';
 
   renderBody(document.getElementById('c-body'), c.body, id);
+  mountMarkdownSource(view.querySelector('#c-source'), c.raw);
+  var sourceList = view.querySelector('#c-sources');
+  function renderSources(ids) {
+    sourceList.innerHTML = R.sourcesList(sources, c.localUsage?.sources, {
+      baseId: id, hrefFor: conceptHref, known: function (target) { return ids.has(target); },
+    });
+  }
+  renderSources(new Set());
+  if (sources.some(function (source) { return R.sourceNoteCandidates(source?.resource ?? source, id); })) {
+    api('list_concepts', {}).then(function (ids) {
+      if (!stale(seq) && sourceList.isConnected) renderSources(new Set(ids));
+    }).catch(function () {
+      if (!stale(seq) && sourceList.isConnected) {
+        var status = document.createElement('span');
+        status.className = 'muted';
+        status.setAttribute('role', 'status');
+        status.textContent = 'Internal source links are unavailable. Reopen this note to retry.';
+        sourceList.appendChild(status);
+      }
+    });
+  }
   if (isComputation) window.okbComputation.mount(document.getElementById('c-computation'), {
     id: id, frontmatter: fm, readonly: STATUS?.readonly === true, api: api,
     detached: function () { return stale(seq); }, reload: function () { renderConcept(id, seq, s.trust); },
@@ -900,6 +943,8 @@ async function renderEdit(id, seq) {
   }
 
   var bodyEl = document.getElementById('ed-body');
+  var resourceEl = document.getElementById('ed-resource');
+  var initialResource = resourceEl.value;
   var msgEl = document.getElementById('ed-msg');
   function insertAtCursor(text) {
     var st = bodyEl.selectionStart || 0;
@@ -945,7 +990,8 @@ async function renderEdit(id, seq) {
     e.preventDefault();
     var val = function (n) { return document.getElementById('ed-' + n).value.trim(); };
     var params = { body: bodyEl.value, tags: val('tags'), status: val('status') };
-    ['type', 'title', 'description', 'resource'].forEach(function (n) { if (val(n)) params[n] = val(n); });
+    ['type', 'title', 'description'].forEach(function (n) { if (val(n)) params[n] = val(n); });
+    if (resourceEl.value !== initialResource) params.resource = resourceEl.value.trim();
     var sa = localToIso(val('stale-after'));
     params['stale-after'] = sa;
     var sourceUpdates = collectSources();
@@ -1021,17 +1067,16 @@ function renderSearch(initialQ) {
     '<label class="field"><span>Search notes</span><input id="sq" type="search" placeholder="Search by keyword…" required></label>' +
     '<div class="row"><button class="primary">Search</button>' +
     '<label><input id="s-semantic" type="checkbox"> Use configured semantic retrieval</label>' +
-    '<label class="field" id="s-profile-field" hidden><span>Retrieval profile</span>' +
+    '<label class="field"><span>Retrieval profile</span>' +
     '<select id="s-profile"><option value="">Configured default</option><option>lean</option>' +
-    '<option>balanced</option><option>max</option></select></label></div></form>' +
+    '<option>balanced</option><option>max</option></select></label>' +
+    '<label class="field"><span>Maximum results</span><input id="s-limit" type="number" value="20" min="1" required></label></div></form>' +
     '<div id="sout" class="list" aria-live="polite"></div></div>';
   var out = document.getElementById('sout');
   var qEl = document.getElementById('sq');
   var semantic = document.getElementById('s-semantic');
   var profile = document.getElementById('s-profile');
-  semantic.addEventListener('change', function () {
-    document.getElementById('s-profile-field').hidden = !semantic.checked;
-  });
+  var limit = document.getElementById('s-limit');
   document.getElementById('sf').addEventListener('submit', async function (e) {
     e.preventDefault();
     var q = qEl.value.trim();
@@ -1041,8 +1086,8 @@ function renderSearch(initialQ) {
       return;
     }
     Okb.working(out, 'searching');
-    var params = { query: q, 'keyword-only': !semantic.checked };
-    if (semantic.checked && profile.value) params.profile = profile.value;
+    var params = { query: q, 'keyword-only': !semantic.checked, limit: limit.valueAsNumber };
+    if (profile.value) params.profile = profile.value;
     try {
       var hits = await api('search', params);
       out.innerHTML = hits.length
