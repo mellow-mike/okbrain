@@ -299,7 +299,7 @@ okb jobs                 # one pass: index, embed, rss, review, doctor
 Multi-device sync uses Git. On a second device, open **Settings → Brain folders
 → Restore from GitHub** to download a shared brain and rebuild its local search
 index. Directories named `db_only/` stay on disk and in the index but out of Git
-when using `okb sync`. Static HTML exports also
+when using `okb sync`. Static HTML and graph JSON exports also
 omit these notes by default. The review queue ranks concepts past their
 `stale_after` first, nudges drafts, and never queues deprecated ones.
 

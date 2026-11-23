@@ -56,7 +56,7 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Save a completed answer from either Ask route as a private Markdown
   draft with model attribution and verified sources. Recover a lost save response.
 - [x] Build a first map and its local index in place with the selected filters.
-- [~] Export the machine-readable graph from the Mac and web apps. Exclude
+- [x] Export the machine-readable graph from the Mac and web apps. Exclude
   private drafts by default and offer an explicit private export.
 - [x] Keep private notes in local Review while using only public note metadata
   for optional AI annotations.
@@ -132,8 +132,9 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   progress, cancellation, and exportable results from the shared benchmark.
 - [x] Rehearse all 36 pinned Vite trials through the team API on the exact
   checkout with an injected provider and separate fixture reviewer.
-- [ ] Measure live provider usage and tokens per accepted result with
-  independent human review of citations and outcomes.
+- [!] Measure live provider usage and tokens per accepted result with
+  independent human review of citations and outcomes. Waiting on an approved
+  provider account and an independent human reviewer.
 - [x] Add project authorization, expiring member tokens, dedicated worker
   subprocesses, per-project credentials, and team status and cancellation.
 - [x] Verify local crash recovery and request replay, project-scoped audit,
@@ -153,8 +154,10 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   controls, a missing local image, and member and read-only authorization.
 - [x] Add an explicitly approved model metadata lookup from the configured
   worker so the operator can check provider access on the deployment host.
-- [ ] Verify failure, retention, access policy, and worker isolation on the
+- [!] Verify failure, retention, access policy, and worker isolation on the
   intended enterprise deployment, including actual provider egress and backups.
+  Waiting on access to that host. Local and CI checks use the offline Linux
+  Docker worker.
 - [x] Add explicitly previewed, independent Pi Durable package reviews with
   task-owned child conversations, combined usage, and a human-reviewed handoff.
 - [x] Preview and apply owner-approved local patches to existing tracked files
@@ -881,6 +884,14 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added graph JSON export to the Mac and web apps and a source
+  manifest copy to the Coding apps and editor. Fixed patch approval under
+  umasks other than `022` (B18). Local checks passed 741 tests under umask
+  `022` and `002`, 25 editor tests, the 375 px browser smoke, and the compiled
+  binary. The macOS app jobs of CI run 45090959270 built both architectures
+  and saved both graph exports through the app's save handling. Live provider
+  evaluation, intended-host verification, signing credentials, and the
+  `v0.1.0` tag remain open.
 - 2026-11-22 — Added reviewed Git origin replacement and disconnection in
   Settings, with the old GitHub credential available for separate removal.
 - 2026-11-22 — Added the app source retrieval benchmark with measured results
