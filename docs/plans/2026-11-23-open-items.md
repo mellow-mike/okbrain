@@ -49,9 +49,12 @@ chat, commits, or logs.
    certify-only primary key, a signing subkey, and an expiry of about two
    years. The maintainer chooses the user ID. Export the public key in armored
    form for `packaging/okbrain-release-key.asc` and share the primary key
-   fingerprint. Export only the signing subkey's secret
-   (`gpg --armor --export-secret-subkeys <FPR>!`) for CI, so a CI leak cannot
-   certify new keys.
+   fingerprint for pinning. For CI, export only the signing subkey's secret by
+   naming the **signing subkey's** fingerprint with a trailing `!`
+   (`gpg --armor --export-secret-subkeys <SIGNING-SUBKEY-FPR>!`), so a CI leak
+   cannot certify new keys. With the primary fingerprint, `!` selects the
+   primary key alone and the export cannot sign ("No secret key"). Signing
+   with `--local-user <primary FPR>` still selects the subkey.
 2. **Create the `release` environment** in the repository settings. Add the
    maintainer as a required reviewer, and allow deployments from `v*` tags and
    the `main` branch (the dry run needs `main`). Add the environment secrets
