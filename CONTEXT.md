@@ -20,6 +20,11 @@ answer, provider, model, verified citations, and mounted brain. Successful
 saves are create-only, keep their original generator and source metadata, and
 refresh the local search index. The approval lives in the current server
 instance and retrying it preserves edits or reports a removed draft.
+The local app can save the machine-readable graph as a JSON file with the
+`graph_data` schema. `export_graph` leaves private notes out unless a trusted
+caller of a writable brain includes them, and the app asks for that approval
+on every private export. The page hands the file to the browser's download
+flow, which the Mac app answers with a save panel.
 
 The coding workflow keeps operational state in Pi Durable storage in the
 user's application data. Each named session binds to a canonical workspace
@@ -574,6 +579,14 @@ ring, and hovering a node dims everything outside its neighbourhood.
   through untouched (external ones open in a new tab). The op is scope `read`
   despite writing a file: the output is derived, and the fixed path leaves no
   caller-chosen destination to abuse.
+- **JSON export:** `okb export-graph` and **Settings → Graph JSON export**
+  return the `graph_data` nodes and edges for use in other tools, built from
+  the same bundle walk. Private notes are left out by the rule the HTML
+  export uses. `--include-private`, or the app's approval, adds them for a
+  trusted caller of a writable brain. The op writes nothing: the CLI prints
+  the JSON and the app saves it through the browser's download flow. The
+  local API serves the route only to the app's own token header and marks the
+  response `no-store`.
 
 ---
 
@@ -978,6 +991,7 @@ account and coding commands that operate independently of a selected brain.
 | `okb brains` | read (localOnly) | List configured brain mounts |
 | `okb serve [--open]` / `okb mcp` / `okb bookmarklet` | admin (localOnly) | Local GUI+API, MCP server, clip bookmarklet |
 | `okb export-viz` | read | Self-contained graph HTML with optional embedded fonts and explicit consent for private notes |
+| `okb export-graph` | read | Graph nodes and edges as portable JSON, with explicit consent for private notes |
 | `okb cache-settings [sqlite\|postgres]` | admin | Choose per-brain SQLite or local PostgreSQL and pgvector caches |
 | `okb version` / `--version` | — | okbrain's version |
 
@@ -1075,14 +1089,15 @@ Views:
   by type, top tags, `graph_path` finder, `orphans`.
 - **Settings** — server status, your actor (`init --actor`), AI providers +
   retrieval profile (`init`), git `sync`, `enrich` guardrails, maintenance
-  (`index`, `embed`, `doctor`, `export_viz`, confirm-gated `rebuild`, `jobs`
-  with a job subset, `upgrade` preview + run), MCP setup snippets, the
-  bookmarklet.
+  (`index`, `embed`, `doctor`, `export_viz`, `export_graph` saved as a JSON
+  file, confirm-gated `rebuild`, `jobs` with a job subset, `upgrade` preview
+  + run), MCP setup snippets, the bookmarklet.
 The bundle remains plain Markdown and external editors can edit it directly.
 The AppKit macOS app embeds the same interface from its bundled loopback
 runtime. Native menus open brain or coding workspace folders and pass external
-links to the system browser. The VS Code and Cursor extension uses the loopback
-coding API to display previews and run reviews in editor tabs.
+links to the system browser. A file the local page generates, such as a graph
+export, opens a native save panel. The VS Code and Cursor extension uses the
+loopback coding API to display previews and run reviews in editor tabs.
 
 ### Look & feel (the design system)
 The okbrain design system (`docs/context/REFERENCES.md` R5) is the source of
@@ -1311,6 +1326,13 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-11-22 — **Graph JSON export reuses `graph_data` and the browser's save
+  flow.** A separate `export_graph` op gives exports a public default while
+  the live graph view keeps showing private notes. Saving through a download
+  needs no server-side destination, and the Mac app answers local blob
+  downloads with `NSSavePanel` through `WKDownloadDelegate`. Private notes
+  follow the rule the HTML and Markdown exports and Git sync already use: a
+  `db_only/` folder or a readable `db_only: true` flag.
 - 2026-11-22 — **Preview scoped coding context before admission.** Keep the
   Git scan bounded and reveal its selected source and limits before sending
   a request. Persist the selected text for durable recovery. Use Pi's native

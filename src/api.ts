@@ -1061,7 +1061,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
   const recoveryAction = url.pathname === "/api/op/sync_recovery";
   const ownerFileAction = recoveryAction || url.pathname.startsWith("/api/op/computation_") ||
-    ["/api/op/export_markdown", "/api/op/inbox_file", "/api/op/keep_private", "/api/op/cache_settings",
+    ["/api/op/export_markdown", "/api/op/export_graph", "/api/op/inbox_file", "/api/op/keep_private", "/api/op/cache_settings",
       "/api/op/sync_settings"].includes(url.pathname);
   if (ownerFileAction) {
     if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))

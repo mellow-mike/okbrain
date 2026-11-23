@@ -218,7 +218,7 @@ Global flags: `--json`, `--bundle <path>`, `--brain <name>`, `--version`.
 | AI accounts | `chatgpt connect` · `chatgpt status` · `chatgpt use` · `chatgpt models` · `chatgpt disconnect` · `import-conversations` |
 | retrieve | `search` · `ask` · `read` · `list` |
 | ChatGPT plan | `ask-plan` |
-| graph | `graph` · `path` · `orphans` · `graph-data` · `export-viz` · `links suggest` · `links accept` |
+| graph | `graph` · `path` · `orphans` · `graph-data` · `export-graph` · `export-viz` · `links suggest` · `links accept` |
 | review | `review` · `review done` · `review snooze` |
 | claims | `take` · `resolve` · `calibrate` |
 | maintain | `index` · `rebuild` · `embed` · `doctor` · `upgrade` · `stats` · `jobs` · `sync` |

@@ -170,9 +170,12 @@ Enter a shared Notion page URL or ID and select **Preview page**. This reads the
 ```bash
 okb serve --open
 okb export-viz
+okb export-graph --json > graph.json
 ```
 
 The local app can browse, search, and edit conversation drafts in its selected bundle. **Settings → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`. Select **Embed app fonts in graph export** or pass `--fonts` to include the app's typefaces for offline viewing.
+
+To use the graph in another tool, open **Settings → Graph JSON export** in the Mac or web app and choose **Export graph JSON**. The file holds the same `nodes` and `edges` as `okb graph-data --json`, including each note's Markdown body, tags, status, trust, and sources. The Mac app opens a save panel for `okbrain-graph.json`, and a browser saves it with its other downloads. Private drafts are left out by default. To include them, select **Include private drafts in graph JSON** and confirm that export. The complete file is named `okbrain-graph-private.json`. A read-only brain can export its shared notes. The CLI equivalent is `okb export-graph --json`, with `--include-private` for the complete graph.
 
 ### Set up Git sync
 

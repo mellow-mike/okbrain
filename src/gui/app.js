@@ -46,6 +46,22 @@ async function get(path, scoped) {
   return body;
 }
 
+// Hand generated text to the browser's download flow. The Mac app answers the
+// same request with a native save panel, so the newest object URL stays alive
+// until the next save replaces it.
+var savedFileUrl = '';
+function saveFile(name, text, type) {
+  if (savedFileUrl) URL.revokeObjectURL(savedFileUrl);
+  savedFileUrl = URL.createObjectURL(new Blob([text], { type: type }));
+  var link = document.createElement('a');
+  link.href = savedFileUrl;
+  link.download = name;
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 // ---- small renderers ------------------------------------------------------
 
 function errorBox(e) {
@@ -3481,6 +3497,11 @@ async function renderSettings(_arg, seq) {
     '<div class="row"><button id="mx-viz">Export viz.html</button>' +
     '<label><input id="mx-viz-fonts" type="checkbox"> Embed app fonts in graph export</label>' +
     (st.readonly ? '' : '<label><input id="mx-viz-private" type="checkbox"> Include private drafts in graph export</label>') + '</div>' +
+    '<section class="stack" aria-labelledby="graph-json-export-heading"><h4 id="graph-json-export-heading">Graph JSON export</h4>' +
+    '<form id="graph-json-export" class="stack">' +
+    '<p class="muted">Save this brain’s notes and links as a JSON file for other tools. Private drafts are left out by default.</p>' +
+    (st.readonly ? '' : '<label class="row"><input type="checkbox" name="private"> Include private drafts in graph JSON</label>') +
+    '<div class="row"><button type="submit">Export graph JSON</button><span role="status"></span></div></form></section>' +
     '<section class="stack" aria-labelledby="markdown-export-heading"><h4 id="markdown-export-heading">Markdown and Obsidian export</h4>' +
     (st.readonly ? '<p>Open a writable brain to export its notes.</p>' :
       '<form id="markdown-export" class="stack"><label class="field"><span>New export folder (absolute path)</span>' +
@@ -3640,6 +3661,28 @@ async function renderSettings(_arg, seq) {
     maint('export_viz', 'exporting', { 'include-private': includePrivate, fonts: fonts }, function (r) {
       return '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>';
     });
+  });
+  var graphJson = document.getElementById('graph-json-export');
+  graphJson.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    var includePrivate = Boolean(graphJson.elements.private?.checked);
+    var button = graphJson.querySelector('button');
+    var status = graphJson.querySelector('[role="status"]');
+    if (button.disabled) return;
+    if (includePrivate && !confirm('The graph JSON will contain private draft text. Export it?')) return;
+    button.disabled = true;
+    Okb.working(status, 'preparing graph JSON');
+    try {
+      var graph = await appWork(api('export_graph', { 'include-private': includePrivate }));
+      if (stale(seq)) return;
+      var name = includePrivate ? 'okbrain-graph-private.json' : 'okbrain-graph.json';
+      saveFile(name, JSON.stringify(graph, null, 2) + '\n', 'application/json');
+      status.textContent = 'Saving ' + name + ' with ' + graph.nodes.length + (graph.nodes.length === 1 ? ' note and ' : ' notes and ') +
+        graph.edges.length + (graph.edges.length === 1 ? ' link' : ' links') +
+        (includePrivate ? ', including private drafts.' : '. Private drafts are left out.');
+    } catch (error) {
+      if (!stale(seq)) status.innerHTML = errorBox(error);
+    } finally { button.disabled = false; }
   });
   var markdown = document.getElementById('markdown-export');
   if (markdown) markdown.addEventListener('submit', async function (event) {

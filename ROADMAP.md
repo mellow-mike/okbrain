@@ -56,7 +56,7 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Save a completed answer from either Ask route as a private Markdown
   draft with model attribution and verified sources. Recover a lost save response.
 - [x] Build a first map and its local index in place with the selected filters.
-- [ ] Export the machine-readable graph from the Mac and web apps. Exclude
+- [~] Export the machine-readable graph from the Mac and web apps. Exclude
   private drafts by default and offer an explicit private export.
 - [x] Keep private notes in local Review while using only public note metadata
   for optional AI annotations.

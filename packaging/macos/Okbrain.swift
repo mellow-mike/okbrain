@@ -1,8 +1,17 @@
 import AppKit
 import WebKit
 
+private struct SmokeFailure: Error {
+    let message: String
+}
+
 @MainActor
-final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+    private static let graphNodeKeys: Set<String> = [
+        "id", "type", "title", "description", "tags", "resource", "bodyLen", "body",
+        "status", "trust", "stale", "staleAfter", "generated", "verified", "sources",
+    ]
+
     private var window: NSWindow!
     private var web: WKWebView!
     private var process: Process?
@@ -11,6 +20,13 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
     private var readyOutput = Data()
     private let smokeTest = ProcessInfo.processInfo.arguments.contains("--smoke-test")
     private var smokeDirectory: URL?
+    private var smokeStarted = false
+    private var smokeConfirmations: [String] = []
+    private var smokeSaved: [String: URL] = [:]
+    private var smokeSaveFailure: String?
+    private var saves: [ObjectIdentifier: WKDownload] = [:]
+    private var saveDestinations: [ObjectIdentifier: URL] = [:]
+    private var cancelledSaves = Set<ObjectIdentifier>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let configuration = WKWebViewConfiguration()
@@ -195,9 +211,16 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
         root != nil && url.scheme == root?.scheme && url.host == root?.host && url.port == root?.port
     }
 
+    /// A file the local page generated itself, addressed as `blob:http://127.0.0.1:<port>/<id>`.
+    private func isLocalBlob(_ url: URL) -> Bool {
+        guard url.scheme == "blob", let origin = URL(string: String(url.absoluteString.dropFirst("blob:".count))) else { return false }
+        return isLocal(origin)
+    }
+
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { decisionHandler(.cancel); return }
+        if action.shouldPerformDownload, isLocalBlob(url) { decisionHandler(.download); return }
         if isLocal(url), action.targetFrame != nil { decisionHandler(.allow); return }
         if action.navigationType == .linkActivated, ["https", "http"].contains(url.scheme ?? "") {
             NSWorkspace.shared.open(url)
@@ -214,8 +237,79 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
         panel.beginSheetModal(for: window) { response in completionHandler(response == .OK ? panel.urls : nil) }
     }
 
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        saves[ObjectIdentifier(download)] = download
+        download.delegate = self
+    }
+
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String,
+                  completionHandler: @escaping (URL?) -> Void) {
+        let key = ObjectIdentifier(download)
+        let suggested = (suggestedFilename as NSString).lastPathComponent
+        let name = suggested.isEmpty || suggested == "/" ? "okbrain-export" : suggested
+        if let smokeDirectory {
+            // The smoke test has nobody to answer a panel. It saves beside its temporary brain.
+            let folder = smokeDirectory.appendingPathComponent("saved", isDirectory: true)
+            let destination = folder.appendingPathComponent(name)
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try? FileManager.default.removeItem(at: destination)
+                saveDestinations[key] = destination
+                completionHandler(destination)
+            } catch {
+                smokeSaveFailure = error.localizedDescription
+                cancelledSaves.insert(key)
+                completionHandler(nil)
+            }
+            return
+        }
+        let panel = NSSavePanel()
+        panel.title = "Save Export"
+        panel.nameFieldStringValue = name
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let destination = panel.url else {
+                self?.cancelledSaves.insert(key)
+                completionHandler(nil)
+                return
+            }
+            // The panel has confirmed any replacement, and WebKit saves only to a new path.
+            try? FileManager.default.removeItem(at: destination)
+            self?.saveDestinations[key] = destination
+            completionHandler(destination)
+        }
+    }
+
+    func downloadDidFinish(_ download: WKDownload) {
+        let key = ObjectIdentifier(download)
+        saves.removeValue(forKey: key)
+        cancelledSaves.remove(key)
+        if let destination = saveDestinations.removeValue(forKey: key), smokeTest {
+            smokeSaved[destination.lastPathComponent] = destination
+        }
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        let key = ObjectIdentifier(download)
+        saves.removeValue(forKey: key)
+        saveDestinations.removeValue(forKey: key)
+        let cancelled = cancelledSaves.remove(key) != nil || (error as NSError).code == NSURLErrorCancelled
+        if smokeTest {
+            if smokeSaveFailure == nil { smokeSaveFailure = error.localizedDescription }
+            return
+        }
+        if !cancelled { show(error.localizedDescription, title: "Could not save the file") }
+    }
+
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        if smokeTest {
+            // Record what the page asked the owner to approve, then continue unattended.
+            smokeConfirmations.append(message)
+            completionHandler(true)
+            return
+        }
         let alert = NSAlert()
         alert.messageText = message
         alert.addButton(withTitle: "Continue")
@@ -224,11 +318,12 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard smokeTest else { return }
+        guard smokeTest, !smokeStarted else { return }
+        smokeStarted = true
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let value = try await webView.callAsyncJavaScript("""
+                try await self.smokeScript(webView, """
                     async function ready(selector) {
                         for (let i = 0; i < 80; i++) {
                             if (document.querySelector(selector)) return true;
@@ -249,24 +344,110 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
                     location.hash = 'coding';
                     if (!await ready('.coding-projects form')) return 'The Coding workspace did not initialize.';
                     return true;
-                    """, arguments: [:], in: nil, contentWorld: .page)
-                guard value as? Bool == true else {
-                    self.show((value as? String) ?? "The okbrain page did not initialize.")
-                    return
-                }
+                    """)
+                try await self.smokeGraphExport(webView)
                 NSApp.terminate(nil)
+            } catch let failure as SmokeFailure {
+                self.show(failure.message)
             } catch { self.show(error.localizedDescription) }
         }
     }
 
-    private func show(_ message: String) {
+    private func smokeScript(_ webView: WKWebView, _ body: String) async throws {
+        let value = try await webView.callAsyncJavaScript(body, arguments: [:], in: nil, contentWorld: .page)
+        guard value as? Bool == true else {
+            throw SmokeFailure(message: (value as? String) ?? "The okbrain page did not initialize.")
+        }
+    }
+
+    /// Save the graph JSON through the page and WebKit's download path, then read the saved files back.
+    private func smokeGraphExport(_ webView: WKWebView) async throws {
+        let publicId = "notes/smoke-public"
+        let privateId = "notes/smoke-private"
+        let privateTitle = "Smoke private draft"
+        let privateText = "Private packaging text."
+        try await smokeScript(webView, """
+            async function ready(selector) {
+                for (let i = 0; i < 80; i++) {
+                    if (document.querySelector(selector)) return true;
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+                return false;
+            }
+            async function save(note) {
+                const response = await fetch('/api/op/write_concept', {
+                    method: 'POST', headers: { 'x-okb-token': window.OKB_TOKEN, 'content-type': 'application/json' },
+                    body: JSON.stringify(note),
+                });
+                return response.ok;
+            }
+            if (!await save({ id: 'notes/smoke-public', type: 'note', title: 'Smoke public note',
+                description: 'A public packaging fixture.', body: 'Read [the draft](/notes/smoke-private.md).' }))
+                return 'The smoke brain could not save a public note.';
+            if (!await save({ id: 'notes/smoke-private', type: 'note', title: 'Smoke private draft',
+                description: 'A private packaging fixture.', body: 'Private packaging text.', private: true }))
+                return 'The smoke brain could not save a private draft.';
+            location.hash = 'settings';
+            if (!await ready('#graph-json-export button')) return 'Settings did not offer the graph JSON export.';
+            document.querySelector('#graph-json-export button').click();
+            return true;
+            """)
+        let shared = try await smokeSavedGraph("okbrain-graph.json")
+        guard shared.ids.contains(publicId), !shared.ids.contains(privateId), shared.edges == 0,
+              !shared.text.contains(privateTitle), !shared.text.contains(privateText) else {
+            throw SmokeFailure(message: "The default graph JSON export did not leave the private draft out.")
+        }
+        guard smokeConfirmations.isEmpty else {
+            throw SmokeFailure(message: "The default graph JSON export asked for an approval it does not need.")
+        }
+
+        try await smokeScript(webView, """
+            const form = document.querySelector('#graph-json-export');
+            const button = form?.querySelector('button');
+            for (let i = 0; button?.disabled && i < 80; i++) await new Promise(resolve => setTimeout(resolve, 100));
+            if (!form?.elements.private || !button || button.disabled) return 'Settings did not offer the private graph JSON export.';
+            form.elements.private.checked = true;
+            button.click();
+            return true;
+            """)
+        let complete = try await smokeSavedGraph("okbrain-graph-private.json")
+        guard complete.ids.contains(publicId), complete.ids.contains(privateId), complete.edges == 1,
+              complete.text.contains(privateText) else {
+            throw SmokeFailure(message: "The approved graph JSON export did not include the private draft.")
+        }
+        guard smokeConfirmations == ["The graph JSON will contain private draft text. Export it?"] else {
+            throw SmokeFailure(message: "The private graph JSON export did not ask for approval in the app.")
+        }
+    }
+
+    private func smokeSavedGraph(_ name: String) async throws -> (ids: Set<String>, edges: Int, text: String) {
+        for _ in 0..<100 {
+            if let failure = smokeSaveFailure { throw SmokeFailure(message: "The app could not save \(name). " + failure) }
+            if let file = smokeSaved[name] {
+                let data = try Data(contentsOf: file)
+                guard let text = String(data: data, encoding: .utf8),
+                      let graph = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let nodes = graph["nodes"] as? [[String: Any]],
+                      let edges = graph["edges"] as? [[String: Any]],
+                      nodes.allSatisfy({ Set($0.keys).isSuperset(of: Okbrain.graphNodeKeys) }),
+                      edges.allSatisfy({ $0["src"] is String && $0["dst"] is String }) else {
+                    throw SmokeFailure(message: "The saved \(name) does not use the graph schema.")
+                }
+                return (Set(nodes.compactMap { $0["id"] as? String }), edges.count, text)
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        throw SmokeFailure(message: "The app did not save \(name).")
+    }
+
+    private func show(_ message: String, title: String = "Could not open okbrain") {
         if smokeTest {
             FileHandle.standardError.write(Data((message + "\n").utf8))
             stop()
             exit(1)
         }
         let alert = NSAlert()
-        alert.messageText = "Could not open okbrain"
+        alert.messageText = title
         alert.informativeText = message
         alert.beginSheetModal(for: window)
     }

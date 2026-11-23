@@ -1710,6 +1710,28 @@ export const operations: readonly Operation[] = [
     },
   },
   {
+    // The portable form of graph_data: the same nodes and edges, meant to be
+    // saved as a file that leaves the app. Private notes stay out unless a
+    // trusted caller of a writable brain explicitly includes them.
+    name: "export_graph",
+    cliName: "export-graph",
+    summary: "The graph (nodes + edges) as portable JSON, without private notes unless included",
+    scope: "read",
+    params: [
+      { name: "include-private", type: "boolean", description: "include private db_only notes in the JSON" },
+    ],
+    handler: (ctx, p) => {
+      const includePrivate = p["include-private"] === true;
+      if (includePrivate && !ctx.trusted) throw new OpError("Private graph exports require a trusted caller.", "untrusted");
+      if (includePrivate && ctx.readonly) throw new OpError("Private graph exports require a writable brain.", "refused");
+      return buildVizGraph(ctx.bundle, { includePrivate });
+    },
+    render: (r) => {
+      const g = r as VizGraph;
+      return `${g.nodes.length} concepts, ${g.edges.length} links (use --json for the data)`;
+    },
+  },
+  {
     // Scope read despite writing a file: output is derived (never canonical
     // knowledge) and the path is fixed to <bundle>/viz.html — no caller-chosen
     // destination an untrusted caller could abuse.

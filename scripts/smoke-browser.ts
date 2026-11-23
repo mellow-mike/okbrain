@@ -15,6 +15,7 @@ import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/c
 import { extractTargets } from "../src/core/graph/links.ts";
 import { fmGenerated, fmSources, parse, serialize } from "../src/core/okf/document.ts";
 import type { AskResult } from "../src/core/retrieval/ask.ts";
+import type { VizGraph } from "../src/core/viz/export.ts";
 import { githubBranchBrowserFixture } from "./github-branch-browser-fixture.ts";
 
 const root = await mkdtemp(join(tmpdir(), "okbrain-browser-smoke-"));
@@ -607,6 +608,70 @@ try {
     await offlineViewer.locator("#filters input[data-type=note]").uncheck();
     assert.equal(await offlineViewer.locator("#filters input[data-type=note]").isChecked(), false);
   } finally { await offlineViewer.close(); }
+  const graphJson = page.locator("#graph-json-export");
+  const graphJsonButton = graphJson.getByRole("button", { name: "Export graph JSON", exact: true });
+  const graphJsonPrivate = graphJson.getByRole("checkbox", { name: "Include private drafts in graph JSON", exact: true });
+  const graphJsonRequests: unknown[] = [];
+  const graphJsonApprovals: string[] = [];
+  const recordGraphJson = (request: BrowserRequest) => {
+    if (new URL(request.url()).pathname === "/api/op/export_graph") graphJsonRequests.push(request.postDataJSON());
+  };
+  async function saveGraphJson(name: string) {
+    const saving = page.waitForEvent("download");
+    await graphJsonButton.click();
+    const download = await saving;
+    assert.equal(download.suggestedFilename(), name);
+    const saved = join(root, name);
+    await download.saveAs(saved);
+    const text = await Bun.file(saved).text();
+    return { text, graph: JSON.parse(text) as VizGraph };
+  }
+  // One private draft by folder and one by flag, each with text no public note contains.
+  const graphDrafts = [
+    { id: "db_only/graph-export-folder", text: "Graph export folder marker.", flag: "" },
+    { id: "policies/graph-export-flagged", text: "Graph export flag marker.", flag: "db_only: true\n" },
+  ];
+  await mkdir(join(bundle, "db_only"), { recursive: true });
+  for (const { id, text, flag } of graphDrafts)
+    await writeFile(join(bundle, `${id}.md`), `---\ntype: note\ntitle: Graph export draft\n${flag}---\n${text} See [policy](/${policyId}.md).\n`);
+  page.on("request", recordGraphJson);
+  try {
+    assert.equal(await graphJsonPrivate.isChecked(), false);
+    const shared = await saveGraphJson("okbrain-graph.json");
+    await graphJson.getByRole("status").getByText(/^Saving okbrain-graph\.json with \d+ notes and \d+ links?\. Private drafts are left out\.$/).waitFor();
+    assert.deepEqual(graphJsonRequests, [{ "include-private": false }]);
+    assert.deepEqual(Object.keys(shared.graph).sort(), ["edges", "nodes"]);
+    assert.ok(shared.graph.nodes.some((node) => node.id === answerSource && node.title === "Offline orchid propagation"));
+    assert.ok(shared.graph.edges.some((edge) => edge.src === answerSource && edge.dst === policyId));
+    assert.ok(shared.graph.nodes.every((node) => !node.id.startsWith("db_only/")));
+    for (const { id, text } of graphDrafts) {
+      assert.ok(shared.graph.nodes.every((node) => node.id !== id));
+      assert.ok(shared.graph.edges.every((edge) => edge.src !== id && edge.dst !== id));
+      assert.equal(shared.text.includes(text), false);
+    }
+
+    // Private drafts need the checkbox and an approval in the dialog for each export.
+    await graphJsonPrivate.check();
+    page.once("dialog", (dialog) => { graphJsonApprovals.push(dialog.message()); void dialog.dismiss(); });
+    await graphJsonButton.click();
+    assert.equal(await graphJsonButton.isEnabled(), true);
+    assert.equal(graphJsonRequests.length, 1);
+    page.once("dialog", (dialog) => { graphJsonApprovals.push(dialog.message()); void dialog.accept(); });
+    const complete = await saveGraphJson("okbrain-graph-private.json");
+    await graphJson.getByRole("status").getByText(/^Saving okbrain-graph-private\.json with \d+ notes and \d+ links?, including private drafts\.$/).waitFor();
+    assert.deepEqual(graphJsonRequests.slice(1), [{ "include-private": true }]);
+    assert.deepEqual(graphJsonApprovals, Array(2).fill("The graph JSON will contain private draft text. Export it?"));
+    for (const { id, text } of graphDrafts) {
+      assert.ok(complete.graph.nodes.find((node) => node.id === id)?.body.includes(text));
+      assert.ok(complete.graph.edges.some((edge) => edge.src === id && edge.dst === policyId));
+    }
+    assert.ok(complete.graph.nodes.some((node) => node.id === draft.id));
+    assert.ok(complete.graph.nodes.length >= shared.graph.nodes.length + graphDrafts.length + 1);
+    await graphJsonPrivate.uncheck();
+  } finally {
+    page.off("request", recordGraphJson);
+    for (const { id } of graphDrafts) await rm(join(bundle, `${id}.md`), { force: true });
+  }
   const markdownExport = page.locator("#markdown-export");
   assert.equal(await markdownExport.getByRole("checkbox", { name: "Include private drafts in Markdown export" }).isChecked(), false);
   const vault = join(root, "exported vault");

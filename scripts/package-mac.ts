@@ -54,9 +54,10 @@ try {
 
   if (process.argv.includes("--smoke")) {
     const child = Bun.spawn([join(executables, "Okbrain"), "--smoke-test"], { stdout: "inherit", stderr: "inherit" });
-    const timer = setTimeout(() => child.kill(), 25_000);
+    // Allow time for the app to save both graph exports and report a specific failure.
+    const timer = setTimeout(() => child.kill(), 45_000);
     try {
-      if (await child.exited) throw new Error("The packaged macOS app did not load its local web interface.");
+      if (await child.exited) throw new Error("The packaged macOS app did not pass its smoke test.");
     } finally { clearTimeout(timer); }
   }
 
