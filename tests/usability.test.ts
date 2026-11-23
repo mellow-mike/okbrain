@@ -444,6 +444,67 @@ describe("usability sessions", () => {
       finally { emptied.close(); }
     } finally { await box.close(); }
   });
+
+  test("ordinary use deletes an expired session, with no visit to the session controls", async () => {
+    const box = await sandbox();
+    try {
+      // What the store holds, read straight from the file so that no session command runs.
+      const held = () => {
+        const db = new Database(box.store, { readonly: true });
+        try {
+          return { sessions: db.query<{ total: number }, []>("SELECT count(*) AS total FROM sessions").get()!.total,
+            events: db.query<{ total: number }, []>("SELECT count(*) AS total FROM events").get()!.total };
+        } finally { db.close(); }
+      };
+      const age = (ms: number) => {
+        const db = new Database(box.store);
+        try { db.query("UPDATE sessions SET started_at = started_at - ?, ended_at = ended_at - ?").run(ms, ms); }
+        finally { db.close(); }
+      };
+      const study = async () => {
+        await box.op("usability_session", { action: "start" });
+        await box.op("capture", { text: "Saved during the study" });
+        await box.op("usability_session", { action: "stop" });
+        expect(held()).toEqual({ sessions: 1, events: 1 });
+      };
+
+      // Inside the window, later work leaves a finished study alone.
+      await box.op("capture", { text: "Written before the study" });
+      await box.op("index");
+      await study();
+      age(29 * day);
+      await box.op("search", { query: "study", "keyword-only": true });
+      expect(held()).toEqual({ sessions: 1, events: 1 });
+
+      // Past it, the next search in the app deletes the study.
+      age(day + 1000);
+      await box.op("search", { query: "study", "keyword-only": true });
+      expect(held()).toEqual({ sessions: 0, events: 0 });
+
+      // So does the next command in a terminal.
+      await study();
+      age(30 * day + 1000);
+      expect((await box.cli("search", "study", "--keyword-only")).code).toBe(0);
+      expect(held()).toEqual({ sessions: 0, events: 0 });
+
+      // And the app's status check, which a read-only brain makes too.
+      await study();
+      age(30 * day + 1000);
+      const readonly = box.serve(box.bundle, true);
+      const status = await (await fetch(`${readonly.url}api/status`, { headers: { "x-okb-token": TOKEN } })).json() as { usabilityRecording: boolean };
+      expect(status.usabilityRecording).toBe(false);
+      expect(held()).toEqual({ sessions: 0, events: 0 });
+
+      // A client over MCP is not the owner's own use, so it deletes nothing and reads nothing.
+      await study();
+      age(30 * day + 1000);
+      const agent = openLocalContext(box.bundle, true, false, "study-agent/1.0.0");
+      agent.ctx.surface = "mcp";
+      try { await runOp(getOp("search")!, agent.ctx, { query: "study", "keyword-only": true }); }
+      finally { await agent.close(); }
+      expect(held()).toEqual({ sessions: 1, events: 1 });
+    } finally { await box.close(); }
+  });
 });
 
 describe("usability summary", () => {

@@ -217,6 +217,20 @@ function recordingSession(db: Database, key: string, now: number): Recording | u
   return row ? { id: row.id, startedAt: row.started_at } : undefined;
 }
 
+/**
+ * Drop sessions past the retention window. Ordinary use of an existing store
+ * comes through here, so a finished study is deleted on time even when nobody
+ * opens the session controls again. It reads first and only takes the write
+ * lock when something has expired.
+ */
+function dropExpired(db: Database, now: number): void {
+  const cutoff = now - retentionMs;
+  try {
+    if (!db.query<{ id: string }, [number]>("SELECT id FROM sessions WHERE started_at < ? LIMIT 1").get(cutoff)) return;
+    db.transaction(() => { db.query("DELETE FROM sessions WHERE started_at < ?").run(cutoff); }).immediate();
+  } catch { /* Another process holds the store. The next activity tries again. */ }
+}
+
 const wholeNumber = (value: number | undefined, least: number): number | null =>
   value !== undefined && Number.isFinite(value) && value >= least ? Math.min(Math.round(value), Number.MAX_SAFE_INTEGER) : null;
 
@@ -251,6 +265,7 @@ function record(ctx: OpContext, event: EventInput): void {
     db = openStore(false);
     if (!db) return;
     const store = db;
+    dropExpired(store, Date.now());
     const key = brainKey(ctx.bundle);
     if (!recordingSession(store, key, Date.now())) return;
     store.transaction(() => {
@@ -352,13 +367,20 @@ export function recordOpEvent(
   if (detail) recordUsabilityActivity(ctx, activity.kind, detail, durationMs);
 }
 
-/** True while this brain has a recording session the caller would add to. */
+/**
+ * True while this brain has a recording session the caller would add to. The
+ * local app asks on every status check, for a read-only brain too, so this is
+ * also where an existing store sheds its expired sessions.
+ */
 export function usabilityRecording(ctx: OpContext): boolean {
-  if (!recordingSurface(ctx)) return false;
+  if (ctx.localUsage !== true) return false;
   let db: Database | undefined;
   try {
     db = openStore(false);
-    return db !== undefined && recordingSession(db, brainKey(ctx.bundle), Date.now()) !== undefined;
+    if (!db) return false;
+    const now = Date.now();
+    dropExpired(db, now);
+    return recordingSurface(ctx) !== undefined && recordingSession(db, brainKey(ctx.bundle), now) !== undefined;
   } catch {
     return false;
   } finally { db?.close(); }

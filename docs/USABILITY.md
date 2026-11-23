@@ -6,7 +6,7 @@ The same steps work in the Mac app and the web app, which share one interface.
 
 ## What a session records
 
-Recording is off until you start it. It covers one brain and stays in your per-user application data on this device, in `usability/sessions.db` under okbrain's data folder. Nothing is sent anywhere. Sessions are deleted after 30 days, or at once when you choose **Clear sessions**.
+Recording is off until you start it. It covers one brain and stays in your per-user application data on this device, in `usability/sessions.db` under okbrain's data folder. Nothing is sent anywhere. A session is deleted 30 days after it starts, the next time you use okbrain, or at once when you choose **Clear sessions**.
 
 | Recorded | Never recorded |
 | --- | --- |

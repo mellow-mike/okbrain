@@ -1224,8 +1224,12 @@ limited to 16 letters, digits, hyphens, or underscores. `CHECK` constraints
 enforce every one of those, so note IDs, titles, paths, tags, bodies, query
 text, model output, and error messages have no column to reach. A failed op
 keeps its `OpError` code and drops the message. Sessions expire after 30
-days, **Clear** deletes a brain's sessions at once with `secure_delete` on,
-and the export leaves out the brain key.
+days: a session past that no longer records, and the owner's next use of an
+existing store deletes it with its events. That is any recorded kind of
+action in the app or the CLI, or the app's status check, so a finished study
+does not wait for someone to reopen the controls. **Clear** deletes a
+brain's sessions at once with `secure_delete` on, and the export leaves out
+the brain key.
 
 ### Multi-brain mounts (Stage 5)
 The gbrain "brains" axis: config `brains` maps a name to a bundle path
