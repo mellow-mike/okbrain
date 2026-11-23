@@ -6,6 +6,7 @@
 // transport on 127.0.0.1.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +15,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createApiServer } from "../src/api.ts";
 import { loadConfig, saveConfig } from "../src/core/config.ts";
+import { openLocalContext } from "../src/core/context.ts";
 import { parse } from "../src/core/okf/document.ts";
+import { getOp, OpError, runOp } from "../src/core/operations.ts";
 import { createMcpServer, mcpActor, mcpOps, runMcpHttp } from "../src/mcp/server.ts";
 import { okb } from "./helpers.ts";
 
@@ -136,6 +139,39 @@ describe("trusted connection (--trusted)", () => {
     const fm = parse(await readFile(join(bundle, "notes", "via-mcp.md"), "utf8")).frontmatter;
     expect(fm.generated).toMatchObject({ by: "test-client/0.0.0" });
     await client.close();
+  });
+
+  // `import` reads any folder this user can read. An agent that could name
+  // the path would pull Markdown from anywhere on the computer into the brain,
+  // where it can read it and Git can share it.
+  test("a trusted client still cannot import from a path on this computer", async () => {
+    const elsewhere = await mkdtemp(join(tmpdir(), "okb-mcp-elsewhere-"));
+    await writeFile(join(elsewhere, "private.md"), "---\ntype: note\ntitle: Elsewhere\ndescription: outside the brain\n---\nOUTSIDE-THE-BRAIN\n");
+    const client = await connect(true);
+    try {
+      expect(mcpOps(true).map((o) => o.name)).not.toContain("import");
+      expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain("import");
+      const called = await client.callTool({ name: "import", arguments: { path: elsewhere } });
+      expect(called.isError).toBe(true);
+      expect(textOf(called)).toContain("unknown tool");
+      // The handler refuses an agent's context as well, whatever lists the op.
+      const agent = openLocalContext(bundle, true, false, "test-client/0.0.0");
+      try {
+        const refused = await runOp(getOp("import")!, agent.ctx, { path: elsewhere }).then(() => null, (error: unknown) => error);
+        expect(refused).toBeInstanceOf(OpError);
+        expect((refused as OpError).code).toBe("refused");
+      } finally { await agent.close(); }
+      expect(existsSync(join(bundle, "private.md"))).toBe(false);
+      // The owner's own surfaces keep the command.
+      const owned = await okb(["--bundle", bundle, "import", elsewhere, "--dest", "imported"]);
+      expect(owned.code).toBe(0);
+      expect(existsSync(join(bundle, "imported", "private.md"))).toBe(true);
+    } finally {
+      await client.close();
+      await rm(join(bundle, "imported"), { recursive: true, force: true });
+      await rm(elsewhere, { recursive: true, force: true });
+      expect((await okb(["index", "--bundle", bundle])).code).toBe(0);
+    }
   });
 
   test("mcpActor: client name/version → producer/version; junk falls back", () => {

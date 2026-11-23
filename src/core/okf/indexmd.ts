@@ -10,7 +10,7 @@ import { basename, join, posix, resolve } from "node:path";
 import { markdownOutsideCode } from "../graph/links.ts";
 import { listMdFiles, readConceptPermissive } from "./bundle.ts";
 import { fmString, OkfParseError, parse, serialize } from "./document.ts";
-import { inDbOnlyDir, isReservedName } from "./paths.ts";
+import { assertBundleFile, inDbOnlyDir, isReservedName } from "./paths.ts";
 import { isPrivateConcept } from "./privacy.ts";
 
 /** The OKF spec version okbrain writes (declared in the root index.md). */
@@ -29,9 +29,12 @@ interface ExistingIndex {
 
 // Extract the preserved head of an existing index.md; null when absent or its
 // frontmatter is unparseable (index.md is derived structure, safe to rebuild).
+// A link or special file in its place is treated as absent: its target's text
+// must not be copied into a parent index that Git then shares (B23).
 async function readExisting(absPath: string): Promise<ExistingIndex | null> {
   let raw: string;
   try {
+    if (!(await lstat(absPath)).isFile()) return null;
     raw = await readFile(absPath, "utf8");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -72,6 +75,7 @@ export async function generateIndexMd(root: string, dir: string, selectedStyle?:
   const punctuation = reference ? " - " : " — ";
   const abs = dir === "" ? root : join(root, ...dir.split("/"));
   const isRoot = dir === "";
+  await assertBundleFile(root, isRoot ? "index.md" : `${dir}/index.md`);
   const existing = await readExisting(join(abs, "index.md"));
   const entries = await readdir(abs, { withFileTypes: true });
 

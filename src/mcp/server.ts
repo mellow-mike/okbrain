@@ -32,10 +32,10 @@ export interface McpOptions {
   mountAllowed?: () => boolean;
 }
 
-/** The MCP tool surface: no admin, no localOnly; write only when trusted. */
+/** The MCP tool surface: no admin, no localOnly, no host paths; write only when trusted. */
 export const mcpOps = (trusted: boolean): Operation[] =>
   operations.filter(
-    (o) => !o.localOnly && o.scope !== "admin" && (trusted || o.scope === "read"),
+    (o) => !o.localOnly && !o.ownerOnly && o.scope !== "admin" && (trusted || o.scope === "read"),
   );
 
 const toolOf = (op: Operation) => ({

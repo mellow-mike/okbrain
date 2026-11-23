@@ -21,6 +21,7 @@ import {
 } from "./document.ts";
 import { OKF_VERSION } from "./indexmd.ts";
 import { appendLogEntry } from "./logmd.ts";
+import { assertBundleFile } from "./paths.ts";
 import { writeConcept, type WriteConceptInput } from "./write.ts";
 
 export interface UpgradePlan {
@@ -138,6 +139,7 @@ export async function upgradeBundle(
   }
 
   const indexPath = join(root, "index.md");
+  await assertBundleFile(root, "index.md");
   let raw: string | null = null;
   try {
     raw = await readFile(indexPath, "utf8");

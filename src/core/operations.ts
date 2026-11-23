@@ -80,7 +80,7 @@ import { regenerateIndexes, setIndexStyle } from "./okf/indexmd.ts";
 import { fileInboxNote, InboxFilingError, type InboxFiling } from "./okf/inbox-filing.ts";
 import { appendLog, createDirectoryLog, LogFolderError, removePrivateLogEntries } from "./okf/logmd.ts";
 import { exportMarkdown, MarkdownExportError, type MarkdownExport } from "./okf/markdown-export.ts";
-import { assertConceptPathSpelling, idToAbsPath, InvalidIdError, slugify, validateId } from "./okf/paths.ts";
+import { assertConceptPathSpelling, conceptFile, idToAbsPath, InvalidIdError, slugify } from "./okf/paths.ts";
 import { isPrivateConcept, isPrivateConceptAt, PrivacyPathError } from "./okf/privacy.ts";
 import { brainStarterCatalog, createBrainStarter, findBrainStarter } from "./okf/starter.ts";
 import { upgradeBundle, type UpgradeResult } from "./okf/upgrade.ts";
@@ -177,6 +177,12 @@ export interface Operation {
   renderStreamFooter?(result: unknown): string;
   /** CLI-only: never exposed over network adapters (local API, MCP). */
   localOnly?: boolean;
+  /**
+   * Takes a path anywhere on this computer. The owner may name one from the
+   * CLI or the local app. An MCP client never sees the op, even when trusted:
+   * an agent works inside the brain it was given.
+   */
+  ownerOnly?: boolean;
   /** Runs against per-user application state rather than a brain mount. */
   bundleIndependent?: boolean;
   /** Human rendering of the result for the CLI (`--json` bypasses it). */
@@ -359,15 +365,16 @@ async function requireNode(eng: IndexEngine, id: string): Promise<void> {
 }
 
 async function readConceptView(bundle: string, id: string): Promise<ConceptView> {
+  let path: string;
   try {
-    validateId(id);
+    path = await conceptFile(bundle, id);
   } catch (e) {
     if (!(e instanceof InvalidIdError)) throw e;
     throw new OpError(e.message, "bad_params");
   }
   let raw: string;
   try {
-    raw = await readFile(idToAbsPath(bundle, id), "utf8");
+    raw = await readFile(path, "utf8");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT")
       throw new OpError(`no such concept: ${id}`, "not_found");
@@ -1651,6 +1658,7 @@ export const operations: readonly Operation[] = [
     cliName: "import",
     summary: "Import existing markdown (file or directory) as OKF concepts",
     scope: "write",
+    ownerOnly: true,
     params: [
       { name: "path", type: "string", required: true, positional: true, description: "markdown file or directory to import" },
       { name: "type", type: "string", description: "type for sources without one (default note)" },
@@ -1658,6 +1666,9 @@ export const operations: readonly Operation[] = [
       { name: "overwrite", type: "boolean", description: "update concepts whose id already exists (default: skip)" },
     ],
     handler: async (ctx, p) => {
+      // The path can be any folder this user can read, so only the owner chooses it.
+      if (ctx.localUsage !== true)
+        throw new OpError("Importing from a path on this computer is available in the local app and the CLI.", "refused");
       const imported: string[] = [];
       try {
         return await writing(() => importPath(ctx.bundle, {
@@ -1809,7 +1820,7 @@ export const operations: readonly Operation[] = [
       const includePrivate = p["include-private"] === true;
       if (includePrivate && !ctx.trusted) throw new OpError("Private HTML exports require a trusted caller.", "untrusted");
       if (includePrivate && ctx.readonly) throw new OpError("Private HTML exports require a writable brain.", "refused");
-      return exportViz(ctx.bundle, { includePrivate, fonts: p.fonts === true });
+      return writing(() => exportViz(ctx.bundle, { includePrivate, fonts: p.fonts === true }));
     },
     render: (r) => {
       const v = r as VizExport;

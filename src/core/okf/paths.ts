@@ -3,7 +3,7 @@
 // (`notes/foo.md` → `notes/foo`); on-disk paths use the OS separator via
 // node:path. Reserved filenames (`index.md`, `log.md`) are not concepts.
 
-import { readdir } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 const RESERVED = new Set(["index.md", "log.md"]);
@@ -42,6 +42,37 @@ export async function assertConceptPathSpelling(root: string, id: string): Promi
     prefix.push(part);
     directory = join(directory, part);
   }
+}
+
+/**
+ * okbrain reads and writes regular files in real folders below the brain's
+ * root, and nothing else. A symbolic link there can point anywhere on this
+ * computer, and a shared Git repository can deliver one, so a link (or a
+ * device, a pipe, or a folder where a file belongs) is refused before it is
+ * opened (B23). `relative` uses forward slashes. Parts that do not exist yet
+ * are fine: a write creates them as real folders and files.
+ */
+export async function assertBundleFile(root: string, relative: string): Promise<void> {
+  const parts = relative.split("/");
+  let current = root;
+  for (const [index, part] of parts.entries()) {
+    current = join(current, part);
+    let info;
+    try { info = await lstat(current); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (index === parts.length - 1 ? !info.isFile() : !info.isDirectory())
+      throw new InvalidIdError(`${relative} is not a regular file in this brain. okbrain does not follow links or open special files.`);
+  }
+}
+
+/** The file a concept ID names, after `assertBundleFile` has accepted it. */
+export async function conceptFile(root: string, id: string): Promise<string> {
+  const path = idToAbsPath(root, id); // validates the id
+  await assertBundleFile(root, `${id}.md`);
+  return path;
 }
 
 /**

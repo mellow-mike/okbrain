@@ -313,6 +313,18 @@ Every write produces a conformant bundle (`writeConcept`, exposed as the
   Mutations use the exact filesystem spelling of each component and reject
   case-only or Unicode-normalization aliases. Doctor reports portable-path
   conflicts in older bundles while their notes remain readable.
+- **Links are never followed.** okbrain reads and writes regular files in
+  real folders below the brain's root. A symbolic link can point anywhere on
+  the computer, and a shared Git repository can deliver one, so
+  `assertBundleFile` (`core/okf/paths.ts`) checks every part of a path with
+  `lstat` before it is opened. It guards note reads and writes by ID, the
+  generated `index.md` and `log.md` files, `viz.html`, the upgrade's root
+  index, and the `.gitignore` and `.gitattributes` that sync seeds. A note
+  write checks its own file, each `index.md` above it, and the logs beside
+  them before any byte is written, so a refused write leaves no half-saved
+  note. The bundle walk already skips links, a link in a subfolder's
+  `index.md` place is treated as absent when its parent index is built, and
+  `okb doctor` reports each link with the `link` check (B23).
 - `index.md` regenerated for the touched directory and every ancestor
   (`core/okf/indexmd.ts`): each index keeps a human-editable head (H1 +
   intro paragraphs before the first `##`, preserved on regeneration) above
@@ -392,7 +404,8 @@ directory with concepts (or the root) lacking `index.md`; v0.1 leftovers
 without `by`, non-actor `by` values, `status` outside draft|stable|deprecated,
 `stale_after` without an explicit offset, `sources` entries without
 `resource` or with a non-ISO `last_modified`); an `Attested Computation`
-without `runtime`. Links to reserved files (`/index.md`, `/notes/log.md`) are
+without `runtime`; a symbolic link anywhere below the root (`link`), which
+okbrain never reads, writes, or follows. Links to reserved files (`/index.md`, `/notes/log.md`) are
 valid targets. The report also carries **signals** — counts by trust tier and
 status, concepts past `stale_after`, and concepts still on v0.1 — so the walk
 doubles as the health report the GUI's Home shows. The consumer itself never
@@ -717,15 +730,25 @@ clears the tag through the writer. Resurface scores `inbox` as a signal.
 
 ### Bookmarklet (built with 3.1)
 Any web page can fire requests at localhost, so a naive clip endpoint is a
-CSRF hole into the brain. The `/clip` endpoint demands the per-install secret
-token (`core/serve-token.ts` — minted at first use, mode 0600 beside
-config.json, embedded by `okb bookmarklet`, constant-time validated);
-tokenless requests are rejected, and the same token gates the whole `/api`
-surface. The bookmarklet itself is a top-level `window.open` GET navigation
-to `/clip?token=…&url=…` (+ the current selection as `quote`) — navigations
-bypass CORS, mixed-content, and private-network-access rules that would
-break a cross-origin `fetch` from an HTTPS page, so it works from any site
-with zero server relaxations. The confirmation page auto-closes on success.
+CSRF hole into the brain. The `/clip` endpoint demands a secret, and
+tokenless requests are rejected. The bookmarklet itself is a top-level
+`window.open` GET navigation to `/clip?token=…&url=…` (+ the current
+selection as `quote`) — navigations bypass CORS, mixed-content, and
+private-network-access rules that would break a cross-origin `fetch` from an
+HTTPS page, so it works from any site with zero server relaxations. The
+confirmation page auto-closes on success.
+
+A bookmarklet runs inside the page being clipped, and that page can read the
+address it opens (for example by replacing `window.open`). So the address
+carries a **clip token**, an HMAC-SHA256 of the per-install serve token
+(`core/serve-token.ts` — minted at first use, mode 0600 beside config.json).
+`/clip` accepts the clip token and no other route does. The serve token
+gates the `/api` surface and travels in a request header only. A page that
+captures the clip token can ask for more clips, which the fetch guard still
+vets, and nothing else. Bookmarklets saved before the clip token existed
+carry the serve token. They still clip, their result window asks the person
+to replace them, and the token they expose no longer opens `/api` from a
+page (B22).
 
 ### RSS ingest (`okb rss`, Stage 4.1)
 Feeds are the second ingest source (after import/capture/clip): `okb rss
@@ -931,12 +954,16 @@ CLI and local API, so surfaces can't drift. Trust is fail-closed in three
 layers: connections are **untrusted by default** (read ops only — write
 tools are hidden from `tools/list`, refused by name if called anyway, and
 `runOp` re-gates scope underneath); `okb mcp --trusted` deliberately exposes
-write ops for clients the user fully trusts; admin and `localOnly` ops never
-appear on this surface at all. Transports: stdio (default — stdout carries
+write ops for clients the user fully trusts; admin, `localOnly`, and
+`ownerOnly` ops never appear on this surface at all. `ownerOnly` marks an op
+that takes a path anywhere on this computer (`import`): the owner may name
+one from the CLI or the local app, and an agent works inside the brain it
+was given. Transports: stdio (default — stdout carries
 only protocol JSON, logs go to stderr) and Streamable HTTP via `--http`
 (stateless server-per-request, binds 127.0.0.1, Host-checked like the local
 API). Filesystem confinement is the ops' own: concept ids reject traversal
-segments before any path is built. Writes over MCP are attributed to the
+segments before any path is built, and no reader or writer follows a
+symbolic link below the brain's root (Writer guarantees). Writes over MCP are attributed to the
 connected client — `<client name>/<client version>` from the MCP initialize
 handshake (`mcp-client/unknown` when it withholds them) — so an agent's
 edits and review stamps read as machine-confirmed, never as a human's.
@@ -953,8 +980,9 @@ validates trust (fail-closed: untrusted ⇒ read-scope only), the read-only
 mount policy, and params before any handler runs; the `OpContext` also
 carries the caller's `actor()` so every write is attributed. Three adapters
 are generated: the CLI, the GUI's local HTTP API, and the MCP server. The
-adapter filters operations by scope and `localOnly`. The registry also marks
-account and coding commands that operate independently of a selected brain.
+adapter filters operations by scope, `localOnly`, and `ownerOnly` (an op that
+takes a host path stays off MCP). The registry also marks account and coding
+commands that operate independently of a selected brain.
 
 ### CLI surface
 | Command | Scope | Purpose |
@@ -1033,10 +1061,17 @@ over the registry, trusted like the CLI but defended like a network surface:
   re-opens a read-only brain. Unknown names are a 400.
 - **Security (fail-closed):** binds 127.0.0.1 only; the Host header must be
   the server's own `127.0.0.1/localhost/[::1]:port` (defeats DNS rebinding);
-  every `/api` and `/clip` request must present the per-install token
-  (header `x-okb-token`, `Authorization: Bearer`, or `?token=`;
-  constant-time compare); CORS reflects only the server's own localhost
-  origins — everything else gets no CORS headers and preflights are 403.
+  every `/api` request must present the per-install token in a header
+  (`x-okb-token` or `Authorization: Bearer`; constant-time compare). The
+  token is never read from the address. A page on another origin cannot set
+  either header without a preflight, and preflights from other origins are
+  403, so a token that leaked into a page could not act as the owner. `/clip`
+  alone accepts a token in the address, and that token is the clip-only one
+  (Bookmarklet, below). Every request that is not a `GET` is refused when it
+  carries another site's `Origin`. CORS reflects only the server's own
+  localhost origins — everything else gets no CORS headers. Responses send
+  `Referrer-Policy: no-referrer`, so a site linked from a note, or a remote
+  image in one, does not learn the app's address and port.
   HTTP errors map from `OpError` codes (bad_params 400, not_found 404,
   untrusted/refused 403; anything else 500).
 - Each request runs in a fresh `OpContext` (shared `core/context.ts`, also

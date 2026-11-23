@@ -27,6 +27,7 @@ import {
   type Status,
   type TrustTier,
 } from "../okf/document.ts";
+import { assertBundleFile } from "../okf/paths.ts";
 import { isPrivateConcept } from "../okf/privacy.ts";
 import { embeddedFontCss } from "./fonts.ts";
 import graphViewJs from "./graph-view.js" with { type: "text" };
@@ -117,6 +118,8 @@ export interface VizExport {
 export async function exportViz(root: string, { includePrivate = false, fonts = false } = {}): Promise<VizExport> {
   const graph = await buildVizGraph(root, { includePrivate });
   const path = join(root, "viz.html");
+  // The path is fixed, so a link planted there would choose where the export lands (B23).
+  await assertBundleFile(root, "viz.html");
   await writeFile(path, renderHtml(graph, fonts ? await embeddedFontCss() : ""), "utf8");
   return { path, nodes: graph.nodes.length, edges: graph.edges.length };
 }

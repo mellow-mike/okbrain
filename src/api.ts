@@ -58,6 +58,7 @@ import {
 import { usabilityRecording } from "./core/usability.ts";
 import {
   bookmarkletJs,
+  clipToken,
   DEFAULT_PORT,
   ensureServeToken,
   hostAllowed,
@@ -173,12 +174,15 @@ type Hdrs = Record<string, string>;
 /**
  * On every response: `/` embeds the serve token in the page, so a remote site
  * framing the GUI could drive authenticated write ops with hijacked clicks.
- * nosniff keeps the static assets from being re-typed by the browser.
+ * nosniff keeps the static assets from being re-typed by the browser. A note
+ * can link to, or show an image from, any site. Sending no referrer keeps the
+ * app's local address and port from those sites.
  */
 const GUARD: Hdrs = {
   "x-frame-options": "DENY",
   "content-security-policy": "frame-ancestors 'none'",
   "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
 };
 
 const json = (status: number, body: unknown, headers: Hdrs = {}): Response =>
@@ -226,10 +230,11 @@ const errBody = (e: unknown): { error: string; code?: string } =>
     ? { error: e.message, code: e.code }
     : { error: e instanceof Error ? e.message : String(e) };
 
-const clipPage = (message: string, ok: boolean): string =>
+/** The bookmarklet's result window. It stays open when it has a notice for the person to read. */
+const clipPage = (message: string, ok: boolean, notice = ""): string =>
   "<!doctype html><meta charset=utf-8><title>okb clip</title>" +
   `<body style='font-family:system-ui;margin:2rem'><p>${esc(message)}</p>` +
-  (ok ? "<script>setTimeout(()=>window.close(),1500)</script>" : "");
+  (notice ? `<p>${esc(notice)}</p>` : ok ? "<script>setTimeout(()=>window.close(),1500)</script>" : "");
 
 /** Public op descriptors for surface generation (GUI forms, MCP tools). */
 const opDescriptors = (): unknown =>
@@ -742,19 +747,22 @@ async function saveAskDraft(req: Request, url: URL, opts: ServeState, scope: Sco
   }
 }
 
-async function clipNav(url: URL, scope: Scope): Promise<Response> {
+async function clipNav(url: URL, scope: Scope, outdatedBookmarklet: boolean): Promise<Response> {
   const op = getOp("clip")!;
   const raw: Record<string, unknown> = {};
   for (const k of ["url", "quote", "note", "tags"]) {
     const v = url.searchParams.get(k);
     if (v !== null && v !== "") raw[k] = v;
   }
+  const replace = outdatedBookmarklet
+    ? "This bookmarklet is from an earlier version of okbrain. Replace it with the one under Add → Bookmarklet in okbrain, then delete this one."
+    : "";
   const local = open(scope);
   try {
     const result = await runOp(op, local.ctx, raw);
-    return html(200, clipPage(op.render(result), true));
+    return html(200, clipPage(op.render(result), true, replace));
   } catch (e) {
-    return html(errStatus(e), clipPage(errBody(e).error, false));
+    return html(errStatus(e), clipPage(errBody(e).error, false, replace));
   } finally {
     await local.close();
   }
@@ -1060,12 +1068,19 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   if (url.pathname === "/api/brains/sync-github") return syncGitHubRequest(req, url, opts, cors ?? {});
   if (url.pathname === "/api/maintenance" && opts.maintenance) return maintenanceRequest(req, url, opts, cors);
 
-  const presented =
-    req.headers.get("x-okb-token") ??
-    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ??
-    url.searchParams.get("token");
-  if (!tokenMatches(presented, opts.token))
+  // The serve token is accepted from a request header only. A page on another
+  // origin cannot set one without a preflight, and this server refuses those.
+  // The one address that carries a credential is the bookmarklet's `/clip`.
+  // A bookmarklet runs inside the page being clipped, which can read that
+  // address, so its token opens `/clip` and nothing else (B22).
+  const sent = req.headers.get("x-okb-token") ?? req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null;
+  const inAddress = req.method === "GET" && url.pathname === "/clip" ? url.searchParams.get("token") : null;
+  // Bookmarklets saved before the clip token existed carry the serve token. They can still clip.
+  const outdatedBookmarklet = sent === null && tokenMatches(inAddress, opts.token);
+  if (!tokenMatches(sent, opts.token) && !tokenMatches(inAddress, clipToken(opts.token)) && !outdatedBookmarklet)
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
+  if (req.method !== "GET" && req.headers.has("origin") && !cors)
+    return json(403, { error: "This request must come from the local app." });
   const recoveryAction = url.pathname === "/api/op/sync_recovery";
   const ownerFileAction = recoveryAction || url.pathname.startsWith("/api/op/computation_") ||
     url.pathname.startsWith("/api/op/usability_") ||
@@ -1138,7 +1153,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
       return json(200, { port: opts.port, bookmarklet: bookmarkletJs(opts.port, opts.token) }, cors);
     if (url.pathname === "/api/personal/sources/history")
       return runJsonOp(getOp("personal_source_history")!, scope, {}, { ...cors, "cache-control": "no-store" });
-    if (url.pathname === "/clip") return clipNav(url, scope);
+    if (url.pathname === "/clip") return clipNav(url, scope, outdatedBookmarklet);
   }
 
   const m = /^\/api\/op\/([a-z_]+)$/.exec(url.pathname);
