@@ -186,12 +186,18 @@ function rememberBrain(name) {
 }
 
 /** The status footer. A recording usability session shows on every view and links to its controls. */
+/** One derived store in the footer: a filled dot when it is built, a hollow one when it is not. */
+function cacheState(built, word, name) {
+  var state = built ? 'built' : 'not built';
+  return '<span class="state" title="' + name + ' ' + state + '"><span class="dot' + (built ? ' on' : '') +
+    '" role="img" aria-label="' + state + '"></span>' + word + '</span>';
+}
+
 function paintStatus() {
   document.getElementById('nav-brain').textContent = STATUS.brain || basename(STATUS.bundle);
   document.getElementById('nav-status').innerHTML =
     (STATUS.usabilityRecording ? '<div><a class="recording" href="#settings/usability"><span class="dot rec"></span>Recording usability session</a></div>' : '') +
-    '<div><span class="dot' + (STATUS.hasIndex ? ' on' : '') + '"></span>index' +
-    ' <span class="dot' + (STATUS.hasVectors ? ' on' : '') + '"></span>vectors</div>' +
+    '<div>' + cacheState(STATUS.hasIndex, 'index', 'Search index') + cacheState(STATUS.hasVectors, 'vectors', 'Vector index') + '</div>' +
     '<div>okb ' + esc(STATUS.version) + ' · OKF ' + esc(STATUS.okfVersion) +
     (STATUS.readonly ? ' · <span class="chip warn">read-only</span>' : '') + '</div>';
 }
@@ -275,6 +281,13 @@ var routes = {
   stats: renderStats, settings: renderSettings,
 };
 
+// The tab and window title for each route. The reader replaces it with the note's own title.
+var VIEW_TITLES = {
+  home: 'Home', browse: 'Browse', concept: 'Note', edit: 'Edit concept', editor: 'New concept', graph: 'Graph', search: 'Search',
+  ask: 'Ask', 'ask-plan': 'Ask with ChatGPT', accounts: 'Accounts', map: 'Focused map', add: 'Add', sources: 'Sources',
+  review: 'Review', inbox: 'Inbox', 'inbox-file': 'File inbox note', claims: 'Claims', coding: 'Coding', stats: 'Stats', settings: 'Settings',
+};
+
 var DIR_MARK = { out: '→', in: '←', both: '↔' };
 
 // Every render gets a generation number; async work checks `stale(seq)` after
@@ -344,14 +357,22 @@ function route() {
   return Okb.go(function () {
     activeGraph?.destroy();
     activeGraph = null;
-    document.querySelectorAll('#nav > a').forEach(function (a) { // not the wordmark's link
+    document.querySelectorAll('#nav .links > a').forEach(function (a) { // not the wordmark's link
       var target = a.getAttribute('data-nav') || a.getAttribute('href').slice(1);
       var active = target === name || (name === 'editor' && target === 'edit') || (name === 'ask-plan' && target === 'ask') ||
         (name === 'inbox-file' && target === 'inbox');
       a.classList.toggle('active', active);
-      if (active) a.setAttribute('aria-current', 'page');
-      else a.removeAttribute('aria-current');
+      if (active) {
+        a.setAttribute('aria-current', 'page');
+        // On a phone the links are one scrolling row. Bring the current one to
+        // its middle by moving the row itself: scrollIntoView would also move
+        // where the next Tab starts, past the skip link.
+        var row = a.parentElement;
+        if (row.scrollWidth > row.clientWidth)
+          row.scrollLeft += a.getBoundingClientRect().left - row.getBoundingClientRect().left - (row.clientWidth - a.offsetWidth) / 2;
+      } else a.removeAttribute('aria-current');
     });
+    document.title = VIEW_TITLES[name] ? VIEW_TITLES[name] + ' · okbrain' : 'okbrain';
     view.className = name === 'graph' ? 'bare' : '';
     view.scrollTop = 0;
     return fn(arg, seq);
@@ -762,6 +783,7 @@ async function renderConcept(id, seq, was) {
   catch (e) { if (!stale(seq)) view.innerHTML = errorBox(e); return; }
   if (stale(seq)) return;
   var fm = c.frontmatter, s = c.signals;
+  document.title = (typeof fm.title === 'string' && fm.title.trim() ? fm.title : id) + ' · okbrain';
   if (fm.type === 'forwarding' && typeof fm.filed_to === 'string') {
     view.innerHTML = '<div class="stack"><h2>' + esc(fm.title || id) + '</h2>' +
       '<p>This capture was filed at ' + conceptLink(fm.filed_to) + '.</p><div id="c-source"></div></div>';
@@ -978,7 +1000,7 @@ async function renderEdit(id, seq) {
     (!exists && !STATUS?.readonly ? '<label class="row"><input id="ed-private" type="checkbox"> Keep this note private</label>' : '') +
     '<div class="row">' +
     '<button class="primary">Save</button>' +
-    '<select id="ed-linkpick"><option value="">insert link to…</option></select>' +
+    '<select id="ed-linkpick" aria-label="Insert a link to a note"><option value="">insert link to…</option></select>' +
     (exists ? '<button type="button" id="ed-suggest">Suggest links</button>' : '') +
     (exists ? '<a href="' + conceptHref(id) + '" class="link-button">Cancel</a>' : '') +
     '<span id="ed-msg" class="muted"></span></div>' +
@@ -1009,10 +1031,10 @@ async function renderEdit(id, seq) {
   function addSource(original) {
     var s = typeof original === 'string' ? { resource: original } : original || {};
     srcEl.insertAdjacentHTML('beforeend',
-      '<div class="srow"><input placeholder="id" value="' + esc(s.id || '') + '" data-k="id">' +
-      '<input placeholder="resource (URL, /path.md, or scope)" value="' + esc(s.resource || '') + '" data-k="resource">' +
-      '<input placeholder="title" value="' + esc(s.title || '') + '" data-k="title">' +
-      '<input placeholder="author (actor)" value="' + esc(s.author || '') + '" data-k="author">' +
+      '<div class="srow"><input aria-label="Source ID" placeholder="id" value="' + esc(s.id || '') + '" data-k="id">' +
+      '<input aria-label="Source resource" placeholder="resource (URL, /path.md, or scope)" value="' + esc(s.resource || '') + '" data-k="resource">' +
+      '<input aria-label="Source title" placeholder="title" value="' + esc(s.title || '') + '" data-k="title">' +
+      '<input aria-label="Source author" placeholder="author (actor)" value="' + esc(s.author || '') + '" data-k="author">' +
       '<button type="button" class="small" data-del title="remove" aria-label="remove source">✕</button></div>');
     if (original !== undefined) {
       var row = srcEl.lastElementChild;
@@ -1134,12 +1156,12 @@ async function renderEdit(id, seq) {
 async function renderGraph(focusId, seq) {
   view.innerHTML =
     '<div id="gwrap"><div id="gmain">' +
-    '<div id="gbar"><input id="gsearch" type="search" placeholder="Filter title / id / tags…">' +
-    '<select id="glayout"><option value="cose">cose</option><option value="concentric">concentric</option>' +
+    '<div id="gbar"><input id="gsearch" type="search" aria-label="Filter the graph by title, ID, or tags" placeholder="Filter title / id / tags…">' +
+    '<select id="glayout" aria-label="Graph layout"><option value="cose">cose</option><option value="concentric">concentric</option>' +
     '<option value="breadthfirst">breadth-first</option><option value="circle">circle</option><option value="grid">grid</option></select>' +
     '<button id="gfit">Fit</button><span id="gstats" class="muted"></span></div>' +
     '<div id="gcy"></div><div id="glegend"></div></div>' +
-    '<div id="gdetail" data-via="map"><p class="empty">Click a node.</p></div></div>';
+    '<div id="gdetail" data-via="map"><p class="empty">Select a node to see its details.</p></div></div>';
   var g;
   // Node labels are canvas text in Literata, and a canvas never loads a face itself.
   try { g = (await Promise.all([api('graph_data', {}), document.fonts.load('9px Literata')]))[0]; }
@@ -1240,7 +1262,7 @@ function renderSearch(initialQ, seq) {
               }).join('') + '</div>' : h.snippet ? '<div class="muted">' + esc(h.snippet.slice(0, 240)) + '…</div>' : '') +
               '<div class="row"><a href="' + conceptHref(h.id) + '" class="link-button small">Open</a>' +
               (readonly ? '' : '<a href="' + editHref(h.id) + '" class="link-button small">Edit</a>') +
-              '<a href="' + mapHref(h.id) + '">Focused map</a></div></div>';
+              '<a href="' + mapHref(h.id) + '" class="link-button small">Focused map</a></div></div>';
           }).join('')
         : '<div class="empty">No hits.</div>';
       Okb.enter(out);
@@ -1499,12 +1521,12 @@ async function renderReview() {
   view.innerHTML = '<div class="stack"><h2>Review</h2>' +
     '<p class="muted">A small daily queue with stated reasons. “Reviewed ✓” records a <code>verified</code> event by you (OKF trust tier: human-reviewed).</p>' +
     '<form id="rform" class="stack"><div class="row">' +
-    '<label class="field">Queue size<input id="rlimit" type="number" min="1" step="1" placeholder="Default"></label>' +
-    '<label class="field">Retrieval profile<select id="rprofile"><option value="">Default</option>' +
+    '<label class="field"><span>Queue size</span><input id="rlimit" type="number" min="1" step="1" placeholder="Default"></label>' +
+    '<label class="field"><span>Retrieval profile</span><select id="rprofile"><option value="">Default</option>' +
     '<option value="lean">Lean</option><option value="balanced">Balanced</option><option value="max">Max</option></select></label></div>' +
     '<label class="row"><input type="checkbox" id="rgarnish"> Ask the configured model to relate public review items to recent public notes</label>' +
     '<div class="row"><button id="rload" type="submit">Update queue</button></div></form>' +
-    (STATUS?.readonly ? '' : '<div class="row"><label class="field">Snooze days<input id="rdays" type="number" min="1" step="1" value="7" required></label></div>') +
+    (STATUS?.readonly ? '' : '<div class="row"><label class="field"><span>Snooze days</span><input id="rdays" type="number" min="1" step="1" value="7" required></label></div>') +
     '<div id="rlist" class="list" data-via="review"></div></div>';
   var listEl = document.getElementById('rlist');
   var limitEl = document.getElementById('rlimit');
@@ -1654,9 +1676,9 @@ function showBookmarklet() {
     a.href = r.bookmarklet;
     a.textContent = 'Clip to okbrain';
     a.className = 'chip';
-    a.title = 'drag me to your bookmarks bar';
+    a.title = 'Drag to your bookmarks bar';
     el.replaceChildren(a);
-    el.insertAdjacentHTML('beforeend', ' <span class="muted">drag this to your bookmarks bar; clicking it on any page clips that page (needs okb serve on port ' + esc(r.port) + ')</span>');
+    el.insertAdjacentHTML('beforeend', ' <span class="muted">Drag this to your bookmarks bar. Selecting it on a page clips that page while okbrain is running on port ' + esc(r.port) + '.</span>');
   }).catch(function (e) { setHtml('bm-out', errorBox(e)); });
 }
 
@@ -1710,8 +1732,8 @@ function renderAdd(_arg, seq) {
     '<label class="field"><span>Comment</span><textarea id="clip-note" rows="2"></textarea></label>' +
     '<label class="field"><span>Tags</span><input id="clip-tags" placeholder="Comma-separated"></label></div></details>' +
     '<div class="row">' +
-    '<label class="row" style="gap:5px"><input type="checkbox" id="clip-read"> already read</label>' +
-    '<label class="row" style="gap:5px"><input type="checkbox" id="clip-auto"> Suggest tags with AI using public tags</label>' +
+    '<label class="row"><input type="checkbox" id="clip-read"> Already read</label>' +
+    '<label class="row"><input type="checkbox" id="clip-auto"> Suggest tags with AI using public tags</label>' +
     '<button>Clip</button></div></form><div id="clip-out"></div>' +
     '<p class="muted">Clipped pages arrive as <code>references/</code> concepts with the page recorded under <code>sources</code>.</p>' +
     '<h3>Bookmarklet</h3><div id="bm-out"></div>' +
@@ -1731,7 +1753,7 @@ function renderAdd(_arg, seq) {
     '<label class="field"><span>File or folder path on the okbrain server</span><input id="imp-path" required></label>' +
     '<div class="grid"><label class="field"><span>Destination folder</span><input id="imp-dest" placeholder="Brain root by default"></label>' +
     '<label class="field"><span>Type for files without one</span><input id="imp-type" placeholder="Note by default"></label></div><div class="row">' +
-    '<label class="row" style="gap:5px"><input type="checkbox" id="imp-over"> overwrite</label>' +
+    '<label class="row"><input type="checkbox" id="imp-over"> Overwrite existing notes</label>' +
     '<button>Import</button></div></form><div id="imp-out" aria-live="polite"></div></details>') + '</div>';
 
   var out = setHtml;
@@ -3696,7 +3718,7 @@ async function renderSettings(section, seq) {
       '<div class="row"><button type="submit">Export Markdown</button><span role="status"></span></div></form>') + '</section>' +
     '<div class="row"><span class="muted">Jobs:</span>' +
     ['index', 'embed', 'rss', 'review', 'doctor'].map(function (j) {
-      return '<label class="row" style="gap:4px"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
+      return '<label class="row"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
     }).join('') + '<button id="mx-jobs">Run jobs</button></div>' +
     (st.readonly ? '' : '<form id="mx-upgrade-form" class="stack"><h4>OKF v0.2 migration</h4>' +
       field('upgrade-by', 'Actor to credit (optional)', '', 'Current actor') +

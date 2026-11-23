@@ -262,7 +262,7 @@ export function renderHtml(graph: VizGraph, fontCss = ""): string {
   <div id="filters"></div>
 </div>
 <div id="graph"><div id="tip"></div></div>
-<div id="detail"><p class="empty">Click a node to see its details.</p></div>
+<div id="detail"><p class="empty">Select a node to see its details.</p></div>
 <script id="okb-graph" type="application/json">${data}</script>
 <script>${cytoscapeJs}</script>
 <script>${markedJs}</script>

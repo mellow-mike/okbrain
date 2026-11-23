@@ -803,6 +803,19 @@ Goal: the brain improves itself on a schedule.
 - [x] Driven in headless Chromium against the compiled binary: every view in
       both themes, reduced motion, 390px, `viz.html`; zero page errors,
       zero external requests
+- [x] 2026-11-23 refinement pass over fifteen views at 1280 px and 375 px:
+      at 480 px or less the nav links are one row that scrolls sideways and
+      keeps the current link in view (at 375 px the bar went from 271 px to
+      169 px tall, and the first Tab still reaches the skip link); each
+      route names the tab and the reader uses the note's title; a checkbox
+      stays beside the first line of its label when the words wrap, with
+      one gap everywhere; a button or checkbox beside a labelled field lines
+      up with the field's control; each footer dot stays with its own word
+      and says `built` or `not built` to a screen reader; the graph filter,
+      graph layout, link picker, and source editor inputs have accessible
+      names; sentence-case labels; the graph fits under the top bar (B26).
+      The browser smoke asserts the nav height, the titles, the current
+      link, the wrapped checkbox, and the graph's fit at 375 px
 
 ---
 
@@ -853,6 +866,7 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B23 | 2026-11-23 | crit | okf/sync | Notes, `index.md`, `log.md`, `viz.html`, and `.gitignore` were opened by path, so a symbolic link in their place was followed. `okb sync` can pull one from a shared repository (only **Restore from GitHub** rejected branches with links). Reproduced: `okb read` returned a file from outside the brain, `okb write` rewrote it, and with `index.md` linked to a shell startup file the next ordinary note write replaced that file with generated index rows. A two-line note title that sorts first put a command on its own line, and it ran when a shell sourced the file. A linked subfolder `index.md` also had its first line copied into the parent index, which Git then shares | `readFile` and `writeFile` on paths built from IDs, with link checks only in newer modules (export, filing, computation, privacy) | fixed | `assertBundleFile` in `core/okf/paths.ts` refuses any path that passes through or ends at a link or special file, applied to note reads and writes, both generated manifests, the graph export, the upgrade, and the sync's seeded files. A note write checks every file it will touch first. `okb doctor` reports links. Regression tests in `tests/okf.links.test.ts`, which fail without the guards |
 | B24 | 2026-11-23 | low | viz/gui | The footnote pass replaced `[^id]` anywhere in the rendered HTML, including inside attribute values such as an image's alt text or a link's title. The inserted superscript's quotes closed the attribute and left a stray `fn"` attribute on the element. No script ran in a 96-payload Chromium run, because every dynamic part is escaped, but the sanitizer's output was being rewritten after the fact | a text-level regex over HTML | fixed | the pass skips tags and code, so a reference is only replaced in running text; test in `tests/viz.render.test.ts` |
 | B25 | 2026-11-23 | med | mcp | `import` takes any path on the computer and has scope `write`, so `okb mcp --trusted` listed it. A trusted agent, or text that steers one, could import every Markdown file under a folder such as the home directory into the brain, read it there, and have Git share it. The other host-path commands were already `localOnly` | `import` predates the MCP surface and was never marked | fixed | new `ownerOnly` flag keeps `import` off MCP while the CLI and the local app keep it, and the handler refuses an agent's context; test in `tests/mcp.test.ts` |
+| B26 | 2026-11-23 | low | gui | Below 860 px wide the graph view was sized as the window height minus 120 px, but the top bar is 163 to 271 px tall. The view ran 43 to 151 px past the bottom of the window: the page gained a second scrollbar, the end of the detail panel could not be reached, and the hint that tells you to pick a node never showed, because a `40vh` margin meant for the side panel pushed it out of its box. Measured in Chromium at 375×780, 375×560, 700×500, and 844×390 | a fixed number stood in for the height of the top bar | fixed | the view now fills exactly what the bar leaves (`#view.bare` is a flex column and `#gwrap` takes the rest), the stacked panels share it 3 to 2, and the hint has a small margin there; the browser smoke asserts at 375 px that the view and the hint end inside the window and that the page does not scroll |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -927,7 +941,13 @@ Newest first. One line per session: what changed + what's next.
   the CLI, local API, and MCP adapters name their surface, and MCP never
   records. Settings has the session controls and the footer shows a recording
   indicator. `docs/USABILITY.md` is the facilitator protocol, with an invented
-  five-conversation export for the import task. Fixed B21 on the way. Next:
+  five-conversation export for the import task. Fixed B21 on the way. A
+  security audit of the local API, the bundle readers and writers, sync, the
+  MCP surface, and the Markdown renderer then found and fixed B22–B25: the
+  serve token no longer travels in an address, links inside a bundle are
+  never followed, a footnote marker cannot break out of an attribute, and
+  `import` is off MCP. A refinement pass over the GUI followed (6.4), which
+  also fixed B26. Next:
   WP1 (signed release workflow), then the maintainer's prerequisites, a signed
   dry run, and the `v0.1.0` tag.
 - 2026-11-23 — Reviewed the project (typecheck clean, 746 tests passing, main

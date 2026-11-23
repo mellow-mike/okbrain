@@ -110,6 +110,9 @@ try {
   const nav = page.getByRole("navigation", { name: "okbrain" });
   const enable = page.getByRole("button", { name: "Enable search and review" });
   await enable.waitFor();
+  // At phone width the links are one row, so the bar leaves most of the screen to the view.
+  assert.ok((await nav.boundingBox())!.height < 210);
+  assert.equal(await page.title(), "Home · okbrain");
   await page.getByRole("heading", { name: "Start with a template" }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Create starter guide" }).isDisabled(), true);
   await page.keyboard.press("Tab");
@@ -337,6 +340,15 @@ try {
   } finally { await page.unroute(askDraftRoute); }
   await nav.getByRole("link", { name: "Review", exact: true }).click();
   await page.getByRole("button", { name: /Reviewed/ }).first().waitFor();
+  // A checkbox keeps its place beside the first line of its label when the words wrap at this width.
+  assert.equal(await page.locator("#rgarnish").evaluate((box) => {
+    const words = document.createRange();
+    words.selectNodeContents(box.nextSibling!);
+    const lines = words.getClientRects();
+    const first = lines[0]!;
+    const edge = box.getBoundingClientRect();
+    return lines.length > 1 && first.top < edge.bottom && first.bottom > edge.top && first.left > edge.right;
+  }), true);
   await page.getByLabel("Queue size", { exact: true }).fill("1");
   await page.locator("#rprofile").selectOption("lean");
   await page.getByRole("button", { name: "Update queue" }).click();
@@ -1027,6 +1039,15 @@ try {
   await page.getByRole("link", { name: "Watched field note", exact: true }).waitFor();
 
   await nav.getByRole("link", { name: "Graph", exact: true }).click();
+  // Under the top bar the graph and its detail panel end at the bottom of the window, with the hint in sight.
+  const hint = page.locator("#gdetail").getByText("Select a node to see its details.", { exact: true });
+  await hint.waitFor();
+  const windowHeight = page.viewportSize()!.height;
+  const graphView = (await page.locator("#view").boundingBox())!;
+  const hintBox = (await hint.boundingBox())!;
+  assert.ok(Math.round(graphView.y + graphView.height) <= windowHeight);
+  assert.ok(hintBox.y + hintBox.height <= windowHeight);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollHeight - document.documentElement.clientHeight), 0);
   await selectGraphNote(page, "external");
   await page.locator("#gdetail").getByRole("heading", { name: "Watched field note" }).waitFor();
   await page.locator("#gdetail").getByRole("link", { name: "Open", exact: true }).click();
@@ -3631,6 +3652,11 @@ try {
     await page.evaluate(() => { location.hash = "#settings"; });
     const card = page.locator("#usability-session");
     await card.getByText("Not recording.", { exact: true }).waitFor();
+    // Each view names the tab, and on a phone the row of links scrolls to keep the current one in sight.
+    assert.equal(await page.title(), "Settings · okbrain");
+    const current = await nav.getByRole("link", { name: "Settings", exact: true }).boundingBox();
+    assert.ok(current && current.x >= 0 && current.x + current.width <= 375);
+    assert.equal(await nav.getByRole("link", { name: "Settings", exact: true }).getAttribute("aria-current"), "page");
     assert.equal(await card.getByRole("button", { name: "Stop session", exact: true }).isVisible(), false);
     assert.equal(await card.getByRole("button", { name: "Export JSON", exact: true }).isVisible(), false);
     assert.match(await card.innerText(), /Never recorded\. Note text, titles, IDs, paths, or tags\. Search and question text\. Answers\. Error messages\./);
@@ -3667,6 +3693,7 @@ try {
     assert.equal(await hits.count(), 2);
     await pressOn(hits.nth(1).locator(".title a"));
     await page.locator(".concept-head h2").getByText(new RegExp(`^Usability ${marker} (first|second) note$`)).waitFor();
+    assert.match(await page.title(), new RegExp(`^Usability ${marker} (first|second) note · okbrain$`));
 
     // The footer link leads back to the controls from any view.
     await pressOn(indicator);

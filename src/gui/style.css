@@ -34,6 +34,8 @@ h2.display { font-size: 40px; line-height: 44px; font-weight: 800; letter-spacin
 h3 { font-size: 11px; line-height: 14px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase;
      color: var(--muted); margin: var(--space-8) 0 var(--space-3); }
 h3:first-child { margin-top: 0; }
+/* A section that opens with its own heading keeps the rhythm of the headings around it. */
+.stack > section:not(.card):not(:first-child) > h3:first-child { margin-top: var(--space-8); }
 
 /* Links are ink like the text around them, so the underline is what marks
    them; it inks in on hover. Anchors that wrap a button carry none. */
@@ -88,6 +90,10 @@ textarea { width: 100%; padding: var(--space-3); resize: vertical; font-family: 
 input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); width: 14px; height: 14px; margin: 0; }
 label { color: var(--ink-2); }
 label.row { cursor: pointer; }
+/* A checkbox sits beside the first line of its label and stays there when the words wrap. */
+label.row:has(> input[type="checkbox"]), label:not([class]):has(> input[type="checkbox"]) { flex-wrap: nowrap; align-items: flex-start; gap: 6px; }
+label:not([class]):has(> input[type="checkbox"]) { display: inline-flex; }
+label.row > input[type="checkbox"], label:not([class]) > input[type="checkbox"] { flex: none; margin-top: 3px; }
 
 .field { display: flex; flex-direction: column; gap: var(--space-1); }
 .field[hidden] { display: none; }
@@ -102,6 +108,9 @@ form .grid.three { grid-template-columns: 1fr 1fr 1fr; }
 
 /* ---- layout primitives --------------------------------------------------------- */
 .row { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
+/* Beside a labelled field, a button or checkbox lines up with the field's control, not with its label. */
+.row:has(> .field) { align-items: flex-end; }
+.row:has(> .field) > label:not(.field) { padding-block: calc((var(--control-h) - 20px) / 2); }
 .stack { display: flex; flex-direction: column; gap: var(--space-3); max-width: 800px; }
 .wide { max-width: none; }
 .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: var(--space-6); }
@@ -187,9 +196,7 @@ div.error::before { content: "Error"; display: block; margin-bottom: var(--space
 .source-choice > span { min-width: 0; }
 .source-entry-detail { display: block; }
 .source-previous { margin-left: 1.6em; }
-/* Usability session: the label field and its button share a baseline, and a
-   focused status line is outlined around its words. */
-#usability-session form .row { align-items: flex-end; }
+/* Usability session: a focused status line is outlined around its words. */
 #usability-session [data-usability-state] { align-self: flex-start; }
 #usability-session [data-usability-feedback]:empty { display: none; }
 .brain-mount-card summary { cursor: pointer; }
@@ -219,7 +226,7 @@ div.error::before { content: "Error"; display: block; margin-bottom: var(--space
 .tbl td.nowrap { white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
 .tbl tr:hover td { background: var(--chip-bg); }
 
-.kv { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--space-2) var(--space-3); font-size: 12px; line-height: 18px; }
+.kv { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); gap: var(--space-2) var(--space-3); font-size: 12px; line-height: 18px; }
 .kv dt { color: var(--muted); }
 .kv dd { color: var(--ink-2); overflow-wrap: anywhere; }
 ul.sources, ul.plain { list-style: none; padding-left: 0; display: flex; flex-direction: column; gap: var(--space-1); }
@@ -298,12 +305,17 @@ ul.plain a { font-family: var(--font-read); font-size: 14px; }
 #nav a.active { color: var(--ink); font-weight: 720; }
 #nav a.active::before { content: ""; position: absolute; left: 3px; top: 7px; bottom: 7px; width: 2px; border-radius: var(--radius-xs);
                         background: var(--accent); animation: okb-tick var(--dur-base) var(--ease-spring) both; }
+/* The links' wrapper only matters on a phone, where it becomes one scrolling row. */
+#nav .links { display: contents; }
 #nav .foot { margin-top: auto; padding: var(--space-3) var(--space-2) 0; display: flex; flex-direction: column; gap: var(--space-2);
              border-top: 1px solid var(--line); }
 #nav .foot #nav-status { font-size: 12px; line-height: 16px; color: var(--muted); }
 #nav-status .dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; vertical-align: 1px;
                    border: 1px solid var(--muted); border-radius: var(--radius-full); }
 #nav-status .dot.on { background: var(--ok); border-color: var(--ok); }
+/* Each dot stays with its own word: more room between the pairs than inside one. */
+#nav-status .state { white-space: nowrap; }
+#nav-status .state + .state { margin-left: var(--space-3); }
 /* A usability session is recording: the one state the footer must never hide. */
 #nav-status .dot.rec { background: var(--danger); border-color: var(--danger); }
 #nav #nav-status a.recording { display: inline; padding: 0; color: var(--ink); font-weight: 560; background: none;
@@ -394,12 +406,22 @@ html.flooding::view-transition-old(root), html.flooding::view-transition-new(roo
   #nav a.active::before { top: auto; bottom: 1px; left: var(--space-2); right: var(--space-2); width: auto; height: 2px; }
   #nav .foot { width: 100%; margin-top: 0; padding: 0; flex-direction: row; align-items: center; border-top: none; }
   #view { padding: var(--space-4); }
-  #view.bare { height: calc(100dvh - 120px); }
-  #gwrap { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(200px, 40%); }
+  /* The graph takes exactly what the top bar leaves, however tall the bar is, and its detail panel sits below it. */
+  #view.bare { display: flex; flex-direction: column; height: auto; min-height: 0; }
+  #gwrap { flex: 1; height: auto; min-height: 0; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 3fr) minmax(120px, 2fr); }
   #gdetail { border-left: none; border-top: 1px solid var(--line); }
+  #gdetail .empty { margin-top: var(--space-4); }
   form .grid, form .grid.three { grid-template-columns: minmax(0, 1fr); }
   .sources-editor .srow { grid-template-columns: 1fr 1fr; }
   .concept-layout { gap: var(--space-6); }
   .concept-head h2 { font-size: 30px; line-height: 36px; }
 }
 @media (max-width: 1000px) { .concept-layout { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---- phone: the links are one row that scrolls sideways, so the view starts higher --- */
+@media (max-width: 480px) {
+  #nav .qs { flex: 1 1 100%; }
+  #nav .links { display: flex; flex-wrap: nowrap; gap: var(--space-1); width: 100%; padding: 3px 1px; overflow-x: auto;
+                overscroll-behavior-x: contain; scrollbar-width: thin; }
+  #nav .links a { flex: none; white-space: nowrap; }
+}

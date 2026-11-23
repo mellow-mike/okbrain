@@ -1085,7 +1085,12 @@ imports embed them into the compiled binary (the viz-vendor pattern; the
 fonts via `file` imports). Presentation only: every data access is a
 `/api/op/*` call or one of the dedicated local routes above. Hash routing, each route
 a page turn; look, type and motion from the design system (Look & feel,
-below); responsive down to phone widths (the sidebar becomes a top bar).
+below); responsive down to phone widths (the sidebar becomes a top bar, and
+at 480 px or less its links become one row that scrolls sideways and keeps
+the current link in view, so the bar takes about a fifth of a phone screen).
+Under the top bar the graph view fills exactly what the bar leaves, with the
+detail panel below the graph. Each route names the tab
+(`Settings · okbrain`), and the reader uses the note's own title.
 Every non-`localOnly` op has a home
 on one of the views below — a registry-derived test enforces it — and the
 `localOnly` ones surface as a brain switcher, a status footer, the
@@ -1182,7 +1187,14 @@ the bundle's words (titles, descriptions, bodies) are Literata, everything
 okbrain says is Recursive Sans, identifiers Recursive Mono; borders, not
 shadows (only floating layers take `shadow`); at most one inverted
 (primary) button per view; no emoji and no icon font (a few Unicode glyphs;
-an inline Lucide SVG if a view ever needs a pictogram). The faces —
+an inline Lucide SVG if a view ever needs a pictogram). Layout rules the
+stylesheet holds once, so views do not restate them: an element marked
+`hidden` never paints, whatever `display` its selector sets; a checkbox sits
+beside the first line of its label, 6 px from the words, and stays there
+when the words wrap; in a row with a labelled field, a button or checkbox
+lines up with the field's control, not with its label. State is never
+colour alone: the footer's index and vector dots are filled or hollow and
+carry `built` / `not built` for a screen reader. The faces —
 Recursive Sans/Mono and Literata roman/italic, subset woff2, 366 KB,
 OFL-1.1 (`gui/fonts/README.md`) — are embedded in the binary and served at
 `/gui/fonts/`; nothing is fetched from a network.
