@@ -13,6 +13,8 @@ If you are starting from a GitHub link, expand **Prepare GitHub checkout** under
 
 Managed checkout preparation requires Git on the computer running okbrain. It supports branches with up to 10,000 regular files, 16 MiB per file, and 256 MiB total. Register an existing local checkout for a branch that requires symlinks, submodules, or a larger worktree.
 
+Before approving a send, choose **Copy source manifest** under the preview to keep a record of the selection or share it for a second look. The versioned JSON carries the preview ID that the send approves. For tracked excerpts it lists the directories, search query, budget, scan limits, and each excerpt's workspace-relative path, line range, and SHA-256 digest, matching the `manifest` from `okb code context --json`. Explicit files are listed by path, size in bytes, and digest, and an independent package review lists one manifest per package. The selected text, your task, and profile guidance stay in the app. Copying uses the preview already on screen. It contacts neither okbrain's server nor the provider, and your approval stays as you left it. If the app cannot use the clipboard, it shows the JSON selected for you to copy. Project members have the same action in the team workspace. In VS Code and Cursor, choose **Copy Source Manifest** on the send confirmation, then **Send Request** when you are ready. After a run with tracked excerpts, **Copy run report** shows the same selection ID and digests under `request.repositoryContext`.
+
 Choose **View saved request source** in the app or editor to review a selected run’s task and approved files or excerpts. For an independent package review, the source is grouped by package. The preview reads from the saved Pi admission, so it includes the evidence the run used even if the checkout changes.
 
 **Run history** shows the most recent requests. In the Mac or web app, open **Find saved request**, enter the session name and request ID, and choose **Open saved request**. In VS Code or Cursor, choose **Find saved request by ID…** from the run picker. A retained request opens even after it falls off the recent list. Exact run and GitHub review links can reopen retained results under the same project access rules.
@@ -89,7 +91,7 @@ okb code context --workspace ./my-project --projects apps/web,packages/auth \
   --query 'refreshSession auth/session' --context-tokens 2500 --show-content
 ```
 
-The preview reports workspace-relative paths, inclusive line ranges, estimated excerpt tokens, and any scan or packing limits reached. `--show-content` prints the selected text. With `--json`, the default result contains `manifest` and `--show-content` adds `excerpts`. Use the displayed context ID with the same selection options to submit.
+The preview reports workspace-relative paths, inclusive line ranges, estimated excerpt tokens, and any scan or packing limits reached. `--show-content` prints the selected text. With `--json`, the default result contains `manifest` and `--show-content` adds `excerpts`. Use the displayed context ID with the same selection options to submit. The apps and editor copy the same manifest with **Copy source manifest**.
 
 ```sh
 okb code run --workspace ./my-project --session auth-review --request-id auth-1 \

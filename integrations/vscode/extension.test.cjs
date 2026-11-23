@@ -756,6 +756,130 @@ test('active-file send and retry require the same read-only review and original 
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });
 
+test('editor copies the reviewed source manifest without another request and keeps the approval for sending', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'okbrain-source-manifest-'));
+  try {
+    const activeFile = join(workspace, 'entry.ts');
+    const original = { uri: { scheme: 'file', fsPath: activeFile }, version: 1, isDirty: false };
+    const content = 'export const reviewedSecret = "source text stays in the preview";\n';
+    await writeFile(activeFile, content);
+    const project = { id: 'fixture', workspace, title: 'Manifest fixture', provider: 'openai', model: 'fixture', scopes: ['.'] };
+    const fileId = 'c'.repeat(64);
+    const repositoryId = 'd'.repeat(64);
+    const fileManifest = { version: 1, source: 'files', id: fileId, files: [{ path: 'entry.ts', bytes: Buffer.byteLength(content), sha256: 'e'.repeat(64) }] };
+    const repositoryFiles = [{ path: 'entry.ts', startLine: 1, endLine: 1, sha256: 'f'.repeat(64), reason: 'Path or source text matches the query' }];
+    const repositoryManifest = { id: repositoryId, projects: ['.'], query: 'reviewedSecret', tokenBudget: 4096, estimatedTokens: 40, contextBytes: 80,
+      trackedPaths: 1, candidateFiles: 1, scannedFiles: 1, matchedFiles: 1,
+      limitsReached: { trackedPaths: false, scannedFiles: false, fileBytes: false, selectedFiles: false, tokenBudget: false }, files: repositoryFiles };
+    const previews = {
+      files: { source: 'files', id: fileId, files: [{ path: 'entry.ts', content }], sourceManifest: fileManifest },
+      repository: { source: 'repository', manifest: repositoryManifest, excerpts: [{ path: 'entry.ts', startLine: 1, endLine: 1, content }],
+        sourceManifest: { version: 1, source: 'repository', id: repositoryId, manifest: repositoryManifest } },
+    };
+    const commands = new Map();
+    const calls = [], copied = [], prompts = [];
+    let provideText, editorChanged, mode, preview;
+    const vscode = {
+      Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }) },
+      commands: { registerCommand: (name, run) => commands.set(name, run) },
+      env: { clipboard: { async writeText(text) { copied.push({ text, calls: calls.length }); } } },
+      ProgressLocation: { Notification: 1 },
+      workspace: {
+        isTrusted: true,
+        workspaceFolders: [{ uri: { scheme: 'file', fsPath: workspace } }],
+        getWorkspaceFolder: () => ({ uri: { scheme: 'file', fsPath: workspace } }),
+        getConfiguration: () => ({ inspect: () => undefined }),
+        registerTextDocumentContentProvider(_scheme, provider) { provideText = provider.provideTextDocumentContent; },
+        async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
+      },
+      window: {
+        onDidChangeActiveTextEditor(callback) { editorChanged = callback; },
+        async showTextDocument(document) { this.activeTextEditor = { document }; editorChanged(); },
+        async withProgress(_options, work) { return work(); },
+        async showInputBox({ prompt }) {
+          if (prompt === 'Coding session name') return 'manifest-review';
+          if (prompt.startsWith('Search the')) return 'reviewedSecret';
+          return prompt.startsWith('Narrow') ? '' : 'Review the saved entry.';
+        },
+        async showQuickPick(items, options) {
+          if (options.placeHolder === 'Choose source lookup for this request') return items[0];
+          return options.canPickMany ? items : items[0];
+        },
+        async showInformationMessage(message, ...actions) {
+          if (!actions.includes('Send Request')) return;
+          prompts.push({ message, actions });
+          const copies = prompts.filter((prompt) => prompt.actions.includes('Copy Source Manifest')).length;
+          if (mode === 'copy-after-leaving' && copies === 1) {
+            this.activeTextEditor = { document: original }; editorChanged();
+            return 'Copy Source Manifest';
+          }
+          if (mode.startsWith('copy') && copies === 1) return 'Copy Source Manifest';
+          if (mode === 'copy-twice-then-send' && copies === 2) return 'Copy Source Manifest';
+          return mode === 'copy-then-dismiss' ? undefined : 'Send Request';
+        },
+        async showErrorMessage(message) { throw new Error(message); },
+      },
+    };
+    activateExtension(vscode, { projects: [project], async api(path, body) {
+      calls.push([path, body === undefined ? undefined : JSON.parse(JSON.stringify(body))]);
+      if (path === '/projects/fixture/preview') return preview;
+      assert.equal(path, '/projects/fixture/run');
+      return { id: body.requestId, status: 'running' };
+    } });
+    async function launch(command, state, response) {
+      mode = state;
+      preview = response;
+      vscode.window.activeTextEditor = { document: original };
+      calls.length = copied.length = prompts.length = 0;
+      await commands.get(command)();
+    }
+    const base = 'Review the task and saved file in the editor. Sending includes active session history.';
+
+    // The copy reads the preview in hand: no request is made between the preview and the send.
+    await launch('okbrain.runFile', 'copy-then-send', previews.files);
+    assert.deepEqual(copied, [{ text: JSON.stringify(fileManifest, null, 2), calls: 1 }]);
+    assert.equal(copied[0].text.includes('source text stays in the preview'), false);
+    assert.deepEqual(prompts, [
+      { message: base, actions: ['Send Request', 'Copy Source Manifest'] },
+      { message: 'Source manifest copied. ' + base, actions: ['Send Request', 'Copy Source Manifest'] },
+    ]);
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview', '/projects/fixture/run']);
+    const { requestId, ...sent } = calls[1][1];
+    assert.match(requestId, /^ide-[a-f0-9-]{36}$/);
+    assert.deepEqual(sent, { source: 'files', files: ['entry.ts'], session: 'manifest-review', prompt: 'Review the saved entry.',
+      previewId: fileId, approved: true });
+
+    await launch('okbrain.runFile', 'copy-twice-then-send', previews.files);
+    assert.deepEqual(copied.map(({ calls }) => calls), [1, 1]);
+    assert.equal(calls.length, 2);
+
+    // Copying alone sends nothing, and a copy after leaving the preview ends the approval.
+    await launch('okbrain.runFile', 'copy-then-dismiss', previews.files);
+    assert.equal(copied.length, 1);
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview']);
+    await launch('okbrain.runFile', 'copy-after-leaving', previews.files);
+    assert.deepEqual(copied, []);
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview']);
+
+    // A manifest for another selection, another source, or an unknown version is not offered.
+    for (const sourceManifest of [undefined, { ...fileManifest, id: 'a'.repeat(64) }, { ...fileManifest, source: 'repository' },
+      { ...fileManifest, version: 2 }]) {
+      await launch('okbrain.runFile', 'send', { ...previews.files, sourceManifest });
+      assert.deepEqual(prompts, [{ message: base, actions: ['Send Request'] }]);
+      assert.deepEqual(copied, []);
+      assert.equal(calls.length, 2);
+    }
+
+    await launch('okbrain.runRepository', 'copy-then-send', previews.repository);
+    assert.deepEqual(copied, [{ text: JSON.stringify(previews.repository.sourceManifest, null, 2), calls: 1 }]);
+    assert.equal(copied[0].text.includes('source text stays in the preview'), false);
+    assert.deepEqual(JSON.parse(copied[0].text).manifest.files, repositoryFiles);
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview', '/projects/fixture/run']);
+    assert.equal(calls[1][1].previewId, repositoryId);
+    assert.equal(Object.hasOwn(calls[1][1], 'sourceManifest'), false);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
 test('editor previews local presets and scoped repository requests with exact approval and stable retries', async () => {
   const root = await mkdtemp(join(tmpdir(), 'okbrain-editor-preset-'));
   try {

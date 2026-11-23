@@ -19,6 +19,8 @@ Open a trusted local workspace and start the okbrain macOS app or the local web 
 1. Choose **okbrain: Open Coding Workspace** from the Command Palette and register the repository, permitted folders, model, and provider credential.
 2. Save a local file. Open **okbrain: Preview Active File for Coding Request** in the editor context menu or Command Palette.
 3. Enter the request and session name. Choose whether to allow source lookup, review the read-only preview, and select **Send Request**. Leaving the preview invalidates the approval.
+
+   To keep a record of the selection first, choose **Copy Source Manifest** on the same confirmation. It copies JSON with the preview ID and each file's path, size or line range, and SHA-256 digest. The file text and your task are left out. Copying makes no request to okbrain or the provider. The confirmation returns so you can send the reviewed request. Repository, preset, and team request previews offer the same action.
 4. Choose **okbrain: Inspect and Review Coding Runs** to reopen a result, record a review, cancel an active run, or resume a saved request. Inspection shows the session’s estimated active context, input limit, output allowance, and model window. Choose **Refresh** while a request runs to see Pi's task counts and read the answer so far.
 5. For a saved request, choose **View saved request source** to open a read-only editor with the original task and the exact files or excerpts supplied to Pi.
 6. On an accepted result, choose **Review proposed patch in okbrain** to open that request in the patch review form. Preview the diff in okbrain and confirm it before applying.

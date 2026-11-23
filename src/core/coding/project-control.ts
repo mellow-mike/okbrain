@@ -20,6 +20,7 @@ import {
 import { CodingEvaluationError, CodingEvaluations, parseEvaluation, pinnedEvaluationBinding, presentEvidence } from "./evaluation.ts";
 import { pinnedEvaluationCheckout, pinnedEvaluationRubric, PinnedEvaluationWorkspaceError, verifyPinnedEvaluationWorkspace } from "./evaluation-rubric.ts";
 import { codingRunReport } from "./run-report.ts";
+import { codingSourceManifest } from "./source-manifest.ts";
 import { dockerWorkerConfig, type DockerWorkerConfig } from "./docker-worker.ts";
 import { PackageReviewError, previewPackageReviews, validatePackageReviews } from "./package-review.ts";
 import { codingPatchProposals } from "./patch-proposals.ts";
@@ -682,17 +683,17 @@ export class CodingProjectControl {
     if (binding) await verifyPinnedEvaluationWorkspace(workspace);
     const measuredFrom = binding ? performance.now() : started;
     const result = source.packages
-      ? { source: "packages", ...await previewPackageReviews(workspace, source.packages) }
+      ? { source: "packages" as const, ...await previewPackageReviews(workspace, source.packages) }
       : source.repository
-        ? { source: "repository", ...await selectRepositoryContext({ workspace, ...source.repository }) }
-        : { source: "files", ...await previewCodingAttachments(workspace, source.files, JSON.parse(project.scopes)) };
+        ? { source: "repository" as const, ...await selectRepositoryContext({ workspace, ...source.repository }) }
+        : { source: "files" as const, ...await previewCodingAttachments(workspace, source.files, JSON.parse(project.scopes)) };
     const milliseconds = performance.now() - measuredFrom;
     if (binding) await verifyPinnedEvaluationWorkspace(workspace);
     if (binding || body.measurePreview === true) {
       const id = "manifest" in result ? result.manifest.id : result.id;
       this.#evaluations.preview(project.id, actor.id, id, milliseconds, binding);
     }
-    return { ...result, ...(branchContext ? { branchContext } : {}) };
+    return { ...result, sourceManifest: codingSourceManifest(result), ...(branchContext ? { branchContext } : {}) };
   }
 
   #runParts(body: Json) {

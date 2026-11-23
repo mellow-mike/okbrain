@@ -243,14 +243,29 @@ function sourceLookupChoice(label) {
     { placeHolder: 'Choose source lookup for this request', ignoreFocusOut: true });
 }
 
-async function confirmRequestPreview(connection, project, title, lines, message, draft, canDisplay, canSubmit) {
+/** The preview's manifest when it names the same selection the approval will send. */
+function previewSourceManifest(preview, id) {
+  const manifest = preview?.sourceManifest;
+  return manifest?.version === 1 && manifest.source === preview.source && manifest.id === id ? manifest : undefined;
+}
+
+async function confirmRequestPreview(connection, project, title, lines, message, draft, canDisplay, canSubmit, sourceManifest) {
   const approvedDocument = await showReadOnlyText(title, lines.join('\n'), canDisplay);
   if (!approvedDocument || !await canSubmit() || vscode.window.activeTextEditor?.document !== approvedDocument) return;
   const approvedEditorRevision = editorRevision;
   const canConfirm = async () => await canSubmit() && editorRevision === approvedEditorRevision &&
     vscode.window.activeTextEditor?.document === approvedDocument;
-  const send = await vscode.window.showInformationMessage(message, 'Send Request');
-  if (send !== 'Send Request') return;
+  const copy = 'Copy Source Manifest';
+  const actions = sourceManifest ? ['Send Request', copy] : ['Send Request'];
+  let prompt = message;
+  for (;;) {
+    const choice = await vscode.window.showInformationMessage(prompt, ...actions);
+    if (choice === 'Send Request') break;
+    if (choice !== copy || !await canConfirm()) return;
+    // The manifest comes from the preview already in this editor. Copying contacts no server or provider.
+    await vscode.env.clipboard.writeText(JSON.stringify(sourceManifest, null, 2));
+    prompt = 'Source manifest copied. ' + message;
+  }
   await submitApprovedRequest(connection, project, { ...draft, requestId: `ide-${randomUUID()}`, approved: true }, canConfirm);
 }
 
@@ -304,7 +319,7 @@ async function runActiveFile(connection) {
   ], 'Review the task and saved file in the editor. Sending includes active session history.', {
     ...source, session, prompt: prompt.trim(), previewId: preview.id,
     ...(lookup.enabled ? { approvedSourceLookup: true } : {}),
-  }, stillEditingFile, fileBinding);
+  }, stillEditingFile, fileBinding, previewSourceManifest(preview, preview.id));
 }
 
 function localWorkspaceFolders() {
@@ -439,7 +454,7 @@ async function reviewRepositoryRequest(connection, project, { name, prompt, sess
   ],
     `Review the task and excerpts in the editor. Sending includes active session history and uses ${project.provider} / ${project.model}${team ? ` through ${connection.url.origin}` : ''}.`,
     { ...source, session, prompt, previewId: preview.manifest.id, ...(lookup.enabled ? { approvedSourceLookup: true } : {}) },
-    canDisplay, canSubmit);
+    canDisplay, canSubmit, previewSourceManifest(preview, preview.manifest.id));
 }
 
 async function resetOwnerContext(connection, project, session, isCurrent) {

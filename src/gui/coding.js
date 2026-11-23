@@ -508,6 +508,49 @@
     el.replaceChildren(...pieces);
   }
 
+  /** Offer the manifest of a preview that has source: the selection and its digests, without the selected text. */
+  function mountSourceManifest(el, preview, feedback) {
+    const manifest = preview?.sourceManifest;
+    const id = preview?.manifest?.id || preview?.id;
+    const selected = Array.isArray(preview?.packages)
+      ? preview.packages.length > 0 && preview.packages.every((part) => part.excerpts?.length)
+      : (preview?.excerpts || preview?.files || []).length > 0;
+    if (!selected || manifest?.version !== 1 || manifest.source !== preview.source || typeof id !== 'string' || manifest.id !== id) return;
+    const row = document.createElement('div');
+    row.className = 'row';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Copy source manifest';
+    row.append(button);
+    const fallback = document.createElement('label');
+    fallback.className = 'field';
+    fallback.hidden = true;
+    fallback.dataset.sourceManifestFallback = '';
+    fallback.innerHTML = '<span>Source manifest JSON</span><textarea rows="8" readonly spellcheck="false"></textarea>';
+    const jsonField = fallback.querySelector('textarea');
+    const json = JSON.stringify(manifest, null, 2);
+    let attempt = 0;
+    // Copying reads the preview already on screen. It sends nothing and keeps the approval as it is.
+    button.addEventListener('click', async () => {
+      const current = ++attempt;
+      try {
+        await navigator.clipboard.writeText(json);
+        if (!button.isConnected || current !== attempt) return;
+        fallback.hidden = true;
+        jsonField.value = '';
+        report(feedback, undefined, 'Source manifest copied.');
+      } catch {
+        if (!button.isConnected || current !== attempt) return;
+        jsonField.value = json;
+        fallback.hidden = false;
+        jsonField.focus();
+        jsonField.select();
+        report(feedback, undefined, 'Copy the selected JSON using your browser or system Copy command.');
+      }
+    });
+    el.append(row, fallback);
+  }
+
   function disclosure(label, value, reason) {
     const details = document.createElement('details');
     const summary = document.createElement('summary');
@@ -911,6 +954,7 @@
           throw new Error('Could not review this branch’s current context. Preview source again.');
         }
         previewContents(previewEl, result);
+        mountSourceManifest(previewEl, result, feedback);
         if (branchContext) previewEl.append(branchHistory(branchContext, 'Context already in this branch'));
         if (result.source === 'repository' && !result.excerpts.length) return;
         if (result.source === 'packages' && result.packages.some((part) => !part.excerpts.length)) return;
@@ -2653,7 +2697,7 @@
     if (!teamMode && arg === 'standalone') {
       projectsEl.remove();
       await window.okbCodingStandalone.mount(page, {
-        coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, report, sessionUsage, usageText, contextSummary,
+        coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, mountSourceManifest, report, sessionUsage, usageText, contextSummary,
         showTaskProgress, taskProgressPanel, mountContextControls, mountRunCopies, sourceLookupSummary,
       });
       return;

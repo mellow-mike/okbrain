@@ -47,6 +47,12 @@ request's own conversation and admitted source. It omits tool arguments,
 result text, and paths from refused calls.
 The app and editor copy that report to the clipboard on request. Task text,
 response text, source bodies, and credentials are outside the report schema.
+Each source preview also returns a versioned source manifest. It repeats the
+preview ID that an approved send must match and lists the selected paths,
+line ranges or sizes, and digests. A repository manifest is the one the CLI
+prints. Selected text, attached file bodies, the task, and profile guidance
+are outside its schema. The apps and editor copy it from the preview they
+already hold, so copying makes no request and leaves the approval unchanged.
 Run inspection projects Pi Durable's live task graph to bounded counts for
 the selected request and its descendants. The control plane forwards those
 counts through the worker pipe and the authenticated inspection route.
@@ -1326,6 +1332,11 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-11-22 — **Build the source manifest once, on the server.** Previews
+  return it so the Mac app, web app, team workspace, and editor copy the same
+  JSON without hashing or filtering in each client. A repository manifest is
+  the CLI's `manifest` unchanged, including the directories and query that
+  its ID binds. Run reports continue to leave the query out.
 - 2026-11-22 — **Graph JSON export reuses `graph_data` and the browser's save
   flow.** A separate `export_graph` op gives exports a public default while
   the live graph view keeps showing private notes. Saving through a download

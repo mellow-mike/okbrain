@@ -76,7 +76,7 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [x] Preview bounded, deterministic excerpts from explicitly scoped Git
   projects. Bind the reviewed selection to its source bytes at admission and
   recover from the stored snapshot.
-- [ ] Copy the exact source selection manifest before sending a Coding
+- [x] Copy the exact source selection manifest before sending a Coding
   request from the apps or editor. Keep source text out of the copied manifest.
 - [x] Expose local request status, active context estimates, Pi Durable history
   compaction, and recorded provider usage including cache counters.

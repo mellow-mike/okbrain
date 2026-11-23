@@ -10,7 +10,7 @@
   };
   const statusLabel = (status) => statusLabels[status] || status || 'Saved';
 
-  async function mount(parent, { coding, readonly, detached, defaultModels, entries, field, previewContents,
+  async function mount(parent, { coding, readonly, detached, defaultModels, entries, field, previewContents, mountSourceManifest,
     report, sessionUsage, usageText, contextSummary, showTaskProgress, taskProgressPanel, mountContextControls, mountRunCopies,
     sourceLookupSummary }) {
     const header = parent.querySelector('header');
@@ -526,6 +526,7 @@
         const result = await coding(prefix + '/preview', selection);
         if (detached() || revision !== current) return;
         previewContents(previewContent, result);
+        mountSourceManifest(previewContent, result, feedback);
         if (result.source === 'repository' && !result.excerpts.length) return;
         if (readonly || !form.checkValidity()) return;
         preview = {

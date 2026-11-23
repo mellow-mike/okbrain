@@ -10,6 +10,7 @@ import { createApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
 import { runCodingSession } from "../src/core/coding/durable.ts";
 import type { CodingRunReport } from "../src/core/coding/run-report.ts";
+import type { CodingSourceManifest } from "../src/core/coding/source-manifest.ts";
 import { loadConfig } from "../src/core/config.ts";
 import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/core/engine/cache-settings.ts";
 import { extractTargets } from "../src/core/graph/links.ts";
@@ -1797,6 +1798,33 @@ try {
       await view.evaluate(() => Reflect.deleteProperty(navigator.clipboard, "writeText"));
     }
   }
+  async function copySourceManifest(view: Page, provider: { state: { callCount: number } }) {
+    const shown = (await view.locator("[data-preview-content] pre").allTextContents()).filter((text) => text.trim().length >= 12);
+    assert.ok(shown.length > 0);
+    const providerCalls = provider.state.callCount;
+    const requests: string[] = [];
+    const record = (request: BrowserRequest) => requests.push(`${request.method()} ${new URL(request.url()).pathname}`);
+    view.on("request", record);
+    let json: string;
+    try {
+      await view.getByRole("button", { name: "Copy source manifest", exact: true }).click();
+      await view.getByText("Source manifest copied.", { exact: true }).waitFor();
+      json = await view.evaluate(() => navigator.clipboard.readText());
+    } finally { view.off("request", record); }
+    // The copy uses the preview on screen. It sends no request and reaches no provider.
+    assert.deepEqual(requests, []);
+    assert.equal(provider.state.callCount, providerCalls);
+    for (const text of shown) {
+      assert.ok(!json.includes(JSON.stringify(text).slice(1, -1)), "Source manifest included previewed text.");
+    }
+    for (const value of [server.token, "standalone-browser-fixture-only"]) assert.ok(!json.includes(value));
+    const manifest = JSON.parse(json) as CodingSourceManifest;
+    assert.equal(manifest.version, 1);
+    assert.match(manifest.id, /^[a-f0-9]{64}$/u);
+    assert.equal(await view.evaluate(() => document.documentElement.scrollWidth), 375);
+    return { manifest, json };
+  }
+  const manifestFallback = ["Copy source manifest", "Copy the selected JSON using your browser or system Copy command.", "Source manifest JSON"] as const;
   const standaloneBudget = waitForBudgetInspection("/standalone", "cli-complete");
   await page.getByRole("link", { name: "Standalone sessions", exact: true }).click();
   await page.getByRole("heading", { name: "Standalone sessions", exact: true }).waitFor();
@@ -2030,6 +2058,19 @@ try {
   await previewStandalone.click();
   await approveStandalone.check();
   assert.equal(standaloneFaux.state.callCount, 2);
+  const standaloneManifest = await copySourceManifest(page, standaloneFaux);
+  assert.equal(standaloneManifest.manifest.source, "repository");
+  assert.ok(standaloneManifest.manifest.source === "repository");
+  const copiedSelection = standaloneManifest.manifest.manifest;
+  assert.equal(copiedSelection.id, standaloneManifest.manifest.id);
+  assert.equal(copiedSelection.query, "sourceMarker");
+  assert.deepEqual(copiedSelection.files.map(({ path, startLine, endLine }) => ({ path, startLine, endLine })),
+    [{ path: "browser.ts", startLine: 1, endLine: 1 }]);
+  // Copying, with or without clipboard access, leaves the reviewed approval in place.
+  await verifyClipboardFallback(page, ...manifestFallback, standaloneManifest.json);
+  assert.equal(await approveStandalone.isChecked(), true);
+  assert.equal(await sendStandalone.isEnabled(), true);
+  assert.equal(standaloneFaux.state.callCount, 2);
   standaloneFaux.setResponses([async (input) => {
     const prompt = JSON.stringify(input.messages);
     assert.match(prompt, /approved browser source/);
@@ -2055,6 +2096,8 @@ try {
   const manifest = repositoryReport.report.request.repositoryContext;
   assert.ok(manifest);
   assert.match(manifest.id, /^[a-f0-9]{64}$/u);
+  assert.equal(manifest.id, copiedSelection.id);
+  assert.deepEqual(manifest.files, copiedSelection.files.map(({ path, startLine, endLine, sha256 }) => ({ path, startLine, endLine, sha256 })));
   assert.deepEqual(manifest.files.map(({ path, startLine, endLine }) =>
     ({ path, startLine, endLine })), [{ path: "browser.ts", startLine: 1, endLine: 1 }]);
   assert.match(manifest.files[0]?.sha256 ?? "", /^[a-f0-9]{64}$/u);
@@ -2384,6 +2427,16 @@ try {
   await profileField.fill(JSON.stringify({ ...expectedProfile, guidance: "Cite repository paths." }));
   await previewProject.click();
   await explicitApproval.check();
+  assert.equal(await sendProject.isEnabled(), true);
+  await projectComposer.getByText("Project guidance", { exact: true }).waitFor();
+  const projectManifest = await copySourceManifest(page, projectFaux);
+  assert.ok(projectManifest.manifest.source === "repository");
+  assert.equal(projectManifest.manifest.manifest.profile?.name, expectedProfile.name);
+  assert.match(projectManifest.manifest.manifest.profile?.id ?? "", /^[a-f0-9]{64}$/u);
+  assert.ok(projectManifest.manifest.manifest.files.length > 0);
+  assert.ok(!projectManifest.json.includes("Cite repository paths."));
+  assert.ok(!projectManifest.json.includes("Review source marker and cite the file."));
+  assert.equal(await explicitApproval.isChecked(), true);
   assert.equal(await sendProject.isEnabled(), true);
   await presetName.fill("Review source with citations");
   const editPreset = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith(projectPath + "/presets") &&

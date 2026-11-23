@@ -11,6 +11,7 @@ import {
 import { validateCodingProjectProfile } from "./project-profile.ts";
 import { selectRepositoryContext, type RepositoryContextOptions } from "./repository-context.ts";
 import { codingRunReport } from "./run-report.ts";
+import { codingSourceManifest } from "./source-manifest.ts";
 import type { CodingTaskProgress } from "./task-progress.ts";
 
 type Input = Record<string, unknown>;
@@ -105,10 +106,13 @@ export class StandaloneCodingControl {
     if (path === "/preview") {
       const workspace = await workspaceOf(input);
       const source = sourceOf(input);
-      if (source.source === "files")
-        return { source: "files", ...await previewCodingAttachments(workspace, source.files) };
+      if (source.source === "files") {
+        const preview = { source: "files" as const, ...await previewCodingAttachments(workspace, source.files) };
+        return { ...preview, sourceManifest: codingSourceManifest(preview) };
+      }
       const selected = await selectRepositoryContext({ workspace, ...source.repository });
-      return { source: "repository", id: selected.manifest.id, ...selected };
+      return { source: "repository", id: selected.manifest.id, ...selected,
+        sourceManifest: codingSourceManifest({ source: "repository", manifest: selected.manifest }) };
     }
     if (!["/inspect", "/run", "/resume", "/cancel", "/delete-session", "/reset-context-preview", "/reset-context",
       "/compact-context-preview", "/compact-context"].includes(path))
