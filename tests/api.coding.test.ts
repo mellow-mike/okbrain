@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createAssistantMessageEventStream, createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
@@ -19,6 +19,11 @@ import { loadConfig, saveConfig } from "../src/core/config.ts";
 import type { CodingProjectProfile } from "../src/core/coding/project-profile.ts";
 import type { CodingRunReport } from "../src/core/coding/run-report.ts";
 import { ensureExtensionCapableSqlite } from "../src/core/engine/custom-sqlite.ts";
+
+// Tests here poll with `waitFor`, which allows each wait up to 4 s, and start
+// worker processes that take far longer to start on Windows runners. Bun's 5 s
+// default is shorter than two such waits.
+setDefaultTimeout(30_000);
 
 const ownerToken = "local-operator-test";
 type Project = { id: string; workspace: string; credential: string };
