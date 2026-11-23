@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,6 +9,9 @@ import { parse } from "../src/core/okf/document.ts";
 import { packContext, publicHits } from "../src/core/retrieval/ask.ts";
 import type { HybridHit } from "../src/core/retrieval/hybrid.ts";
 import { okb } from "./helpers.ts";
+
+// Each test here starts dozens of Git processes, which take far longer to start on Windows runners.
+setDefaultTimeout(30_000);
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: process.env });
 const first = "notes/[local] draft", second = "notes/turn-private", publicId = "notes/public";

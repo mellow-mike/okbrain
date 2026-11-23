@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { createApiServer, type ApiServer } from "../src/api.ts";
 import type { SyncOriginPreview } from "../src/core/sync.ts";
 import { mcpOps } from "../src/mcp/server.ts";
+
+// Each test here starts dozens of Git processes, which take far longer to start on Windows runners.
+setDefaultTimeout(30_000);
 
 const ownerToken = "sync-fixture-owner-0123456789";
 

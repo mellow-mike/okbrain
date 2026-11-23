@@ -1,9 +1,12 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { syncRecovery } from "../src/core/sync-recovery.ts";
 import { syncBundle } from "../src/core/sync.ts";
+
+// Each test here starts dozens of Git processes, which take far longer to start on Windows runners.
+setDefaultTimeout(30_000);
 
 const roots: string[] = [];
 const note = (text: string) => `---\ntype: note\ntitle: Sample\ncustom: keep\n---\n${text}\n`;

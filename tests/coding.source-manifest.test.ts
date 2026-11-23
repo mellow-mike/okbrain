@@ -184,4 +184,4 @@ test("every app preview carries the manifest, previews call no provider, and the
     expect(inspection.report?.request.repositoryContext).toMatchObject({ id: ownerPreview.sourceManifest.id,
       files: ownerPreview.manifest.files.map(({ path: file, startLine, endLine, sha256: digest }) => ({ path: file, startLine, endLine, sha256: digest })) });
   } finally { await api.stop(); }
-});
+}, 15_000);

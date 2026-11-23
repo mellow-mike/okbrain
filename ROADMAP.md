@@ -821,6 +821,7 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B17 | 2026-09-26 | low | viz/gui | `sources[].resource` bundle paths such as `policies/x.md` show as broken links in the offline graph and open a JSON error page from the note reader | `sourcesList` emitted file paths directly | fixed | Resolve source paths against available notes, including a bundle-root fallback, then route them inside the reader or graph. |
 | B15 | 2026-09-03 | med | ingest | `okb capture` wrote to the `inbox/` directory but never tagged `inbox`, so captures were invisible to `okb inbox`, the Inbox view, and the review queue's inbox signal (the reading inbox is the tag, not the directory) | capture didn't add the tag | fixed | captures carry the `inbox` tag; regression in `tests/authoring.test.ts` |
 | B18 | 2026-11-22 | high | coding | Patch preview and apply refused every tracked file whose permission bits were not exactly `0644` or `0755` ("Use an ordinary tracked UTF-8 file with its Git permissions"). A checkout made under umask `002` or `077` holds `0664` or `0600` files, and `git apply` writes the draft copy under the same umask. Nine patch tests failed on a stock Ubuntu account while CI passed under umask `022` | tracked files were compared with the full index mode, although Git and the new-file branch look only at the owner-executable bit | fixed | compare the owner-executable bit and refuse set-ID and sticky bits for tracked and new files; `tests/coding.approved-patch.test.ts` covers umask `002`, umask `077`, and a `0640` file, and still refuses an executable or set-ID file |
+| B19 | 2026-11-22 | low | tests | `windows-latest` failed on two consecutive heads. `tests/api.sync.test.ts` "Git setup and recovery…" starts 196 Git processes and passed Bun's 5 s default test timeout on the Windows runner. Bun then killed the Git child of the request in flight, so the local sync after an origin disconnect returned 409, or the run reported a bare timeout. Reproduced on Linux by delaying every `git` start by 50 ms | the Git sync test files ran on the default timeout, while slow tests elsewhere already had explicit ones; the Windows `Test` step takes about 180 s against 35 s on Linux | fixed | `setDefaultTimeout(30_000)` in the six Git sync test files and an explicit timeout on two Coding tests; the full suite passes with every `git` start delayed by 60 ms |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -889,9 +890,10 @@ Newest first. One line per session: what changed + what's next.
   umasks other than `022` (B18). Local checks passed 741 tests under umask
   `022` and `002`, 25 editor tests, the 375 px browser smoke, and the compiled
   binary. The macOS app jobs of CI run 45090959270 built both architectures
-  and saved both graph exports through the app's save handling. Live provider
-  evaluation, intended-host verification, signing credentials, and the
-  `v0.1.0` tag remain open.
+  and saved both graph exports through the app's save handling. Gave the Git
+  sync tests time for Windows runners (B19). Live provider evaluation,
+  intended-host verification, signing credentials, and the `v0.1.0` tag
+  remain open.
 - 2026-11-22 — Added reviewed Git origin replacement and disconnection in
   Settings, with the old GitHub credential available for separate removal.
 - 2026-11-22 — Added the app source retrieval benchmark with measured results

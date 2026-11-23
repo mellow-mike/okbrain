@@ -2,7 +2,7 @@
 // bare repo (file path remote) so CI never touches the network. Git identity
 // and config are pinned via env so developer/CI global config can't leak in.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
@@ -13,6 +13,9 @@ import { inDbOnlyDir } from "../src/core/okf/paths.ts";
 import { writeConcept } from "../src/core/okf/write.ts";
 import { SyncError, syncBundle, syncStatus } from "../src/core/sync.ts";
 import { okb } from "./helpers.ts";
+
+// Each test here starts dozens of Git processes, which take far longer to start on Windows runners.
+setDefaultTimeout(30_000);
 
 let base: string;
 const dir = async (name: string): Promise<string> => {

@@ -81,4 +81,4 @@ test("the pinned checkout check rejects nested, moved, dirty, staged and hidden 
     git("config", "--unset", "filter.fixture.clean");
     await expect(verifyPinnedEvaluationWorkspace(workspace, revision)).resolves.toBeUndefined();
   } finally { await rm(base, { force: true, recursive: true }); }
-});
+}, 15_000);
