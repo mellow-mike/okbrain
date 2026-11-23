@@ -12,6 +12,19 @@ is described in [AGENTS.md](AGENTS.md). Design rationale lives in [CONTEXT.md](C
 
 Stages 0–6 built the knowledge bundle, graph, retrieval, CLI, GUI, and MCP.
 The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions.
+The maintainer decisions of 2026-11-23 and the plan for the remaining items
+are in [the open items handoff](docs/plans/2026-11-23-open-items.md).
+
+### v0.1.0 release
+
+- [ ] Sign `SHA256SUMS.txt` with a dedicated release GPG key from a protected
+  `release` GitHub environment, and verify the signature against the committed
+  public key before publishing.
+- [ ] Add GitHub build provenance attestations for every release asset.
+- [ ] Add a signed dry run of the release workflow that publishes nothing.
+- [ ] Document download verification, and the first-launch approval for
+  binaries without a publisher signature.
+- [ ] Tag `v0.1.0` after a signed dry run passes. The maintainer pushes the tag.
 
 ### Stage 7 — Personal second brain
 
@@ -62,6 +75,10 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   for optional AI annotations.
 - [x] Use public note tags for optional clip suggestions. Keep marking a note
   reviewed local even when its vector is missing.
+- [ ] Add opt-in, local-only usability sessions that measure time to first
+  saved item and re-finding success without recording note content or query
+  text. Export a JSON summary and add a facilitator protocol in
+  `docs/USABILITY.md`.
 
 ### Stage 8 — Enterprise coding
 
@@ -134,7 +151,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
   checkout with an injected provider and separate fixture reviewer.
 - [!] Measure live provider usage and tokens per accepted result with
   independent human review of citations and outcomes. Waiting on an approved
-  provider account and an independent human reviewer.
+  provider account and an independent human reviewer. Deferred by the
+  maintainer on 2026-11-23. It does not block v0.1.0.
 - [x] Add project authorization, expiring member tokens, dedicated worker
   subprocesses, per-project credentials, and team status and cancellation.
 - [x] Verify local crash recovery and request replay, project-scoped audit,
@@ -157,7 +175,8 @@ The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions
 - [!] Verify failure, retention, access policy, and worker isolation on the
   intended enterprise deployment, including actual provider egress and backups.
   Waiting on access to that host. Local and CI checks use the offline Linux
-  Docker worker.
+  Docker worker. Deferred by the maintainer on 2026-11-23. It does not block
+  v0.1.0.
 - [x] Add explicitly previewed, independent Pi Durable package reviews with
   task-owned child conversations, combined usage, and a human-reviewed handoff.
 - [x] Preview and apply owner-approved local patches to existing tracked files
@@ -632,6 +651,8 @@ Goal: the brain improves itself on a schedule.
 - [!] Signed/notarized release artifacts require publisher credentials. The
       native packagers support macOS Developer ID and notarization and
       Windows Authenticode. See `packaging/README.md` for both platforms.
+      Deferred beyond v0.1.0 on 2026-11-23. v0.1.0 signs its checksum
+      manifest with GPG and attests each asset instead.
 
 ### 5.2 Multi-brain mounts (brains axis)
 - [x] Config `brains` map (string path or `{ path, readonly }`; `~`
@@ -748,7 +769,9 @@ Goal: the brain improves itself on a schedule.
       to the package version and verify the assembled files before publishing.
 - [x] Docs: README (v0.2, GUI tour, offline package, upgrade), CONTEXT,
       CLAUDE.md invariant 1, REFERENCES (R1 updated, R3/R4 added), skills
-- [ ] Tag `v0.1.0` (runs the release workflow) — the maintainer's call
+- [ ] Tag `v0.1.0` (runs the release workflow) — the maintainer's call. On
+      2026-11-23 the maintainer chose to sign first. See Current focus →
+      v0.1.0 release.
 
 ### 6.4 Design system (R5)
 - [x] `core/viz/tokens.css` from the system's tokens: both themes, families,
@@ -879,12 +902,23 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       with `okb export-viz --fonts`.
 - [x] Use one graph component for the app and offline HTML export, including
       Cytoscape styling, filters, and the note inspector.
+- [ ] 1.0 distribution candidates (not v0.1.0, decided 2026-11-23): a Homebrew
+      tap and Scoop bucket fed from release checksums, and the editor
+      extension on the VS Code Marketplace and Open VSX (for Cursor). Claim the
+      `okbrain` publisher ID or rename it before publishing.
 
 ---
 
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-23 — Reviewed the project (typecheck clean, 746 tests passing, main
+  CI green, no open PRs or issues) and recorded maintainer decisions. v0.1.0
+  ships through GitHub Releases with a GPG-signed checksum manifest and build
+  provenance attestations. Publisher signing, the extra channels, live provider
+  evaluation, and intended-host verification are deferred. Usability sessions
+  get local-only measurement, and concept types stay free-form. Next:
+  [the open items handoff](docs/plans/2026-11-23-open-items.md).
 - 2026-11-22 — Added graph JSON export to the Mac and web apps and a source
   manifest copy to the Coding apps and editor. Fixed patch approval under
   umasks other than `022` (B18). Local checks passed 741 tests under umask
