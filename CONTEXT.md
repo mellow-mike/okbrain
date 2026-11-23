@@ -1332,6 +1332,10 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-11-22 — **Patch approval compares file modes the way Git does.** Check
+  the owner-executable bit and refuse set-ID and sticky bits, for tracked and
+  new files alike. Requiring exactly `0644` or `0755` refused every tracked
+  file in a checkout made under a umask other than `022`.
 - 2026-11-22 — **Build the source manifest once, on the server.** Previews
   return it so the Mac app, web app, team workspace, and editor copy the same
   JSON without hashing or filtering in each client. A repository manifest is

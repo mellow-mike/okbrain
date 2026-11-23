@@ -59,6 +59,39 @@ test("previews an exact patch without touching files and applies only to the wor
   });
 });
 
+test("tracked files keep their Git mode under any umask, and a changed executable bit is still refused", async () => {
+  if (process.platform === "win32") return;
+  // Group-writable and owner-only checkouts are ordinary: Git records 100644 for both.
+  for (const [mask, permissions] of [[0o002, 0o664], [0o077, 0o600], [0o022, 0o640]] as const) {
+    await fixture(async (workspace, git) => {
+      const file = join(workspace, target);
+      await chmod(file, permissions);
+      expect(git("ls-files", "--stage", "--", target)).toStartWith("100644 ");
+      const previousMask = process.umask(mask);
+      try {
+        const receipts = await withPreparedPatch(workspace, ["src"], diff(), async ({ files, apply }) => {
+          expect(files).toEqual([{ path: target, mode: "100644", before: patchDigest(original), after: patchDigest(proposed) }]);
+          expect(await approvedPatchState(workspace, ["src"], files)).toBe("before");
+          await apply();
+          return files;
+        });
+        expect(await readFile(file, "utf8")).toBe(proposed);
+        expect(await approvedPatchState(workspace, ["src"], receipts)).toBe("after");
+        expect((await approvedPatchFiles(workspace, ["src"], receipts)).map(({ bytes }) => Buffer.from(bytes).toString())).toEqual([proposed]);
+        expect((await stat(file)).mode & 0o111).toBe(0);
+      } finally { process.umask(previousMask); }
+    });
+  }
+  // The index still says 100644, so an executable or set-ID worktree file is a pending mode change.
+  for (const permissions of [0o755, 0o744, 0o2644, 0o4644]) {
+    await fixture(async (workspace) => {
+      await chmod(join(workspace, target), permissions);
+      await expect(withPreparedPatch(workspace, ["src"], diff(), async () => {})).rejects.toThrow("with its Git permissions");
+      expect(await readFile(join(workspace, target), "utf8")).toBe(original);
+    });
+  }
+});
+
 test("adds a new executable and an empty file with no changes to the real index", async () => {
   await fixture(async (workspace, git) => {
     const executable = "src/new/nested/check.txt";

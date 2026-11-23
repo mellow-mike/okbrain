@@ -132,9 +132,9 @@ async function readPatchFile(workspace: string, path: string, mode: string, newF
     const file = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const info = await file.stat();
-      const matchesMode = newFile
-        ? (info.mode & 0o7000) === 0 && Boolean(info.mode & 0o100) === (mode === "100755")
-        : (info.mode & 0o7777) === Number.parseInt(mode.slice(-3), 8);
+      // Git records only whether the owner can execute a file. The other
+      // permission bits follow the umask of whoever checked the file out.
+      const matchesMode = (info.mode & 0o7000) === 0 && Boolean(info.mode & 0o100) === (mode === "100755");
       if (!info.isFile() || info.nlink !== 1 || info.size > approvedPatchFileBytes ||
         (process.platform !== "win32" && !matchesMode)) throw new Error();
       const bytes = Buffer.alloc(info.size + 1);
