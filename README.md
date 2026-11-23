@@ -4,50 +4,56 @@
 [![Platforms: macOS, Linux, Windows](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-4c6ef5?style=flat)](.github/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-4c6ef5?style=flat)](LICENSE)
 
-A self-hosted personal knowledge manager whose entire database is plain markdown in git.
+A local-first second brain and a review workspace for recoverable coding requests.
 
-Your notes are a conformant [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
-(OKF v0.2) bundle — one markdown file per idea, YAML frontmatter, links between
-them. Search, vectors, and the graph are a **derived cache** that rebuilds from
-those files with one command. Delete okbrain tomorrow and your knowledge is
-still there, readable by any editor you like.
+Your knowledge lives in a portable Markdown and YAML bundle compatible with
+[Open Knowledge Format v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format).
+Capture notes from the web and AI conversations, map how they relate, and ask
+questions with sources. Use a local model, a provider API key, or an eligible
+ChatGPT plan. The macOS app, local web app, CLI, and MCP server share the same
+knowledge store. You can rebuild search and the graph from the files.
+
+Start on **Home** with a note, or open **Sources** to preview and import
+exports as private drafts. Search, review, and build focused maps offline.
+When using a ChatGPT plan, review the excerpts in **Ask with ChatGPT** before
+sending them.
+
+Open **Coding** to register a permitted workspace, preview source excerpts,
+send a Pi Durable request, and inspect, resume, or review its result. Save
+project request presets for recurring work. The VS Code and Cursor extension
+previews source and opens run results from a local project or an HTTPS team
+workspace. Connect a GitHub remote from Coding to review repository activity,
+start a draft from an issue, or hand off accepted work.
+See the [personal guide](docs/PERSONAL.md) and [coding guide](docs/CODING.md).
 
 > [!NOTE]
-> Pre-1.0 and not yet published to a package registry, so installing means a
-> one-command build from source (or `bun run package` for an offline archive).
-> Stages 0–6 of the [roadmap](ROADMAP.md) are complete: CLI, local web GUI,
-> and MCP server all work today, with 443 tests green on macOS, Linux,
-> and Windows.
+> Download the macOS app and editor extension from a successful [CI run](https://github.com/mellow-mike/okbrain/actions/workflows/ci.yml).
+> Use **File → Open Brain Folder** in the app and **Extensions → Install from VSIX** in the editor.
+> [Packaging](packaging/README.md) covers local installation and builds. The [roadmap](ROADMAP.md) tracks release and deployment verification.
 
 ## Why
 
 Most knowledge tools own your data in a proprietary store and rent you access
 to it. okbrain inverts that: the markdown *is* the database.
 
-- **No lock-in, provable.** `okb rebuild` deletes the index and reconstructs it
-  from the markdown. Anything the database knows, the files already said.
+- **Portable knowledge.** `okb rebuild` reconstructs the keyword and graph
+  index from Markdown. `okb embed` builds the optional vector cache.
 - **Provenance, trust, and lifecycle are first-class.** Every write records
   who changed it (`generated`), reviews become `verified` events with derived
   trust tiers (unverified → machine-confirmed → human-reviewed), concepts carry
   a `status` and a `stale_after` date, and clips, feeds, and the enrichment
   agent cite their `sources` in frontmatter — all of it OKF v0.2, readable by
   any other OKF tool. `okb upgrade` migrates older bundles.
-- **Runs fully offline.** Six runtime dependencies, one compiled binary, no
-  Docker, no daemon, no mandatory network. AI is opt-in and never implicit — no
-  command spends tokens unless you asked it to.
-- **One contract, three surfaces.** 40 operations defined once drive the CLI
-  (`okb`), a local web app (`okb serve`), and an MCP server (`okb mcp`) so your
-  own agents can query your brain as a tool. Every capability is reachable
-  from all three.
+- **Local knowledge.** Notes, the graph, keyword search, and conversation
+  imports work offline. Choose when a hosted model receives your context.
+- **Shared knowledge operations.** The CLI, macOS app, local web app, and
+  MCP server share the knowledge operations. Local app routes handle selected
+  file uploads, account consent, and coding sessions.
 - **Hybrid retrieval.** Keyword (FTS5/BM25) + semantic vectors (sqlite-vec) +
   graph expansion + typed-edge relational recall, fused into one ranking.
   `okb ask` answers with citations post-verified against your actual notes.
-- **Fail-closed trust.** MCP exposes 15 read-only tools by default and 31 only
-  when you pass `--trusted`; its writes are attributed to the client, never to
-  you; brains can be mounted read-only.
-
-Not for you if you want mobile apps, hosted sync, WYSIWYG editing, or
-multi-user collaboration. This is a single-user tool for a laptop.
+- **Explicit access.** MCP exposes read tools by default. Trusted clients can
+  write with their own attribution, and brains can be mounted read-only.
 
 ## See it work
 
@@ -106,11 +112,11 @@ it in. Run `okb embed` and `[vector]` joins the mix. Every command takes
 
 ## Install
 
-Requires [Bun](https://bun.sh) ≥ 1.1. Build the binary:
+The source build requires [Bun](https://bun.com) 1.4.3 or newer.
 
 ```bash
 git clone https://github.com/mellow-mike/okbrain && cd okbrain
-bun install
+bun install --frozen-lockfile
 bun run build
 ```
 
@@ -125,9 +131,8 @@ okb --version
 
 For a self-contained, fully offline package of this machine's build, run
 `bun run package`: it writes `dist/okb-<version>-<os>-<arch>.tar.gz` (or
-`.zip` on Windows) holding the binary, the extension, README and LICENSE —
-the CLI, the local API, the embedded GUI, and the MCP server, with nothing
-downloaded at runtime. Unpack it anywhere and put the directory on `PATH`.
+`.zip` on Windows) with the binary, extension, README, license, and user
+guides. Unpack it anywhere and put the directory on `PATH`.
 
 <details>
 <summary>macOS: enabling vector search</summary>
@@ -210,12 +215,15 @@ Global flags: `--json`, `--bundle <path>`, `--brain <name>`, `--version`.
 |---|---|
 | author | `new` · `capture` · `import` · `write` · `rm` |
 | ingest | `clip` · `rss` · `enrich` · `inbox` · `inbox read` |
+| AI accounts | `chatgpt connect` · `chatgpt status` · `chatgpt use` · `chatgpt models` · `chatgpt disconnect` · `import-conversations` |
 | retrieve | `search` · `ask` · `read` · `list` |
-| graph | `graph` · `path` · `orphans` · `graph-data` · `export-viz` · `links suggest` · `links accept` |
+| ChatGPT plan | `ask-plan` |
+| graph | `graph` · `path` · `orphans` · `graph-data` · `export-graph` · `export-viz` · `links suggest` · `links accept` |
 | review | `review` · `review done` · `review snooze` |
 | claims | `take` · `resolve` · `calibrate` |
 | maintain | `index` · `rebuild` · `embed` · `doctor` · `upgrade` · `stats` · `jobs` · `sync` |
 | serve | `serve` · `bookmarklet` · `mcp` |
+| coding | `code context` · `code run` · `code status` |
 | setup | `init` · `brains` · `version` |
 
 ### Provenance and trust
@@ -247,13 +255,19 @@ verifies each citation against your bundle before printing it — a concept id
 the model invented is never shown as a source. `--profile lean|balanced|max`
 trades recall against cost (`lean` keeps a local model comfortable).
 
+For eligible ChatGPT accounts, sign in with `okb chatgpt connect`, then use
+`okb ask-plan "What did I conclude about spaced repetition?"`. `ask-plan`
+uses local keyword and graph retrieval and sends the selected context to
+OpenAI for synthesis. You can also bring exported ChatGPT and Claude
+conversations into your brain as private drafts. [Personal guide](docs/PERSONAL.md)
+
 ### The other two surfaces
 
 ```bash
 okb serve --open         # web app on http://127.0.0.1:6522, loopback only
 okb bookmarklet          # a clip-this-page bookmarklet for your browser
-okb mcp                  # stdio MCP, 15 read-only tools
-okb mcp --trusted        # 31 tools including writes — only for clients you trust
+okb mcp                  # stdio MCP, read-only tools
+okb mcp --trusted        # enable writes for a client you trust
 ```
 
 The GUI is a full surface over the same operations: a Home page (brain at a
@@ -262,7 +276,8 @@ conformance check), Browse (every concept with status, trust tier, staleness),
 a Concept reader (provenance, footnote attribution, links to / cited by,
 verify / deprecate / delete), an editor with the v0.2 fields and a sources
 editor, the live graph, search, ask, review, inbox, add (capture, clip, feeds,
-import, the bookmarklet), claims, stats, and settings (your actor, providers,
+import, the bookmarklet), Sources (conversation previews and private draft
+import), claims, stats, and settings (your actor, providers,
 sync, enrichment, maintenance including jobs and the v0.2 upgrade, MCP setup,
 a brain switcher). It is dark-first ink on a ground — colour only marks
 state and concept types, your notes read in Literata while okbrain speaks in
@@ -281,17 +296,18 @@ okb review               # today's "worth another look" queue, with reasons
 okb jobs                 # one pass: index, embed, rss, review, doctor
 ```
 
-Multi-device sync **is** git — add an `origin` remote, and the other machine
-runs `okb index` after cloning. Directories named `db_only/` stay on disk and
-in the index but out of git. The review queue ranks concepts past their
+Multi-device sync uses Git. On a second device, open **Settings → Brain folders
+→ Restore from GitHub** to download a shared brain and rebuild its local search
+index. Directories named `db_only/` stay on disk and in the index but out of Git
+when using `okb sync`. Static HTML and graph JSON exports also
+omit these notes by default. The review queue ranks concepts past their
 `stale_after` first, nudges drafts, and never queues deprecated ones.
 
-Schedule `okb jobs` with cron, launchd, or Task Scheduler; there is no daemon,
-and its embed step skips itself until you have run `okb embed` once, so a
-nightly run can't start spending on a hosted provider behind your back.
-Deliberate AI enrichment is its own command — `okb enrich` turns an LLM loose
-on the web inside hard caps on depth, hosts, paths, and pages, every one of
-them enforced in the tool rather than the prompt.
+In the Mac or web app, use **Settings → Maintenance → Schedule maintenance**
+to run selected jobs while the app server is open. RSS and embedding schedules
+require separate approval of the current settings. `okb jobs` also runs a
+single pass for scripts using cron, launchd, or Task Scheduler. Use **Enrich**
+for a deliberate AI web pass with limits on depth, hosts, paths, and pages.
 
 ## Configuration
 
@@ -345,10 +361,12 @@ flowchart TD
     CLI["CLI · okb"] --> OPS
     GUI["GUI · okb serve"] --> OPS
     MCP["MCP · okb mcp"] --> OPS
-    OPS["Operations contract<br/>40 ops · read / write / admin + trust + actor"]
+    OPS["Operations contract<br/>read / write / admin + trust + actor"]
     OPS --> BUNDLE[("OKF v0.2 bundle<br/>markdown + git")]
     OPS --> ENGINE[("Engine<br/>SQLite + sqlite-vec + FTS5")]
     OPS --> AI["AI gateway<br/>local or hosted"]
+    OPS --> PLAN["ChatGPT plan<br/>local sign-in"]
+    OPS --> PI["Pi Durable<br/>coding sessions and transcripts"]
     BUNDLE -.->|okb rebuild| ENGINE
 ```
 
@@ -363,7 +381,10 @@ ever living behind it.
 |---|---|
 | [CONTEXT.md](CONTEXT.md) | Living design reference — how each component works and why |
 | [ROADMAP.md](ROADMAP.md) | Granular tasks, bug log, backlog, progress log |
-| [CLAUDE.md](CLAUDE.md) | North Star, invariants, and working rules |
+| [AGENTS.md](AGENTS.md) | Architecture and working rules for contributors |
+| [Product plan](docs/PRODUCT-PLAN.md) | Personal and enterprise direction |
+| [Personal guide](docs/PERSONAL.md) | Subscription accounts, conversation imports, and data sharing |
+| [Coding guide](docs/CODING.md) | Run and recover local Pi Durable requests |
 | [skills/](skills/) | Agent skills: capture, ingest, enrich, query, daily-note, link-suggest |
 | [bundles/](bundles/README.md) | The example bundle and the vendored OKF v0.2 sample |
 | [packaging/](packaging/) | Release flow, offline packaging, Homebrew and Scoop manifests, signing notes |
@@ -374,17 +395,14 @@ ever living behind it.
 bun install
 bun run okb <args>     # run the CLI from source
 bun run typecheck      # tsc --noEmit, strict
-bun test               # 443 tests, no network
+bun test               # test suite with local provider fixtures
 bun run build          # bin/okb + vec0 beside it
 bun run package        # offline release archive for this machine → dist/
 ```
 
-CI runs typecheck and tests on macOS, Linux, and Windows with a pinned Bun; a
-change isn't done until it's green on all three. Contributions are welcome —
-open an issue before a large change, and read [CLAUDE.md](CLAUDE.md) first for
-the invariants a patch has to hold. Every bug fix lands with a test that fails
-before and passes after, and behavior changes update `CONTEXT.md` and
-`ROADMAP.md` in the same commit.
+CI runs typecheck and tests on macOS, Linux, and Windows with a pinned Bun.
+Read [AGENTS.md](AGENTS.md) for contributor guidance and update the design,
+roadmap, and user guides when behavior changes.
 
 ## License
 

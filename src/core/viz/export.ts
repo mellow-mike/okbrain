@@ -10,7 +10,7 @@
 
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { buildEdges, LINK, resolveLinkTarget, type Edge } from "../graph/links.ts";
+import { buildEdges, resolveLinkTarget, rewriteBodyLinks, type Edge } from "../graph/links.ts";
 import { listConcepts, readConceptPermissive } from "../okf/bundle.ts";
 import {
   fmGenerated,
@@ -27,6 +27,9 @@ import {
   type Status,
   type TrustTier,
 } from "../okf/document.ts";
+import { isPrivateConcept } from "../okf/privacy.ts";
+import { embeddedFontCss } from "./fonts.ts";
+import graphViewJs from "./graph-view.js" with { type: "text" };
 import okbJs from "./okb.js" with { type: "text" };
 import renderJs from "./render.js" with { type: "text" };
 import safeMarkdownJs from "./safe-markdown.js" with { type: "text" };
@@ -63,7 +66,7 @@ export interface VizGraph {
  * anchors; external, broken, and non-`.md` links are left untouched. Pure.
  */
 export function rewireLinks(srcId: string, body: string, known: Set<string>): string {
-  return body.replace(LINK, (match, target: string) => {
+  return rewriteBodyLinks(body, (match, target) => {
     const id = resolveLinkTarget(srcId, target);
     return id !== null && known.has(id)
       ? `](#concept:${encodeURIComponent(id)})`
@@ -71,13 +74,15 @@ export function rewireLinks(srcId: string, body: string, known: Set<string>): st
   });
 }
 
-export async function buildVizGraph(root: string): Promise<VizGraph> {
+export async function buildVizGraph(root: string, { includePrivate = true } = {}): Promise<VizGraph> {
   const ids = await listConcepts(root);
-  const known = new Set(ids);
+  const known = new Set<string>();
   const nodes: VizNode[] = [];
   const docs: { id: string; body: string; frontmatter: Record<string, unknown> }[] = [];
   for (const id of ids) {
     const { doc } = await readConceptPermissive(root, id);
+    if (!includePrivate && isPrivateConcept(id, doc.frontmatter)) continue;
+    known.add(id);
     docs.push({ id, body: doc.body, frontmatter: doc.frontmatter });
     const fm = doc.frontmatter;
     nodes.push({
@@ -88,7 +93,7 @@ export async function buildVizGraph(root: string): Promise<VizGraph> {
       tags: fmTags(fm.tags),
       resource: fmString(fm.resource),
       bodyLen: doc.body.length,
-      body: rewireLinks(id, doc.body, known),
+      body: doc.body,
       status: fmStatus(fm),
       trust: trustTier(fm),
       stale: isStale(fm),
@@ -98,6 +103,7 @@ export async function buildVizGraph(root: string): Promise<VizGraph> {
       sources: fmSources(fm),
     });
   }
+  for (const node of nodes) node.body = rewireLinks(node.id, node.body, known);
   return { nodes, edges: buildEdges(docs, known) };
 }
 
@@ -108,10 +114,10 @@ export interface VizExport {
 }
 
 /** Export the bundle's graph to `<root>/viz.html` (fixed path by design). */
-export async function exportViz(root: string): Promise<VizExport> {
-  const graph = await buildVizGraph(root);
+export async function exportViz(root: string, { includePrivate = false, fonts = false } = {}): Promise<VizExport> {
+  const graph = await buildVizGraph(root, { includePrivate });
   const path = join(root, "viz.html");
-  await writeFile(path, renderHtml(graph), "utf8");
+  await writeFile(path, renderHtml(graph, fonts ? await embeddedFontCss() : ""), "utf8");
   return { path, nodes: graph.nodes.length, edges: graph.edges.length };
 }
 
@@ -119,13 +125,12 @@ export async function exportViz(root: string): Promise<VizExport> {
  * Render the single-file page: data + vendored libs + viewer, no network.
  * Look: the design system's tokens (core/viz/tokens.css, inlined) and its
  * Okb helpers (theme restore + ink-flood toggle under `okb-viz-theme`, graph
- * palette), shared with the GUI. The web fonts stay out — the families fall
- * back through their stacks — so the file stays the size of its libraries.
+ * palette), shared with the GUI. The fonts can be embedded for offline use.
  * Types take graph slots in sorted order (the ninth onward shares
  * graph-other), and every node keeps a visible label, so identity is never
  * colour alone.
  */
-export function renderHtml(graph: VizGraph): string {
+export function renderHtml(graph: VizGraph, fontCss = ""): string {
   // <-escape so no `</script>` (or any tag) can break out of the block.
   const data = JSON.stringify(graph).replace(/</g, "\\u003c");
   return `<!doctype html>
@@ -134,7 +139,7 @@ export function renderHtml(graph: VizGraph): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>okbrain graph — ${graph.nodes.length} concepts</title>
-<style>${tokensCss}</style>
+<style>${tokensCss}${fontCss ? `\n${fontCss}` : ""}</style>
 <style>
   :root, [data-theme="dark"] { color-scheme: dark; --wght-text: 370; --wght-read: 400; }
   [data-theme="light"] { color-scheme: light; --wght-text: 400; --wght-read: 440; }
@@ -260,206 +265,32 @@ export function renderHtml(graph: VizGraph): string {
 <script>${markedJs}</script>
 <script>${safeMarkdownJs}</script>
 <script>${renderJs}</script>
+<script>${graphViewJs}</script>
 <script>
-var G = JSON.parse(document.getElementById('okb-graph').textContent);
-var R = window.okbRender, esc = R.esc;
-function typeName(t) { return t || '(untyped)'; }
-function ms(token) { return parseFloat(Okb.token(token)) || 0; }
-
-var byId = {}, citedBy = {}, linksTo = {}, typeCount = {}, types = [];
-G.nodes.forEach(function (n) {
-  byId[n.id] = n;
-  var t = typeName(n.type);
-  typeCount[t] = (typeCount[t] || 0) + 1;
-  if (types.indexOf(t) < 0) types.push(t);
-});
-G.edges.forEach(function (e) {
-  (citedBy[e.dst] = citedBy[e.dst] || []).push(e.src);
-  (linksTo[e.src] = linksTo[e.src] || []).push(e.dst);
-});
-types.sort();
-function slot(t) { var i = types.indexOf(t); return i < 8 ? 'graph-' + (i + 1) : 'graph-other'; }
-function swatch(t) { return '<span class="swatch" style="background:var(--' + slot(t) + ')"></span>'; }
-
-// The canvas takes concrete colours: the current theme's, re-read when it flips.
-var fill = {}, tok = {};
-function readTheme() {
-  var p = Okb.graphPalette();
-  types.forEach(function (t, i) { fill[t] = i < 8 ? p.slots[i] : p.other; });
-  ['ink-2', 'surface', 'danger', 'edge-line', 'accent'].forEach(function (k) { tok[k] = Okb.token(k); });
-}
-function themed(k) { return function () { return tok[k]; }; }
-readTheme();
-
-var cy = cytoscape({
-  container: document.getElementById('graph'),
-  elements: G.nodes.map(function (n) {
-    return { data: { id: n.id, label: n.title || n.id, type: typeName(n.type),
-      status: n.status, stale: n.stale,
-      size: 16 + 4 * Math.sqrt(Math.min(n.bodyLen, 20000) / 100) } };
-  }).concat(G.edges.map(function (e) {
-    return { data: { id: JSON.stringify([e.src, e.dst]), source: e.src, target: e.dst } };
-  })),
-  style: [
-    { selector: 'node', style: {
-      'background-color': function (ele) { return fill[ele.data('type')]; },
-      width: 'data(size)', height: 'data(size)', label: 'data(label)',
-      'font-family': Okb.token('font-read'), 'font-size': 9, color: themed('ink-2'),
-      'text-outline-color': themed('surface'), 'text-outline-width': 2,
-      'text-valign': 'bottom', 'text-margin-y': 4,
-      'text-wrap': 'ellipsis', 'text-max-width': '120px' } },
-    { selector: 'node[?stale]', style: { 'border-width': 2, 'border-style': 'dashed', 'border-color': themed('danger') } },
-    { selector: 'node[status = "deprecated"]', style: { opacity: Number(Okb.token('opacity-deprecated')) } },
-    { selector: 'edge', style: {
-      width: 1.2, 'line-color': themed('edge-line'), 'target-arrow-color': themed('edge-line'),
-      'target-arrow-shape': 'triangle', 'arrow-scale': 0.8, 'curve-style': 'bezier' } },
-    { selector: 'node:selected', style: { 'border-width': 2, 'border-style': 'solid', 'border-color': themed('accent') } },
-    { selector: '.dim, .faded', style: { opacity: Number(Okb.token('opacity-dim')) } }
-  ],
-  layout: { name: 'cose', animate: false },
-  wheelSensitivity: 0.2
-});
-
-var searchEl = document.getElementById('search');
-var detailEl = document.getElementById('detail');
-var tipEl = document.getElementById('tip');
-var themeEl = document.getElementById('theme');
-
-// The label and the canvas follow the attribute, inside the ink flood.
+var graph = window.okbGraphView.mount(JSON.parse(document.getElementById('okb-graph').textContent), {
+  canvas: document.getElementById('graph'),
+  detail: document.getElementById('detail'),
+  filters: document.getElementById('filters'),
+  search: document.getElementById('search'),
+  layout: document.getElementById('layout'),
+  fit: document.getElementById('fit'),
+  tip: document.getElementById('tip'),
+}, { descriptionClass: 'desc', metadataClass: 'fm', showResource: true });
+var searchEl = document.getElementById('search'), themeEl = document.getElementById('theme');
 function themeLabel() {
   themeEl.textContent = Okb.theme.get() === 'dark' ? '\\u263C light' : '\\u263E dark';
 }
 themeLabel();
-new MutationObserver(function () { themeLabel(); readTheme(); cy.style().update(); })
+new MutationObserver(function () { themeLabel(); graph.repaint(); })
   .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 themeEl.addEventListener('click', function () { Okb.theme.toggle(themeEl); });
-
-var checked = {};
-var filtersEl = document.getElementById('filters');
-types.forEach(function (t) {
-  checked[t] = true;
-  var label = document.createElement('label');
-  var cb = document.createElement('input');
-  cb.type = 'checkbox';
-  cb.checked = true;
-  cb.addEventListener('change', function () { checked[t] = cb.checked; applyFilters(); });
-  var count = document.createElement('span');
-  count.className = 'count';
-  count.textContent = typeCount[t];
-  label.appendChild(cb);
-  label.insertAdjacentHTML('beforeend', swatch(t));
-  label.appendChild(document.createTextNode(t));
-  label.appendChild(count);
-  filtersEl.appendChild(label);
-});
-
-function applyFilters() {
-  var q = searchEl.value.trim().toLowerCase();
-  cy.batch(function () {
-    cy.nodes().forEach(function (node) {
-      node.style('display', checked[node.data('type')] ? 'element' : 'none');
-    });
-    cy.elements().removeClass('dim');
-    if (!q) return;
-    cy.elements().addClass('dim');
-    cy.nodes().forEach(function (node) {
-      var n = byId[node.id()];
-      var hay = (n.id + ' ' + n.title + ' ' + n.tags.join(' ')).toLowerCase();
-      if (hay.indexOf(q) >= 0) {
-        node.removeClass('dim');
-        node.connectedEdges().removeClass('dim');
-      }
-    });
-  });
-}
-searchEl.addEventListener('input', applyFilters);
-document.addEventListener('keydown', function (e) {
-  if (e.key === '/' && document.activeElement !== searchEl) {
-    e.preventDefault();
+document.addEventListener('keydown', function (event) {
+  if (event.key === '/' && document.activeElement !== searchEl) {
+    event.preventDefault();
     searchEl.focus();
     searchEl.select();
   }
 });
-
-document.getElementById('layout').addEventListener('change', function (e) {
-  var d = ms('dur-deliberate');
-  cy.layout({ name: e.target.value, animate: d > 0 ? 'end' : false, animationDuration: d,
-    animationEasing: Okb.token('ease-in-out') }).run();
-});
-document.getElementById('fit').addEventListener('click', function () {
-  cy.fit(undefined, 40);
-});
-
-function conceptHref(id) { return '#concept:' + encodeURIComponent(id); }
-function typeChip(t) { return '<span class="chip">' + swatch(t) + esc(t) + '</span>'; }
-function conceptList(ids) {
-  return '<ul>' + ids.map(function (id) {
-    return '<li><a href="' + conceptHref(id) + '">' +
-      esc((byId[id] && byId[id].title) || id) + '</a></li>';
-  }).join('') + '</ul>';
-}
-
-function showDetail(id) {
-  var n = byId[id];
-  if (!n) return;
-  var h = '<h2>' + esc(n.title || n.id) + '</h2>' +
-    '<div class="meta">' + typeChip(typeName(n.type)) + '<code>' + esc(n.id) + '</code></div>' +
-    '<div class="meta">' + R.badges(n) + '</div>';
-  if (n.description) h += '<p class="desc">' + esc(n.description) + '</p>';
-  if (n.tags.length) h += '<div class="meta">' + n.tags.map(function (t) {
-    return '<span class="chip">' + esc(t) + '</span>';
-  }).join(' ') + '</div>';
-  h += '<dl class="fm">';
-  if (n.resource) h += '<dt>Resource</dt><dd><a href="' + esc(n.resource) + '">' + esc(n.resource) + '</a></dd>';
-  h += '<dt>Generated</dt><dd>' + R.actorLine(n.generated) + '</dd>';
-  h += '<dt>Verified</dt><dd>' + (n.verified.length ? n.verified.map(R.actorLine).join('<br>') : '—') + '</dd>';
-  h += '<dt>Sources</dt><dd>' + R.sourcesList(n.sources) + '</dd></dl>';
-  h += '<div class="body">' + R.renderMarkdown(n.body) + '</div>';
-  var out = linksTo[id] || [], back = citedBy[id] || [];
-  if (out.length) h += '<h3>Links to</h3>' + conceptList(out);
-  if (back.length) h += '<h3>Cited by</h3>' + conceptList(back);
-  detailEl.innerHTML = h;
-  R.wireLinks(detailEl, { baseId: id, hrefFor: conceptHref, known: function (x) { return !!byId[x]; } });
-}
-
-function focusNode(id) {
-  var node = cy.getElementById(id);
-  if (node.nonempty()) {
-    cy.$(':selected').unselect();
-    node.select();
-    cy.animate({ center: { eles: node } }, { duration: ms('dur-slow'), easing: Okb.token('ease-in-out') });
-  }
-  showDetail(id);
-}
-
-detailEl.addEventListener('click', function (e) {
-  var a = e.target.closest('a[href^="#concept:"]');
-  if (!a) return;
-  e.preventDefault();
-  focusNode(decodeURIComponent(a.getAttribute('href').slice(9)));
-});
-
-cy.on('tap', 'node', function (e) { showDetail(e.target.id()); });
-// Hover dims everything outside the node's neighbourhood and names the node.
-cy.on('mouseover', 'node', function (e) {
-  var n = byId[e.target.id()];
-  var t = typeName(n.type);
-  cy.elements().difference(e.target.closedNeighborhood()).addClass('faded');
-  tipEl.innerHTML = '<div class="t">' + esc(n.title || n.id) + '</div>' +
-    '<div class="meta">' + swatch(t) + esc(t) + (n.stale ? ' · stale' : '') + (n.status !== 'stable' ? ' · ' + esc(n.status) : '') + '</div>' +
-    (n.description ? '<div class="d">' + esc(n.description) + '</div>' : '');
-  var p = e.renderedPosition, box = e.cy.container().getBoundingClientRect();
-  tipEl.style.left = Math.min(p.x + 14, box.width - 270) + 'px';
-  tipEl.style.top = Math.min(p.y + 14, box.height - 90) + 'px';
-  tipEl.style.display = 'block';
-  e.cy.container().style.cursor = 'pointer';
-});
-cy.on('mouseout tap', 'node', function (e) {
-  cy.elements().removeClass('faded');
-  tipEl.style.display = 'none';
-  e.cy.container().style.cursor = '';
-});
-cy.on('pan zoom', function () { tipEl.style.display = 'none'; });
 </script>
 </body>
 </html>

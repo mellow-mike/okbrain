@@ -1,0 +1,1623 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
+const { mkdtemp, mkdir, rm, writeFile } = require('node:fs/promises');
+const { tmpdir } = require('node:os');
+const { join } = require('node:path');
+const { test } = require('node:test');
+const { runInNewContext } = require('node:vm');
+
+function activateExtension(vscode, connection, options = {}) {
+  const file = require.resolve('./extension.cjs');
+  const module = { exports: {} };
+  vscode.workspace.onDidChangeWorkspaceFolders ??= () => {};
+  vscode.window.onDidChangeActiveTextEditor ??= () => {};
+  runInNewContext(readFileSync(file, 'utf8'), {
+    module,
+    URL,
+    URLSearchParams,
+    Buffer,
+    require(id) {
+      if (id === 'vscode') return vscode;
+      if (id === './connection.cjs') return { ...require(id), connect: async () => connection };
+      if (id === './team-connection.cjs' && options.connectTeam) return { ...require(id), connectTeam: options.connectTeam };
+      return require(id);
+    },
+  }, { filename: file });
+  module.exports.activate({ subscriptions: [], secrets: options.secrets ?? { onDidChange() {} } });
+}
+
+function comparisonSide(projectId, run, text, fields = {}) {
+  return { session: run.session, requestId: run.id, status: run.status, review: run.review ?? null,
+    answer: { text, truncated: false },
+    report: { version: 1, projectId, session: run.session, runStatus: run.status, request: { requestId: run.id } },
+    ...fields };
+}
+
+test('editor inspection shows the context budget and opens approved source only on request', async () => {
+  const project = { id: 'fixture', title: 'Project fixture' };
+  const runs = [
+    { id: 'active', session: 'main', status: 'running', admitted: true },
+    { id: 'saved', session: 'main', status: 'done', admitted: true },
+  ];
+  const source = {
+    prompt: 'Review the saved input.', guidance: 'Project rules.',
+    groups: [{ label: 'Package fixture', files: [{ path: 'package/example.ts', startLine: 3, endLine: 9, text: '<source>&</source>' }] }],
+  };
+  let selectedRun = 'active';
+  let openSource = false;
+  let availableActions;
+  let lastDocument;
+  let savedContext = { estimatedTokens: 1050, limitTokens: 2400, maxOutputTokens: 400, modelWindowTokens: 3200, historyCompacted: true };
+  const lookup = { served: [{ path: 'src/example.ts', startLine: 2, endLine: 4, text: 'Do not repeat this lookup content' },
+    { path: '../out-of-scope.ts', startLine: 1, endLine: 1 }], refused: 2, incomplete: 1, truncated: true };
+  let sourceReads = 0;
+  let provideSource;
+  const commands = new Map();
+  const connection = {
+    projects: [project],
+    async api(path, identity) {
+      if (path === '/projects/fixture/runs') return runs;
+      if (path === '/projects/fixture/inspect') return { run: runs.find((run) => run.id === identity.requestId),
+        ...(identity.requestId === 'saved' ? { pi: { context: savedContext, usage: { models: {} },
+          request: { requestId: 'saved', approvedSourceLookup: true, sourceLookup: lookup } } } : {}) };
+      assert.equal(path, '/projects/fixture/source-inspect');
+      assert.equal(identity.session, 'main');
+      assert.equal(identity.requestId, 'saved');
+      sourceReads++;
+      return source;
+    },
+  };
+  const vscode = {
+    Uri: { from: (file) => ({ ...file, toString: () => `${file.scheme}:${file.path}?${file.query}` }) },
+    commands: { registerCommand: (name, run) => commands.set(name, run) },
+    env: {},
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider(scheme, provider) {
+        assert.equal(scheme, 'okbrain-saved-source');
+        provideSource = provider.provideTextDocumentContent;
+      },
+      async openTextDocument(input) {
+        return input.scheme
+          ? { uri: input, languageId: 'plaintext', text: provideSource(input) }
+          : { languageId: input.language, text: input.content };
+      },
+    },
+    window: {
+      async showTextDocument(document) { lastDocument = document; },
+      async showQuickPick(choices, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return choices.find((choice) => choice.label === selectedRun);
+        availableActions = Array.from(choices, (choice) => choice.label);
+        if (openSource) return choices.find((choice) => choice.label === 'View saved request source');
+      },
+      async showErrorMessage(message) { throw new Error(message); },
+    },
+  };
+  activateExtension(vscode, connection);
+  const inspect = commands.get('okbrain.runs');
+
+  await inspect();
+  assert.ok(!availableActions.includes('View saved request source'));
+  assert.doesNotMatch(lastDocument.text, /Session context budget/);
+  assert.doesNotMatch(lastDocument.text, /Approved source lookup/);
+  selectedRun = 'saved';
+  await inspect();
+  assert.ok(availableActions.includes('View saved request source'));
+  assert.equal(sourceReads, 0);
+  assert.ok(!lastDocument.text.includes(source.prompt));
+  assert.match(lastDocument.text, /Approved source lookup\nsrc\/example\.ts:2–4\n2 refused · 1 incomplete\nAdditional ranges omitted\./);
+  assert.doesNotMatch(lastDocument.text, /out-of-scope\.ts|Do not repeat this lookup content/);
+  assert.ok(lastDocument.text.includes([
+    'Session context budget',
+    `Estimated active context: ${(1050).toLocaleString()} tokens`,
+    `Input token cap: ${(2400).toLocaleString()} tokens`,
+    `Output reserve: ${(400).toLocaleString()} tokens`,
+    `Model window: ${(3200).toLocaleString()} tokens`,
+    'Earlier turns are compacted. Saved requests remain in Run history.',
+    '', 'Recorded session usage',
+  ].join('\n')));
+
+  savedContext = { estimatedTokens: 0, limitTokens: '2400', maxOutputTokens: -1, modelWindowTokens: 3200.5, historyCompacted: 'true' };
+  await inspect();
+  assert.ok(lastDocument.text.includes(`Estimated active context: ${(0).toLocaleString()} tokens`));
+  assert.doesNotMatch(lastDocument.text, /Input token cap|Output reserve|Model window|Older turns|Earlier turns/);
+  savedContext = { estimatedTokens: 12, limitTokens: 400 };
+  await inspect();
+  assert.ok(lastDocument.text.includes(`Estimated active context: ${(12).toLocaleString()} tokens\nInput token cap: ${(400).toLocaleString()} tokens`));
+  assert.doesNotMatch(lastDocument.text, /Output reserve|Model window/);
+
+  openSource = true;
+  await inspect();
+  assert.equal(sourceReads, 1);
+  assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
+  assert.equal(lastDocument.languageId, 'plaintext');
+  assert.ok(lastDocument.text.includes(source.prompt));
+  assert.ok(lastDocument.text.includes('Project guidance\nProject rules.'));
+  assert.ok(lastDocument.text.includes('Package fixture\n\npackage/example.ts:3–9\n<source>&</source>'));
+  assert.equal(provideSource(lastDocument.uri), '');
+});
+
+test('editor copies only the approved report for the currently inspected saved run', async () => {
+  const project = { id: 'fixture', title: 'Project fixture' };
+  const run = { session: 'main', id: 'saved-request', status: 'done', admitted: true };
+  const savedReport = { version: 1, projectId: project.id, session: run.session, runStatus: run.status,
+    request: { requestId: run.id, status: 'done' } };
+  const editor = { document: { uri: { scheme: 'untitled' } } };
+  const label = 'Copy run report';
+  const commands = new Map();
+  const calls = [], copied = [], notices = [];
+  let candidate = savedReport, mode = 'dismiss', availableActions, editorChanged;
+  let inspectedRun = run;
+  const vscode = {
+    commands: { registerCommand: (name, run) => commands.set(name, run) },
+    env: { clipboard: { async writeText(text) { copied.push(text); } } },
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider() {},
+      async openTextDocument(document) { return document; },
+    },
+    window: {
+      activeTextEditor: editor,
+      onDidChangeActiveTextEditor(listener) { editorChanged = listener; },
+      async showTextDocument() {},
+      async showQuickPick(items, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return items[0];
+        availableActions = Array.from(items, (item) => item.label);
+        if (mode === 'dismiss') return undefined;
+        if (mode === 'away') {
+          this.activeTextEditor = undefined;
+          editorChanged(undefined);
+          this.activeTextEditor = editor;
+          editorChanged(editor);
+        }
+        return items.find((item) => item.label === label);
+      },
+      async showInformationMessage(message) { notices.push(message); },
+      async showErrorMessage(message) { throw new Error(message); },
+    },
+  };
+  activateExtension(vscode, { projects: [project], async api(path, data) {
+    calls.push({ path, data });
+    if (path === '/projects/fixture/runs') return [run];
+    assert.equal(path, '/projects/fixture/inspect');
+    assert.equal(data.session, run.session);
+    assert.equal(data.requestId, run.id);
+    return { run: inspectedRun, report: candidate, pi: { request: { receipt: { text: 'Response kept out of the clipboard.' } } } };
+  } });
+  const inspect = commands.get('okbrain.runs');
+
+  await inspect();
+  assert.ok(availableActions.includes(label));
+  assert.deepEqual(copied, []);
+  mode = 'copy';
+  for (candidate of [undefined, { ...savedReport, version: 2 }, { ...savedReport, projectId: 'other' },
+    { ...savedReport, session: 'other' }, { ...savedReport, request: { requestId: 'other' } },
+    { ...savedReport, runStatus: 'failed' }]) {
+    await inspect();
+    assert.ok(!availableActions.includes(label));
+  }
+  for (inspectedRun of [{ ...run, id: 'mismatched-run' }, { ...run, admitted: false }, { ...run, status: 'running' }]) {
+    candidate = { ...savedReport, runStatus: inspectedRun.status };
+    await inspect();
+    assert.ok(!availableActions.includes(label));
+  }
+  candidate = savedReport;
+  inspectedRun = run;
+  mode = 'away';
+  await inspect();
+  assert.deepEqual(copied, []);
+  assert.deepEqual(notices, []);
+
+  calls.length = 0;
+  mode = 'copy';
+  await inspect();
+  assert.deepEqual(calls.map(({ path }) => path), ['/projects/fixture/runs', '/projects/fixture/inspect']);
+  assert.deepEqual(copied, [JSON.stringify(savedReport, null, 2)]);
+  assert.deepEqual(notices, ['Run report copied.']);
+});
+
+for (const team of [false, true]) test(`${team ? 'team' : 'owner'} editor finds a retained request by exact identity outside recent runs`, async () => {
+  const project = { id: '773447c4-ef90-423a-9e58-34af0350fdcc', title: 'Project fixture' };
+  const url = new URL(team ? 'https://team.example.test/' : 'http://127.0.0.1:6510/');
+  const token = 'okbp_' + 'a'.repeat(43);
+  const recent = { id: 'recent', session: 'main', status: 'done' };
+  const retained = { id: 'Older.Request-1', session: 'saved-session', status: 'done', project: project.id, admitted: true };
+  const commands = new Map();
+  const calls = [], opened = [], errors = [];
+  let provideText, document, editorChanged;
+  let requestID = retained.id;
+  let bound = true;
+  let mode = 'success';
+  const vscode = {
+    Uri: { from: (uri) => ({ ...uri, toString: () => `${uri.scheme}:${uri.path}?${uri.query}` }), parse: (value) => new URL(value) },
+    commands: { registerCommand: (name, action) => commands.set(name, action) },
+    env: { openExternal: async (address) => { opened.push(address.href); } },
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider(_scheme, provider) { provideText = provider.provideTextDocumentContent; },
+      async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
+    },
+    window: {
+      onDidChangeActiveTextEditor(listener) { editorChanged = listener; },
+      async showTextDocument(visible) { document = visible; this.activeTextEditor = { document }; editorChanged(this.activeTextEditor); },
+      async showInputBox({ prompt, validateInput }) {
+        assert.ok(validateInput('../outside'));
+        if (prompt === 'Saved session name') return ` ${retained.session} `;
+        assert.equal(prompt, 'Saved request ID');
+        if (mode === 'cancel') return undefined;
+        if (mode === 'unbind') bound = false;
+        if (mode === 'switch-editor') editorChanged(this.activeTextEditor);
+        return requestID;
+      },
+      async showQuickPick(items, options) {
+        if (options.placeHolder === 'Choose a request to inspect') {
+          assert.deepEqual(Array.from(items, ({ label }) => label), [recent.id, 'Find saved request by ID…']);
+          return items.at(-1);
+        }
+        return items.find(({ label }) => label === 'Open in okbrain');
+      },
+      async showErrorMessage(message) { errors.push(message); },
+    },
+  };
+  const connection = { url, projects: [project], ...(team ? { mode: 'team', projectId: project.id } : {}), async api(path, data) {
+    const prefix = `/projects/${project.id}/`;
+    assert.ok(path.startsWith(prefix));
+    const action = path.slice(prefix.length);
+    calls.push([action, data === undefined ? undefined : JSON.parse(JSON.stringify(data))]);
+    if (action === 'runs') return [recent];
+    assert.equal(action, 'inspect');
+    if (data.requestId === 'unknown') throw Object.assign(new Error('Fixture missing'), { status: 404 });
+    if (data.requestId === 'expired') throw Object.assign(new Error('Fixture expired'), { status: 410 });
+    return { run: retained, reviewHistory: { latestId: null, entries: [] }, pi: { request: { receipt: { text: 'Retained answer.' } } } };
+  } };
+  activateExtension(vscode, connection, {
+    secrets: { onDidChange() {}, async get() { return bound ? JSON.stringify({ origin: url.origin, projectId: project.id, token }) : undefined; } },
+    connectTeam: async (origin, supplied, projectId) => {
+      assert.deepEqual([origin, supplied, projectId], [url.origin, token, project.id]);
+      return connection;
+    },
+  });
+  const inspect = commands.get(team ? 'okbrain.teamRuns' : 'okbrain.runs');
+  await inspect();
+  assert.deepEqual(calls.splice(0), [['runs', undefined], ['inspect', { session: retained.session, requestId: retained.id }]]);
+  assert.match(document.text, /Retained answer\./);
+  assert.equal(document.uri.scheme, 'okbrain-saved-source');
+  assert.deepEqual(opened, [`${url.href}#coding/${project.id}?session=${retained.session}&request=${retained.id}`]);
+  assert.ok(!opened[0].includes(token));
+
+  for (requestID of ['unknown', 'expired']) await inspect();
+  assert.deepEqual(errors, ['No saved request has that session and request ID.', 'This saved request expired under the project’s retention policy.']);
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect', 'runs', 'inspect']);
+  requestID = retained.id;
+  for (mode of ['cancel', 'switch-editor', ...(team ? ['unbind'] : [])]) {
+    await inspect();
+    assert.deepEqual(calls.splice(0), [['runs', undefined]]);
+  }
+  assert.equal(opened.length, 1);
+});
+
+test('owner review keeps feedback bound to the inspected run and safely retries the exact decision', async () => {
+  const project = { id: 'fixture', title: 'Project fixture' };
+  const run = { id: 'saved-request', session: 'main', status: 'done', admitted: true };
+  const other = { ...run, id: 'another-request' };
+  const note = '  <feedback> Please add a test.  ';
+  const latest = { id: '1'.repeat(32), decision: 'accepted', reviewer: 'owner', reviewed: '2026-11-22T15:00:00.000Z', note: '<previous feedback>' };
+  const earlier = { ...latest, id: '2'.repeat(32), decision: 'changes_requested', note: 'Earlier feedback' };
+  const newest = { ...latest, id: '3'.repeat(32), reviewer: 'Teammate', note: 'A newer review' };
+  let history = { latestId: latest.id, entries: [latest, earlier], hasEarlier: true };
+  let mode = 'view', lastDocument, actions, editorChanged, workspaceChanged, provideText;
+  let selected = run;
+  const written = [], notices = [], errors = [];
+  const commands = new Map();
+  const inspect = () => commands.get('okbrain.runs')();
+  const switchEditor = () => {
+    const current = vscode.window.activeTextEditor;
+    vscode.window.activeTextEditor = undefined;
+    editorChanged(undefined);
+    vscode.window.activeTextEditor = current;
+    editorChanged(current);
+  };
+  const vscode = {
+    Uri: { from: (uri) => ({ ...uri, toString: () => `${uri.scheme}:${uri.path}?${uri.query}` }) },
+    commands: { registerCommand: (name, action) => commands.set(name, action) },
+    env: {},
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider(_scheme, provider) { provideText = provider.provideTextDocumentContent; },
+      onDidChangeWorkspaceFolders(listener) { workspaceChanged = listener; },
+      async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
+    },
+    window: {
+      onDidChangeActiveTextEditor(listener) { editorChanged = listener; },
+      async showTextDocument(document) {
+        lastDocument = document;
+        this.activeTextEditor = { document };
+        editorChanged(this.activeTextEditor);
+      },
+      async showQuickPick(items, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return items.find((item) => item.label === selected.id);
+        actions = Array.from(items, ({ label }) => label);
+        if (mode !== 'view') return items.find(({ label }) => label === 'Request changes');
+      },
+      async showInputBox(options) {
+        assert.equal(options.prompt, 'Optional feedback for this review');
+        assert.equal(options.title, `Request changes · ${run.session} / ${run.id}`);
+        assert.equal(options.validateInput('😀'.repeat(1024)), null);
+        assert.match(options.validateInput('😀'.repeat(1024) + 'a'), /4 KiB/);
+        assert.ok(options.validateInput('Hidden\x00control'));
+        if (mode === 'dismiss') return undefined;
+        if (mode === 'switch-editor') switchEditor();
+        if (mode === 'switch-workspace') workspaceChanged();
+        if (mode === 'switch-inspection') {
+          selected = other;
+          mode = 'view';
+          await inspect();
+          selected = run;
+        }
+        if (mode === 'conflict-refreshed') assert.equal(options.value, note);
+        return mode === 'blank' ? ' \t ' : note;
+      },
+      async showWarningMessage(_message, choice) {
+        assert.equal(mode, 'conflict');
+        assert.equal(choice, 'Refresh Review');
+        history = { latestId: newest.id, entries: [newest, latest, earlier] };
+        mode = 'conflict-refreshed';
+        return choice;
+      },
+      async showErrorMessage(message, retry) {
+        assert.ok(!message.includes(note));
+        errors.push([message, retry]);
+        if (mode === 'away-on-retry') switchEditor();
+        return retry;
+      },
+      async showInformationMessage(message) { notices.push(message); },
+    },
+  };
+  activateExtension(vscode, { projects: [project], async api(path, data) {
+    if (path.endsWith('/runs')) return [run, other];
+    if (path.endsWith('/inspect')) return { run: selected, reviewHistory: history };
+    assert.ok(path.endsWith('/review'));
+    written.push(JSON.parse(JSON.stringify(data)));
+    if (mode === 'conflict') throw Object.assign(new Error('stale'), { status: 409 });
+    if (mode === 'denied') throw Object.assign(new Error('denied'), { status: 403 });
+    if (mode === 'away-on-retry' || (mode === 'retry' && written.length === 1)) throw new Error('Response lost');
+    return { ...run, project: project.id, review: data.decision };
+  } });
+
+  await inspect();
+  assert.ok(actions.includes('Accept result'));
+  assert.ok(actions.includes('Request changes'));
+  assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
+  assert.match(lastDocument.text, /Review history\n\nAccepted · owner · 2026-11-22T15:00:00.000Z\n<previous feedback>/);
+  assert.ok(lastDocument.text.indexOf('<previous feedback>') < lastDocument.text.indexOf('Earlier feedback'));
+  assert.match(lastDocument.text, /Earlier reviews omitted/);
+  assert.equal(provideText(lastDocument.uri), '');
+  history = { latestId: earlier.id, entries: [latest, earlier] };
+  await inspect();
+  assert.ok(!actions.includes('Request changes'));
+  history = { latestId: latest.id, entries: [latest, earlier] };
+  for (mode of ['dismiss', 'switch-editor', 'switch-workspace', 'switch-inspection']) {
+    await inspect();
+    assert.deepEqual(written, []);
+  }
+
+  mode = 'retry';
+  await inspect();
+  assert.equal(written.length, 2);
+  assert.deepEqual(written[0], written[1]);
+  const { reviewId, ...fields } = written[0];
+  assert.match(reviewId, /^[a-f0-9]{32}$/);
+  assert.deepEqual(fields, { session: run.session, requestId: run.id, decision: 'changes_requested', expectedReviewId: latest.id, note });
+  assert.equal(errors.pop()[1], 'Try Same Review');
+  assert.match(notices.pop(), /saved-request · changes_requested/);
+
+  written.length = 0;
+  mode = 'away-on-retry';
+  await inspect();
+  assert.equal(written.length, 1);
+  assert.equal(errors.pop()[1], 'Try Same Review');
+
+  mode = 'denied';
+  await inspect();
+  assert.deepEqual(errors.pop(), ['denied', undefined]);
+  mode = 'conflict';
+  written.length = 0;
+  await inspect();
+  assert.equal(written.length, 2);
+  assert.equal(written[0].expectedReviewId, latest.id);
+  assert.equal(written[1].expectedReviewId, newest.id);
+  assert.equal(written[1].note, note);
+  assert.notEqual(written[0].reviewId, written[1].reviewId);
+  assert.match(lastDocument.text, /A newer review/);
+
+  mode = 'blank';
+  history = { latestId: null, entries: [] };
+  await inspect();
+  assert.equal(written.at(-1).expectedReviewId, null);
+  assert.ok(!Object.hasOwn(written.at(-1), 'note'));
+});
+
+test('editor sends the accepted request to patch review without calling another API', async () => {
+  const project = { id: 'e2bb15ce-a12d-4630-8d72-bbbdbb986ba8', title: 'Project fixture' };
+  const runs = [
+    { id: 'review.1', session: 'main_branch', status: 'done' },
+    { id: 'review.2', session: 'main_branch', status: 'done', review: 'changes_requested' },
+    { id: 'review.3', session: 'branch-two', status: 'done', review: 'accepted' },
+    { id: 'review.4', session: 'alternative', status: 'done', review: 'accepted', admitted: true,
+      branch: { session: 'branch-two', requestId: 'review.3' } },
+  ];
+  const url = new URL('http://127.0.0.1:6522/');
+  const commands = new Map();
+  const opened = [];
+  const calls = [];
+  const patch = 'Review proposed patch in okbrain';
+  const github = 'Prepare GitHub pull request in okbrain';
+  let runId = runs[0].id;
+  let nextAction = patch;
+  let availableActions;
+  const vscode = {
+    Uri: { parse: (href) => new URL(href) },
+    commands: { registerCommand: (name, run) => commands.set(name, run) },
+    env: { openExternal: async (target) => { opened.push(target.href); return true; } },
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider() {},
+      async openTextDocument(input) { return input; },
+    },
+    window: {
+      async showTextDocument() {},
+      async showQuickPick(choices, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return choices.find((choice) => choice.label === runId);
+        availableActions = Array.from(choices, (choice) => choice.label);
+        return choices.find((choice) => choice.label === nextAction);
+      },
+      async showErrorMessage(message) { throw new Error(message); },
+    },
+  };
+  activateExtension(vscode, {
+    url,
+    projects: [project],
+    async api(path, identity) {
+      calls.push(path);
+      if (path === `/projects/${project.id}/runs`) return runs;
+      assert.equal(path, `/projects/${project.id}/inspect`);
+      return { run: runs.find(({ id, session }) => id === identity.requestId && session === identity.session) };
+    },
+  });
+  const inspect = commands.get('okbrain.runs');
+
+  for (const { id } of runs.slice(0, 2)) {
+    runId = id;
+    await inspect();
+    assert.ok(!availableActions.includes(patch));
+    assert.ok(!availableActions.includes(github));
+  }
+  assert.deepEqual(opened, []);
+  calls.length = 0;
+  const accepted = runs[2];
+  runId = accepted.id;
+  await inspect();
+  assert.ok(availableActions.includes(patch));
+  assert.ok(availableActions.includes(github));
+  assert.deepEqual(calls, [`/projects/${project.id}/runs`, `/projects/${project.id}/inspect`]);
+  assert.deepEqual(opened, [`${url.href}#coding/${project.id}/patch/${accepted.session}/${accepted.id}`]);
+
+  nextAction = github;
+  await inspect();
+  assert.equal(opened[1], `${url.href}#coding/${project.id}/github/${accepted.session}/${accepted.id}`);
+
+  const alternative = runs[3];
+  runId = alternative.id;
+  nextAction = patch;
+  await inspect();
+  nextAction = github;
+  await inspect();
+  assert.deepEqual(opened.slice(2), [
+    `${url.href}#coding/${project.id}/patch/${alternative.session}/${alternative.id}`,
+    `${url.href}#coding/${project.id}/github/${alternative.session}/${alternative.id}`,
+  ]);
+});
+
+test('editor opens the exact eligible alternative branch source run in the owner app', async () => {
+  const project = { id: 'e2bb15ce-a12d-4630-8d72-bbbdbb986ba8', title: 'Project fixture' };
+  const earlier = { id: 'earlier', session: 'earlier_session', status: 'done', review: 'accepted' };
+  const selected = { id: 'review.2-retry', session: 'second_session', status: 'done', review: 'accepted' };
+  const url = new URL('http://127.0.0.1:6522/');
+  const label = 'Preview alternative branch in okbrain';
+  const commands = new Map();
+  const calls = [];
+  const opened = [];
+  let workspaceChanged;
+  let selection;
+  let inspected = selected;
+  let eligible = false;
+  let leaveWorkspace = false;
+  const vscode = {
+    Uri: { parse: (href) => new URL(href) },
+    commands: { registerCommand: (name, run) => commands.set(name, run) },
+    env: { openExternal: async (target) => { opened.push(target.href); return true; } },
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      onDidChangeWorkspaceFolders(listener) { workspaceChanged = listener; },
+      registerTextDocumentContentProvider() {},
+      async openTextDocument(input) { return input; },
+    },
+    window: {
+      async showTextDocument() {},
+      async showQuickPick(choices, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return choices.find((choice) => choice.label === selected.id);
+        selection = choices.find((choice) => choice.label === label);
+        if (leaveWorkspace) workspaceChanged();
+        return selection;
+      },
+      async showErrorMessage(message) { throw new Error(message); },
+    },
+  };
+  activateExtension(vscode, {
+    url,
+    projects: [project],
+    async api(path, identity) {
+      calls.push(path);
+      if (path === `/projects/${project.id}/runs`) return [earlier, selected];
+      assert.equal(path, `/projects/${project.id}/inspect`);
+      assert.equal(identity.session, selected.session);
+      assert.equal(identity.requestId, selected.id);
+      return { run: inspected, alternativeBranchEligible: eligible };
+    },
+  });
+  const inspect = commands.get('okbrain.runs');
+
+  await inspect();
+  assert.equal(selection, undefined);
+  eligible = true;
+  inspected = earlier;
+  await inspect();
+  assert.equal(selection, undefined);
+  inspected = selected;
+  leaveWorkspace = true;
+  await inspect();
+  assert.equal(selection.label, label);
+  assert.deepEqual(opened, []);
+
+  leaveWorkspace = false;
+  calls.length = 0;
+  await inspect();
+  assert.deepEqual(calls, [`/projects/${project.id}/runs`, `/projects/${project.id}/inspect`]);
+  assert.deepEqual(opened, [`${url.href}#coding/${project.id}?session=${selected.session}&request=${selected.id}`]);
+});
+
+test('editor compares only the exact settled alternative and its original in a read-only document', async () => {
+  const project = { id: 'fixture', title: 'Review fixture' };
+  const original = { session: 'main', id: 'same-id', status: 'done', review: 'accepted', admitted: true };
+  const run = { session: 'alt-review', id: original.id, status: 'done', admitted: true,
+    branch: { session: original.session, requestId: original.id } };
+  const selected = { session: run.session, requestId: run.id };
+  const originalSide = comparisonSide(project.id, original, '<original saved answer>', { task: 'Original fixture task.' });
+  originalSide.report.request.usage = { input: 4, output: 3, totalTokens: 7 };
+  originalSide.report.request.repositoryContext = { files: [{ path: 'src/entry.ts', startLine: 4, endLine: 7 }] };
+  const branchSide = comparisonSide(project.id, run, 'Alternative saved answer', {
+    answer: { text: 'Alternative saved answer', truncated: true },
+  });
+  const compare = 'Compare with original';
+  const commands = new Map();
+  const comparisons = [];
+  const documents = [];
+  const errors = [];
+  let provide;
+  let changeWorkspace;
+  let scope = 'dismiss';
+  let available;
+  const vscode = {
+    Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }) },
+    commands: { registerCommand: (name, handler) => commands.set(name, handler) },
+    env: {},
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      onDidChangeWorkspaceFolders(listener) { changeWorkspace = listener; },
+      registerTextDocumentContentProvider(_scheme, provider) { provide = provider.provideTextDocumentContent; },
+      async openTextDocument(input) { return input.scheme ? { uri: input, languageId: 'plaintext', text: provide(input) } : input; },
+    },
+    window: {
+      async showTextDocument(doc) { if (doc.uri) documents.push(doc); },
+      async showQuickPick(choices, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return choices[0];
+        available = choices.find((item) => item.label === compare);
+        return scope === 'dismiss' ? undefined : available;
+      },
+      async showErrorMessage(message) { errors.push(message); },
+    },
+  };
+  activateExtension(vscode, { projects: [project], async api(path, data) {
+    if (path === '/projects/fixture/runs') return [run];
+    if (path === '/projects/fixture/inspect') return { run: { ...run, admitted: scope !== 'no-admission' } };
+    assert.equal(path, '/projects/fixture/branch-comparison-inspect');
+    comparisons.push({ ...data });
+    if (scope === 'stale') changeWorkspace();
+    return { original: scope === 'wrong-original' ? comparisonSide(project.id, { ...original, session: 'other' }, 'Wrong answer') : originalSide,
+      alternative: branchSide };
+  } });
+  const inspect = commands.get('okbrain.runs');
+  await inspect();
+  assert.equal(available.label, compare);
+  scope = 'no-admission';
+  await inspect();
+  assert.equal(available, undefined);
+  assert.deepEqual(comparisons, []);
+  scope = 'stale';
+  await inspect();
+  scope = 'wrong-original';
+  await inspect();
+  assert.deepEqual(documents, []);
+  assert.match(errors.pop(), /Could not verify the saved comparison/);
+  scope = 'valid';
+  await inspect();
+  assert.deepEqual(comparisons, [selected, selected, selected]);
+  assert.equal(documents.length, 1);
+  assert.equal(documents[0].uri.scheme, 'okbrain-saved-source');
+  assert.match(documents[0].text, /Original run[\s\S]*Session main · request same-id[\s\S]*7 total[\s\S]*src\/entry\.ts:4–7[\s\S]*<original saved answer>/);
+  assert.match(documents[0].text, /Alternative run[\s\S]*Session alt-review · request same-id[\s\S]*Alternative saved answer\nPreview limit reached\./);
+});
+
+test('active-file send and retry require the same read-only review and original file version', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'okbrain-active-file-'));
+  try {
+    const activeFile = join(workspace, 'entry.ts');
+    const original = { uri: { scheme: 'file', fsPath: activeFile }, version: 1, isDirty: false };
+    const source = { source: 'files', files: ['entry.ts'] };
+    const content = '<exact saved fixture>\n  keep spaces';
+    await writeFile(activeFile, content);
+    const project = { id: 'fixture', workspace, title: 'Active-file fixture', provider: 'openai', model: 'fixture' };
+    const previewId = 'b'.repeat(64);
+    const commands = new Map();
+    const calls = [];
+    const errors = [];
+    let provideText;
+    let editorChanged;
+    let mode;
+    const vscode = {
+      Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }) },
+      commands: { registerCommand: (name, run) => commands.set(name, run) },
+      env: {},
+      ProgressLocation: { Notification: 1 },
+      workspace: {
+        isTrusted: true,
+        getConfiguration: () => ({ inspect: () => undefined }),
+        registerTextDocumentContentProvider(_scheme, provider) { provideText = provider.provideTextDocumentContent; },
+        async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
+      },
+      window: {
+        onDidChangeActiveTextEditor(callback) { editorChanged = callback; },
+        async showTextDocument(document) { this.activeTextEditor = { document }; editorChanged(); },
+        async withProgress(_options, work) { return work(); },
+        async showInputBox({ prompt }) { return prompt === 'Coding session name' ? 'active-review' : 'Review the saved entry.'; },
+        async showQuickPick(items, options) {
+          assert.equal(options.placeHolder, 'Choose source lookup for this request');
+          assert.equal(items[1].label, 'Allow lookups in the approved file');
+          return mode === 'lookup-cancelled' ? undefined : items[1];
+        },
+        async showInformationMessage(_message, ...actions) {
+          if (!actions.includes('Send Request')) return;
+          const previewEditor = this.activeTextEditor;
+          assert.equal(previewEditor.document.uri.scheme, 'okbrain-saved-source');
+          assert.match(previewEditor.document.text, /Source lookup: Allowed within the approved file/);
+          assert.ok(previewEditor.document.text.endsWith('File: entry.ts\n' + content));
+          if (mode === 'file-version-changed') original.version++;
+          if (mode === 'editor-changed-and-returned') {
+            this.activeTextEditor = { document: original }; editorChanged();
+            this.activeTextEditor = previewEditor; editorChanged();
+          }
+          return mode === 'send-cancelled' ? undefined : 'Send Request';
+        },
+        async showErrorMessage(message, ...actions) {
+          if (!actions.includes('Try Same Request')) return errors.push(message);
+          if (mode === 'stale-retry') { this.activeTextEditor = { document: original }; editorChanged(); }
+          return 'Try Same Request';
+        },
+      },
+    };
+    activateExtension(vscode, { projects: [project], async api(path, body) {
+      calls.push([path, JSON.parse(JSON.stringify(body))]);
+      if (path === '/projects/fixture/preview') return { source: 'files', id: previewId,
+        files: [{ path: mode === 'wrong-file' ? 'other.ts' : 'entry.ts', content }] };
+      assert.equal(path, '/projects/fixture/run');
+      if (calls.length === 2) throw new Error('The first response was lost');
+      return { id: body.requestId, status: 'running' };
+    } });
+    async function launch(state) {
+      mode = state;
+      vscode.window.activeTextEditor = { document: original };
+      calls.length = 0;
+      await commands.get('okbrain.runFile')();
+    }
+
+    for (const state of ['lookup-cancelled', 'send-cancelled', 'file-version-changed', 'editor-changed-and-returned', 'wrong-file']) {
+      await launch(state);
+      assert.deepEqual(calls, [['/projects/fixture/preview', source]]);
+    }
+    assert.deepEqual(errors, ['Could not verify the active file preview.']);
+    await launch('stale-retry');
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview', '/projects/fixture/run']);
+    await launch('retry');
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview', '/projects/fixture/run', '/projects/fixture/run']);
+    assert.deepEqual(calls[1], calls[2]);
+    const { requestId, ...body } = calls[1][1];
+    assert.match(requestId, /^ide-[a-f0-9-]{36}$/);
+    assert.deepEqual(body, { ...source, session: 'active-review', prompt: 'Review the saved entry.', previewId,
+      approved: true, approvedSourceLookup: true });
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
+test('editor copies the reviewed source manifest without another request and keeps the approval for sending', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'okbrain-source-manifest-'));
+  try {
+    const activeFile = join(workspace, 'entry.ts');
+    const original = { uri: { scheme: 'file', fsPath: activeFile }, version: 1, isDirty: false };
+    const content = 'export const reviewedSecret = "source text stays in the preview";\n';
+    await writeFile(activeFile, content);
+    const project = { id: 'fixture', workspace, title: 'Manifest fixture', provider: 'openai', model: 'fixture', scopes: ['.'] };
+    const fileId = 'c'.repeat(64);
+    const repositoryId = 'd'.repeat(64);
+    const fileManifest = { version: 1, source: 'files', id: fileId, files: [{ path: 'entry.ts', bytes: Buffer.byteLength(content), sha256: 'e'.repeat(64) }] };
+    const repositoryFiles = [{ path: 'entry.ts', startLine: 1, endLine: 1, sha256: 'f'.repeat(64), reason: 'Path or source text matches the query' }];
+    const repositoryManifest = { id: repositoryId, projects: ['.'], query: 'reviewedSecret', tokenBudget: 4096, estimatedTokens: 40, contextBytes: 80,
+      trackedPaths: 1, candidateFiles: 1, scannedFiles: 1, matchedFiles: 1,
+      limitsReached: { trackedPaths: false, scannedFiles: false, fileBytes: false, selectedFiles: false, tokenBudget: false }, files: repositoryFiles };
+    const previews = {
+      files: { source: 'files', id: fileId, files: [{ path: 'entry.ts', content }], sourceManifest: fileManifest },
+      repository: { source: 'repository', manifest: repositoryManifest, excerpts: [{ path: 'entry.ts', startLine: 1, endLine: 1, content }],
+        sourceManifest: { version: 1, source: 'repository', id: repositoryId, manifest: repositoryManifest } },
+    };
+    const commands = new Map();
+    const calls = [], copied = [], prompts = [];
+    let provideText, editorChanged, mode, preview;
+    const vscode = {
+      Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }) },
+      commands: { registerCommand: (name, run) => commands.set(name, run) },
+      env: { clipboard: { async writeText(text) { copied.push({ text, calls: calls.length }); } } },
+      ProgressLocation: { Notification: 1 },
+      workspace: {
+        isTrusted: true,
+        workspaceFolders: [{ uri: { scheme: 'file', fsPath: workspace } }],
+        getWorkspaceFolder: () => ({ uri: { scheme: 'file', fsPath: workspace } }),
+        getConfiguration: () => ({ inspect: () => undefined }),
+        registerTextDocumentContentProvider(_scheme, provider) { provideText = provider.provideTextDocumentContent; },
+        async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
+      },
+      window: {
+        onDidChangeActiveTextEditor(callback) { editorChanged = callback; },
+        async showTextDocument(document) { this.activeTextEditor = { document }; editorChanged(); },
+        async withProgress(_options, work) { return work(); },
+        async showInputBox({ prompt }) {
+          if (prompt === 'Coding session name') return 'manifest-review';
+          if (prompt.startsWith('Search the')) return 'reviewedSecret';
+          return prompt.startsWith('Narrow') ? '' : 'Review the saved entry.';
+        },
+        async showQuickPick(items, options) {
+          if (options.placeHolder === 'Choose source lookup for this request') return items[0];
+          return options.canPickMany ? items : items[0];
+        },
+        async showInformationMessage(message, ...actions) {
+          if (!actions.includes('Send Request')) return;
+          prompts.push({ message, actions });
+          const copies = prompts.filter((prompt) => prompt.actions.includes('Copy Source Manifest')).length;
+          if (mode === 'copy-after-leaving' && copies === 1) {
+            this.activeTextEditor = { document: original }; editorChanged();
+            return 'Copy Source Manifest';
+          }
+          if (mode.startsWith('copy') && copies === 1) return 'Copy Source Manifest';
+          if (mode === 'copy-twice-then-send' && copies === 2) return 'Copy Source Manifest';
+          return mode === 'copy-then-dismiss' ? undefined : 'Send Request';
+        },
+        async showErrorMessage(message) { throw new Error(message); },
+      },
+    };
+    activateExtension(vscode, { projects: [project], async api(path, body) {
+      calls.push([path, body === undefined ? undefined : JSON.parse(JSON.stringify(body))]);
+      if (path === '/projects/fixture/preview') return preview;
+      assert.equal(path, '/projects/fixture/run');
+      return { id: body.requestId, status: 'running' };
+    } });
+    async function launch(command, state, response) {
+      mode = state;
+      preview = response;
+      vscode.window.activeTextEditor = { document: original };
+      calls.length = copied.length = prompts.length = 0;
+      await commands.get(command)();
+    }
+    const base = 'Review the task and saved file in the editor. Sending includes active session history.';
+
+    // The copy reads the preview in hand: no request is made between the preview and the send.
+    await launch('okbrain.runFile', 'copy-then-send', previews.files);
+    assert.deepEqual(copied, [{ text: JSON.stringify(fileManifest, null, 2), calls: 1 }]);
+    assert.equal(copied[0].text.includes('source text stays in the preview'), false);
+    assert.deepEqual(prompts, [
+      { message: base, actions: ['Send Request', 'Copy Source Manifest'] },
+      { message: 'Source manifest copied. ' + base, actions: ['Send Request', 'Copy Source Manifest'] },
+    ]);
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview', '/projects/fixture/run']);
+    const { requestId, ...sent } = calls[1][1];
+    assert.match(requestId, /^ide-[a-f0-9-]{36}$/);
+    assert.deepEqual(sent, { source: 'files', files: ['entry.ts'], session: 'manifest-review', prompt: 'Review the saved entry.',
+      previewId: fileId, approved: true });
+
+    await launch('okbrain.runFile', 'copy-twice-then-send', previews.files);
+    assert.deepEqual(copied.map(({ calls }) => calls), [1, 1]);
+    assert.equal(calls.length, 2);
+
+    // Copying alone sends nothing, and a copy after leaving the preview ends the approval.
+    await launch('okbrain.runFile', 'copy-then-dismiss', previews.files);
+    assert.equal(copied.length, 1);
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview']);
+    await launch('okbrain.runFile', 'copy-after-leaving', previews.files);
+    assert.deepEqual(copied, []);
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview']);
+
+    // A manifest for another selection, another source, or an unknown version is not offered.
+    for (const sourceManifest of [undefined, { ...fileManifest, id: 'a'.repeat(64) }, { ...fileManifest, source: 'repository' },
+      { ...fileManifest, version: 2 }]) {
+      await launch('okbrain.runFile', 'send', { ...previews.files, sourceManifest });
+      assert.deepEqual(prompts, [{ message: base, actions: ['Send Request'] }]);
+      assert.deepEqual(copied, []);
+      assert.equal(calls.length, 2);
+    }
+
+    await launch('okbrain.runRepository', 'copy-then-send', previews.repository);
+    assert.deepEqual(copied, [{ text: JSON.stringify(previews.repository.sourceManifest, null, 2), calls: 1 }]);
+    assert.equal(copied[0].text.includes('source text stays in the preview'), false);
+    assert.deepEqual(JSON.parse(copied[0].text).manifest.files, repositoryFiles);
+    assert.deepEqual(calls.map(([path]) => path), ['/projects/fixture/preview', '/projects/fixture/run']);
+    assert.equal(calls[1][1].previewId, repositoryId);
+    assert.equal(Object.hasOwn(calls[1][1], 'sourceManifest'), false);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
+test('editor previews local presets and scoped repository requests with exact approval and stable retries', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'okbrain-editor-preset-'));
+  try {
+    const workspace = join(root, 'project');
+    const separate = join(root, 'other');
+    await Promise.all([mkdir(workspace), mkdir(separate)]);
+    const activeFile = join(workspace, 'active.ts');
+    const otherFile = join(separate, 'other.ts');
+    await Promise.all([writeFile(activeFile, 'active'), writeFile(otherFile, 'separate')]);
+    const folder = { uri: { scheme: 'file', fsPath: workspace } };
+    const otherFolder = { uri: { scheme: 'file', fsPath: separate } };
+    const project = { id: 'fixture', title: 'Project fixture', workspace, scopes: ['src', 'docs,examples'], provider: 'openai', model: 'fixture-model' };
+    const otherProject = { ...project, id: 'other', workspace: separate };
+    const profile = { version: 1, name: 'Focused profile', projects: ['src'], guidance: 'Previewed guidance.' };
+    const preset = { id: 'preset-1', name: 'Review API', prompt: 'Review <exact> request.', query: 'lookupApi', profile };
+    const preview = { source: 'repository', manifest: { id: 'a'.repeat(64) }, guidance: profile.guidance,
+      excerpts: [{ path: 'src/example.ts', startLine: 8, endLine: 9, content: '<exact>\n  spaced text' }] };
+    const expectedSource = { source: 'repository', query: preset.query, profile };
+    const manualPrompt = 'Review the selected workspace query.';
+    const manualSource = { source: 'repository', query: 'local allocator', projects: ['src/allocator'] };
+    const calls = [];
+    const commands = new Map();
+    const errors = [];
+    const submitted = [];
+    let provideText;
+    let lastDocument;
+    let mode;
+    const manual = () => mode.startsWith('manual-');
+    const lookupEnabled = () => mode === 'send-lookup' || mode === 'manual-retry';
+    const vscode = {
+      Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }) },
+      commands: { registerCommand: (name, run) => commands.set(name, run) },
+      env: {},
+      ProgressLocation: { Notification: 1 },
+      workspace: {
+        isTrusted: true,
+        workspaceFolders: [folder, otherFolder],
+        getWorkspaceFolder(uri) { return new Map([[activeFile, folder], [otherFile, otherFolder]]).get(uri.fsPath); },
+        getConfiguration: () => ({ inspect: () => undefined }),
+        registerTextDocumentContentProvider(_scheme, provider) { provideText = provider.provideTextDocumentContent; },
+        async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
+      },
+      window: {
+        async showTextDocument(document) {
+          lastDocument = document;
+          this.activeTextEditor = { document };
+        },
+        async showInputBox(options) {
+          if (options.prompt === 'What should Pi review or propose?') return manualPrompt;
+          if (options.prompt === 'Search the project repository for source') return manualSource.query;
+          if (options.prompt === 'Narrow to repository subdirectories (optional)') {
+            assert.ok(options.validateInput('../outside'));
+            assert.ok(options.validateInput('src-extra/allocator'));
+            assert.equal(options.validateInput(manualSource.projects[0]), null);
+            return manualSource.projects[0];
+          }
+          assert.equal(options.prompt, 'Coding session name');
+          return manual() ? 'repository-review' : 'preset-review';
+        },
+        async withProgress(_options, work) { return work(); },
+        async showQuickPick(items, options) {
+          if (options.placeHolder === 'Choose a saved request preset') return mode === 'dismiss-preset' ? undefined : items[0];
+          if (options.placeHolder === 'Choose approved repository directories') {
+            assert.deepEqual(Array.from(items, ({ path }) => path), project.scopes);
+            return mode === 'manual-cancel-directories' ? undefined : [items[0]];
+          }
+          assert.equal(options.placeHolder, 'Choose source lookup for this request');
+          if (mode === 'dismiss-lookup') return undefined;
+          return items[lookupEnabled() ? 1 : 0];
+        },
+        async showInformationMessage(message, ...actions) {
+          if (!actions.includes('Send Request')) return undefined;
+          assert.match(message, /active session history/);
+          assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
+          assert.ok(lastDocument.text.includes('Task\n' + (manual() ? manualPrompt : preset.prompt)));
+          if (manual()) assert.match(lastDocument.text, /Repository search: local allocator/);
+          assert.ok(lastDocument.text.includes('Project guidance\n' + profile.guidance));
+          assert.ok(lastDocument.text.includes('src/example.ts:8–9\n' + preview.excerpts[0].content));
+          assert.ok(lastDocument.text.includes(lookupEnabled() ? 'Source lookup: Allowed within the approved excerpts' : 'Source lookup: Off'));
+          if (mode === 'switch-workspace') this.activeTextEditor = { document: { uri: { scheme: 'file', fsPath: otherFile } } };
+          if (mode === 'manual-leave-preview') this.activeTextEditor = { document: { uri: { scheme: 'file', fsPath: activeFile } } };
+          return mode.endsWith('dismiss-send') ? undefined : 'Send Request';
+        },
+        async showErrorMessage(message, ...actions) {
+          if (actions.includes('Try Same Request')) return 'Try Same Request';
+          errors.push(message);
+        },
+      },
+    };
+    activateExtension(vscode, {
+      projects: [otherProject, project],
+      async api(path, input) {
+        calls.push(path);
+        if (path === '/projects/fixture/presets') {
+          assert.equal(input, undefined);
+          return { presets: [preset] };
+        }
+        if (path === '/projects/fixture/preview') {
+          assert.deepEqual(JSON.parse(JSON.stringify(input)), manual() ? manualSource : expectedSource);
+          return preview;
+        }
+        assert.equal(path, '/projects/fixture/run');
+        submitted.push(JSON.parse(JSON.stringify(input)));
+        if (submitted.length === 1 || (mode === 'manual-retry' && calls.filter((entry) => entry === path).length === 1))
+          throw new Error('First response lost');
+        return { id: input.requestId, status: 'running' };
+      },
+    });
+    const launchFrom = async (state, fsPath = activeFile) => {
+      mode = state;
+      vscode.window.activeTextEditor = { document: { uri: { scheme: 'file', fsPath } } };
+      calls.length = 0;
+      await commands.get(manual() ? 'okbrain.runRepository' : 'okbrain.runPreset')();
+    };
+
+    await launchFrom('non-project', join(root, 'unregistered.ts'));
+    assert.deepEqual(calls, []);
+    assert.match(errors.pop(), /Open the registered project folder/);
+    await launchFrom('dismiss-preset');
+    assert.deepEqual(calls, ['/projects/fixture/presets']);
+    await launchFrom('dismiss-lookup');
+    assert.deepEqual(calls, ['/projects/fixture/presets', '/projects/fixture/preview']);
+    await launchFrom('dismiss-send');
+    assert.deepEqual(calls, ['/projects/fixture/presets', '/projects/fixture/preview']);
+    await launchFrom('switch-workspace');
+    assert.deepEqual(calls, ['/projects/fixture/presets', '/projects/fixture/preview']);
+    assert.match(errors.pop(), /open workspace changed/);
+    assert.deepEqual(submitted, []);
+
+    await launchFrom('send-lookup');
+    assert.deepEqual(calls, ['/projects/fixture/presets', '/projects/fixture/preview', '/projects/fixture/run', '/projects/fixture/run']);
+    assert.equal(submitted.length, 2);
+    assert.deepEqual(submitted[0], submitted[1]);
+    const { requestId, ...request } = submitted[0];
+    assert.match(requestId, /^ide-[a-f0-9-]{36}$/);
+    assert.deepEqual(request, { ...expectedSource, session: 'preset-review', prompt: preset.prompt,
+      previewId: preview.manifest.id, approved: true, approvedSourceLookup: true });
+    await launchFrom('send-no-lookup');
+    assert.equal(Object.hasOwn(submitted[2], 'approvedSourceLookup'), false);
+    assert.notEqual(submitted[2].requestId, requestId);
+
+    await launchFrom('manual-cancel-directories');
+    assert.deepEqual(calls, []);
+    await launchFrom('manual-dismiss-send');
+    assert.deepEqual(calls, ['/projects/fixture/preview']);
+    await launchFrom('manual-leave-preview');
+    assert.deepEqual(calls, ['/projects/fixture/preview']);
+    assert.equal(submitted.length, 3);
+    await launchFrom('manual-retry');
+    assert.deepEqual(calls, ['/projects/fixture/preview', '/projects/fixture/run', '/projects/fixture/run']);
+    const [manualSend, retried] = submitted.slice(3);
+    assert.deepEqual(retried, manualSend);
+    assert.match(manualSend.requestId, /^ide-[a-f0-9-]{36}$/);
+    assert.deepEqual(manualSend, { ...manualSource, prompt: manualPrompt, session: 'repository-review', requestId: manualSend.requestId,
+      previewId: preview.manifest.id, approved: true, approvedSourceLookup: true });
+    assert.deepEqual(errors, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('team commands bind SecretStorage to one project and gate server-side previews and review on that binding', async () => {
+  const projectId = 'e2bb15ce-a12d-4630-8d72-bbbdbb986ba8';
+  const newProjectId = 'e2bb15ce-a12d-4630-8d72-bbbdbb986ba9';
+  const origin = 'https://workspace.example.test';
+  const credential = 'okbp_' + 'a'.repeat(43);
+  const project = { id: projectId, title: 'Shared project', provider: 'openai', model: 'team-model', scopes: ['core', 'tests', 'docs,examples'] };
+  const preset = { name: 'Inspect core', prompt: 'Check the core code.', query: 'boot', profile: { version: 1, name: 'Core', projects: ['core'] } };
+  const preview = { source: 'repository', manifest: { id: 'a'.repeat(64) },
+    excerpts: [{ path: 'core/sample.ts', startLine: 3, endLine: 4, content: '<literal source>' }] };
+  const done = { id: 'result', session: 'team', status: 'done', review: 'accepted', admitted: true };
+  const branch = { ...done, session: 'alt-team', branch: { session: done.session, requestId: done.id } };
+  const interrupted = { id: 'interrupted', session: 'team', status: 'interrupted', admitted: true };
+  const active = { id: 'active', session: 'team', status: 'running', admitted: true };
+  const commands = new Map();
+  const entries = new Map();
+  const calls = [];
+  const connections = [];
+  const opened = [];
+  const errors = [];
+  const copied = [];
+  let changed;
+  const secrets = {
+    onDidChange(listener) { changed = listener; },
+    async get(key) { return entries.get(key); },
+    async store(key, value) { entries.set(key, value); changed({ key }); },
+    async delete(key) { entries.delete(key); changed({ key }); },
+  };
+  let mode;
+  let provideText;
+  let lastDocument;
+  let selectedRun = done;
+  let nextRunAction = 'View saved request source';
+  let lookup = false;
+  let manualAttempts = 0;
+  let reviewAttempts = 0;
+  let reviewHistory;
+  let availableActions;
+  const cloned = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+  const invoke = (command) => commands.get(`okbrain.${command}`)();
+  const savedTeamReport = { version: 1, projectId, session: done.session, runStatus: done.status, request: { requestId: done.id } };
+  const teamFeedback = 'Keep this <feedback> in project history.';
+  const vscode = {
+    Uri: { from: (value) => ({ ...value, toString: () => `${value.scheme}:${value.path}?${value.query}` }), parse: (value) => new URL(value) },
+    commands: { registerCommand: (name, run) => commands.set(name, run) },
+    env: { openExternal: async (url) => { opened.push(url.href); return true; },
+      clipboard: { async writeText(text) { copied.push(text); } } },
+    ProgressLocation: { Notification: 1 },
+    workspace: {
+      isTrusted: true,
+      workspaceFolders: [],
+      getConfiguration() { throw new Error('Team actions must not open owner settings.'); },
+      registerTextDocumentContentProvider(_scheme, provider) { provideText = provider.provideTextDocumentContent; },
+      async openTextDocument(uri) { return { uri, languageId: 'plaintext', text: provideText(uri) }; },
+    },
+    window: {
+      async showTextDocument(document) { lastDocument = document; this.activeTextEditor = { document }; },
+      async showInputBox(options) {
+        if (options.prompt === 'Team workspace HTTPS address') {
+          assert.ok(options.validateInput('http://workspace.example.test'));
+          if (mode === 'dismiss-connect') return undefined;
+          return origin;
+        }
+        if (options.prompt.startsWith('Project token for ')) {
+          assert.equal(options.password, true);
+          return credential;
+        }
+        if (options.prompt === 'What should Pi review or propose?') return 'Manual team task';
+        if (options.prompt === 'Search the team repository for source') return 'server query';
+        if (options.prompt === 'Narrow to repository subdirectories (optional)') {
+          assert.ok(options.validateInput('../outside'));
+          assert.ok(options.validateInput('core/outside-scope'));
+          return mode === 'manual-literal' ? '' : 'tests/allocator, tests/edge';
+        }
+        if (options.prompt === 'Optional feedback for this review') {
+          if (mode === 'disconnect-review-note') await invoke('disconnectTeam');
+          return teamFeedback;
+        }
+        assert.equal(options.prompt, 'Coding session name');
+        return 'editor-team';
+      },
+      async withProgress(_options, work) { return work(); },
+      async showQuickPick(items, options) {
+        if (options.placeHolder === `Choose a request for ${project.title}`) return items[mode.startsWith('manual') ? 0 : 1];
+        if (options.placeHolder === 'Choose approved team repository directories') return [items[mode === 'manual-literal' ? 2 : 1]];
+        if (options.placeHolder === 'Choose source lookup for this request') return items[lookup ? 1 : 0];
+        if (options.placeHolder === 'Choose a request to inspect') return items.find(({ run }) => run?.id === selectedRun.id && run.session === selectedRun.session);
+        assert.equal(options.placeHolder, 'Choose a run action');
+        availableActions = Array.from(items, ({ label }) => label);
+        const action = items.find(({ label }) => label === nextRunAction);
+        if (mode === 'disconnect-copy') await invoke('disconnectTeam');
+        return action;
+      },
+      async showInformationMessage(message, ...actions) {
+        assert.ok(!message.includes(credential));
+        if (!actions.includes('Send Request')) return undefined;
+        assert.ok(message.includes(origin));
+        assert.match(lastDocument.text, /<literal source>/);
+        assert.match(lastDocument.text, /Source lookup:/);
+        assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
+        if (mode === 'disconnect-approval') await invoke('disconnectTeam');
+        return mode === 'dismiss-approval' ? undefined : 'Send Request';
+      },
+      async showWarningMessage() {
+        if (mode === 'disconnect-resume') await invoke('disconnectTeam');
+        return 'Resume';
+      },
+      async showErrorMessage(message, ...actions) {
+        assert.ok(!message.includes(credential));
+        if (actions.includes('Try Same Request')) {
+          if (mode === 'replace-retry') await secrets.store('okbrain.team.connection', JSON.stringify({ origin, projectId: newProjectId, token: credential }));
+          return 'Try Same Request';
+        }
+        if (actions.includes('Try Same Review')) {
+          if (mode === 'replace-review-retry') await secrets.store('okbrain.team.connection', JSON.stringify({ origin, projectId: newProjectId, token: credential }));
+          return 'Try Same Review';
+        }
+        errors.push(message);
+      },
+    },
+  };
+  const connectTeam = async (url, token, expected) => {
+    connections.push([url, token, expected]);
+    if (expected && expected !== projectId) throw new Error('The token belongs to a different project.');
+    assert.equal(url, origin);
+    assert.equal(token, credential);
+    const prefix = `/projects/${projectId}/`;
+    return { url: new URL(url), mode: 'team', projectId, projects: [project], async api(path, data) {
+      assert.ok(path.startsWith(prefix));
+      const action = path.slice(prefix.length);
+      calls.push([action, cloned(data)]);
+      if (action === 'presets') return { presets: [preset] };
+      if (action === 'preview') return preview;
+      if (action === 'run') {
+        if ((mode === 'manual' && manualAttempts++ === 0) || mode === 'replace-retry') throw new Error('Response lost');
+        if (mode === 'denied-retry') throw Object.assign(new Error('The team token expired.'), { status: 401 });
+        return { id: data.requestId, status: 'running' };
+      }
+      if (action === 'runs') return [done, interrupted, active, branch];
+      if (action === 'inspect') return { run: selectedRun, ...(selectedRun === done ? { report: savedTeamReport, alternativeBranchEligible: true } : {}),
+        ...(reviewHistory ? { reviewHistory } : {}),
+        pi: { pendingRequestIds: [], request: { receipt: { text: 'Shared result.' } } } };
+      if (action === 'source-inspect') return { prompt: 'Saved shared task.', groups: [{ files: [{ path: 'core/sample.ts', text: '<literal source>' }] }] };
+      if (action === 'branch-comparison-inspect') {
+        if (mode === 'disconnect-comparison') await invoke('disconnectTeam');
+        return { original: comparisonSide(projectId, done, 'Original team answer'), alternative: comparisonSide(projectId, branch, 'Alternative team answer') };
+      }
+      if (action === 'cancel' || action === 'resume') return selectedRun;
+      assert.equal(action, 'review');
+      if ((mode === 'review-retry' && reviewAttempts++ === 0) || mode === 'replace-review-retry') throw new Error('Response lost');
+      return { ...done, review: data.decision };
+    } };
+  };
+  activateExtension(vscode, undefined, { secrets, connectTeam });
+
+  mode = 'dismiss-connect';
+  await invoke('connectTeam');
+  assert.equal(connections.length, 0);
+  mode = 'connect';
+  await invoke('connectTeam');
+  assert.deepEqual(JSON.parse(entries.get('okbrain.team.connection')), { origin, projectId, token: credential });
+  await invoke('openTeam');
+  assert.deepEqual(opened, [origin + '/']);
+  assert.deepEqual(connections, [[origin, credential, undefined]]);
+
+  mode = 'dismiss-approval';
+  await invoke('runTeam');
+  assert.deepEqual(connections.at(-1), [origin, credential, projectId]);
+  assert.deepEqual(calls.splice(0), [['presets', undefined], ['preview', { source: 'repository', query: preset.query, profile: preset.profile }]]);
+  mode = 'manual';
+  lookup = true;
+  await invoke('runTeam');
+  const manual = calls.splice(0);
+  assert.deepEqual(manual[1], ['preview', { source: 'repository', query: 'server query', projects: ['tests/allocator', 'tests/edge'] }]);
+  assert.deepEqual(manual[2], manual[3]);
+  const { requestId, ...body } = manual[2][1];
+  assert.match(requestId, /^ide-[a-f0-9-]{36}$/);
+  assert.deepEqual(body, { ...manual[1][1], session: 'editor-team', prompt: 'Manual team task', previewId: preview.manifest.id,
+    approved: true, approvedSourceLookup: true });
+  mode = 'manual-literal';
+  await invoke('runTeam');
+  assert.deepEqual(calls.splice(0)[1], ['preview', { source: 'repository', query: 'server query', projects: ['docs,examples'] }]);
+  mode = 'preset';
+  lookup = false;
+  await invoke('runTeam');
+  const presetCalls = calls.splice(0);
+  assert.deepEqual(presetCalls.map(([action]) => action), ['presets', 'preview', 'run']);
+  assert.deepEqual(presetCalls[2][1].profile, preset.profile);
+  assert.equal(presetCalls[2][1].prompt, preset.prompt);
+  assert.ok(!Object.hasOwn(presetCalls[2][1], 'approvedSourceLookup'));
+  mode = 'denied-retry';
+  await invoke('runTeam');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['presets', 'preview', 'run']);
+  assert.match(errors.pop(), /token expired/);
+
+  mode = 'disconnect-approval';
+  await invoke('runTeam');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['presets', 'preview']);
+  assert.equal(entries.size, 0);
+  mode = 'connect';
+  await invoke('connectTeam');
+  mode = 'replace-retry';
+  await invoke('runTeam');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['presets', 'preview', 'run']);
+  await invoke('teamRuns');
+  assert.match(errors.pop(), /different project/);
+
+  mode = 'connect';
+  await invoke('connectTeam');
+  await invoke('teamRuns');
+  assert.ok(availableActions.includes('Request changes'));
+  assert.ok(!availableActions.includes('Review proposed patch in okbrain'));
+  assert.ok(!availableActions.includes('Preview alternative branch in okbrain'));
+  assert.ok(!availableActions.includes('Prepare GitHub pull request in okbrain'));
+  assert.ok(!availableActions.includes('Start fresh context'));
+  assert.ok(!availableActions.includes('Compact context locally'));
+  assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
+  assert.match(lastDocument.text, /Saved shared task/);
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect', 'source-inspect']);
+  nextRunAction = 'Copy run report';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect']);
+  assert.deepEqual(copied, [JSON.stringify(savedTeamReport, null, 2)]);
+  mode = 'disconnect-copy';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect']);
+  assert.equal(copied.length, 1);
+  mode = 'connect';
+  await invoke('connectTeam');
+  nextRunAction = 'Request changes';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.pop(), ['review', { session: done.session, requestId: done.id, decision: 'changes_requested' }]);
+  calls.length = 0;
+
+  const latestTeamReview = { id: 'b'.repeat(32), decision: 'accepted', reviewer: 'Project reviewer', reviewed: '2026-11-22T15:00:00.000Z', note: teamFeedback };
+  reviewHistory = { latestId: latestTeamReview.id, entries: [latestTeamReview] };
+  mode = 'team-review-report';
+  nextRunAction = 'Copy run report';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect']);
+  assert.equal(lastDocument.uri.scheme, 'okbrain-saved-source');
+  assert.ok(lastDocument.text.includes(teamFeedback));
+  assert.equal(copied.at(-1), JSON.stringify(savedTeamReport, null, 2));
+  assert.ok(!copied.at(-1).includes(teamFeedback));
+
+  nextRunAction = 'Request changes';
+  mode = 'review-retry';
+  await invoke('teamRuns');
+  const teamReviewCalls = calls.splice(0);
+  assert.deepEqual(teamReviewCalls.map(([action]) => action), ['runs', 'inspect', 'review', 'review']);
+  assert.deepEqual(teamReviewCalls[2], teamReviewCalls[3]);
+  const { reviewId, ...teamReview } = teamReviewCalls[2][1];
+  assert.match(reviewId, /^[a-f0-9]{32}$/);
+  assert.deepEqual(teamReview, { session: done.session, requestId: done.id, decision: 'changes_requested', expectedReviewId: latestTeamReview.id, note: teamFeedback });
+
+  mode = 'replace-review-retry';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect', 'review']);
+  mode = 'connect';
+  await invoke('connectTeam');
+  mode = 'disconnect-review-note';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).map(([action]) => action), ['runs', 'inspect']);
+  assert.equal(entries.size, 0);
+  mode = 'connect';
+  await invoke('connectTeam');
+  reviewHistory = undefined;
+  selectedRun = active;
+  nextRunAction = 'Cancel request';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.pop(), ['cancel', { session: active.session, requestId: active.id }]);
+  calls.length = 0;
+  selectedRun = interrupted;
+  nextRunAction = 'Resume from saved context';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.pop(), ['resume', { session: interrupted.session, requestId: interrupted.id }]);
+  calls.length = 0;
+  mode = 'disconnect-resume';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.map(([action]) => action), ['runs', 'inspect']);
+  assert.equal(entries.size, 0);
+
+  mode = 'connect';
+  await invoke('connectTeam');
+  selectedRun = branch;
+  nextRunAction = 'Compare with original';
+  calls.length = 0;
+  await invoke('teamRuns');
+  assert.deepEqual(calls.splice(0).at(-1), ['branch-comparison-inspect', { session: branch.session, requestId: branch.id }]);
+  assert.ok(!availableActions.includes('Review proposed patch in okbrain'));
+  assert.ok(!availableActions.includes('Prepare GitHub pull request in okbrain'));
+  assert.equal(lastDocument.uri.path, '/Alternative run comparison.txt');
+  assert.match(lastDocument.text, /Original team answer[\s\S]*Alternative team answer/);
+  mode = 'disconnect-comparison';
+  await invoke('teamRuns');
+  assert.deepEqual(calls.map(([action]) => action), ['runs', 'inspect', 'branch-comparison-inspect']);
+  assert.equal(lastDocument.uri.path, '/Team coding run.txt');
+  assert.equal(entries.size, 0);
+  assert.deepEqual(errors, []);
+});
+
+test('owner starts fresh context with the exact optional handoff only after confirming the current idle session', async () => {
+  const project = { id: 'fixture', title: 'Project fixture' };
+  const first = { session: 'original', id: 'request-one', status: 'done', admitted: true };
+  const other = { session: 'other', id: 'request-two', status: 'done', admitted: true };
+  const calls = [];
+  const notices = [];
+  const errors = [];
+  const commands = new Map();
+  const title = 'Start fresh context';
+  const folder = { uri: { scheme: 'file', fsPath: '/fixture' } };
+  const inspectedEditor = { document: { uri: { scheme: 'untitled' } } };
+  const handoff = '  Review cache ownership before editing <new> & `old`.  ';
+  let selected = first;
+  let chooseReset = true;
+  let mode = 'cancel-input';
+  let version = 0;
+  let availableActions;
+  let foldersChanged;
+  let editorChanged;
+  let inputPrompts = 0;
+  let confirmations = 0;
+  const invoke = () => commands.get('okbrain.runs')();
+  const vscode = {
+    commands: { registerCommand: (name, run) => commands.set(name, run) },
+    env: {},
+    workspace: {
+      isTrusted: true,
+      workspaceFolders: [folder],
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider() {},
+      onDidChangeWorkspaceFolders(listener) { foldersChanged = listener; },
+      async openTextDocument(value) { return value; },
+    },
+    window: {
+      activeTextEditor: inspectedEditor,
+      onDidChangeActiveTextEditor(listener) { editorChanged = listener; },
+      async showTextDocument() {},
+      async showQuickPick(items, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return items.find((item) => item.label === selected.id);
+        availableActions = Array.from(items, (item) => item.label);
+        return chooseReset ? items.find((item) => item.label === title) : undefined;
+      },
+      async showInputBox(options) {
+        inputPrompts++;
+        assert.equal(options.prompt, 'Optional handoff for the next request');
+        assert.match(options.placeHolder, /One line/);
+        assert.equal(options.validateInput(handoff), null);
+        assert.match(options.validateInput('two\nlines'), /single line/);
+        assert.equal(options.validateInput('é'.repeat(1024)), null);
+        assert.match(options.validateInput('é'.repeat(1025)), /2,048 UTF-8 bytes/);
+        if (mode === 'cancel-input') return undefined;
+        if (mode === 'editor-changed-in-input') {
+          this.activeTextEditor = undefined;
+          editorChanged(undefined);
+          this.activeTextEditor = inspectedEditor;
+          editorChanged(inspectedEditor);
+        }
+        if (mode === 'blank') return '';
+        return mode === 'whitespace-only' ? '  ' : handoff;
+      },
+      async showWarningMessage(message, options, button) {
+        confirmations++;
+        assert.match(message, /session original\?/);
+        assert.match(message, /Saved runs stay available/);
+        assert.equal(options.modal, true);
+        assert.equal(button, 'Start Fresh Context');
+        if (mode === 'blank' || mode === 'whitespace-only') assert.equal('detail' in options, false);
+        else {
+          assert.equal(options.detail, handoff);
+          assert.match(message, /The next request you start.*include the handoff shown below/);
+        }
+        if (mode === 'decline') return undefined;
+        if (mode === 'other-inspection') {
+          chooseReset = false;
+          selected = other;
+          await invoke();
+        }
+        if (mode === 'workspace-changed') {
+          vscode.workspace.workspaceFolders = [{ uri: { scheme: 'file', fsPath: '/new-workspace' } }];
+          foldersChanged();
+          vscode.workspace.workspaceFolders = [folder];
+          foldersChanged();
+        }
+        if (mode === 'editor-changed') {
+          this.activeTextEditor = { document: { uri: { scheme: 'file', fsPath: '/fixture/other.ts' } } };
+          editorChanged(this.activeTextEditor);
+          this.activeTextEditor = inspectedEditor;
+          editorChanged(inspectedEditor);
+        }
+        return button;
+      },
+      async showInformationMessage(message) { notices.push(message); },
+      async showErrorMessage(message, ...actions) {
+        assert.equal(actions.length, 0);
+        errors.push(message);
+      },
+    },
+  };
+  activateExtension(vscode, { projects: [project], async api(path, data) {
+    assert.ok(path.startsWith('/projects/fixture/'));
+    const action = path.slice('/projects/fixture/'.length);
+    if (action === 'runs') return [first, other];
+    if (action === 'inspect') return { run: data.requestId === first.id ? first : other,
+      pi: { pendingRequestIds: mode === 'pending' ? ['still-running'] : [] } };
+    calls.push([action, JSON.parse(JSON.stringify(data))]);
+    if (action === 'reset-context-preview') return { version: `preview-${++version}`,
+      ...(mode === 'preview-dropped-note' || data.handoff === undefined ? {} : {
+        handoff: mode === 'preview-altered-note' ? data.handoff.trim() : data.handoff,
+      }) };
+    assert.equal(action, 'reset-context');
+    if (mode === 'network-failure') throw new Error('Connection lost');
+    return { reset: true, version: data.version };
+  } });
+
+  await invoke();
+  assert.deepEqual(calls, []);
+  assert.equal(confirmations, 0);
+  mode = 'editor-changed-in-input';
+  await invoke();
+  assert.deepEqual(calls, []);
+  assert.equal(confirmations, 0);
+  mode = 'decline';
+  await invoke();
+  const withNote = { session: first.session, handoff };
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote]]);
+  assert.deepEqual(notices, []);
+  mode = 'pending';
+  await invoke();
+  assert.ok(!availableActions.includes(title));
+  assert.equal(inputPrompts, 3);
+  assert.deepEqual(calls, []);
+  mode = 'other-inspection';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote]]);
+  chooseReset = true;
+  selected = first;
+  mode = 'workspace-changed';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote]]);
+  mode = 'editor-changed';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote]]);
+  for (mode of ['preview-dropped-note', 'preview-altered-note']) {
+    await invoke();
+    assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote]]);
+    assert.deepEqual(errors.splice(0), ['Could not preview the handoff for this session. Update okbrain or leave the handoff blank.']);
+  }
+  mode = 'approve';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', withNote],
+    ['reset-context', { ...withNote, version: 'preview-7' }]]);
+  mode = 'blank';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }],
+    ['reset-context', { session: first.session, version: 'preview-8' }]]);
+  mode = 'whitespace-only';
+  await invoke();
+  assert.deepEqual(calls.splice(0), [['reset-context-preview', { session: first.session }],
+    ['reset-context', { session: first.session, version: 'preview-9' }]]);
+  assert.match(notices[0], /Saved runs remain/);
+  assert.ok(notices.every((message) => !message.includes(handoff)));
+  mode = 'network-failure';
+  await invoke();
+  assert.deepEqual(calls.map(([action]) => action), ['reset-context-preview', 'reset-context']);
+  assert.deepEqual(errors, ['Connection lost']);
+});
+
+test('editor compacts only an approved idle owner session and recovers pending compaction', async () => {
+  const project = { id: 'fixture', title: 'Project fixture' };
+  const run = { session: 'main', id: 'saved-request', status: 'done', admitted: true };
+  const editor = { document: { uri: { scheme: 'untitled' } } };
+  const commands = new Map();
+  const calls = [];
+  const notices = [];
+  const errors = [];
+  const confirmations = [];
+  const compact = 'Compact context locally';
+  const version = 'approved-compaction-version';
+  const preview = ['compact-context-preview', { session: run.session }];
+  const apply = ['compact-context', { session: run.session, version }];
+  let mode = 'decline';
+  let actions;
+  let editorChanged;
+  let documentText;
+  const switchEditor = () => {
+    vscode.window.activeTextEditor = undefined;
+    editorChanged(undefined);
+    vscode.window.activeTextEditor = editor;
+    editorChanged(editor);
+  };
+  const vscode = {
+    commands: { registerCommand: (name, invoke) => commands.set(name, invoke) }, env: {},
+    workspace: {
+      isTrusted: true,
+      getConfiguration: () => ({ inspect: () => undefined }),
+      registerTextDocumentContentProvider() {},
+      async openTextDocument(document) { return document; },
+    },
+    window: {
+      activeTextEditor: editor,
+      onDidChangeActiveTextEditor(listener) { editorChanged = listener; },
+      async showTextDocument(document) { documentText = document.content; },
+      async showQuickPick(items, options) {
+        if (options.placeHolder === 'Choose a request to inspect') return items[0];
+        actions = Array.from(items, (item) => item.label);
+        return items.find((item) => item.label === compact);
+      },
+      async showWarningMessage(message, options, button) {
+        assert.equal(options.modal, true);
+        assert.match(message, /for session main\?/);
+        assert.match(message, /recap runs entirely on this device/);
+        assert.match(message, /originals stay in Run history/);
+        assert.match(message, /skips sessions with too little older history/);
+        confirmations.push(button);
+        if (mode === 'away-during-confirmation') switchEditor();
+        return mode === 'decline' ? undefined : button;
+      },
+      async showInformationMessage(message) { notices.push(message); },
+      async showErrorMessage(message) { errors.push(message); },
+    },
+  };
+  activateExtension(vscode, { projects: [project], async api(path, data) {
+    assert.ok(path.startsWith('/projects/fixture/'));
+    const action = path.slice('/projects/fixture/'.length);
+    if (action === 'runs') return [run];
+    if (action === 'inspect') return { run, pi: { pendingRequestIds: mode === 'busy' ? ['active-request'] : [],
+      context: { compactionPending: mode === 'recovery' } } };
+    calls.push([action, JSON.parse(JSON.stringify(data))]);
+    if (action === 'compact-context-preview') {
+      if (mode === 'away-during-preview') switchEditor();
+      if (mode === 'readonly') throw new Error('Open a writable brain to compact the session context.');
+      return { version, ...(mode === 'recovery' ? { recovering: true } : {}) };
+    }
+    assert.equal(action, 'compact-context');
+    return { version, compacted: mode !== 'no-op', ...(mode === 'recovery' ? { replayed: true } : {}) };
+  } });
+  const inspect = commands.get('okbrain.runs');
+
+  await inspect();
+  assert.ok(actions.includes('Start fresh context'));
+  assert.deepEqual(calls.splice(0), [preview]);
+  assert.deepEqual(confirmations.splice(0), ['Compact Context']);
+  for (const status of ['running', 'interrupted']) {
+    run.status = status;
+    await inspect();
+    assert.ok(!actions.includes(compact));
+  }
+  run.status = 'done';
+  mode = 'busy';
+  await inspect();
+  assert.ok(!actions.includes(compact));
+  assert.deepEqual(calls, []);
+  mode = 'readonly';
+  await inspect();
+  assert.deepEqual(calls.splice(0), [preview]);
+  assert.match(errors.pop(), /writable brain/);
+  mode = 'away-during-preview';
+  await inspect();
+  assert.deepEqual(calls.splice(0), [preview]);
+  assert.deepEqual(confirmations, []);
+  mode = 'away-during-confirmation';
+  await inspect();
+  assert.deepEqual(calls.splice(0), [preview]);
+  assert.deepEqual(confirmations.splice(0), ['Compact Context']);
+  assert.deepEqual(notices, []);
+
+  for (const [scenario, button, notice] of [
+    ['success', 'Compact Context', /Compacted context locally for main/],
+    ['no-op', 'Compact Context', /main has too little older history/],
+    ['recovery', 'Resume Compaction', /Recovered local compaction for main/],
+  ]) {
+    mode = scenario;
+    await inspect();
+    assert.deepEqual(calls.splice(0), [preview, apply]);
+    assert.deepEqual(confirmations.splice(0), [button]);
+    assert.match(notices.pop(), notice);
+  }
+  assert.match(documentText, /Local compaction is awaiting recovery/);
+  assert.ok(actions.includes(compact));
+  assert.ok(!actions.includes('Start fresh context'));
+  assert.deepEqual(errors, []);
+});

@@ -15,6 +15,13 @@ import { EngineError } from "./sqlite.ts";
 
 export class VecError extends EngineError {}
 
+/** Reject an in-flight embed after another operation changed the cache key. */
+export function requireVectorKey(current: EmbedMeta | null, expected: EmbedMeta | null | undefined): void {
+  if (expected === undefined) return;
+  if (current?.provider !== expected?.provider || current?.model !== expected?.model || current?.dim !== expected?.dim)
+    throw new VecError("The vector cache changed while embedding. Run okb embed again.");
+}
+
 const VEC_SCHEMA_VERSION = 1;
 
 /** Default on-disk location of a bundle's vector store. */
@@ -93,7 +100,8 @@ export function openVectorStore(dbPath: string): VectorStore {
   const getMeta = (): EmbedMeta | null =>
     db.query<EmbedMeta, []>("SELECT provider, model, dim FROM meta").get() ?? null;
 
-  const reset = db.transaction((m: EmbedMeta) => {
+  const reset = db.transaction((m: EmbedMeta, expectedKey?: EmbedMeta | null) => {
+    requireVectorKey(getMeta(), expectedKey);
     if (!Number.isInteger(m.dim) || m.dim < 1)
       throw new VecError(`invalid embedding dimension: ${m.dim}`);
     dropAll();
@@ -111,8 +119,10 @@ export function openVectorStore(dbPath: string): VectorStore {
     );
   });
 
-  const replace = db.transaction((nodeId: string, hash: string, chunks: ChunkVector[]) => {
-    if (getMeta() === null) {
+  const replace = db.transaction((nodeId: string, hash: string, chunks: ChunkVector[], expectedKey?: EmbedMeta | null) => {
+    const key = getMeta();
+    requireVectorKey(key, expectedKey);
+    if (key === null) {
       if (chunks.length > 0)
         throw new VecError("vector store has no cache key yet — reset() before storing chunks");
     } else {
@@ -130,15 +140,18 @@ export function openVectorStore(dbPath: string): VectorStore {
     ).run(nodeId, hash);
   });
 
-  const remove = db.transaction((nodeId: string) => {
-    if (getMeta() !== null) db.query("DELETE FROM chunks WHERE node_id = ?").run(nodeId);
+  const remove = db.transaction((nodeId: string, expectedKey?: EmbedMeta | null) => {
+    const key = getMeta();
+    requireVectorKey(key, expectedKey);
+    if (key !== null) db.query("DELETE FROM chunks WHERE node_id = ?").run(nodeId);
     db.query("DELETE FROM embed_state WHERE node_id = ?").run(nodeId);
   });
 
   return {
     meta: getMeta,
-    reset: (m) => reset(m),
-    clear: db.transaction(() => {
+    reset: (m, expectedKey) => reset(m, expectedKey),
+    clear: db.transaction((expectedKey?: EmbedMeta | null) => {
+      requireVectorKey(getMeta(), expectedKey);
       dropAll();
       createBase();
     }),
@@ -151,8 +164,8 @@ export function openVectorStore(dbPath: string): VectorStore {
           .all()
           .map((r) => [r.node_id, r.embed_hash]),
       ),
-    replace: (nodeId, hash, chunks) => replace(nodeId, hash, chunks),
-    remove: (nodeId) => remove(nodeId),
+    replace: (nodeId, hash, chunks, expectedKey) => replace(nodeId, hash, chunks, expectedKey),
+    remove: (nodeId, expectedKey) => remove(nodeId, expectedKey),
     search: (vector, k = 10) => {
       if (getMeta() === null) return [];
       return db

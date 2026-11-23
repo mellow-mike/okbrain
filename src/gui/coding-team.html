@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>okbrain team workspace</title>
+<link rel="stylesheet" href="/gui/tokens.css">
+<link rel="stylesheet" href="/gui/style.css">
+<link rel="stylesheet" href="/gui/coding.css">
+<script defer src="/gui/render.js"></script>
+<script defer src="/gui/github.js"></script>
+<script defer src="/gui/coding-evaluation.js"></script>
+<script defer src="/gui/coding.js"></script>
+</head>
+<body>
+<main id="team-workspace" class="stack wide coding-team">
+  <header class="row">
+    <strong>okbrain</strong>
+    <button type="button" class="small right" id="team-disconnect" hidden>Disconnect</button>
+  </header>
+  <section id="team-entrance" class="stack coding-panel">
+    <h2>Open a team workspace</h2>
+    <form class="stack">
+      <label class="field"><span>Project token</span><input name="token" type="password" autocomplete="off" required maxlength="48"></label>
+      <div class="row"><button type="submit" class="primary">Open project</button></div>
+      <div class="coding-feedback" role="status"></div>
+    </form>
+    <details>
+      <summary>Connect VS Code or Cursor</summary>
+      <div class="stack coding-form">
+        <p>Use <strong>Extensions → Install from VSIX</strong> to install <code>okbrain-coding.vsix</code>.</p>
+        <p>From a trusted local editor window, choose <strong>okbrain: Connect to Team Workspace</strong> in the Command Palette.</p>
+        <p class="muted" data-team-editor-origin>Enter the HTTPS team origin and project token from your project owner.</p>
+      </div>
+    </details>
+  </section>
+  <div id="team-view" tabindex="-1" hidden></div>
+</main>
+</body>
+</html>

@@ -1,7 +1,7 @@
 {
   "name": "okbrain",
   "version": "0.1.0",
-  "description": "Self-hosted, OKF-native personal knowledge manager (TypeScript on Bun).",
+  "description": "Local-first second brain and Pi Durable coding sessions (TypeScript on Bun).",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -12,20 +12,31 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "build": "bun build --compile --outfile bin/okb src/cli.ts && bun run scripts/copy-vec0.ts bin",
-    "package": "bun run scripts/package-release.ts --local"
+    "package": "bun run scripts/package-release.ts --local",
+    "package:mac": "bun run scripts/package-mac.ts",
+    "package:ide": "bun run scripts/package-ide.ts",
+    "smoke:browser": "bun run scripts/smoke-browser.ts"
   },
   "engines": {
-    "bun": ">=1.1.0"
+    "bun": ">=1.4.3"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/bun": "1.4.3",
     "@types/turndown": "^5.0.6",
+    "playwright": "1.65.1",
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "@earendil-works/chord": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-durable": "1.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@mozilla/readability": "^0.6.0",
+    "eventsource-parser": "3.1.0",
+    "ical.js": "2.2.1",
+    "jose": "6.2.3",
     "linkedom": "^0.18.13",
+    "postal-mime": "4.2.1",
     "sqlite-vec": "^0.1.9",
     "turndown": "^7.2.4",
     "yaml": "^2.9.0"

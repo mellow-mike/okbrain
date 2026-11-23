@@ -1,18 +1,23 @@
-// Shared OpContext wiring for local adapters (CLI, local API; MCP reuses it
-// with trusted=false). Engines open lazily — a read on a never-indexed bundle
-// must fail loudly, not create an empty index (B3) — and the caller owns
-// close via the returned handle.
+// Shared OpContext wiring for the CLI, local API and MCP. Caches open lazily.
+// A read on a never-indexed bundle must not create an empty index.
 
+import type { SQL } from "bun";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { loadConfig, resolveActor, type OkbConfig } from "./config.ts";
-import type { Engine, VectorStore } from "./engine/interface.ts";
+import { configForBrain, loadConfig, resolveActor, type OkbConfig } from "./config.ts";
+import type { BundleWatchBackend } from "./engine/bundle-watch.ts";
+import { closeCacheClient, createCacheClient, postgresAccess, readCacheSettings } from "./engine/cache-settings.ts";
+import type { IndexEngine, IndexVectors } from "./engine/interface.ts";
+import { hasPostgresIndex, openPostgresEngine } from "./engine/postgres.ts";
+import { hasPostgresVectors, openPostgresVectors } from "./engine/postgres-vectors.ts";
 import { defaultDbPath, EngineError, openSqliteEngine } from "./engine/sqlite.ts";
 import { defaultVectorsPath, openVectorStore } from "./engine/vectors.ts";
 import type { OpContext } from "./operations.ts";
 
 export interface LocalContext {
   ctx: OpContext;
-  close(): void;
+  cacheBackend(): "sqlite" | "postgres";
+  close(): Promise<void>;
 }
 
 export function openLocalContext(
@@ -21,41 +26,82 @@ export function openLocalContext(
   readonly = false,
   actor?: string,
 ): LocalContext {
-  let engine: Engine | undefined;
-  let vectors: VectorStore | undefined;
+  let engine: IndexEngine | undefined;
+  let vectors: IndexVectors | undefined;
   let cfg: OkbConfig | undefined;
+  let client: SQL | undefined;
+  let settings: ReturnType<typeof readCacheSettings> | undefined;
+  const saved = () => settings === undefined ? (settings = readCacheSettings(bundle)) : settings;
+
+  function postgres() {
+    const selected = saved();
+    if (!selected?.connection) return;
+    client ??= createCacheClient(selected.connection);
+    return { client, schema: selected.namespace };
+  }
+
   const ctx: OpContext = {
     bundle,
     trusted,
     readonly,
+    localUsage: actor === undefined,
     actor: () => actor ?? resolveActor((cfg ??= loadConfig())),
-    engine: (createIfMissing = false) => {
-      if (!engine) {
-        const db = defaultDbPath(bundle);
-        if (!createIfMissing && !existsSync(db))
-          throw new EngineError("no index for this bundle yet — run `okb index` first");
-        engine = openSqliteEngine(db);
-      }
-      return engine;
+    engine: async (createIfMissing = false) => {
+      if (engine) return engine;
+      const pg = postgres();
+      if (pg)
+        return engine = await postgresAccess(() => openPostgresEngine(pg.client, pg.schema, createIfMissing));
+      const db = defaultDbPath(bundle);
+      if (!createIfMissing && !existsSync(db))
+        throw new EngineError("no index for this bundle yet — run `okb index` first");
+      return engine = openSqliteEngine(db);
     },
-    hasIndex: () => existsSync(defaultDbPath(bundle)),
-    vectors: (createIfMissing = false) => {
-      if (!vectors) {
-        const path = defaultVectorsPath(bundle);
-        if (!createIfMissing && !existsSync(path))
-          throw new EngineError("no vector index for this bundle yet — run `okb embed` first");
-        vectors = openVectorStore(path);
-      }
-      return vectors;
+    hasIndex: () => {
+      const pg = postgres();
+      return pg ? postgresAccess(() => hasPostgresIndex(pg.client, pg.schema)) : existsSync(defaultDbPath(bundle));
     },
-    hasVectors: () => existsSync(defaultVectorsPath(bundle)),
-    config: () => (cfg ??= loadConfig()),
+    vectors: async (createIfMissing = false) => {
+      if (vectors) return vectors;
+      const pg = postgres();
+      if (pg)
+        return vectors = await postgresAccess(() => openPostgresVectors(pg.client, pg.schema, createIfMissing));
+      const path = defaultVectorsPath(bundle);
+      if (!createIfMissing && !existsSync(path))
+        throw new EngineError("no vector index for this bundle yet — run `okb embed` first");
+      return vectors = openVectorStore(path);
+    },
+    hasVectors: () => {
+      const pg = postgres();
+      return pg ? postgresAccess(() => hasPostgresVectors(pg.client, pg.schema)) : existsSync(defaultVectorsPath(bundle));
+    },
+    config: () => configForBrain((cfg ??= loadConfig()), ctx.brain, bundle),
   };
   return {
     ctx,
-    close: () => {
-      engine?.close();
-      vectors?.close();
+    cacheBackend: () => saved()?.connection ? "postgres" : "sqlite",
+    close: async () => {
+      if (engine) await engine.close();
+      if (vectors) await vectors.close();
+      if (client) await closeCacheClient(client);
     },
   };
 }
+
+export const localBundleWatchBackend: BundleWatchBackend = {
+  identity(bundle) {
+    const saved = readCacheSettings(bundle);
+    return saved?.connection
+      ? createHash("sha256").update(saved.namespace).update(saved.connection).digest("hex")
+      : "sqlite";
+  },
+  async exists(bundle) {
+    const local = openLocalContext(bundle);
+    try { return await local.ctx.hasIndex(); }
+    finally { await local.close(); }
+  },
+  async open(bundle) {
+    const local = openLocalContext(bundle);
+    try { return { engine: await local.ctx.engine(true), close: local.close }; }
+    catch (error) { await local.close(); throw error; }
+  },
+};

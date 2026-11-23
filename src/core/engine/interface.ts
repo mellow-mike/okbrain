@@ -1,6 +1,6 @@
 // The engine contract: the derived, rebuildable cache behind all DB access
-// (CLAUDE.md invariant 4). SQLite is the default implementation; Postgres is a
-// later drop-in. Canonical knowledge never lives only here — `wipe` + a bundle
+// (CLAUDE.md invariant 4). SQLite is the default implementation. PostgreSQL
+// is optional. Canonical knowledge never lives only here — `wipe` + a bundle
 // re-index must always restore full state.
 
 import type { Status, TrustTier } from "../okf/document.ts";
@@ -45,8 +45,20 @@ export type LinkEdge = Pick<EdgeRecord, "src" | "dst">;
 export interface SearchHit {
   id: string;
   title: string;
-  /** Higher is better (BM25-derived). */
+  /** Higher is better within this engine's result set. */
   score: number;
+  keywordExcerpt?: SearchExcerptPart[];
+}
+
+export interface SearchExcerptPart {
+  text: string;
+  match: boolean;
+}
+
+export interface LinkCandidate {
+  id: string;
+  title: string;
+  sharedTags: string[];
 }
 
 export interface Neighbor {
@@ -101,14 +113,14 @@ export interface VectorStore {
   /** Current cache key; null when nothing was ever embedded. */
   meta(): EmbedMeta | null;
   /** Wipe everything and pin a new cache key (vec table created at `dim`). */
-  reset(meta: EmbedMeta): void;
+  reset(meta: EmbedMeta, expectedKey?: EmbedMeta | null): void;
   /** Wipe everything including the key (back to the never-embedded state). */
-  clear(): void;
+  clear(expectedKey?: EmbedMeta | null): void;
   /** node_id → embed-input hash for every tracked concept (drives skip logic). */
   embeddedHashes(): Map<string, string>;
   /** Atomically swap one concept's chunks (empty = tracked, nothing to embed). */
-  replace(nodeId: string, embedHash: string, chunks: ChunkVector[]): void;
-  remove(nodeId: string): void;
+  replace(nodeId: string, embedHash: string, chunks: ChunkVector[], expectedKey?: EmbedMeta | null): void;
+  remove(nodeId: string, expectedKey?: EmbedMeta | null): void;
   /** k nearest chunks by cosine distance; [] when nothing is embedded. */
   search(vector: number[], k?: number): VecHit[];
   /** Total stored chunks. */
@@ -120,9 +132,12 @@ export interface Engine {
   upsertNode(node: NodeUpsert): void;
   removeNode(id: string): void;
   getNode(id: string): NodeRecord | null;
+  hasNode(id: string): boolean;
   getTags(id: string): string[];
   /** All indexed node ids, sorted. */
   listNodeIds(): string[];
+  /** Indexed concept titles and matching tags for link suggestions, sorted by id. */
+  listLinkCandidates(tags: readonly string[]): LinkCandidate[];
   /** id → contentHash for every indexed node (drives skip/removal logic). */
   contentHashes(): Map<string, string>;
   /**
@@ -137,8 +152,10 @@ export interface Engine {
   listEdges(): EdgeRecord[];
   /** One concept's resolved links (`out`) and backlinks (`in`), sorted. */
   edgesOf(id: string): { out: string[]; in: string[] };
+  /** Direct resolved links in each direction with an independent bound. */
+  focusEdges(id: string, limit: number): { out: EdgeRecord[]; in: EdgeRecord[] };
   /** Keyword search (BM25) over title/body/tags. */
-  search(query: string, limit?: number): SearchHit[];
+  search(query: string, limit?: number, excerpts?: boolean): SearchHit[];
   /** Undirected neighborhood (links + backlinks) out to `depth` hops. */
   neighbors(id: string, depth?: number): Neighbor[];
   /** Every node's review fields (Resurface), sorted by id. */
@@ -160,3 +177,16 @@ export interface Engine {
   wipe(): void;
   close(): void;
 }
+
+export type Awaitable<T> = T | Promise<T>;
+
+type AwaitableMethods<T> = {
+  [K in keyof T]: T[K] extends (...args: infer Args) => infer Result ? (...args: Args) => Awaitable<Result> : never;
+};
+
+/** Operations can use SQLite's synchronous cache or a network-backed cache. */
+export type IndexEngine = AwaitableMethods<Engine> & {
+  /** Optionally run multiple graph/index operations in one transaction. */
+  batch?<T>(work: (index: IndexEngine) => Promise<T>): Promise<T>;
+};
+export type IndexVectors = AwaitableMethods<VectorStore>;

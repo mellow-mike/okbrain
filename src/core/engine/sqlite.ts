@@ -7,6 +7,7 @@
 // `okb rebuild` runs — recreates the current schema unconditionally.
 
 import { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Status, TrustTier } from "../okf/document.ts";
@@ -14,16 +15,20 @@ import { ensureExtensionCapableSqlite } from "./custom-sqlite.ts";
 import type {
   EdgeRecord,
   Engine,
+  LinkCandidate,
   Neighbor,
   NodeRecord,
   NodeUpsert,
   ReviewRow,
+  SearchExcerptPart,
   SearchHit,
 } from "./interface.ts";
 
 export class EngineError extends Error {}
 
 const SCHEMA_VERSION = 4;
+const BUSY_TIMEOUT_MS = 1000;
+const STARTUP_BUSY_TIMEOUT_MS = 25;
 
 const SCHEMA = `
 CREATE TABLE nodes(
@@ -77,6 +82,22 @@ export function toMatchExpr(query: string): string {
     .join(" ");
 }
 
+function excerptParts(excerpt: string, marker: string): SearchExcerptPart[] {
+  const parts: SearchExcerptPart[] = [];
+  let budget = 320;
+  let match = false;
+  for (const part of excerpt.split(new RegExp(`(${marker}[<>])`, "u"))) {
+    if (part === `${marker}<` || part === `${marker}>`) { match = part.endsWith("<"); continue; }
+    if (part === "") continue;
+    if (budget <= 0) { parts.push({ text: "…", match: false }); break; }
+    const text = part.length > budget ? part.slice(0, budget) + "…" : part;
+    parts.push({ text, match });
+    if (part.length > budget) break;
+    budget -= part.length;
+  }
+  return parts;
+}
+
 interface NodeRow {
   id: string;
   type: string;
@@ -92,26 +113,60 @@ interface NodeRow {
   content_hash: string;
 }
 
+function isTransientLock(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^SQLITE_(?:BUSY|LOCKED)(?:_|$)/.test(code);
+}
+
 function createSchema(db: Database): void {
   try {
     db.exec(SCHEMA);
-  } catch (e) {
+  } catch (error) {
+    if (isTransientLock(error)) throw error;
     throw new EngineError(
-      `cannot create index schema (SQLite build may lack FTS5): ${(e as Error).message}`,
+      `cannot create index schema (SQLite build may lack FTS5): ${(error as Error).message}`,
+      { cause: error },
     );
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
+function schemaVersion(db: Database): number {
+  return db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version;
+}
+
 /** True when the schema is current; false = stale, only wipe() may repair. */
 function migrate(db: Database): boolean {
-  const { user_version } = db
-    .query<{ user_version: number }, []>("PRAGMA user_version")
-    .get()!;
-  if (user_version === SCHEMA_VERSION) return true;
-  if (user_version !== 0) return false;
-  createSchema(db);
-  return true;
+  const version = schemaVersion(db);
+  if (version !== 0) return version === SCHEMA_VERSION;
+  // Concurrent openers can both see version 0. Only the writer holding the
+  // transaction may initialize it, and the schema and version commit together.
+  return db.transaction(() => {
+    const currentVersion = schemaVersion(db);
+    if (currentVersion === 0) createSchema(db);
+    return currentVersion === 0 || currentVersion === SCHEMA_VERSION;
+  }).immediate();
+}
+
+function initialize(db: Database): boolean {
+  db.exec(`PRAGMA busy_timeout = ${STARTUP_BUSY_TIMEOUT_MS}`);
+  const deadline = performance.now() + BUSY_TIMEOUT_MS;
+  let delay = 5;
+  while (true) {
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      const schemaOk = migrate(db);
+      db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      return schemaOk;
+    } catch (error) {
+      const remaining = deadline - performance.now();
+      if (!isTransientLock(error) || remaining <= 0) throw error;
+      // SQLite can return BUSY immediately when changing the journal mode
+      // requires a lock upgrade, even with a native busy timeout configured.
+      Bun.sleepSync(Math.min(delay, remaining));
+      delay = Math.min(delay * 2, 50);
+    }
+  }
 }
 
 /** Open (creating/migrating as needed) a SQLite engine at `dbPath`. */
@@ -121,8 +176,13 @@ export function openSqliteEngine(dbPath: string): Engine {
   ensureExtensionCapableSqlite();
   if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
   const db = new Database(dbPath, { create: true });
-  db.exec("PRAGMA journal_mode = WAL");
-  let schemaOk = migrate(db);
+  let schemaOk: boolean;
+  try {
+    schemaOk = initialize(db);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 
   // Data methods refuse a stale schema so a v1 index can't half-answer.
   const fresh =
@@ -226,6 +286,8 @@ export function openSqliteEngine(dbPath: string): Engine {
       return row ? toRecord(row) : null;
     }),
 
+    hasNode: fresh((id) => db.query("SELECT 1 FROM nodes WHERE id = ?").get(id) !== null),
+
     getTags: fresh((id) =>
       db
         .query<{ tag: string }, [string]>(
@@ -250,6 +312,25 @@ export function openSqliteEngine(dbPath: string): Engine {
         .all()
         .map((r) => r.id),
     ),
+
+    listLinkCandidates: fresh((tags: readonly string[]) => {
+      const wanted = new Set(tags);
+      const rows = db.query<{ id: string; title: string; tag: string | null }, [boolean]>(
+        `SELECT n.id, n.title, t.tag FROM nodes n
+         LEFT JOIN tags t ON t.node_id = n.id AND ?
+         ORDER BY n.id, t.tag`,
+      ).all(wanted.size > 0);
+      const candidates: LinkCandidate[] = [];
+      for (const { id, title, tag } of rows) {
+        let candidate = candidates.at(-1);
+        if (candidate?.id !== id) {
+          candidate = { id, title, sharedTags: [] };
+          candidates.push(candidate);
+        }
+        if (tag !== null && wanted.has(tag)) candidate.sharedTags.push(tag);
+      }
+      return candidates;
+    }),
 
     replaceEdges: fresh((edges) => replaceEdges(edges)),
     replaceEdgesFor: fresh((src, edges) => replaceEdgesFor(src, edges)),
@@ -278,15 +359,32 @@ export function openSqliteEngine(dbPath: string): Engine {
       };
     }),
 
-    search: fresh((query, limit = 20) => {
+    focusEdges: fresh((id, limit) => ({
+      out: db.query<EdgeRecord, [string, number]>(
+        "SELECT e.* FROM edges e JOIN nodes n ON n.id = e.dst WHERE e.src = ? ORDER BY e.dst LIMIT ?",
+      ).all(id, limit),
+      in: db.query<EdgeRecord, [string, number]>(
+        "SELECT e.* FROM edges e JOIN nodes n ON n.id = e.src WHERE e.dst = ? ORDER BY e.src LIMIT ?",
+      ).all(id, limit),
+    })),
+
+    search: fresh((query, limit = 20, excerpts = false) => {
       const expr = toMatchExpr(query);
       if (expr === "") return [];
       // Column weights (title, body, tags): a title hit should beat a body hit.
+      const rows = `FROM fts JOIN nodes n ON n.rowid = fts.rowid WHERE fts MATCH ? ORDER BY score DESC, n.id LIMIT ?`;
+      const fields = `n.id, n.title, -bm25(fts, 10.0, 1.0, 5.0) AS score`;
+      if (excerpts) {
+        // Markers are per query so source text cannot masquerade as highlighting.
+        const marker = randomUUID();
+        return db.query<SearchHit & { excerpt: string }, [string, string, string, number]>(
+          `SELECT ${fields}, snippet(fts, -1, ?, ?, '…', 18) AS excerpt ${rows}`,
+        ).all(`${marker}<`, `${marker}>`, expr, limit)
+          .map(({ excerpt, ...hit }) => ({ ...hit, keywordExcerpt: excerptParts(excerpt, marker) }));
+      }
       return db
         .query<SearchHit, [string, number]>(
-          `SELECT n.id, n.title, -bm25(fts, 10.0, 1.0, 5.0) AS score
-           FROM fts JOIN nodes n ON n.rowid = fts.rowid
-           WHERE fts MATCH ? ORDER BY score DESC, n.id LIMIT ?`,
+          `SELECT ${fields} ${rows}`,
         )
         .all(expr, limit);
     }),
@@ -357,9 +455,11 @@ export function openSqliteEngine(dbPath: string): Engine {
     wipe() {
       // Drop + recreate rather than DELETE FROM: this is also the upgrade
       // path from any older schema version (`okb rebuild`).
-      for (const t of ["fts", "nodes", "edges", "tags", "review_state"])
-        db.exec(`DROP TABLE IF EXISTS ${t}`);
-      createSchema(db);
+      db.transaction(() => {
+        for (const t of ["fts", "nodes", "edges", "tags", "review_state"])
+          db.exec(`DROP TABLE IF EXISTS ${t}`);
+        createSchema(db);
+      }).immediate();
       schemaOk = true;
     },
 

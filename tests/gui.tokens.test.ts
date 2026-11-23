@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fontAssets, hostedFontCss } from "../src/core/viz/fonts.ts";
 
 const SRC = join(import.meta.dir, "..", "src");
 const read = (p: string): string => readFileSync(join(SRC, p), "utf8");
@@ -30,7 +31,7 @@ describe("design tokens", () => {
   });
 
   test("every token the GUI, the viewer and Okb read is defined", () => {
-    const files = ["gui/style.css", "gui/app.js", "core/viz/export.ts", "core/viz/okb.js"].map(read);
+    const files = ["gui/style.css", "gui/app.js", "core/viz/export.ts", "core/viz/okb.js", "core/viz/graph-view.js"].map(read);
     const defined = new Set([
       ...names(tokens, /--([a-z0-9-]+)\s*:/g),
       ...files.flatMap((f) => [...names(f, /--([a-z0-9-]+)\s*:/g), ...names(f, /setProperty\('--([a-z0-9-]+)'/g)]),
@@ -41,8 +42,9 @@ describe("design tokens", () => {
   });
 
   test("every font face the stylesheet declares ships in src/gui/fonts", () => {
-    const faces = [...read("gui/style.css").matchAll(/url\("\/gui\/fonts\/([^"]+)"\)/g)].map((m) => m[1]!);
+    const faces = [...hostedFontCss.matchAll(/url\("\/gui\/fonts\/([^"]+)"\)/g)].map((m) => m[1]!);
     expect(faces).toHaveLength(4);
     for (const f of faces) expect(existsSync(join(SRC, "gui", "fonts", f))).toBe(true);
+    expect(fontAssets.map(([path]) => path)).toEqual(faces.map((face) => `/gui/fonts/${face}`));
   });
 });

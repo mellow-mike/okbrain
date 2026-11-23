@@ -1,0 +1,652 @@
+/* Private evaluation records use saved run inputs and recorded Pi usage. */
+(function () {
+  'use strict';
+
+  const strategyLabels = { files: 'Explicit files', lexical: 'Lexical', indexed: 'Indexed profile', packages: 'Package reviews' };
+  const decisions = { accepted: 'Accepted', changes_requested: 'Changes requested' };
+  const queueLabels = { ready: 'Ready to review', awaiting: 'Awaiting another member', reviewed: 'Reviewed', all: 'All attempts' };
+  const origins = { provider: 'Configured provider', injected: 'Injected provider' };
+  const number = (value) => value === null ? '—' : value.toLocaleString();
+  const reference = ({ path, startLine, endLine }, dash = '–') => path + ':' + startLine + (startLine === endLine ? '' : dash + endLine);
+  const measurement = ({ strategy, origin }) => [strategyLabels[strategy], origins[origin]].filter(Boolean).join(' · ');
+
+  function element(tag, text, className) {
+    const result = document.createElement(tag);
+    if (text !== undefined) result.textContent = text;
+    if (className) result.className = className;
+    return result;
+  }
+
+  function disclosure(name, text) {
+    const details = element('details');
+    details.append(element('summary', name), element('pre', text));
+    return details;
+  }
+
+  function composerOptions(slot, { readonly, invalidate, coding, prefix, detached, loadPinnedCase }) {
+    const details = element('details');
+    details.innerHTML = '<summary>Independent evaluation</summary><div class="stack coding-form">' +
+      '<label class="row"><input type="checkbox" data-enroll> Include this request in a measurement series</label>' +
+      '<fieldset class="stack" data-case hidden><legend>Evaluation case</legend>' +
+      '<div class="coding-grid"><label class="field"><span>Series ID</span><input name="evaluation-series" required maxlength="64" ' +
+      'placeholder="vite-v7" spellcheck="false"></label>' +
+      '<label class="field"><span>Task ID</span><input name="evaluation-task" required maxlength="64" placeholder="hmr-lifecycle" spellcheck="false"></label></div>' +
+      '<label class="field"><span>Expected citations</span><textarea name="evaluation-targets" rows="3" required maxlength="24576" ' +
+      'placeholder="src/client.ts:12-18"></textarea></label>' +
+      '<p class="muted">Enter one workspace path and line range per line. A different project member will verify citations against the saved preview. These fields stay with the evaluation record.</p>' +
+      '</fieldset></div>';
+    slot.append(details);
+    const enroll = details.querySelector('[data-enroll]');
+    const fields = details.querySelector('[data-case]');
+    const series = fields.querySelector('[name=evaluation-series]');
+    const task = fields.querySelector('[name=evaluation-task]');
+    const citations = fields.querySelector('textarea');
+    const update = () => { fields.hidden = fields.disabled = !enroll.checked; };
+    enroll.disabled = readonly;
+    enroll.addEventListener('change', () => {
+      update();
+      invalidate();
+    });
+    fields.addEventListener('input', invalidate);
+    fields.addEventListener('change', invalidate);
+    update();
+    mountPinnedRubric(fields.parentElement, { readonly, coding, prefix, detached, loadPinnedCase });
+    return {
+      load(saved) {
+        series.value = saved.series;
+        task.value = saved.task;
+        citations.value = saved.evidence.map((item) => typeof item === 'string' ? item : reference(item, '-')).join('\n');
+        enroll.checked = true;
+        details.open = true;
+        update();
+      },
+      value() {
+        if (!enroll.checked) return undefined;
+        const evidence = citations.value.split('\n').map((item) => item.trim()).filter(Boolean);
+        return { series: series.value.trim(), task: task.value.trim(), evidence };
+      },
+    };
+  }
+
+  function mountPinnedRubric(parent, { readonly, coding, prefix, detached, loadPinnedCase }) {
+    const disclosure = element('details');
+    disclosure.innerHTML = '<summary>Pinned Vite benchmark</summary><div class="stack coding-form">' +
+      '<p class="muted">Use a coding project rooted at a clean checkout of this exact Vite revision.</p>' +
+      '<div class="muted" data-benchmark-metadata hidden><p data-benchmark-revision></p><p data-benchmark-repository></p></div>' +
+      '<div class="coding-grid"><label class="field"><span id="benchmark-study-label">Benchmark study</span>' +
+      '<select aria-labelledby="benchmark-study-label" data-study disabled></select></label>' +
+      '<label class="field"><span id="benchmark-case-label">Benchmark case</span>' +
+      '<select aria-labelledby="benchmark-case-label" data-task disabled></select></label>' +
+      '<label class="field"><span id="benchmark-strategy-label">Benchmark strategy</span>' +
+      '<select aria-labelledby="benchmark-strategy-label" data-strategy disabled>' +
+      '<option value="files">Explicit files</option><option value="lexical">Lexical</option>' +
+      '<option value="indexed">Indexed profile</option></select></label></div>' +
+      '<p data-task-description hidden></p><div class="row"><button type="button" disabled>Use pinned case</button></div>' +
+      '<p class="coding-feedback" role="status"></p></div>';
+    parent.append(disclosure);
+    const studySelect = disclosure.querySelector('[data-study]');
+    const taskSelect = disclosure.querySelector('[data-task]');
+    const strategySelect = disclosure.querySelector('[data-strategy]');
+    const description = disclosure.querySelector('[data-task-description]');
+    const apply = disclosure.querySelector('button');
+    const feedback = disclosure.querySelector('[role="status"]');
+    let studies;
+    let loading = false;
+    const selectedStudy = () => studies?.find(({ id }) => id === studySelect.value);
+    const selectedTask = () => selectedStudy()?.tasks.find(({ id }) => id === taskSelect.value);
+
+    function showTask() {
+      const task = selectedTask();
+      description.textContent = task?.description ?? '';
+      description.hidden = !description.textContent;
+      apply.disabled = readonly || !task;
+    }
+    function showStudy() {
+      const previous = taskSelect.value;
+      const tasks = selectedStudy()?.tasks ?? [];
+      taskSelect.replaceChildren(...tasks.map(({ id }) => new Option(id, id)));
+      if (tasks.some(({ id }) => id === previous)) taskSelect.value = previous;
+      taskSelect.disabled = !tasks.length;
+      strategySelect.disabled = !tasks.length;
+      showTask();
+    }
+    disclosure.addEventListener('toggle', async () => {
+      if (!disclosure.open || studies || loading || detached()) return;
+      loading = true;
+      feedback.classList.remove('error');
+      feedback.textContent = 'Loading the pinned Vite benchmark…';
+      try {
+        const result = await coding(prefix + '/evaluation-rubric');
+        if (detached() || !disclosure.isConnected) return;
+        if (result?.version !== 1 || !Array.isArray(result.studies) || !result.studies.length)
+          throw new Error('The pinned Vite benchmark could not be loaded.');
+        studies = result.studies;
+        disclosure.querySelector('[data-benchmark-revision]').textContent = result.tag + ' · ' + result.revision;
+        disclosure.querySelector('[data-benchmark-repository]').textContent = result.repository;
+        disclosure.querySelector('[data-benchmark-metadata]').hidden = false;
+        studySelect.replaceChildren(...studies.map(({ label, id }) => new Option(label, id)));
+        studySelect.disabled = false;
+        showStudy();
+        feedback.textContent = '';
+      } catch (error) {
+        if (detached() || !disclosure.isConnected) return;
+        feedback.classList.add('error');
+        feedback.textContent = error.message;
+      } finally { loading = false; }
+    });
+    studySelect.addEventListener('change', showStudy);
+    taskSelect.addEventListener('change', showTask);
+    apply.addEventListener('click', () => {
+      if (apply.disabled || detached()) return;
+      const study = selectedStudy();
+      const task = selectedTask();
+      if (!task) return;
+      const loaded = loadPinnedCase(study, task, strategySelect.value);
+      feedback.classList.toggle('error', !loaded);
+      feedback.textContent = loaded ? '' : 'Wait for the current request to finish sending before loading this pinned case.';
+    });
+  }
+
+  function summaryGroup(group) {
+    const panel = element('article', undefined, 'stack coding-panel');
+    const heading = group.series + ' · ' + (strategyLabels[group.strategy] || group.strategy);
+    panel.append(element('h4', heading));
+    if (group.origin === 'injected') panel.append(element('p', 'Injected provider measurements', 'muted'));
+    panel.append(
+      element('p', group.attempts + (group.attempts === 1 ? ' attempt · ' : ' attempts · ') + group.reviewed + ' reviewed · ' + group.accepted + ' accepted'),
+      element('p', group.cases + (group.cases === 1 ? ' distinct task' : ' distinct tasks'), 'muted'),
+      element('p', group.evidenceVerified + '/' + group.evidenceExpected + ' expected citations verified'),
+      element('p', 'Preview p50 / p95 ' + number(group.previewP50) + ' / ' + number(group.previewP95) + ' ms · ' + group.previewCount + ' measured', 'muted'),
+      element('p', 'Mean approved source ' + number(group.meanSourceBytes) + ' bytes from reviewed runs', 'muted'),
+      element('p', [number(group.tokens.input) + ' input', number(group.tokens.output) + ' output',
+        number(group.tokens.cacheRead) + ' cache read', number(group.tokens.cacheWrite) + ' cache write'].join(' · '), 'muted'),
+      element('p', 'Recorded tokens per accepted result ' + number(group.tokensPerAccepted) + ' · ' + group.usageRecorded + '/' + group.reviewed + ' reviewed runs with usage'),
+    );
+    return panel;
+  }
+
+  function mount(parent, { prefix, coding, readonly, detached, canLoadCase, loadCase }) {
+    const panel = element('details', undefined, 'coding-panel coding-evaluations');
+    panel.innerHTML = '<summary>Evaluation results</summary><div class="stack coding-form">' +
+      '<h4>Evaluation review queue</h4><div class="row">' +
+      '<button type="button" class="small" data-refresh>Refresh evaluations</button></div>' +
+      '<label class="field"><span id="evaluation-status-label">Evaluation status</span>' +
+      '<select aria-labelledby="evaluation-status-label" data-status-filter disabled></select></label>' +
+      '<p class="muted" data-truncated hidden>Queue and metrics cover the most recent 200 evaluation attempts.</p>' +
+      '<div class="stack coding-runs" data-attempts></div><div class="stack" data-detail></div>' +
+      '<p class="coding-feedback" role="status"></p>' +
+      '<div class="stack" data-metrics-controls hidden><h4>Measurement metrics</h4><div class="row">' +
+      '<button type="button" class="small" data-copy disabled>Copy metrics as JSON</button></div></div>' +
+      '<label class="field" data-metrics-fallback hidden><span>Evaluation metrics JSON</span>' +
+      '<textarea rows="8" readonly spellcheck="false"></textarea></label>' +
+      '<p class="coding-feedback" role="status" data-metrics-feedback></p>' +
+      '<div class="stack" data-groups></div></div>';
+    parent.append(panel);
+    const groups = panel.querySelector('[data-groups]');
+    const attempts = panel.querySelector('[data-attempts]');
+    const detail = panel.querySelector('[data-detail]');
+    const feedback = panel.querySelector('[role=status]');
+    const filter = panel.querySelector('[data-status-filter]');
+    const metricsControls = panel.querySelector('[data-metrics-controls]');
+    const copy = panel.querySelector('[data-copy]');
+    const fallback = panel.querySelector('[data-metrics-fallback]');
+    const metricsFeedback = panel.querySelector('[data-metrics-feedback]');
+    const jsonField = fallback.querySelector('textarea');
+    let report;
+    let selected;
+    let reportGeneration = 0;
+    let detailGeneration = 0;
+    let copyGeneration = 0;
+    let loadingReport = false;
+
+    function message(text, error = false) {
+      feedback.classList.toggle('error', error);
+      feedback.textContent = text;
+    }
+
+    const requestIdentity = (attempt) => ({ session: attempt.session, requestId: attempt.requestId });
+    const attemptKey = (attempt) => JSON.stringify([attempt.session, attempt.requestId]);
+    const settled = (attempt) => attempt.status === 'done' || attempt.status === 'unanswered';
+    const queueStatus = (attempt) => !settled(attempt) ? 'unfinished'
+      : attempt.decision ? 'reviewed' : !readonly && attempt.canReview ? 'ready' : 'awaiting';
+
+    function clearSelection() {
+      selected = undefined;
+      ++detailGeneration;
+      detail.replaceChildren();
+      attempts.querySelector('[aria-pressed="true"]')?.setAttribute('aria-pressed', 'false');
+    }
+
+    function renderQueue(reviewed) {
+      const rows = report.attempts;
+      const counts = { ready: 0, awaiting: 0, reviewed: 0, unfinished: 0, all: rows.length };
+      for (const row of rows) counts[queueStatus(row)]++;
+      let active = filter.value || ['ready', 'awaiting', 'reviewed'].find((key) => counts[key]) || 'all';
+      if (reviewed && selected === reviewed && active === 'ready' && !counts.ready &&
+          rows.some((row) => attemptKey(row) === reviewed && queueStatus(row) === 'reviewed')) active = 'reviewed';
+      filter.replaceChildren(...Object.entries(queueLabels).map(([key, label]) => new Option(label + ' (' + counts[key] + ')', key)));
+      filter.value = active;
+      filter.disabled = false;
+
+      const visible = active === 'all' ? rows : rows.filter((row) => queueStatus(row) === active);
+      if (selected && !visible.some((row) => attemptKey(row) === selected && settled(row))) clearSelection();
+      const empty = !rows.length ? 'Enroll a new request in Independent evaluation to start measuring.' : {
+        ready: 'No evaluations are ready for you to review.',
+        awaiting: 'No evaluations are awaiting another member.',
+        reviewed: 'No evaluations have been reviewed.',
+      }[active];
+      attempts.replaceChildren(...(visible.length ? visible.map((attempt) => {
+        const button = element('button', undefined, 'coding-run');
+        button.type = 'button';
+        button.disabled = !settled(attempt);
+        const labels = element('span');
+        labels.append(element('strong', attempt.series + ' / ' + attempt.task),
+          element('span', attempt.session + ' · ' + attempt.requestId, 'muted'), element('br'), element('span', measurement(attempt), 'muted'));
+        const status = decisions[attempt.decision] || queueLabels[queueStatus(attempt)] || attempt.status;
+        button.append(labels, element('span', status));
+        button.setAttribute('aria-pressed', String(selected === attemptKey(attempt)));
+        button.addEventListener('click', () => {
+          selected = attemptKey(attempt);
+          for (const other of attempts.querySelectorAll('button')) other.setAttribute('aria-pressed', String(other === button));
+          message('');
+          void openReview(attempt);
+        });
+        return button;
+      }) : [element('p', empty, 'muted')]));
+    }
+
+    function clearMetricsFallback() {
+      ++copyGeneration;
+      fallback.hidden = true;
+      jsonField.value = '';
+      metricsFeedback.textContent = '';
+    }
+
+    async function loadReport(reviewed) {
+      const current = ++reportGeneration;
+      loadingReport = true;
+      const useCase = detail.querySelector('[data-use-evaluation-case]');
+      if (useCase) useCase.disabled = true;
+      try {
+        const result = await coding(prefix + '/evaluations');
+        if (detached() || current !== reportGeneration) return;
+        clearMetricsFallback();
+        report = result;
+        panel.querySelector('[data-truncated]').hidden = !report.truncated;
+        metricsControls.hidden = !report.groups.length;
+        copy.disabled = !report.groups.length;
+        groups.replaceChildren(...(report.groups.length
+          ? [element('p', report.provider + ' · ' + report.model, 'muted'), ...report.groups.map(summaryGroup)] : []));
+        renderQueue(reviewed);
+      } catch (error) {
+        if (!detached() && current === reportGeneration) message(error.message, true);
+      } finally {
+        if (!detached() && current === reportGeneration) {
+          loadingReport = false;
+          const button = detail.querySelector('[data-use-evaluation-case]');
+          if (button) button.disabled = false;
+        }
+      }
+    }
+
+    function reviewForm(result, isCurrent) {
+      const { attempt, evidencePresent } = result;
+      const form = element('form', undefined, 'stack');
+      const canReview = !readonly && attempt.canReview;
+      const evidence = element('fieldset', undefined, 'stack');
+      evidence.append(element('legend', 'Expected citations'));
+      const checks = [];
+      for (const [index, target] of attempt.evidence.entries()) {
+        const covered = evidencePresent.includes(index);
+        const label = element('label', undefined, 'row');
+        const check = element('input');
+        check.type = 'checkbox';
+        check.checked = attempt.verified.includes(index);
+        check.disabled = !canReview || !covered;
+        checks.push(check);
+        label.append(check, element('span', reference(target) + (covered ? '' : ' · Missing from saved source')));
+        evidence.append(label);
+      }
+      form.append(evidence);
+      if (attempt.reviewer) form.append(element('p', decisions[attempt.decision] + ' by ' + attempt.reviewer, 'muted'));
+      if (!canReview) {
+        if (!attempt.reviewer && !readonly) form.append(element('p', 'A different authenticated project member can record this evaluation.', 'muted'));
+        return form;
+      }
+      const label = element('label', undefined, 'field');
+      const decision = element('select');
+      decision.required = true;
+      decision.append(new Option('Choose a decision', ''), new Option('Accept result', 'accepted'), new Option('Request changes', 'changes_requested'));
+      decision.value = attempt.decision || '';
+      label.append(element('span', 'Evaluation decision'), decision);
+      const save = element('button', 'Save independent evaluation', 'primary');
+      save.type = 'submit';
+      form.append(label, element('p', 'Confirm a citation only if the response supports it with the approved source. Acceptance requires all expected citations.', 'muted'), save);
+      let saving = false;
+      const update = () => {
+        decision.options[1].disabled = attempt.status !== 'done' || checks.some((check) => !check.checked);
+        if (decision.value === 'accepted' && decision.options[1].disabled) decision.value = '';
+        save.disabled = saving || !decision.value;
+      };
+      form.addEventListener('change', update);
+      update();
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        if (save.disabled || !isCurrent()) return;
+        const restoreFocus = form.contains(document.activeElement);
+        saving = true;
+        update();
+        try {
+          await coding(prefix + '/evaluation-review', {
+            ...requestIdentity(attempt), decision: decision.value,
+            verified: checks.flatMap((check, index) => check.checked ? [index] : []),
+          });
+          if (detached() || !panel.open) return;
+          const reviewed = isCurrent() ? attemptKey(attempt) : undefined;
+          message('Independent evaluation saved.');
+          await loadReport(reviewed);
+          const focus = restoreFocus && (document.activeElement === document.body || form.contains(document.activeElement));
+          if (reviewed && isCurrent()) await openReview(attempt, focus);
+          else if (reviewed && !selected && focus) filter.focus();
+        } catch (error) {
+          if (isCurrent()) message(error.message, true);
+        } finally { saving = false; update(); }
+      });
+      return form;
+    }
+
+    async function openReview(attempt, focus = true) {
+      const current = ++detailGeneration;
+      const expected = attemptKey(attempt);
+      const isCurrent = () => !detached() && panel.isConnected && panel.open && selected === expected && current === detailGeneration;
+      detail.replaceChildren(element('p', 'Loading saved evaluation source…', 'muted'));
+      try {
+        const result = await coding(prefix + '/evaluation-inspect', requestIdentity(attempt));
+        if (!isCurrent()) return;
+        if (attemptKey(result.attempt) !== expected || !settled(result.attempt)) throw new Error('Refresh the evaluation before opening this case.');
+        const heading = element('h4', result.attempt.task + ' · Evaluation');
+        const source = element('details');
+        source.append(element('summary', 'Approved source used for this request'));
+        if (!result.sources.length) source.append(element('p', 'No source was attached.', 'muted'));
+        for (const part of result.sources) source.append(disclosure(reference(part), part.content));
+        const controls = [heading, element('p', measurement(result.attempt) + ' · Submitted by ' + result.attempt.submitter, 'muted')];
+        if (!readonly && loadCase && canLoadCase?.() && typeof result.task === 'string' && result.task.trim() && result.attempt.evidence.length) {
+          const actions = element('div', undefined, 'row');
+          const button = element('button', 'Use evaluation case', 'small');
+          button.type = 'button';
+          button.dataset.useEvaluationCase = '';
+          button.disabled = loadingReport;
+          button.addEventListener('click', () => {
+            if (!isCurrent() || loadingReport || !button.isConnected || !canLoadCase()) return;
+            const { series, task, evidence } = result.attempt;
+            if (!loadCase({ prompt: result.task, series, task, evidence })) {
+              message('Wait for the current request to finish sending before loading this evaluation case.', true);
+              return;
+            }
+            message('');
+          });
+          actions.append(button);
+          controls.push(actions);
+        }
+        detail.replaceChildren(...controls, disclosure('Task sent to the provider', result.task),
+          disclosure('Model response', result.response || result.unansweredReason || 'No response was saved.'), source, reviewForm(result, isCurrent));
+        if (focus) {
+          heading.tabIndex = -1;
+          heading.focus();
+        }
+      } catch (error) {
+        if (isCurrent()) detail.replaceChildren(element('p', error.message, 'error'));
+      }
+    }
+
+    panel.addEventListener('toggle', () => {
+      if (panel.open) void loadReport();
+      else {
+        ++reportGeneration;
+        loadingReport = false;
+        clearSelection();
+        clearMetricsFallback();
+        message('');
+      }
+    });
+    filter.addEventListener('change', () => {
+      message('');
+      renderQueue();
+    });
+    panel.querySelector('[data-refresh]').addEventListener('click', () => loadReport());
+    copy.addEventListener('click', async () => {
+      if (!report || copy.disabled) return;
+      const current = ++copyGeneration;
+      const isCurrent = () => !detached() && panel.isConnected && panel.open && current === copyGeneration;
+      const { provider, model, groups, truncated } = report;
+      const json = JSON.stringify({ provider, model, groups, truncated }, null, 2);
+      try {
+        await navigator.clipboard.writeText(json);
+        if (!isCurrent()) return;
+        clearMetricsFallback();
+        metricsFeedback.textContent = 'Evaluation metrics copied.';
+      } catch {
+        if (!isCurrent()) return;
+        jsonField.value = json;
+        fallback.hidden = false;
+        jsonField.focus();
+        jsonField.select();
+        metricsFeedback.textContent = 'Clipboard unavailable. Copy the selected evaluation metrics JSON.';
+      }
+    });
+  }
+
+  const retrievalStudies = {
+    package: { label: 'Package directories', budget: 4096 },
+    subsystem: { label: 'Subsystem directories', budget: 12288 },
+  };
+  const retrievalStatuses = {
+    idle: 'No benchmark has run for this project.',
+    running: 'Running retrieval benchmark…',
+    cancelling: 'Cancelling retrieval benchmark…',
+    completed: 'Benchmark completed.',
+    cancelled: 'Benchmark cancelled.',
+    failed: 'Benchmark failed.',
+  };
+
+  function retrievalStrategy(label, result) {
+    const card = element('article', undefined, 'stack coding-panel');
+    const percent = (value) => value.toLocaleString(undefined, { style: 'percent', maximumFractionDigits: 1 });
+    card.append(element('h5', label),
+      element('p', 'File recall ' + percent(result.fileRecall)),
+      element('p', 'Evidence recall ' + percent(result.evidenceRecall)),
+      element('p', 'Preview p50 / p95 ' + number(result.p50PreviewMs) + ' / ' + number(result.p95PreviewMs) + ' ms'),
+      element('p', 'Mean context ' + number(result.meanContextBytes) + ' bytes'),
+      element('p', number(result.samples) + ' previews · ' + number(result.cappedPreviews) + ' reached a limit', 'muted'));
+    return card;
+  }
+
+  function mountRetrievalBenchmark(parent, { prefix, coding, readonly, detached }) {
+    if (readonly) return;
+    const path = prefix + '/retrieval-benchmark';
+    const panel = element('details', undefined, 'coding-panel coding-retrieval-benchmark');
+    panel.innerHTML = '<summary>Source retrieval benchmark</summary><div class="stack coding-form">' +
+      '<p>Compare retrieval strategies on six cases in a clean checkout at the pinned Vite revision. The benchmark reads local source and makes no model calls.</p>' +
+      '<form class="stack"><fieldset class="stack" disabled><legend>Benchmark settings</legend>' +
+      '<label class="field"><span id="retrieval-study-label">Benchmark study</span>' +
+      '<select name="study" aria-labelledby="retrieval-study-label"></select></label>' +
+      '<div class="coding-grid"><label class="field"><span>Repetitions</span><input name="repetitions" type="number" value="5" min="1" max="50" required></label>' +
+      '<label class="field"><span>Token budget</span><input name="budget" type="number" value="4096" min="1" max="16384" required></label></div>' +
+      '<p class="muted">The token budget applies to lexical and indexed previews. Explicit files use the known evidence paths as a baseline.</p>' +
+      '<div class="row"><button type="submit">Run retrieval benchmark</button></div></fieldset></form>' +
+      '<p data-job-status role="status">Loading benchmark status…</p><p data-job-settings class="muted" hidden></p>' +
+      '<div class="stack" data-job-progress hidden><progress aria-label="Benchmark progress"></progress><p></p></div>' +
+      '<p class="coding-feedback error" data-job-error></p><div class="row"><button type="button" class="small" data-cancel hidden>Cancel benchmark</button>' +
+      '<button type="button" class="small" data-refresh>Refresh benchmark</button></div>' +
+      '<p class="coding-feedback error" data-request-error role="status"></p>' +
+      '<div class="stack" data-report hidden><h4>Retrieval results</h4><div class="coding-grid" data-strategies></div>' +
+      '<div class="row"><button type="button" class="small" data-copy>Copy benchmark report</button></div>' +
+      '<label class="field" data-json hidden><span>Benchmark report JSON</span><textarea rows="8" readonly spellcheck="false"></textarea></label>' +
+      '<p class="coding-feedback" role="status" data-copy-feedback></p></div></div>';
+    parent.append(panel);
+
+    const form = panel.querySelector('form');
+    const fields = form.querySelector('fieldset');
+    const study = form.elements.study;
+    const budget = form.elements.budget;
+    study.replaceChildren(...Object.entries(retrievalStudies).map(([id, item]) => new Option(item.label, id)));
+    study.addEventListener('change', () => { budget.value = retrievalStudies[study.value].budget; });
+    const status = panel.querySelector('[data-job-status]');
+    const settings = panel.querySelector('[data-job-settings]');
+    const progress = panel.querySelector('[data-job-progress]');
+    const bar = progress.querySelector('progress');
+    const progressText = progress.querySelector('p');
+    const jobError = panel.querySelector('[data-job-error]');
+    const requestError = panel.querySelector('[data-request-error]');
+    const cancel = panel.querySelector('[data-cancel]');
+    const refreshButton = panel.querySelector('[data-refresh]');
+    const report = panel.querySelector('[data-report]');
+    const strategies = report.querySelector('[data-strategies]');
+    const copyButton = report.querySelector('[data-copy]');
+    const fallback = report.querySelector('[data-json]');
+    const jsonField = fallback.querySelector('textarea');
+    const copyFeedback = report.querySelector('[data-copy-feedback]');
+    let state;
+    let timer;
+    let reading = false;
+    let changing = false;
+    let readGeneration = 0;
+    let copyGeneration = 0;
+
+    const visible = () => !detached() && panel.isConnected && panel.open;
+    const active = () => state?.status === 'running' || state?.status === 'cancelling';
+
+    function controls() {
+      fields.disabled = !state || changing || active();
+      cancel.hidden = !active();
+      cancel.disabled = changing || state?.status !== 'running' || !state.id;
+      refreshButton.disabled = changing;
+    }
+
+    function show(next) {
+      const sameReport = report.hidden === false && next?.status === 'completed' && state?.id === next.id;
+      state = next;
+      const caption = retrievalStatuses[next?.status] || 'Loading benchmark status…';
+      if (status.textContent !== caption) status.textContent = caption;
+      settings.hidden = !next?.study;
+      settings.textContent = next?.study ? [retrievalStudies[next.study]?.label || next.study,
+        number(next.repetitions) + (next.repetitions === 1 ? ' repetition' : ' repetitions'),
+        number(next.tokenBudget) + ' tokens', next.revision].join(' · ') : '';
+      progress.hidden = !(next?.total > 0);
+      if (!progress.hidden) {
+        bar.max = next.total;
+        bar.value = next.completed;
+        progressText.textContent = number(next.completed) + ' of ' + number(next.total) + ' previews';
+      }
+      jobError.textContent = next?.error || '';
+      if (!sameReport) {
+        ++copyGeneration;
+        fallback.hidden = true;
+        jsonField.value = '';
+        copyFeedback.textContent = '';
+        const data = next?.status === 'completed' ? next.report?.strategies : null;
+        report.hidden = !data;
+        strategies.replaceChildren(...(data ? [retrievalStrategy('Explicit files', data.explicit),
+          retrievalStrategy('Lexical', data.lexical), retrievalStrategy('Indexed profile', data.indexed)] : []));
+      }
+      controls();
+    }
+
+    function schedule() {
+      clearTimeout(timer);
+      if (visible() && active()) timer = setTimeout(refresh, 1000);
+    }
+
+    async function refresh(keepError = false) {
+      if (!visible() || reading || changing) return;
+      clearTimeout(timer);
+      const current = ++readGeneration;
+      reading = true;
+      controls();
+      try {
+        const result = await coding(path);
+        if (!visible() || current !== readGeneration) return;
+        show(result);
+        if (!keepError) requestError.textContent = '';
+      } catch (error) {
+        if (visible() && current === readGeneration) {
+          if (!state) status.textContent = 'Could not load benchmark status.';
+          if (!keepError) requestError.textContent = error.message;
+        }
+      } finally {
+        if (current === readGeneration) {
+          reading = false;
+          controls();
+          schedule();
+        }
+      }
+    }
+
+    async function change(body) {
+      if (!visible() || changing) return;
+      clearTimeout(timer);
+      ++readGeneration;
+      reading = false;
+      changing = true;
+      let reconcile = false;
+      requestError.textContent = '';
+      controls();
+      try {
+        const result = await coding(path, body);
+        if (visible()) show(result);
+      } catch (error) {
+        if (visible()) requestError.textContent = error.message;
+        reconcile = true;
+      } finally {
+        changing = false;
+        if (visible()) {
+          controls();
+          if (reconcile || !state) void refresh(reconcile);
+          else schedule();
+        }
+      }
+    }
+
+    panel.addEventListener('toggle', () => {
+      if (visible()) void refresh();
+      else {
+        clearTimeout(timer);
+        ++readGeneration;
+        reading = false;
+        requestError.textContent = '';
+        show(undefined);
+      }
+    });
+    refreshButton.addEventListener('click', () => { void refresh(); });
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (fields.disabled || !form.reportValidity()) return;
+      void change({ action: 'start', study: study.value, repetitions: form.elements.repetitions.valueAsNumber, tokenBudget: budget.valueAsNumber });
+    });
+    cancel.addEventListener('click', () => {
+      if (!cancel.disabled) void change({ action: 'cancel', id: state.id });
+    });
+    copyButton.addEventListener('click', async () => {
+      if (!visible() || report.hidden || !state?.report) return;
+      const current = ++copyGeneration;
+      const isCurrent = () => visible() && current === copyGeneration;
+      const json = JSON.stringify(state.report, null, 2);
+      try {
+        await navigator.clipboard.writeText(json);
+        if (!isCurrent()) return;
+        fallback.hidden = true;
+        jsonField.value = '';
+        copyFeedback.textContent = 'Benchmark report copied.';
+      } catch {
+        if (!isCurrent()) return;
+        jsonField.value = json;
+        fallback.hidden = false;
+        jsonField.focus();
+        jsonField.select();
+        copyFeedback.textContent = 'Clipboard unavailable. Copy the selected benchmark report JSON.';
+      }
+    });
+  }
+
+  window.okbCodingEvaluation = { composerOptions, mount, mountRetrievalBenchmark };
+})();

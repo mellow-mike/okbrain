@@ -12,12 +12,13 @@
 import { parseHTML } from "linkedom";
 import type { ChatMessage } from "../ai/gateway.ts";
 import { readConceptPermissive } from "../okf/bundle.ts";
+import { isPrivateConceptAt } from "../okf/privacy.ts";
 import { fmSources, type SourceEntry } from "../okf/document.ts";
 import { idToAbsPath, validateId, InvalidIdError } from "../okf/paths.ts";
 import { OkfWriteError, writeConcept } from "../okf/write.ts";
 import { existsSync } from "node:fs";
 import { extractArticle } from "./extract.ts";
-import { FetchGuardError, guardedFetch, type FetchedPage } from "./fetch-guard.ts";
+import { FetchGuardError, guardedFetch } from "./fetch-guard.ts";
 
 export interface WebPassLimits {
   /** Successful page fetches allowed in one run (0 with noWeb). */
@@ -54,7 +55,7 @@ export interface EnrichDeps {
   /** Actor recorded as `generated.by` on every write (e.g. `okb-enrich/<model>`). */
   actor?: string;
   /** Injectable for tests; defaults to the guarded fetcher. */
-  fetcher?(url: string): Promise<FetchedPage>;
+  fetcher?: typeof guardedFetch;
   /** Concept ids + titles the list tool returns (engine or bundle scan). */
   listConcepts(): Promise<{ id: string; title: string }[]>;
   /** Cross-link proposals (4.4); absent when the bundle has no index. */
@@ -168,6 +169,15 @@ export async function runEnrich(
   const frontier = new Map<string, number>(seeds.map((s) => [s, 0]));
   const result: EnrichResult = { written: [], fetched: [], summary: "", steps: 0 };
 
+  const authorizeUrl = (url: URL) => {
+    if (!hostAllowed(url.hostname, limits.allowHosts))
+      throw new WebPassError(`host not in the allowlist: ${url.hostname}`);
+    if (limits.denyPaths.some((p) => url.pathname.startsWith(p)))
+      throw new WebPassError(`path is denied: ${url.pathname}`);
+    if (limits.allowPaths.length > 0 && !limits.allowPaths.some((p) => url.pathname.startsWith(p)))
+      throw new WebPassError(`path is outside the allowed prefixes: ${url.pathname}`);
+  };
+
   const fetchTool = async (rawUrl: string): Promise<unknown> => {
     if (limits.noWeb) throw new WebPassError("web access is disabled (--no-web)");
     const depth = frontier.get(rawUrl);
@@ -175,18 +185,18 @@ export async function runEnrich(
       throw new WebPassError("only seed URLs or links from fetched pages can be fetched");
     if (depth > limits.maxDepth)
       throw new WebPassError(`beyond the depth cap (${limits.maxDepth})`);
-    const url = new URL(rawUrl);
-    if (!hostAllowed(url.hostname, limits.allowHosts))
-      throw new WebPassError(`host not in the allowlist: ${url.hostname}`);
-    if (limits.denyPaths.some((p) => url.pathname.startsWith(p)))
-      throw new WebPassError(`path is denied: ${url.pathname}`);
-    if (limits.allowPaths.length > 0 && !limits.allowPaths.some((p) => url.pathname.startsWith(p)))
-      throw new WebPassError(`path is outside the allowed prefixes: ${url.pathname}`);
+    authorizeUrl(new URL(rawUrl));
     // Budget last: policy refusals report their real reason even after the cap.
     if (result.fetched.length >= limits.maxPages)
       throw new WebPassError(`page cap reached (${limits.maxPages}); write or finish`);
 
-    const page = await fetcher(rawUrl);
+    const page = await fetcher(rawUrl, { authorizeUrl });
+    let finalUrl: URL;
+    try { finalUrl = new URL(page.url); }
+    catch { throw new WebPassError("The fetched page did not report a valid URL."); }
+    if (finalUrl.protocol !== "http:" && finalUrl.protocol !== "https:")
+      throw new WebPassError("The fetched page did not report an HTTP or HTTPS URL.");
+    authorizeUrl(finalUrl);
     result.fetched.push(rawUrl);
     const links = pageLinks(page.body, page.url);
     for (const l of links) if (!frontier.has(l)) frontier.set(l, depth + 1);
@@ -207,6 +217,7 @@ export async function runEnrich(
       throw new WebPassError((e as InvalidIdError).message);
     }
     const exists = existsSync(idToAbsPath(root, id));
+    if (exists && await isPrivateConceptAt(root, id)) throw new WebPassError("The selected note is unavailable to enrichment.");
     if (!exists && !id.startsWith("references/"))
       throw new WebPassError(
         `new concepts must live under references/ (got ${id}); existing concepts may be enriched in place`,
@@ -273,6 +284,7 @@ export async function runEnrich(
           case "read_concept": {
             const id = String(action.id ?? "");
             validateId(id);
+            if (await isPrivateConceptAt(root, id)) throw new WebPassError("The selected note is unavailable to enrichment.");
             const { doc } = await readConceptPermissive(root, id);
             observation = { id, frontmatter: doc.frontmatter, body: doc.body };
             break;

@@ -56,6 +56,18 @@ describe("slugify", () => {
 });
 
 describe("okb new", () => {
+  test("mutations preserve the actual spelling of folders and concept IDs", async () => {
+    expect((await okb(["new", "note", "Research", "Original text", "--id", "Research/Fieldbook"])).code).toBe(0);
+    const wrongFolder = await okb(["new", "note", "Other", "Other text", "--id", "research/Other"]);
+    expect(wrongFolder.code).toBe(2);
+    expect(wrongFolder.stderr).toContain("Use the existing path spelling Research.");
+    const wrongFile = await okb(["rm", "Research/fieldbook"]);
+    expect(wrongFile.code).toBe(2);
+    expect(wrongFile.stderr).toContain("Use the existing path spelling Research/Fieldbook.md.");
+    expect((await concept("Research/Fieldbook")).frontmatter.description).toBe("Original text");
+    expect((await okb(["new", "note", "Reserved", "d", "--id", "Research/Index"])).stderr).toContain("reserved");
+  });
+
   test("derives <type>s/<slug>, writes a conformant concept", async () => {
     const r = await okb(["new", "note", "My First Note", "A note about firsts", "--tags", "a,b"]);
     expect(r.code).toBe(0);
@@ -162,6 +174,24 @@ describe("okb import", () => {
     const over = await importPath(root, { path: src, overwrite: true });
     expect(over.imported).toEqual(["a"]);
     expect((await concept("a")).body).toContain("two");
+  });
+
+  test("refreshes manifests, provenance and search for files saved before an import failure", async () => {
+    expect((await okb(["index"])).code).toBe(0);
+    const invalid = "---\ntype: [unclosed\n---\nExisting bytes\n";
+    await writeFile(join(root, "b.md"), invalid);
+    await writeFile(join(src, "a.md"), "# First result\n\nquartzleaf\n");
+    await writeFile(join(src, "b.md"), "# Replacement\n\nnew content\n");
+
+    const result = await okb(["import", src, "--overwrite"]);
+
+    expect(result.code).toBe(2);
+    expect(await readFile(join(root, "b.md"), "utf8")).toBe(invalid);
+    expect(await readFile(join(root, "index.md"), "utf8")).toContain("[First result](/a.md)");
+    expect(await readFile(join(root, "log.md"), "utf8")).toContain("**Creation**: [First result](/a.md)");
+    const search = await okb(["search", "quartzleaf", "--json"]);
+    expect(search.code).toBe(0);
+    expect(JSON.parse(search.stdout)).toEqual([expect.objectContaining({ id: "a" })]);
   });
 
   test("in-run slug collisions keep the first source", async () => {

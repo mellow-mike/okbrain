@@ -20,6 +20,7 @@ export interface ReviewConfig {
     expired: number;
     /** `status: draft` (§5.4). */
     draft: number;
+    overdueClaim: number;
   };
 }
 
@@ -35,6 +36,7 @@ export const defaultReviewConfig: ReviewConfig = {
     anniversary: 0.5,
     expired: 2.0,
     draft: 1.0,
+    overdueClaim: 3.0,
   },
 };
 
@@ -43,6 +45,8 @@ export interface ReviewItem {
   title: string;
   score: number;
   reasons: string[];
+  /** Deadline for an open claim with an active overdue review signal. */
+  overdueClaim?: string;
   /** Optional AI one-liner tying the item to recent activity (F-B.8). */
   garnish?: string;
 }
@@ -64,6 +68,7 @@ export function reviewQueue(
   edges: LinkEdge[],
   now: Date,
   cfg: ReviewConfig = defaultReviewConfig,
+  overdueClaims?: ReadonlyMap<string, string>,
 ): ReviewItem[] {
   const staleDays = new Map(rows.map((r) => [r.id, daysSince(r.timestamp, now)]));
   const degree = new Map<string, number>();
@@ -85,8 +90,10 @@ export function reviewQueue(
   const ranked: { item: ReviewItem; ts: string }[] = [];
   for (const r of rows) {
     if (r.status === "deprecated") continue; // kept for links and history, not for review
+    const overdueClaim = w.overdueClaim > 0 ? overdueClaims?.get(r.id) : undefined;
     const reviewed = daysSince(r.lastReviewed, now);
-    if (reviewed !== null && reviewed < cfg.cooldownDays) continue;
+    if (reviewed !== null && reviewed < cfg.cooldownDays &&
+        (!overdueClaim || r.lastReviewed!.slice(0, 10) > overdueClaim)) continue;
     if (r.snoozeUntil !== null && Date.parse(r.snoozeUntil) > now.getTime()) continue;
 
     const d = staleDays.get(r.id) ?? null;
@@ -102,6 +109,7 @@ export function reviewQueue(
     if (r.staleAfter !== null && Date.parse(r.staleAfter) <= now.getTime())
       add(w.expired, `stale since ${r.staleAfter.slice(0, 10)}`);
     if (r.status === "draft") add(w.draft, "still a draft");
+    if (overdueClaim) add(w.overdueClaim, `claim due ${overdueClaim}`);
     if (d !== null) add((w.staleness * Math.min(d, 365)) / 365, `untouched ${age(d)}`);
     if ((degree.get(r.id) ?? 0) === 0)
       add(w.orphan, d !== null ? `orphan for ${age(d)}` : "orphan");
@@ -118,7 +126,7 @@ export function reviewQueue(
     }
     if (score > 0)
       ranked.push({
-        item: { id: r.id, title: r.title, score, reasons },
+        item: { id: r.id, title: r.title, score, reasons, ...(overdueClaim ? { overdueClaim } : {}) },
         ts: r.timestamp ?? "￿", // unknown age sorts after any real date
       });
   }

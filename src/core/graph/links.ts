@@ -15,7 +15,36 @@ export interface Edge {
 }
 
 // Inline markdown link/image targets: the `(...)` after `](`.
-export const LINK = /\]\(([^)]*)\)/g;
+export const LINK = /\]\(([^)\0]*)\)/g;
+
+/** Mask fenced code while preserving newlines and offsets into the original Markdown. */
+export function markdownOutsideCode(body: string): string {
+  const fencePattern = /^ {0,3}(`{3,}|~{3,})([^\n]*)/;
+  if (!/^ {0,3}(?:`{3,}|~{3,})/m.test(body)) return body;
+  let fence: string | undefined;
+  return body.split("\n").map((line) => {
+    const match = fencePattern.exec(line);
+    if (!fence) {
+      if (!match || (match[1]!.startsWith("`") && match[2]!.includes("`"))) return line;
+      fence = match[1]!;
+    } else if (match && match[1]!.startsWith(fence) && match[2]!.trim() === "") {
+      fence = undefined;
+    }
+    // NULs prevent an opening link before the fence from matching past it.
+    return "\0".repeat(line.length);
+  }).join("\n");
+}
+
+/** Rewrite link destinations in Markdown while leaving fenced code byte-for-byte intact. */
+export function rewriteBodyLinks(body: string, rewrite: (match: string, target: string) => string): string {
+  const parts: string[] = [];
+  let offset = 0;
+  for (const m of markdownOutsideCode(body).matchAll(LINK)) {
+    parts.push(body.slice(offset, m.index), rewrite(m[0], m[1]!));
+    offset = m.index + m[0].length;
+  }
+  return offset === 0 ? body : parts.join("") + body.slice(offset);
+}
 
 // Split a raw target into its destination (unwrapping `<...>`) and whatever
 // trails it (` "title"` and, for wrapped targets, anything after `>`).
@@ -28,6 +57,8 @@ function splitTarget(raw: string): { dest: string; suffix: string } {
   const dest = t.split(/\s/, 1)[0]!;
   return { dest, suffix: t.slice(dest.length) };
 }
+
+type KnownConcepts = Pick<ReadonlySet<string>, "has">;
 
 /**
  * Resolve one raw link target to a bundle-relative concept id, or null if it is
@@ -61,13 +92,21 @@ export function resolveLinkTarget(srcId: string, rawTarget: string): string | nu
 export function resolvePathField(
   srcId: string,
   raw: string,
-  known?: Set<string>,
+  known?: KnownConcepts,
 ): string | null {
-  const rel = resolveLinkTarget(srcId, raw);
-  if (rel === null || known === undefined || known.has(rel)) return rel;
-  if (raw.startsWith("/") || raw.startsWith(".")) return rel;
-  const fromRoot = resolveLinkTarget("", raw);
-  return fromRoot !== null && known.has(fromRoot) ? fromRoot : rel;
+  const target = pathFieldCandidates(srcId, raw);
+  if (!target) return null;
+  const { relative, root } = target;
+  return root !== undefined && known !== undefined && !known.has(relative) && known.has(root) ? root : relative;
+}
+
+/** Candidate targets before checking which concepts exist in the index. */
+export function pathFieldCandidates(srcId: string, raw: string): { relative: string; root?: string } | null {
+  const relative = resolveLinkTarget(srcId, raw);
+  if (relative === null) return null;
+  if (raw.startsWith("/") || raw.startsWith(".")) return { relative };
+  const root = resolveLinkTarget("", raw);
+  return root !== null && root !== relative ? { relative, root } : { relative };
 }
 
 /**
@@ -77,7 +116,7 @@ export function resolvePathField(
  * Destinations needing it (spaces, parens) are `<...>`-wrapped. Idempotent.
  */
 export function normalizeLinks(srcId: string, body: string): string {
-  return body.replace(LINK, (match, raw: string) => {
+  return rewriteBodyLinks(body, (match, raw) => {
     const id = resolveLinkTarget(srcId, raw);
     if (id === null) return match;
     const { dest, suffix } = splitTarget(raw);
@@ -87,10 +126,37 @@ export function normalizeLinks(srcId: string, body: string): string {
   });
 }
 
+/** Make links to selected concepts work in readers outside the OKF bundle. */
+export function relativeConceptLinks(srcId: string, body: string, selected: KnownConcepts): string {
+  return rewriteBodyLinks(body, (match, raw) => {
+    const target = resolveLinkTarget(srcId, raw);
+    if (target === null || !selected.has(target)) return match;
+    const { dest, suffix } = splitTarget(raw);
+    const path = posix.relative(posix.dirname(srcId), `${target}.md`)
+      .split("/").map((part) => encodeURIComponent(part).replace(/[()]/g, (c) => c === "(" ? "%28" : "%29")).join("/");
+    const tail = dest.search(/[?#]/);
+    return `](${path}${tail < 0 ? "" : dest.slice(tail)}${suffix})`;
+  });
+}
+
+/** Preserve relative Markdown links and images when the containing note changes folder. */
+export function rebaseBodyLinks(srcId: string, dstId: string, body: string): string {
+  const from = posix.dirname(srcId), to = posix.dirname(dstId);
+  if (from === to) return body;
+  return rewriteBodyLinks(body, (match, raw) => {
+    const { dest, suffix } = splitTarget(raw);
+    const cut = dest.search(/[?#]/);
+    const path = cut < 0 ? dest : dest.slice(0, cut);
+    if (!path || path.startsWith("/") || /^[a-z][a-z0-9+.-]*:/i.test(path)) return match;
+    const target = posix.relative(to, posix.join(from, path)) + (cut < 0 ? "" : dest.slice(cut));
+    return `](${/\s/.test(target) ? `<${target}>` : target}${suffix})`;
+  });
+}
+
 /** All resolved internal link target ids in a body, deduped, in first-seen order. */
 export function extractTargets(srcId: string, body: string): string[] {
   const seen = new Set<string>();
-  for (const m of body.matchAll(LINK)) {
+  for (const m of markdownOutsideCode(body).matchAll(LINK)) {
     const id = resolveLinkTarget(srcId, m[1]!);
     if (id !== null) seen.add(id);
   }
@@ -101,7 +167,7 @@ export function extractTargets(srcId: string, body: string): string[] {
 export function sourceTargets(
   srcId: string,
   fm: Record<string, unknown>,
-  known?: Set<string>,
+  known?: KnownConcepts,
 ): string[] {
   const seen = new Set<string>();
   for (const s of fmSources(fm)) {

@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
 
-# A feature isn't done until it's green on all three OSes (CLAUDE.md).
+# Keep the CLI and storage paths verified on all three supported OSes.
 jobs:
   test:
     name: ${{ matrix.os }}
@@ -20,7 +20,7 @@ jobs:
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14 # pinned: `latest` once broke Windows CI (B6)
+          bun-version: 1.4.3 # pinned: `latest` once broke Windows CI (B6)
 
       # bun:sqlite links Apple's SQLite, which can't load extensions; the
       # engine swaps in Homebrew's via Database.setCustomSQLite (sqlite-vec).
@@ -36,3 +36,130 @@ jobs:
 
       - name: Test
         run: bun test
+
+      - name: Test keyboard and offline browser workflows
+        if: runner.os == 'Linux'
+        run: |
+          bunx --bun playwright install --with-deps --only-shell chromium
+          bun run smoke:browser
+
+      - name: Record local app latency
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bun run build
+          bun run scripts/benchmark-personal.ts | tee -a "$GITHUB_STEP_SUMMARY"
+
+  coding-worker:
+    name: Linux Docker coding worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - name: Build coding worker
+        run: docker build --file packaging/coding-worker/Dockerfile --tag okbrain-coding-worker:ci .
+      - name: Exercise the isolated worker offline
+        run: |
+          worker_image=$(docker image inspect --format '{{.Id}}' okbrain-coding-worker:ci)
+          bun run packaging/coding-worker/smoke.ts "$worker_image"
+
+  postgres:
+    name: Linux PostgreSQL and pgvector
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
+        env:
+          POSTGRES_USER: okbrain_test
+          POSTGRES_DB: okbrain_test
+          POSTGRES_PASSWORD: disposable_fixture_only
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U okbrain_test -d okbrain_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - name: Install pgvector in a dedicated extension schema
+        run: docker exec '${{ job.services.postgres.id }}' psql -v ON_ERROR_STOP=1 -U okbrain_test -d okbrain_test -c "CREATE SCHEMA vector_fixture; CREATE EXTENSION vector WITH SCHEMA vector_fixture;"
+      - name: Test database parity through adapters and the CLI
+        env:
+          OKB_TEST_POSTGRES_URL: postgresql://okbrain_test:disposable_fixture_only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/okbrain_test
+        run: bun test tests/engine.postgres.test.ts tests/engine.postgres-vectors.test.ts tests/e2e.postgres.test.ts tests/retrieval.embed.test.ts
+
+  mac-app:
+    name: macOS app (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - run: bun run package:mac --smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okbrain-${{ matrix.os }}
+          path: dist/okbrain-*-macos-*.zip
+          if-no-files-found: error
+
+  ide-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test integrations/vscode/*.test.cjs
+      - run: bun run package:ide
+      - uses: actions/upload-artifact@v4
+        with:
+          name: okbrain-editor-extension
+          path: dist/okbrain-coding.vsix
+          if-no-files-found: error
+
+  release-candidate:
+    name: Verify complete release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    needs: [mac-app, ide-extension]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - name: Build release archives
+        run: bun run scripts/package-release.ts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: okbrain-macos-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: okbrain-editor-extension
+          path: dist
+      - name: Assemble and verify release assets
+        run: |
+          bun run scripts/release-assets.ts assemble
+          bun run scripts/release-assets.ts verify

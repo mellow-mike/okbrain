@@ -23,7 +23,7 @@ import {
   type OkfDocument,
 } from "../okf/document.ts";
 import { idToAbsPath, InvalidIdError, isReservedName, slugify } from "../okf/paths.ts";
-import { OkfWriteError, writeConcept } from "../okf/write.ts";
+import { OkfWriteError, writeConceptBatch } from "../okf/write.ts";
 import { clip } from "./capture.ts";
 
 export interface ImportInput {
@@ -54,7 +54,7 @@ function deriveDescription(body: string, relPath: string): string {
   return line ? clip(line.trim(), 120) : `Imported from ${relPath}`;
 }
 
-export async function importPath(root: string, input: ImportInput): Promise<ImportResult> {
+export async function importPath(root: string, input: ImportInput, onWrite?: (id: string) => void): Promise<ImportResult> {
   const src = resolve(input.path);
   const st = await stat(src).catch(() => null);
   if (!st) throw new OkfWriteError(`import path not found: ${input.path}`);
@@ -66,58 +66,65 @@ export async function importPath(root: string, input: ImportInput): Promise<Impo
     : (await listMdFiles(src)).filter((p) => !isReservedName(basename(p)));
   const srcDir = st.isFile() ? resolve(src, "..") : src;
 
-  const result: ImportResult = { imported: [], skipped: [] };
-  const claimed = new Set<string>();
-  for (const relPath of files) {
-    let id: string;
-    try {
-      id = input.dest ? `${input.dest}/${relPathToSlugId(relPath)}` : relPathToSlugId(relPath);
-    } catch (e) {
-      if (!(e instanceof InvalidIdError)) throw e;
-      result.skipped.push({ path: relPath, reason: e.message });
-      continue;
+  return writeConceptBatch(root, async (write) => {
+    const result: ImportResult = { imported: [], skipped: [] };
+    const claimed = new Set<string>();
+    for (const relPath of files) {
+      let id: string;
+      try {
+        id = input.dest ? `${input.dest}/${relPathToSlugId(relPath)}` : relPathToSlugId(relPath);
+      } catch (e) {
+        if (!(e instanceof InvalidIdError)) throw e;
+        result.skipped.push({ path: relPath, reason: e.message });
+        continue;
+      }
+      if (claimed.has(id)) {
+        result.skipped.push({ path: relPath, reason: `id collision with another import: ${id}` });
+        continue;
+      }
+      claimed.add(id);
+      if (!input.overwrite && existsSync(idToAbsPath(root, id))) {
+        result.skipped.push({ path: relPath, reason: `concept exists: ${id} (use --overwrite)` });
+        continue;
+      }
+      const raw = await readFile(resolve(srcDir, ...relPath.split("/")), "utf8");
+      let doc: OkfDocument;
+      try {
+        doc = parse(raw);
+      } catch (e) {
+        if (!(e instanceof OkfParseError)) throw e;
+        doc = { frontmatter: {}, body: raw }; // permissive: keep it all as body
+      }
+      const fm = doc.frontmatter;
+      const tags = fmTags(fm.tags);
+      // OKF v0.2 families ride along when well-formed; a foreign `generated`
+      // is the source's own provenance and is kept verbatim.
+      const generated = fmGenerated(fm);
+      const verified = normalizeVerified(fm).filter((e) => isActor(e.by));
+      const sources = fmSources(fm);
+      const written = await write({
+        id,
+        type: fmString(fm.type) || input.type || "note",
+        title: fmString(fm.title) || deriveTitle(doc.body, relPath),
+        description: fmString(fm.description) || deriveDescription(doc.body, relPath),
+        body: doc.body,
+        resource: fmString(fm.resource) || undefined,
+        tags: tags.length > 0 ? tags : undefined,
+        status: (STATUSES as readonly unknown[]).includes(fm.status) ? (fm.status as string) : undefined,
+        staleAfter: isIsoInstant(fm.stale_after) ? fm.stale_after : undefined,
+        sources: sources.length > 0 ? sources : undefined,
+        generated: generated !== null && isActor(generated.by) ? generated : undefined,
+        verified: verified.length > 0 ? verified : undefined,
+        actor: input.actor,
+        extra: fm,
+      }, { createOnly: !input.overwrite });
+      if (!input.overwrite && !written.created) {
+        result.skipped.push({ path: relPath, reason: `concept exists: ${id} (use --overwrite)` });
+        continue;
+      }
+      result.imported.push(id);
+      onWrite?.(id);
     }
-    if (claimed.has(id)) {
-      result.skipped.push({ path: relPath, reason: `id collision with another import: ${id}` });
-      continue;
-    }
-    claimed.add(id);
-    if (!input.overwrite && existsSync(idToAbsPath(root, id))) {
-      result.skipped.push({ path: relPath, reason: `concept exists: ${id} (use --overwrite)` });
-      continue;
-    }
-    const raw = await readFile(resolve(srcDir, ...relPath.split("/")), "utf8");
-    let doc: OkfDocument;
-    try {
-      doc = parse(raw);
-    } catch (e) {
-      if (!(e instanceof OkfParseError)) throw e;
-      doc = { frontmatter: {}, body: raw }; // permissive: keep it all as body
-    }
-    const fm = doc.frontmatter;
-    const tags = fmTags(fm.tags);
-    // OKF v0.2 families ride along when well-formed; a foreign `generated`
-    // is the source's own provenance and is kept verbatim.
-    const generated = fmGenerated(fm);
-    const verified = normalizeVerified(fm).filter((e) => isActor(e.by));
-    const sources = fmSources(fm);
-    await writeConcept(root, {
-      id,
-      type: fmString(fm.type) || input.type || "note",
-      title: fmString(fm.title) || deriveTitle(doc.body, relPath),
-      description: fmString(fm.description) || deriveDescription(doc.body, relPath),
-      body: doc.body,
-      resource: fmString(fm.resource) || undefined,
-      tags: tags.length > 0 ? tags : undefined,
-      status: (STATUSES as readonly unknown[]).includes(fm.status) ? (fm.status as string) : undefined,
-      staleAfter: isIsoInstant(fm.stale_after) ? fm.stale_after : undefined,
-      sources: sources.length > 0 ? sources : undefined,
-      generated: generated !== null && isActor(generated.by) ? generated : undefined,
-      verified: verified.length > 0 ? verified : undefined,
-      actor: input.actor,
-      extra: fm,
-    });
-    result.imported.push(id);
-  }
-  return result;
+    return result;
+  });
 }

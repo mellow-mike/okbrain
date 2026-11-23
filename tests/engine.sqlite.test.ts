@@ -1,4 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Engine, NodeUpsert } from "../src/core/engine/interface.ts";
 import { openSqliteEngine, toMatchExpr } from "../src/core/engine/sqlite.ts";
 
@@ -22,6 +26,65 @@ function node(id: string, over: Partial<NodeUpsert> = {}): NodeUpsert {
 
 const engine: Engine = openSqliteEngine(":memory:");
 afterAll(() => engine.close());
+
+describe("startup", () => {
+  test("initializes an index after another process releases a rollback journal writer", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "okb-sqlite-open-"));
+    const path = join(dir, "index.db");
+    const holder = Bun.spawn([process.execPath, "-e", `
+      import { Database } from "bun:sqlite";
+      import { ensureExtensionCapableSqlite } from "./src/core/engine/custom-sqlite.ts";
+      ensureExtensionCapableSqlite();
+      const db = new Database(process.argv.at(-1), { create: true });
+      db.exec("PRAGMA journal_mode = DELETE; PRAGMA user_version = 0; BEGIN IMMEDIATE");
+      console.log("locked");
+      await Bun.sleep(450);
+      db.exec("ROLLBACK");
+      db.close();
+    `, "--", path], { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "inherit" });
+    const output = holder.stdout.getReader();
+    try {
+      const { value } = await output.read();
+      expect(new TextDecoder().decode(value).trim()).toBe("locked");
+      const opened = openSqliteEngine(path);
+      try {
+        opened.upsertNode(node("concurrent-open", { title: "Concurrent startup" }));
+        expect(opened.search("startup").map((hit) => hit.id)).toEqual(["concurrent-open"]);
+      } finally {
+        opened.close();
+      }
+      expect(await holder.exited).toBe(0);
+    } finally {
+      output.releaseLock();
+      await holder.exited;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("requires an explicit wipe to open a stale version for data access", () => {
+    const dir = mkdtempSync(join(tmpdir(), "okb-sqlite-version-"));
+    const path = join(dir, "index.db");
+    try {
+      const old = new Database(path, { create: true });
+      try {
+        old.exec("CREATE TABLE nodes(id TEXT); PRAGMA user_version = 3");
+      } finally {
+        old.close();
+      }
+      const opened = openSqliteEngine(path);
+      try {
+        expect(() => opened.contentHashes()).toThrow("okb rebuild --confirm-destructive");
+        opened.wipe();
+        opened.upsertNode(node("rebuilt"));
+        expect(opened.getNode("rebuilt")?.title).toBe("rebuilt");
+      } finally {
+        opened.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("nodes + tags", () => {
   test("upsert inserts, then updates in place", () => {

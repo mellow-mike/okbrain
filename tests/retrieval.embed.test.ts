@@ -2,12 +2,17 @@
 // invalidation on provider/model switch, --limit pacing, stale removal, the
 // write hook, and `okb embed` + hook end-to-end against a stub embed server.
 
+import { SQL } from "bun";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { VectorStore } from "../src/core/engine/interface.ts";
+import type { IndexVectors, VectorStore } from "../src/core/engine/interface.ts";
+import { openPostgresVectors } from "../src/core/engine/postgres-vectors.ts";
 import { defaultVectorsPath, openVectorStore } from "../src/core/engine/vectors.ts";
+import { readConceptPermissive } from "../src/core/okf/bundle.ts";
+import { normalizeVerified } from "../src/core/okf/document.ts";
 import { embedBundle, embedConcept, type Embedder } from "../src/core/retrieval/embed.ts";
 import { okb } from "./helpers.ts";
 
@@ -53,6 +58,59 @@ beforeEach(async () => {
 afterEach(async () => {
   store.close();
   await rm(root, { recursive: true, force: true });
+});
+
+async function rejectsStaleEmbed(stale: IndexVectors, current: IndexVectors) {
+  for (const hasInitialKey of [true, false]) {
+    await current.clear();
+    if (hasInitialKey) await current.reset({ provider: "fixture", model: "older", dim: 2 });
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const oldWork = embedBundle(root, stale, {
+      provider: "fixture", model: "older",
+      async embed(texts) {
+        started.resolve();
+        await release.promise;
+        return texts.map(() => [1, 0]);
+      },
+    }).catch((error: unknown) => error);
+    try {
+      await Promise.race([started.promise, oldWork.then(() => { throw new Error("The stale provider never started."); })]);
+      await embedBundle(root, current, {
+        provider: "fixture", model: "newer", embed: async (texts) => texts.map(() => [0, 1]),
+      });
+    } finally { release.resolve(); }
+    expect(await oldWork).toMatchObject({ message: "The vector cache changed while embedding. Run okb embed again." });
+    expect(await current.meta()).toEqual({ provider: "fixture", model: "newer", dim: 2 });
+    expect(await current.count()).toBe(3);
+    const hits = await current.search([0, 1]);
+    expect(hits).toHaveLength(3);
+    expect(hits.every(({ distance }) => distance === 0)).toBe(true);
+  }
+}
+
+test("in-flight SQLite embedding cannot replace or reset a newer model's cache", async () => {
+  await rejectsStaleEmbed(store, store);
+});
+
+const postgresFixture = process.env.OKB_TEST_POSTGRES_URL;
+test.skipIf(!postgresFixture)("concurrent embeddings from separate PostgreSQL pools respect the cache key", async () => {
+  const address = new URL(postgresFixture!);
+  if (!["127.0.0.1", "[::1]"].includes(address.hostname)) throw new Error("Use a disposable loopback PostgreSQL fixture.");
+  const schema = "okb_" + randomBytes(16).toString("hex");
+  const sql = new SQL(address.toString());
+  const second = new SQL(address.toString());
+  try {
+    const stale = await openPostgresVectors(sql, schema, true);
+    const current = await openPostgresVectors(second, schema, false);
+    await rejectsStaleEmbed(stale, current);
+  } finally {
+    try {
+      await sql`DROP SCHEMA IF EXISTS ${sql(schema)} CASCADE`;
+    } finally {
+      await Promise.all([sql.close(), second.close()]);
+    }
+  }
 });
 
 describe("embedBundle", () => {
@@ -219,6 +277,33 @@ describe("okb embed + write hook (stub embed server)", () => {
     expect(requests).toBe(before + 1); // the hook embedded it
     const stats = await okb(["--bundle", root, "embed"]);
     expect(stats.stdout).toContain("skipped 4");
+  });
+
+  test("review done updates verification and the queue without embedding an uncached note", async () => {
+    const id = "notes/beta";
+    const cli = (...args: string[]) => okb(["--bundle", root, ...args]);
+    expect((await cli("index")).code).toBe(0);
+    const primed = await cli("embed", "--limit", "1");
+    expect(primed.code).toBe(0);
+    expect(primed.stdout).toContain("embedded 1");
+    expect((await cli("review", "--json")).stdout).toContain(`"${id}"`);
+    const before = requests;
+    const original = (await readConceptPermissive(root, id)).doc;
+
+    const reviewed = await cli("review", "done", id);
+    expect(reviewed.code).toBe(0);
+    expect(reviewed.stdout).toContain(`reviewed ${id}`);
+    expect(requests).toBe(before);
+    const saved = (await readConceptPermissive(root, id)).doc;
+    expect(saved.body).toBe(original.body);
+    expect(normalizeVerified(saved.frontmatter)).toHaveLength(1);
+    expect((await cli("review", "--json")).stdout).not.toContain(`"${id}"`);
+    const cached = openVectorStore(defaultVectorsPath(root));
+    try {
+      expect(cached.meta()?.provider).toBe("ollama");
+      expect(cached.embeddedHashes().has("notes/alpha")).toBe(true);
+      expect(cached.embeddedHashes().has(id)).toBe(false);
+    } finally { cached.close(); }
   });
 
   test("an unreachable embed provider never fails the write", async () => {

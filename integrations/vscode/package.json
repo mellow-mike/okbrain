@@ -1,0 +1,43 @@
+{
+  "name": "okbrain",
+  "displayName": "okbrain Coding",
+  "description": "Preview editor files and review recoverable Pi Durable coding runs with okbrain.",
+  "version": "0.1.0",
+  "publisher": "okbrain",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/mellow-mike/okbrain.git", "directory": "integrations/vscode" },
+  "engines": { "vscode": "^1.95.0" },
+  "categories": ["AI", "Other"],
+  "main": "./extension.cjs",
+  "extensionKind": ["ui"],
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": { "supported": false, "description": "Project actions use files from a local, trusted workspace." }
+  },
+  "contributes": {
+    "commands": [
+      { "command": "okbrain.open", "title": "Open Coding Workspace", "category": "okbrain" },
+      { "command": "okbrain.runFile", "title": "Preview Active File for Coding Request", "category": "okbrain" },
+      { "command": "okbrain.runRepository", "title": "Preview Repository Coding Request", "category": "okbrain" },
+      { "command": "okbrain.runPreset", "title": "Preview Saved Request Preset", "category": "okbrain" },
+      { "command": "okbrain.runs", "title": "Inspect and Review Coding Runs", "category": "okbrain" },
+      { "command": "okbrain.connectTeam", "title": "Connect to Team Workspace", "category": "okbrain" },
+      { "command": "okbrain.runTeam", "title": "Preview Team Coding Request", "category": "okbrain" },
+      { "command": "okbrain.teamRuns", "title": "Inspect and Review Team Coding Runs", "category": "okbrain" },
+      { "command": "okbrain.openTeam", "title": "Open Team Workspace in Browser", "category": "okbrain" },
+      { "command": "okbrain.disconnectTeam", "title": "Disconnect from Team Workspace", "category": "okbrain" }
+    ],
+    "menus": { "editor/context": [{ "command": "okbrain.runFile", "when": "resourceScheme == file && isWorkspaceTrusted", "group": "navigation@90" }] },
+    "configuration": {
+      "title": "okbrain",
+      "properties": {
+        "okbrain.server": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Optional local okbrain HTTP address on 127.0.0.1. Leave empty to find the macOS app or the default web server."
+        }
+      }
+    }
+  }
+}

@@ -5,7 +5,7 @@
 // shared tags. Suggestions always route through review — accepting is a
 // separate explicit write (`link_accept`), never an auto-insert.
 
-import type { Engine } from "../engine/interface.ts";
+import type { IndexEngine } from "../engine/interface.ts";
 import { extractTargets } from "./links.ts";
 
 export interface LinkSuggestion {
@@ -38,39 +38,37 @@ const queryWords = (c: SuggestInput): string[] =>
       .filter((w) => w.length >= 3 && !STOP.has(w)),
   )].slice(0, 8);
 
-export function suggestLinks(concept: SuggestInput, eng: Engine, limit = 5): LinkSuggestion[] {
+export async function suggestLinks(concept: SuggestInput, eng: IndexEngine, limit = 5): Promise<LinkSuggestion[]> {
   // Never suggest what's already connected (either direction) or the self.
   const excluded = new Set<string>([concept.id, ...extractTargets(concept.id, concept.body)]);
-  for (const id of eng.edgesOf(concept.id).in) excluded.add(id);
+  for (const id of (await eng.edgesOf(concept.id)).in) excluded.add(id);
 
-  const scores = new Map<string, { score: number; reasons: Set<string> }>();
-  const bump = (id: string, pts: number, reason: string): void => {
+  const scores = new Map<string, { title: string; score: number; reasons: Set<string> }>();
+  const bump = (id: string, title: string, pts: number, reason: string): void => {
     if (excluded.has(id)) return;
     let cur = scores.get(id);
-    if (!cur) scores.set(id, (cur = { score: 0, reasons: new Set() }));
+    if (!cur) scores.set(id, (cur = { title, score: 0, reasons: new Set() }));
     cur.score += pts;
     cur.reasons.add(reason);
   };
 
-  for (const id of eng.listNodeIds()) {
+  for (const { id, title, sharedTags } of await eng.listLinkCandidates(concept.tags)) {
     if (excluded.has(id)) continue;
-    const n = eng.getNode(id)!;
-    const title = n.title.trim();
-    if (title.length >= 3 && new RegExp(`\\b${escapeRe(title)}\\b`, "i").test(concept.body))
-      bump(id, 3, `mentions "${title}"`);
-    const shared = eng.getTags(id).filter((t) => concept.tags.includes(t));
-    if (shared.length > 0)
-      bump(id, 0.5 * Math.min(shared.length, 3), `shares tags: ${shared.slice(0, 3).join(", ")}`);
+    const name = title.trim();
+    if (name.length >= 3 && new RegExp(`\\b${escapeRe(name)}\\b`, "i").test(concept.body))
+      bump(id, title, 3, `mentions "${name}"`);
+    const shared = sharedTags.slice(0, 3);
+    if (shared.length > 0) bump(id, title, 0.5 * shared.length, `shares tags: ${shared.join(", ")}`);
   }
 
   const words = queryWords(concept);
   for (const w of words)
-    eng.search(w, FTS_K).forEach((h, i) =>
-      bump(h.id, (2 / words.length) * ((FTS_K - i) / FTS_K), "similar content"),
+    (await eng.search(w, FTS_K)).forEach((h, i) =>
+      bump(h.id, h.title, (2 / words.length) * ((FTS_K - i) / FTS_K), "similar content"),
     );
 
   return [...scores.entries()]
-    .map(([id, s]) => ({ id, title: eng.getNode(id)!.title, score: s.score, reasons: [...s.reasons] }))
+    .map(([id, s]) => ({ id, title: s.title, score: s.score, reasons: [...s.reasons] }))
     .sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1))
     .slice(0, limit);
 }

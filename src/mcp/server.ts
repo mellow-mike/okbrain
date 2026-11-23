@@ -24,10 +24,12 @@ import { VERSION } from "../core/version.ts";
 
 export interface McpOptions {
   bundle: string;
+  brain?: string;
   /** Expose write ops to this connection. Never set for remote clients. */
   trusted: boolean;
   /** Serving a read-only brain mount: write ops refused even when trusted. */
   readonly?: boolean;
+  mountAllowed?: () => boolean;
 }
 
 /** The MCP tool surface: no admin, no localOnly; write only when trusted. */
@@ -69,10 +71,12 @@ export function createMcpServer(opts: McpOptions): Server {
     { capabilities: { tools: {} } },
   );
   server.setRequestHandler(ListToolsRequestSchema, () => ({
-    tools: mcpOps(opts.trusted).map(toolOf),
+    tools: opts.mountAllowed?.() === false ? [] : mcpOps(opts.trusted && !opts.readonly).map(toolOf),
   }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const op = mcpOps(opts.trusted).find((o) => o.name === req.params.name);
+    if (opts.mountAllowed?.() === false)
+      return { content: [{ type: "text", text: "The brain mount changed. Restart its MCP listener." }], isError: true };
+    const op = mcpOps(opts.trusted && !opts.readonly).find((o) => o.name === req.params.name);
     if (!op)
       return {
         content: [{ type: "text", text: `unknown tool: ${req.params.name}` }],
@@ -84,6 +88,7 @@ export function createMcpServer(opts: McpOptions): Server {
       opts.readonly === true,
       mcpActor(server.getClientVersion()),
     );
+    local.ctx.brain = opts.brain;
     try {
       const result = await runOp(op, local.ctx, req.params.arguments ?? {});
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -93,7 +98,7 @@ export function createMcpServer(opts: McpOptions): Server {
         isError: true,
       };
     } finally {
-      local.close();
+      await local.close();
     }
   });
   return server;
@@ -106,16 +111,20 @@ export async function runMcpStdio(opts: McpOptions): Promise<void> {
 
 /**
  * Streamable HTTP transport, stateless (a fresh server+transport pair per
- * request): binds 127.0.0.1 only and Host-checks like the local API. No
- * token — the default surface is read-only; `--trusted` is a deliberate,
- * local decision.
+ * request): binds 127.0.0.1 only and validates Host and Origin. The separate
+ * app-managed listener uses an ephemeral bearer token.
  */
 export function runMcpHttp(opts: McpOptions & { port: number }): HttpServer {
   let port = opts.port; // resolved after listen (0 = ephemeral, for tests)
   const httpServer = createServer(async (req, res) => {
-    if (!hostAllowed(req.headers.host ?? null, port)) {
-      res.writeHead(403, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "host not allowed (localhost only)" }));
+    const refuse = (status: number, message: string) => {
+      res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: message }));
+    };
+    const origin = req.headers.origin;
+    if (!hostAllowed(req.headers.host ?? null, port) || (origin !== undefined
+      && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`)) {
+      refuse(403, "MCP HTTP accepts only local hosts and origins.");
       return;
     }
     const server = createMcpServer(opts);

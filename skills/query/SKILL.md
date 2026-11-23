@@ -16,6 +16,9 @@ Steps:
    citations are post-verified against retrieved context; relay them as
    concept ids. An "I found nothing" answer is real signal: say so and offer
    to capture/enrich instead of filling the gap from model memory.
+   When the user chooses their connected ChatGPT plan, run
+   `okb ask-plan "<question>"`. It retrieves locally and sends selected
+   context to OpenAI for its cited answer.
 4. Answer with the bundle's content, cite ids inline, and note when your own
    knowledge disagrees with a note (the note may be stale — offer to update
    it, don't silently override it).

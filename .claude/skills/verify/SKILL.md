@@ -15,7 +15,7 @@ D=$(mktemp -d)
 printf -- '---\ntype: note\ntitle: A\n---\nSee [b](/b.md).\n' > "$D/a.md"
 printf -- '---\ntype: note\ntitle: B\n---\n' > "$D/b.md"
 bun run src/cli.ts index --bundle "$D"
-bun run src/cli.ts search b --bundle "$D"      # every op takes --bundle; --json for machine output
+bun run src/cli.ts search b --bundle "$D"      # select a brain; --json for machine output
 bun run src/cli.ts doctor --bundle "$D"        # v0.2 conformance + signals; `okb upgrade --dry-run` for v0.1 leftovers
 ```
 
@@ -73,7 +73,7 @@ must show status/trust badges and the `sources` list.
 
 ## Gotchas
 
-- Capture command output to a file and check the real exit code (CLAUDE.md
+- Capture command output to a file and check the real exit code (AGENTS.md
   iron rule) — piping eats `$?`.
 - Never `pkill -f "okb serve …"` from a Bash tool call: the pattern matches
   the tool's own shell and kills it. `pkill -x okb` is safe.

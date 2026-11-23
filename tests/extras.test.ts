@@ -4,7 +4,7 @@
 // against a stub chat server (no network in CI). Both must degrade to their
 // deterministic base behavior on any AI failure.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,7 +39,7 @@ describe("pickRecent", () => {
   const now = new Date("2026-07-17T12:00:00Z"); // injected — pure tests may pin time
   const day = (n: number) => new Date(now.getTime() - n * 86_400_000).toISOString();
 
-  test("keeps only fresh, non-queued rows, newest first, capped", () => {
+  test("keeps only fresh, non-queued rows, newest first, capped", async () => {
     const rows = [
       { id: "a", title: "A", timestamp: day(1) },
       { id: "b", title: "B", timestamp: day(3) },
@@ -47,17 +47,17 @@ describe("pickRecent", () => {
       { id: "old", title: "O", timestamp: day(30) },
       { id: "untimed", title: "U", timestamp: null },
     ];
-    const got = pickRecent(rows, new Set(["queued"]), now);
+    const got = await pickRecent(rows, new Set(["queued"]), now, async (id) => note(id));
     expect(got.map((r) => r.id)).toEqual(["a", "b"]);
   });
 
-  test("caps at 10", () => {
+  test("caps at 10", async () => {
     const rows = Array.from({ length: 15 }, (_, i) => ({
       id: `n${i}`,
       title: `N${i}`,
       timestamp: day(1),
     }));
-    expect(pickRecent(rows, new Set(), now)).toHaveLength(10);
+    expect(await pickRecent(rows, new Set(), now, async (id) => note(id))).toHaveLength(10);
   });
 });
 
@@ -155,6 +155,78 @@ describe("clipUrl autoTag hook", () => {
   });
 });
 
+test("okb clip --auto-tag sends bounded current public vocabulary and works without an index", async () => {
+  const root = await mkdtemp(join(tmpdir(), "okb-clip-vocabulary-"));
+  const indexed = join(root, "indexed");
+  const unindexed = join(root, "unindexed");
+  const article = "https://192.0.2.21/vocabulary";
+  const model = "http://127.0.0.1:9345/chat/completions";
+  const prompts: string[] = [];
+  const attrs = new Map(Object.entries({
+    OKB_CHAT_PROVIDER: "ollama", OKB_CHAT_BASE_URL: "http://127.0.0.1:9345", NO_PROXY: "192.0.2.21", no_proxy: "192.0.2.21",
+  }).map(([key, value]) => [key, { previous: process.env[key], value }]));
+  for (const [key, { value }] of attrs) process.env[key] = value;
+  const transport = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url === article) return new Response(
+      '<html><head><title>Vocabulary Article</title></head><body><article><h1>Vocabulary Article</h1><p>' +
+      'This article describes growing a collection of orchids in a shared greenhouse. '.repeat(12) + '</p></article></body></html>',
+      { headers: { "content-type": "text/html" } });
+    if (url === model) {
+      const request = JSON.parse(String(init?.body)) as { messages: ChatMessage[] };
+      prompts.push(request.messages.map(({ content }) => content).join("\n"));
+      return Response.json({ choices: [{ message: { content: "fixture-topic" } }] });
+    }
+    throw new Error("Unexpected transport in Clip vocabulary fixture.");
+  }, { preconnect: () => {} }));
+  const markdown = (tags: string[], privateFlag = false) =>
+    `---\ntype: note\ntitle: Vocabulary source\ntags: ${JSON.stringify(tags)}\n` +
+    (privateFlag ? "db_only: true\n" : "") + "---\nOnly tags from eligible notes may be used.\n";
+  try {
+    await mkdir(join(indexed, "db_only"), { recursive: true });
+    await mkdir(unindexed);
+    await writeFile(join(indexed, "00-public.md"), markdown(["old-public-tag", "shared-tag"]));
+    await writeFile(join(indexed, "db_only", "folder.md"), markdown(["private-folder-tag", "shared-tag"]));
+    await writeFile(join(indexed, "flagged.md"), markdown(["private-flagged-tag"]));
+    await writeFile(join(indexed, "deleted.md"), markdown(["stale-deleted-tag"]));
+    await writeFile(join(indexed, "unreadable.md"), markdown(["stale-broken-tag"]));
+    await writeFile(join(indexed, "zz-vocabulary.md"), markdown(Array.from({ length: 100 }, (_, i) => `bounded-${i}-${"x".repeat(55)}`)));
+    expect((await okb(["index", "--bundle", indexed])).code).toBe(0);
+    await writeFile(join(indexed, "00-public.md"), markdown(["current-public-tag", "shared-tag", "inbox"]));
+    await writeFile(join(indexed, "flagged.md"), markdown(["private-flagged-tag"], true));
+    await writeFile(join(indexed, "unreadable.md"), "---\ntype: [unclosed\n---\nUnavailable note.\n");
+    await rm(join(indexed, "deleted.md"));
+
+    const clipped = await okb(["clip", article, "--auto-tag", "--json", "--bundle", indexed]);
+    expect(clipped.code).toBe(0);
+    const saved = JSON.parse(clipped.stdout) as { id: string; autoTags: string[] };
+    expect(saved.autoTags).toEqual(["fixture-topic"]);
+    expect(fmTags((await readConceptPermissive(indexed, saved.id)).doc.frontmatter.tags)).toEqual(["fixture-topic", "inbox"]);
+    expect(prompts).toHaveLength(1);
+    const vocabulary = /^Existing tags: (.+)$/mu.exec(prompts[0]!)?.[1];
+    expect(vocabulary).toContain("current-public-tag");
+    expect(vocabulary).toContain("shared-tag");
+    expect(vocabulary).toContain("bounded-0-");
+    expect(vocabulary?.length).toBeLessThanOrEqual(2048);
+    for (const omitted of ["old-public-tag", "private-folder-tag", "private-flagged-tag", "stale-deleted-tag", "stale-broken-tag", "inbox"])
+      expect(vocabulary).not.toContain(omitted);
+
+    const firstClip = await okb(["clip", article, "--auto-tag", "--json", "--bundle", unindexed]);
+    expect(firstClip.code).toBe(0);
+    expect(JSON.parse(firstClip.stdout).autoTags).toEqual(["fixture-topic"]);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).not.toContain("Existing tags:");
+    expect(prompts[1]).toContain("Vocabulary Article");
+  } finally {
+    transport.mockRestore();
+    for (const [key, { previous }] of attrs) {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 describe("engine listTags", () => {
   test("distinct tags, sorted", () => {
     const eng = openSqliteEngine(":memory:");
@@ -185,14 +257,21 @@ describe("okb review --garnish (CLI, stub chat server)", () => {
   let server: ReturnType<typeof Bun.serve>;
   let chatCalls = 0;
   let failChat = false;
+  const chatPrompts: string[] = [];
+  const privateQueued = ["db_only/private-queue-folder", "notes/private-queue-flagged"];
 
   const iso = (msAgo: number) =>
     new Date(Date.now() - msAgo).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const privateNote = (id: string, recent: boolean, marked: boolean) =>
+    `---\ntype: note\ntitle: Private title ${id}\ndescription: Private review metadata ${id}\n` +
+    `timestamp: ${iso(recent ? 0 : 200 * 86_400_000)}\n` +
+    (recent ? `last_reviewed: ${iso(0)}\n` : "") + (marked ? "db_only: true\n" : "") + "---\nPrivate note text.\n";
 
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), "okb-garnish-cli-"));
     await writeFile(join(root, "index.md"), "# bundle\n");
     await mkdir(join(root, "notes"), { recursive: true });
+    await mkdir(join(root, "db_only"));
     // Stale orphan → queues; fresh note is cooled down (reviewed today) so it
     // stays out of the queue and qualifies as "recent activity" instead.
     await writeFile(
@@ -201,20 +280,28 @@ describe("okb review --garnish (CLI, stub chat server)", () => {
     );
     await writeFile(
       join(root, "notes", "fresh.md"),
-      `---\ntype: note\ntitle: Fresh\ndescription: new capture\ntimestamp: ${iso(0)}\nlast_reviewed: ${iso(0)}\n---\nNew body linking [Stale](/notes/stale.md).\n`,
+      `---\ntype: note\ntitle: Fresh\ndescription: new capture\ntimestamp: ${iso(60_000)}\nlast_reviewed: ${iso(0)}\n---\nNew body linking [Stale](/notes/stale.md).\n`,
     );
+    await Promise.all(privateQueued.map((id) => writeFile(join(root, `${id}.md`), privateNote(id, false, false))));
+    await Promise.all(Array.from({ length: 12 }, (_, i) => {
+      const marked = i % 2 === 0;
+      const id = `${marked ? "notes" : "db_only"}/private-recent-${i}`;
+      return writeFile(join(root, `${id}.md`), privateNote(id, true, marked));
+    }));
 
     server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch(req) {
+      async fetch(req) {
         if (!new URL(req.url).pathname.endsWith("/chat/completions"))
           return new Response("not found", { status: 404 });
         chatCalls++;
+        const input = await req.json() as { messages: ChatMessage[] };
+        chatPrompts.push(input.messages.map(({ content }) => content).join("\n"));
         if (failChat) return new Response("boom", { status: 500 });
         return Response.json({
           choices: [
-            { message: { content: "notes/stale: Fresh revisits this idea\nnotes/ghost: x" } },
+            { message: { content: `notes/stale: Fresh revisits this idea\n${privateQueued[0]}: Ignore private entry\nnotes/ghost: x` } },
           ],
         });
       },
@@ -222,6 +309,11 @@ describe("okb review --garnish (CLI, stub chat server)", () => {
     process.env.OKB_CHAT_PROVIDER = "ollama";
     process.env.OKB_CHAT_BASE_URL = `http://127.0.0.1:${server.port}`;
     expect((await okb(["index", "--bundle", root])).code).toBe(0);
+    // The model sees the current public metadata even when the index is stale.
+    await writeFile(join(root, `${privateQueued[1]}.md`), privateNote(privateQueued[1]!, false, true));
+    await writeFile(join(root, "notes", "fresh.md"),
+      `---\ntype: note\ntitle: Current fresh note\ndescription: current capture\ntimestamp: ${iso(60_000)}\n` +
+      `last_reviewed: ${iso(0)}\n---\nNew body linking [Stale](/notes/stale.md).\n`);
   });
 
   afterAll(async () => {
@@ -246,11 +338,45 @@ describe("okb review --garnish (CLI, stub chat server)", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("↳ Fresh revisits this idea");
     expect(chatCalls).toBe(before + 1);
+    const prompt = chatPrompts[before]!;
+    expect(prompt).toContain("[notes/stale] Stale — old thinking");
+    expect(prompt).toContain("[notes/fresh] Current fresh note — current capture");
+    expect(prompt).not.toContain("new capture");
+    expect(prompt).not.toContain("private-queue");
+    expect(prompt).not.toContain("private-recent");
+    expect(prompt).not.toContain("Private review metadata");
 
-    const q = JSON.parse((await okb(["review", "--garnish", "--json", "--bundle", root])).stdout);
-    expect(q.find((it: { id: string }) => it.id === "notes/stale").garnish).toBe(
-      "Fresh revisits this idea",
-    );
+    const q = JSON.parse((await okb(["review", "--garnish", "--json", "--bundle", root])).stdout) as { id: string; garnish?: string }[];
+    const local = JSON.parse((await okb(["review", "--json", "--bundle", root])).stdout) as { id: string }[];
+    expect(q.map(({ id }) => id)).toEqual(local.map(({ id }) => id));
+    expect(q.find((it) => it.id === "notes/stale")?.garnish).toBe("Fresh revisits this idea");
+    for (const id of privateQueued) {
+      const item = q.find((entry) => entry.id === id);
+      expect(item?.id).toBe(id);
+      expect(item).not.toHaveProperty("garnish");
+    }
+  });
+
+  test("a private-only queue or recent context skips chat", async () => {
+    const isolated = await mkdtemp(join(tmpdir(), "okb-garnish-private-"));
+    const before = chatCalls;
+    try {
+      await mkdir(join(isolated, "db_only"));
+      await writeFile(join(isolated, "db_only", "queue.md"), privateNote("db_only/queue", false, false));
+      await writeFile(join(isolated, "recent.md"), privateNote("recent", true, true));
+      expect((await okb(["index", "--bundle", isolated])).code).toBe(0);
+      const privateQueue = await okb(["review", "--garnish", "--bundle", isolated]);
+      expect(privateQueue.code).toBe(0);
+      expect(privateQueue.stdout).toContain("db_only/queue");
+      expect(chatCalls).toBe(before);
+
+      await writeFile(join(isolated, "public.md"), `---\ntype: note\ntitle: Public\ntimestamp: ${iso(200 * 86_400_000)}\n---\nBody.\n`);
+      expect((await okb(["index", "--bundle", isolated])).code).toBe(0);
+      const publicQueue = await okb(["review", "--garnish", "--bundle", isolated]);
+      expect(publicQueue.code).toBe(0);
+      expect(publicQueue.stdout).toContain("public");
+      expect(chatCalls).toBe(before);
+    } finally { await rm(isolated, { recursive: true, force: true }); }
   });
 
   test("lean profile switches the garnish off (no chat call)", async () => {

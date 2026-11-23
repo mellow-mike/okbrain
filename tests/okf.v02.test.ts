@@ -3,7 +3,7 @@
 // surface the new signals (list --detail, read signals, new-concept ids,
 // init --actor). No network anywhere.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -128,6 +128,35 @@ describe("path-valued fields and provenance edges (§5.1, §6.2)", () => {
       await updateIndexFor(root, "m", eng);
       expect(eng.listEdges()).toEqual([{ src: "m", dst: "policies/p", rel: null }]);
       expect(eng.getNode("m")).toMatchObject({ timestamp: null, status: "stable", trust: "unverified" });
+    } finally {
+      eng.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("incremental provenance resolves nearby and root targets without listing all nodes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "okb-v02-incremental-"));
+    const eng = openSqliteEngine(":memory:");
+    try {
+      await mkdir(join(root, "metrics"));
+      await mkdir(join(root, "policies"));
+      for (const parts of [["orders.md"], ["metrics", "orders.md"], ["policies", "p.md"]])
+        await writeFile(join(root, ...parts), "---\ntype: note\n---\nText.\n");
+      await buildIndex(root, eng);
+      const listNodeIds = spyOn(eng, "listNodeIds");
+      await writeFile(
+        join(root, "metrics", "m.md"),
+        "---\ntype: Metric\nsources:\n  - resource: orders.md\n  - resource: policies/p.md\n---\nBody.\n",
+      );
+      await updateIndexFor(root, "metrics/m", eng);
+      const edges = [
+        { src: "metrics/m", dst: "metrics/orders", rel: "cites" },
+        { src: "metrics/m", dst: "policies/p", rel: "cites" },
+      ];
+      expect(eng.listEdges()).toEqual(edges);
+      expect(listNodeIds).not.toHaveBeenCalled();
+      await buildIndex(root, eng);
+      expect(eng.listEdges()).toEqual(edges);
     } finally {
       eng.close();
       await rm(root, { recursive: true, force: true });

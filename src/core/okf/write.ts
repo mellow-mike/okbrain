@@ -8,8 +8,10 @@
 // when their v0.2 counterpart is written. Each write also regenerates
 // index.md up the touched dir chain and appends a log.md entry (Stage 1.2).
 
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, posix } from "node:path";
+import { randomUUID } from "node:crypto";
+import { readFileSync, renameSync } from "node:fs";
+import { chmod, link, lstat, mkdir, unlink, writeFile } from "node:fs/promises";
+import { dirname, join, posix } from "node:path";
 import { resolveActor } from "../config.ts";
 import { normalizeLinks } from "../graph/links.ts";
 import { readConceptPermissive } from "./bundle.ts";
@@ -22,11 +24,13 @@ import {
   serialize,
   STATUSES,
   type ActorEvent,
+  type OkfDocument,
   type SourceEntry,
 } from "./document.ts";
-import { regenerateIndexes } from "./indexmd.ts";
-import { appendLog } from "./logmd.ts";
-import { idToAbsPath, inDbOnlyDir, isReservedName, slugify } from "./paths.ts";
+import { regenerateIndexBranches, regenerateIndexes } from "./indexmd.ts";
+import { appendConceptLogs, appendLog, formatLogEntry, todayUtc, type ConceptLogEntry } from "./logmd.ts";
+import { assertConceptPathSpelling, idToAbsPath, isReservedName, slugify } from "./paths.ts";
+import { isPrivateConcept } from "./privacy.ts";
 
 export class OkfWriteError extends Error {}
 
@@ -77,6 +81,32 @@ export interface WriteResult {
    * no-op guard below). Absent on real writes and creates.
    */
   noop?: boolean;
+}
+
+interface WriteOptions {
+  /** Leave an existing concept alone, including one created by a concurrent import. */
+  createOnly?: boolean;
+  /** Recheck a reviewed create-only write before staging and publication. */
+  authorize?: () => void | Promise<void>;
+  /** The caller will regenerate the affected index branch after a batch. */
+  deferIndex?: boolean;
+  /** Apply a reviewed write only if the concept still has these exact bytes. */
+  expected?: string;
+  /** Accumulate derived metadata until the importing operation finishes. */
+  batch?: { dirs: Set<string>; log: ConceptLogEntry[] };
+}
+
+/** Import a group of concepts through the same writer and refresh metadata even after a partial import. */
+export async function writeConceptBatch<T>(root: string, write: (
+  add: (input: WriteConceptInput, options?: Pick<WriteOptions, "createOnly">) => Promise<WriteResult>,
+) => Promise<T>): Promise<T> {
+  const batch = { dirs: new Set<string>(), log: [] as ConceptLogEntry[] };
+  try {
+    return await write((input, options) => writeConcept(root, input, { ...options, batch }));
+  } finally {
+    try { await regenerateIndexBranches(root, batch.dirs); }
+    finally { await appendConceptLogs(root, batch.log); }
+  }
 }
 
 /** Emitted instant format: ISO 8601 UTC, second precision. */
@@ -132,19 +162,60 @@ export function normalizeSources(sources: SourceEntry[]): SourceEntry[] {
 const event = (e: ActorEvent): ActorEvent =>
   e.at === undefined ? { by: e.by } : { by: e.by, at: e.at };
 
+/** Publish reviewed raw bytes atomically, optionally checking a stronger caller-owned snapshot. */
+export async function publishConcept(
+  path: string,
+  bytes: string,
+  mode: number | undefined,
+  expected?: string,
+  matches?: () => Promise<boolean>,
+): Promise<boolean> {
+  const temporary = join(dirname(path), `.okb-write-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, bytes, { encoding: "utf8", flag: "wx", mode });
+    if (matches && !await matches()) return false;
+    if (expected === undefined) await link(temporary, path);
+    else {
+      if (!matches && readFileSync(path, "utf8") !== expected) return false;
+      renameSync(temporary, path);
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === (expected === undefined ? "EEXIST" : "ENOENT")) return false;
+    throw error;
+  } finally {
+    await unlink(temporary).catch(() => {});
+  }
+}
+
+/** Publish an already validated filing document. Its original provenance must pass through untouched. */
+export async function writeFilingDocument(root: string, id: string, doc: OkfDocument, expected?: string): Promise<boolean> {
+  const path = idToAbsPath(root, id);
+  if (isReservedName(posix.basename(id) + ".md")) throw new OkfWriteError("Choose a concept path for filing.");
+  await assertConceptPathSpelling(root, id);
+  const privateConcept = isPrivateConcept(id, doc.frontmatter);
+  return publishConcept(path, serialize(doc), privateConcept ? 0o600 : undefined, expected);
+}
+
 /** Create or update one concept. Returns the written path and created flag. */
 export async function writeConcept(
   root: string,
   input: WriteConceptInput,
+  options: WriteOptions = {},
 ): Promise<WriteResult> {
   const path = idToAbsPath(root, input.id); // validates the id
   if (isReservedName(posix.basename(input.id) + ".md"))
     throw new OkfWriteError(
       `${input.id} is a reserved file, not a concept; index.md/log.md are maintained by okbrain`,
     );
+  await assertConceptPathSpelling(root, input.id);
 
   let existing;
   try {
+    if (options.createOnly) {
+      await lstat(path);
+      return { id: input.id, path, created: false, noop: true };
+    }
     existing = await readConceptPermissive(root, input.id);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
@@ -155,6 +226,8 @@ export async function writeConcept(
     );
   if (input.metadataOnly && !existing)
     throw new OkfWriteError(`metadata-only write requires an existing concept: ${input.id}`);
+  if (options.expected !== undefined && existing?.raw !== options.expected)
+    throw new OkfWriteError("The concept changed. Review it again before saving.");
   const prev = existing?.doc.frontmatter ?? {};
   const prevBody = existing?.doc.body ?? "";
 
@@ -232,14 +305,39 @@ export async function writeConcept(
     if (asIs === existing.raw) return { id: input.id, path, created: false, noop: true };
   }
 
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, serialize({ frontmatter: fm, body }), "utf8");
-  const dir = posix.dirname(input.id);
-  await regenerateIndexes(root, dir === "." ? "" : dir);
+  const privateConcept = isPrivateConcept(input.id, fm);
+  const authorize = options.createOnly ? options.authorize : undefined;
+  await authorize?.();
+  await mkdir(dirname(path), { recursive: true, mode: privateConcept ? 0o700 : undefined });
+  const serialized = serialize({ frontmatter: fm, body });
+  const mode = privateConcept ? 0o600 : undefined;
+  if (options.createOnly) {
+    // Publish complete bytes without ever replacing a concurrent writer's note.
+    const confirmed = authorize && (async () => { await authorize(); return true; });
+    if (!await publishConcept(path, serialized, mode, undefined, confirmed))
+      return { id: input.id, path, created: false, noop: true };
+  } else if (options.expected !== undefined) {
+    const info = await lstat(path);
+    if (!info.isFile() || !await publishConcept(path, serialized, mode ?? (info.mode & 0o777), options.expected))
+      throw new OkfWriteError("The concept changed. Review it again before saving.");
+  } else {
+    await writeFile(path, serialized, { encoding: "utf8", mode });
+    if (privateConcept && process.platform !== "win32") await chmod(path, 0o600);
+  }
+  const dir = posix.dirname(input.id) === "." ? "" : posix.dirname(input.id);
   const kind = existing === undefined ? "Creation" : "Update";
-  if (!inDbOnlyDir(input.id) && !input.metadataOnly)
+  const publicLog = !privateConcept && !input.metadataOnly;
+  if (options.batch) {
+    options.batch.dirs.add(dir);
+    if (publicLog) {
+      options.batch.log.push({ id: input.id, date: todayUtc(),
+        entry: formatLogEntry(kind, input.id, fm.title as string, fm.description as string) });
+    }
+  } else {
+    if (!options.deferIndex) await regenerateIndexes(root, dir);
     // Private concepts never leak titles into the committed root log.md;
     // metadata-only stamps aren't content changes worth a log entry.
-    await appendLog(root, kind, input.id, fm.title as string, fm.description as string);
+    if (publicLog) await appendLog(root, kind, input.id, fm.title as string, fm.description as string);
+  }
   return { id: input.id, path, created: existing === undefined };
 }

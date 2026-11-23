@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AiError, createGateway, detectProvider, resolveCall } from "../src/core/ai/gateway.ts";
 import {
+  brainAiDefaults,
   ConfigError,
   configFilePath,
   loadConfig,
@@ -59,6 +60,37 @@ describe("resolution (pure)", () => {
       /no rerank support/,
     );
   });
+
+  test("brain defaults preserve precedence and do not redirect credentials to inherited endpoints", () => {
+    const settings = {
+      provider: "openai", model: "app-chat", baseUrl: "http://configured-openai/chat",
+      embedModel: "app-embed", embedBaseUrl: "http://configured-openai/embeddings",
+      [brainAiDefaults]: { provider: "anthropic", model: "brain-chat" },
+    };
+    expect(resolveCall("chat", settings, {
+      ANTHROPIC_API_KEY: "fixture-anthropic", OKB_CHAT_BASE_URL: "http://inherited-app-proxy",
+    })).toMatchObject({ provider: "anthropic", model: "brain-chat", baseUrl: "https://api.anthropic.com/v1", apiKey: "fixture-anthropic" });
+    expect(resolveCall("embed", settings, NO_ENV)).toMatchObject({
+      provider: "openai", model: "app-embed", baseUrl: "http://configured-openai/embeddings",
+    });
+    const override = { ...settings, [brainAiDefaults]: { embedProvider: "voyage" } };
+    expect(resolveCall("embed", override, { VOYAGE_API_KEY: "fixture-voyage" })).toMatchObject({
+      provider: "voyage", model: "voyage-3", baseUrl: "https://api.voyageai.com/v1", apiKey: "fixture-voyage",
+    });
+    const env = { OKB_CHAT_PROVIDER: "gemini", OKB_CHAT_MODEL: "env-chat", OKB_CHAT_BASE_URL: "http://configured-gemini" };
+    expect(resolveCall("chat", settings, env)).toMatchObject({ provider: "gemini", model: "env-chat", baseUrl: "http://configured-gemini" });
+    expect(resolveCall("chat", settings, env, { provider: "openai", model: "override" })).toMatchObject({
+      provider: "openai", model: "override", baseUrl: "http://configured-openai/chat",
+    });
+    expect(resolveCall("chat", { baseUrl: "http://unbound-local" }, { OPENAI_API_KEY: "fixture-openai" })).toMatchObject({
+      provider: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "fixture-openai",
+    });
+    const legacy = { OKB_CHAT_BASE_URL: "http://env-openai", OPENAI_API_KEY: "fixture-openai", OPENROUTER_API_KEY: "fixture-openrouter" };
+    expect(resolveCall("chat", {}, legacy)).toMatchObject({ provider: "openai", baseUrl: "http://env-openai" });
+    expect(resolveCall("chat", { [brainAiDefaults]: { provider: "openrouter" } }, legacy)).toMatchObject({
+      provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1", apiKey: "fixture-openrouter",
+    });
+  });
 });
 
 describe("gateway dialects (stub local server — the offline path)", () => {
@@ -66,6 +98,8 @@ describe("gateway dialects (stub local server — the offline path)", () => {
   let last: { path: string; body: Record<string, unknown>; headers: Headers };
   const base = () => `http://127.0.0.1:${server.port}`;
   const gw = createGateway({}, NO_ENV);
+  const events = (items: unknown[]) => new Response(items
+    .map((item) => `data: ${JSON.stringify(item)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
 
   beforeAll(() => {
     server = Bun.serve({
@@ -75,6 +109,23 @@ describe("gateway dialects (stub local server — the offline path)", () => {
         const path = new URL(req.url).pathname;
         const body = (await req.json()) as Record<string, unknown>;
         last = { path, body, headers: req.headers };
+        if (path === "/chat/completions" && body.stream === true) return events([
+          { choices: [{ delta: { content: "a" } }] },
+          { choices: [{ delta: { content: "b" }, finish_reason: "stop" }] },
+        ]);
+        if (path === "/messages" && body.stream === true) return events([
+          { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "private" } },
+          { type: "content_block_delta", delta: { type: "text_delta", text: "a" } },
+          { type: "content_block_delta", delta: { type: "text_delta", text: "b" } },
+          { type: "message_stop" },
+        ]);
+        if (path.includes(":streamGenerateContent")) {
+          expect(new URL(req.url).searchParams.get("alt")).toBe("sse");
+          return events([
+            { candidates: [{ content: { parts: [{ thought: true, text: "private" }, { text: "a" }] } }] },
+            { candidates: [{ content: { parts: [{ text: "b" }] }, finishReason: "STOP" }] },
+          ]);
+        }
         if (path.endsWith("/chat/completions"))
           return Response.json({ choices: [{ message: { content: "local says hi" } }] });
         if (path.endsWith("/embeddings"))
@@ -174,6 +225,15 @@ describe("gateway dialects (stub local server — the offline path)", () => {
     await expect(gw.chat([{ role: "user", content: "hi" }], { provider: "openai" })).rejects.toThrow(
       /OPENAI_API_KEY/,
     );
+  });
+
+  test.each(["ollama", "openai", "openrouter", "anthropic", "gemini"])("streams only answer text through %s", async (provider) => {
+    const deltas: string[] = [];
+    const result = await gw.chat([{ role: "user", content: "hi" }], { provider, baseUrl: base(), apiKey: "fixture" }, {
+      onDelta: (text) => deltas.push(text),
+    });
+    expect(deltas).toEqual(["a", "b"]);
+    expect(result.text).toBe("ab");
   });
 });
 

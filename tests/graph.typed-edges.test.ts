@@ -102,9 +102,9 @@ describe("engine stores rel", () => {
 });
 
 describe("relationalRanking", () => {
-  test("'what cites X' → inbound cites edges of the anchor", () => {
+  test("'what cites X' → inbound cites edges of the anchor", async () => {
     const e = fixtureEngine();
-    const r = relationalRanking("what cites project atlas", e);
+    const r = await relationalRanking("what cites project atlas", e);
     expect(r).not.toBeNull();
     expect(r!.rel).toBe("cites");
     expect(r!.anchor).toBe("projects/atlas");
@@ -112,21 +112,21 @@ describe("relationalRanking", () => {
     e.close();
   });
 
-  test("'atlas depends on' → outbound depends-on edges", () => {
+  test("'atlas depends on' → outbound depends-on edges", async () => {
     const e = fixtureEngine();
-    const r = relationalRanking("what does project atlas depend on", e);
+    const r = await relationalRanking("what does project atlas depend on", e);
     expect(r).not.toBeNull();
     expect(r!.rel).toBe("depends-on");
     expect(r!.ranking).toEqual(["infra/queue"]);
     e.close();
   });
 
-  test("no-ops: no relation phrase, no anchor hit, no edges of that rel", () => {
+  test("no-ops: no relation phrase, no anchor hit, no edges of that rel", async () => {
     const e = fixtureEngine();
-    expect(relationalRanking("weather tomorrow", e)).toBeNull();
-    expect(relationalRanking("what cites zzz-nonexistent", e)).toBeNull();
-    expect(relationalRanking("queue contradicts", e)).toBeNull(); // rel unused in graph
-    expect(relationalRanking("cites", e)).toBeNull(); // nothing left to anchor on
+    expect(await relationalRanking("weather tomorrow", e)).toBeNull();
+    expect(await relationalRanking("what cites zzz-nonexistent", e)).toBeNull();
+    expect(await relationalRanking("queue contradicts", e)).toBeNull(); // rel unused in graph
+    expect(await relationalRanking("cites", e)).toBeNull(); // nothing left to anchor on
     e.close();
   });
 });

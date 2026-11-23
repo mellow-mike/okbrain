@@ -56,7 +56,9 @@
    */
   function resolveInternal(href, baseId) {
     if (!href) return null;
-    if (href.indexOf('#concept:') === 0) return decodeURIComponent(href.slice(9));
+    if (href.indexOf('#concept:') === 0) {
+      try { return decodeURIComponent(href.slice(9)); } catch { return null; }
+    }
     if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.charAt(0) === '#') return null;
     var t = href.split('#')[0].split('?')[0];
     if (!/\.md$/.test(t)) return null;
@@ -119,19 +121,56 @@
     return '<span class="actor">' + esc(ev.by) + '</span>' + (ev.at ? ' <span class="muted">· ' + esc(ev.at) + '</span>' : '');
   }
 
+  function resourceLink(resource, title) {
+    var label = esc(title || resource);
+    var target = okbSafeUrl(resource);
+    if (target === null || target === '') return label;
+    var external = /^https?:\/\//i.test(target) ? ' target="_blank" rel="noopener" class="external"' : '';
+    return '<a href="' + esc(target) + '"' + external + '>' + label + '</a>';
+  }
+
+  /** Preserve the graph's relative-first path-field resolution and bundle-root fallback. */
+  function sourceNoteCandidates(resource, baseId) {
+    if (typeof resource !== 'string') return null;
+    var target = okbSafeUrl(resource);
+    if (!target) return null;
+    var end = target.charAt(0) === '<' ? target.indexOf('>') : -1;
+    var dest = end >= 0 ? target.slice(1, end) : target.split(/\s/, 1)[0];
+    if (/^(?:#|\/\/|[a-z][a-z0-9+.-]*:)/i.test(dest) || dest.includes('\\')) return null;
+    var relative = resolveInternal(dest, baseId);
+    if (!relative || /[\\\u0000-\u001f\u007f]/.test(relative)) return null;
+    var root = /^[/.]/.test(resource) ? null : resolveInternal(dest);
+    return root && root !== relative ? [relative, root] : [relative];
+  }
+
+  function sourceLink(resource, title, opts) {
+    var label = esc(title || resource);
+    var target = okbSafeUrl(resource);
+    if (!target) return label;
+    if (/^(?:(?:https?|ftp):\/\/[^/\\?#]|mailto:)/i.test(target)) return resourceLink(resource, title);
+    var candidates = opts && sourceNoteCandidates(resource, opts.baseId);
+    var id = candidates && candidates.find(function (candidate) { return opts.known(candidate); });
+    return id ? '<a href="' + esc(opts.hrefFor(id)) + '" class="internal" data-id="' + esc(id) + '">' + label + '</a>' : label;
+  }
+
   /** `sources` entries as a list with credibility signals. */
-  function sourcesList(sources) {
-    if (!sources || !sources.length) return '<span class="muted">—</span>';
-    return '<ul class="sources">' + sources.map(function (s) {
-      var label = esc(s.title || s.resource);
-      var res = String(s.resource || '');
-      var link = /^https?:\/\//i.test(res)
-        ? '<a href="' + esc(res) + '" target="_blank" rel="noopener" class="external">' + label + '</a>'
-        : '<a href="' + esc(res) + '">' + label + '</a>';
+  function sourcesList(sources, localUsage, opts) {
+    var entries = (sources || []).map(function (s) { return typeof s === 'string' ? { resource: s } : s; })
+      .filter(function (s) { return s && typeof s.resource === 'string' && s.resource !== ''; });
+    if (!entries.length) return '<span class="muted">—</span>';
+    return '<ul class="sources">' + entries.map(function (s) {
+      var res = s.resource;
+      var link = sourceLink(res, s.title, opts);
       var sig = [];
       if (s.author) sig.push(esc(s.author));
       if (s.last_modified) sig.push('modified ' + esc(String(s.last_modified).slice(0, 10)));
       if (s.usage_count != null) sig.push(esc(s.usage_count) + ' uses');
+      if (localUsage && Object.hasOwn(localUsage, res)) {
+        var observed = localUsage[res];
+        var usageWindow = observed.usage_window;
+        sig.push('<span title="' + esc(usageWindow.from.slice(0, 10) + ' to ' + usageWindow.to.slice(0, 10)) + '">' +
+          esc(observed.usage_count) + ' local uses</span>');
+      }
       return '<li>' + (s.id ? '<code>' + esc(s.id) + '</code> ' : '') + link +
         (sig.length ? ' <span class="muted">(' + sig.join(' · ') + ')</span>' : '') + '</li>';
     }).join('') + '</ul>';
@@ -144,6 +183,8 @@
     wireLinks: wireLinks,
     badges: badges,
     actorLine: actorLine,
+    resourceLink: resourceLink,
+    sourceNoteCandidates: sourceNoteCandidates,
     sourcesList: sourcesList,
   };
 })();

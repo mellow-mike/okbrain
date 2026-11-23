@@ -1,0 +1,82 @@
+.coding-page { padding-bottom: var(--space-8); }
+.coding-page header h2 { margin-bottom: var(--space-2); }
+.coding-projects { max-width: none; }
+.coding-project-links { gap: var(--space-2); }
+.coding-project-links a {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+.coding-project-links a[aria-current="page"] { border-color: var(--accent); }
+.coding-project-header { gap: var(--space-1); padding-top: var(--space-3); }
+.coding-project-header h3 { font-size: 18px; line-height: 24px; font-weight: 700; text-transform: none; margin: 0; color: var(--ink); }
+.coding-workspace-grid { display: grid; gap: var(--space-4); grid-template-columns: minmax(0, 5fr) minmax(0, 4fr); align-items: start; }
+.coding-left, .coding-right, .coding-panel, .coding-panel form { max-width: none; min-width: 0; }
+.coding-panel {
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--plane);
+  overflow-wrap: anywhere;
+}
+.coding-panel > summary { cursor: pointer; font-weight: 650; }
+.coding-panel h3 { margin: 0; }
+.coding-panel [hidden] { display: none !important; }
+/* Keep adjacent actions from rewrapping between pointer down and up. */
+.coding-panel [data-context-controls] button:hover:not(:disabled),
+.coding-panel [data-branch-actions] button:hover:not(:disabled),
+.coding-panel [data-run-copy-actions] button:hover:not(:disabled) { font-weight: 560; }
+.coding-branch-history { max-height: 24rem; overflow: auto; min-width: 0; }
+.coding-branch-history pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.coding-comparison {
+  width: min(64rem, calc(100% - 2 * var(--space-4)));
+  max-height: calc(100% - 2 * var(--space-4));
+  margin: auto;
+  overflow: auto;
+  color: var(--ink);
+}
+.coding-comparison::backdrop { background: rgb(0 0 0 / 55%); }
+.coding-comparison > .stack { max-width: none; }
+.coding-comparison-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+.coding-comparison-side { min-width: 0; padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.coding-comparison-side pre { max-height: 22rem; overflow: auto; overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+  .coding-comparison-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.coding-form { padding-top: var(--space-4); }
+.coding-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr)); }
+.coding-deployment-summary { margin: 0; }
+.coding-deployment-summary dd { margin-inline-start: 0; }
+.coding-panel input, .coding-panel select { min-width: 0; }
+.coding-preview details, .coding-result details { border-top: 1px solid var(--line); padding-top: var(--space-2); }
+.coding-preview pre, .coding-result pre { max-height: 26rem; overflow: auto; }
+.coding-result { border-top: 1px solid var(--line); padding-top: var(--space-4); }
+.coding-review-history { padding-inline-start: var(--space-5); }
+.coding-review-history li { margin-block: var(--space-2); overflow-wrap: anywhere; }
+.coding-review-note { white-space: pre-wrap; }
+.coding-feedback:empty { display: none; }
+.coding-runs { max-height: 20rem; overflow-y: auto; padding: var(--space-1); }
+.coding-run {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  height: auto;
+  width: 100%;
+  text-align: left;
+  white-space: normal;
+  padding: var(--space-2) var(--space-3);
+}
+.coding-run[aria-pressed="true"] { border-color: var(--accent); }
+.coding-run strong { display: block; overflow-wrap: anywhere; }
+.coding-run span:last-child { font-size: 12px; }
+.coding-audit { padding-left: var(--space-5); }
+.coding-audit li { padding-block: var(--space-1); }
+@media (max-width: 920px) {
+  .coding-workspace-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.coding-team { max-width: 1160px; margin: 0 auto; padding: var(--space-6) var(--space-4); }
+.coding-team [hidden] { display: none !important; }
+.coding-team > header { padding-bottom: var(--space-3); border-bottom: 1px solid var(--line); }
+.coding-team > #team-entrance { max-width: 520px; }
+.coding-team .coding-project-links a { cursor: default; }

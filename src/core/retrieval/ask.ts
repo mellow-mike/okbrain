@@ -7,6 +7,8 @@
 
 import type { ChatMessage, ChatResult } from "../ai/gateway.ts";
 import { readConceptPermissive } from "../okf/bundle.ts";
+import { fmString } from "../okf/document.ts";
+import { isPrivateConcept, isPrivateConceptAt } from "../okf/privacy.ts";
 import { MAX_CHUNK_CHARS } from "./chunk.ts";
 import { hybridRetrieve, type HybridArms, type HybridHit } from "./hybrid.ts";
 import type { RetrievalProfile } from "./profiles.ts";
@@ -15,6 +17,11 @@ export interface AskDeps {
   bundle: string;
   arms: HybridArms;
   chat(messages: ChatMessage[]): Promise<ChatResult>;
+  /** Optional streaming call for synthesis. Internal query expansion stays off the answer stream. */
+  synthesize?(messages: ChatMessage[]): Promise<ChatResult>;
+  signal?: AbortSignal;
+  /** Skip local-only notes at the provider boundary unless the caller opted in. */
+  includePrivate?: boolean;
   /** Optional rerank of the pool (caller owns gating and failure policy). */
   rerank?(query: string, hits: HybridHit[]): Promise<HybridHit[]>;
   /** Called with the packed context before synthesis (streaming surfaces). */
@@ -73,30 +80,41 @@ export async function packContext(
   bundle: string,
   hits: HybridHit[],
   budgetChars: number,
+  { includePrivate = true } = {},
 ): Promise<{ blocks: string[]; packed: HybridHit[] }> {
   const blocks: string[] = [];
   const packed: HybridHit[] = [];
   let size = 0;
   for (const h of hits) {
     let text = h.snippet;
-    if (text === undefined)
+    let hit = h;
+    if (!includePrivate) {
+      try {
+        const { parsed, doc } = await readConceptPermissive(bundle, h.id);
+        if (!parsed || isPrivateConcept(h.id, doc.frontmatter)) continue;
+        const body = doc.body.trim();
+        const description = fmString(doc.frontmatter.description);
+        hit = { ...h, title: fmString(doc.frontmatter.title) || h.id, description };
+        if (text === undefined || !body.includes(text)) text = (body || description).slice(0, MAX_CHUNK_CHARS);
+      } catch { continue; }
+    } else if (text === undefined)
       try {
         const body = (await readConceptPermissive(bundle, h.id)).doc.body.trim();
         text = (body === "" ? h.description : body).slice(0, MAX_CHUNK_CHARS);
       } catch {
         text = h.description; // index knows an id the bundle no longer has
       }
-    const block = `[${h.id}] ${h.title}\n${text}`;
+    const block = `[${hit.id}] ${hit.title}\n${text}`;
     if (packed.length > 0 && size + block.length > budgetChars) break;
     blocks.push(block);
-    packed.push(h);
+    packed.push(hit);
     size += block.length + 2;
   }
   return { blocks, packed };
 }
 
 /** Ids cited in the answer, in order of first appearance, verified against `packed`. */
-export function extractCitations(answer: string, packed: HybridHit[]): Citation[] {
+export function extractCitations(answer: string, packed: Citation[]): Citation[] {
   const known = new Map(packed.map((h) => [h.id, h.title]));
   const out: Citation[] = [];
   for (const m of answer.matchAll(/\[([^\][\n]+)\]/g)) {
@@ -111,13 +129,55 @@ export async function askBrain(
   deps: AskDeps,
   profile: RetrievalProfile,
 ): Promise<AskResult> {
+  deps.signal?.throwIfAborted();
   const queries = [
     question,
     ...(profile.multiQuery > 0 ? await queryVariants(question, profile.multiQuery, deps.chat) : []),
   ];
+  deps.signal?.throwIfAborted();
   const { hits, vectorSkipped } = await hybridRetrieve(queries, deps.arms, profile, profile.vecK);
-  const base = { profile: profile.name, vectorSkipped };
-  if (hits.length === 0)
+  deps.signal?.throwIfAborted();
+  const candidates = deps.includePrivate === false ? await publicHits(deps.bundle, hits) : hits;
+  const pool = deps.rerank && candidates.length ? await deps.rerank(question, candidates) : candidates;
+  const { blocks, packed } = await packContext(deps.bundle, pool, profile.budgetChars, { includePrivate: deps.includePrivate });
+  return answerFromContext(question, { blocks, context: packed.map(citationOf), profile: profile.name, vectorSkipped }, deps);
+}
+
+function citationOf({ id, title }: Citation): Citation { return { id, title }; }
+
+export async function publicHits<T extends { id: string }>(bundle: string, hits: T[]): Promise<T[]> {
+  const excluded = await Promise.all(hits.map((hit) => isPrivateConceptAt(bundle, hit.id)));
+  return hits.filter((_, index) => !excluded[index]);
+}
+
+export interface PreparedContext {
+  blocks: string[];
+  context: Citation[];
+  profile: string;
+  vectorSkipped: string | null;
+}
+
+export async function prepareLocalContext(
+  question: string,
+  bundle: string,
+  arms: Pick<HybridArms, "engine">,
+  profile: RetrievalProfile,
+  includePrivate: boolean,
+): Promise<PreparedContext> {
+  const { hits, vectorSkipped } = await hybridRetrieve([question], arms, profile, profile.vecK);
+  const { blocks, packed } = await packContext(bundle, hits, profile.budgetChars, { includePrivate });
+  return { blocks, context: packed.map(citationOf), profile: profile.name, vectorSkipped };
+}
+
+export async function answerFromContext(
+  question: string,
+  prepared: PreparedContext,
+  deps: Pick<AskDeps, "chat" | "onContext" | "synthesize" | "signal">,
+): Promise<AskResult> {
+  const { blocks, context, profile, vectorSkipped } = prepared;
+  deps.signal?.throwIfAborted();
+  const base = { profile, vectorSkipped };
+  if (context.length === 0)
     return {
       ...base,
       answer: "No relevant concepts found in the brain — try `okb search`, or add notes first.",
@@ -127,18 +187,16 @@ export async function askBrain(
       model: null,
     };
 
-  const pool = deps.rerank ? await deps.rerank(question, hits) : hits;
-  const { blocks, packed } = await packContext(deps.bundle, pool, profile.budgetChars);
-  deps.onContext?.(packed.map(({ id, title }) => ({ id, title })));
-  const { text, provider, model } = await deps.chat([
+  deps.onContext?.(context);
+  const { text, provider, model } = await (deps.synthesize ?? deps.chat)([
     { role: "system", content: SYNTH_SYSTEM },
     { role: "user", content: `Concepts:\n\n${blocks.join("\n\n")}\n\nQuestion: ${question}` },
   ]);
   return {
     ...base,
     answer: text,
-    citations: extractCitations(text, packed),
-    context: packed.map(({ id, title }) => ({ id, title })),
+    citations: extractCitations(text, context),
+    context,
     provider,
     model,
   };

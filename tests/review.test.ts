@@ -34,6 +34,14 @@ const queue = (rows: ReviewRow[], edges: LinkEdge[] = []) =>
   reviewQueue(rows, edges, NOW, { ...defaultReviewConfig, queueSize: 100 });
 
 describe("scoring signals (pure)", () => {
+  test("a missed claim deadline surfaces after a pre-deadline review and respects a later review", () => {
+    const cfg = { ...defaultReviewConfig, queueSize: 100 };
+    const deadlines = new Map([["due", "2026-07-08"]]);
+    const due = row("due", { type: "claim", lastReviewed: "2026-07-07T12:00:00Z" });
+    expect(reviewQueue([due], [], NOW, cfg, deadlines)[0]?.reasons).toContain("claim due 2026-07-08");
+    expect(reviewQueue([{ ...due, lastReviewed: "2026-07-09T12:00:00Z" }], [], NOW, cfg, deadlines)).toEqual([]);
+    expect(reviewQueue([{ ...due, snoozeUntil: "2026-07-12T12:00:00Z" }], [], NOW, cfg, deadlines)).toEqual([]);
+  });
   // A linked pair isolates staleness: no orphan/hub/neighbor/inbox signal fires.
   const pair = (days: number): [ReviewRow[], LinkEdge[]] => [
     [row("a", { timestamp: daysAgo(days) }), row("b", { timestamp: daysAgo(days) })],

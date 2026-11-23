@@ -77,9 +77,19 @@ describe("rrfFuse", () => {
 
 describe("hybridRetrieve", () => {
   test("both-arm hit ranks first; sources tag each arm; snippet from best chunk", async () => {
+    const asyncArms: HybridArms = {
+      ...arms(),
+      engine: {
+        ...eng,
+        search: async (...args) => eng.search(...args),
+        edgesOf: async (id) => eng.edgesOf(id),
+        getNode: async (id) => eng.getNode(id),
+      },
+      vectors: { ...store, search: async (...args) => store.search(...args) },
+    };
     const { hits, vectorSkipped } = await hybridRetrieve(
       ["databases"],
-      arms(),
+      asyncArms,
       PROFILES.balanced!,
       10,
     );

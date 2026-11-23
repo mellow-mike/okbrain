@@ -3,26 +3,189 @@
 Living, granular roadmap for okbrain. **It grows organically** — add subtasks as
 you discover them, log bugs in the Bug Log, drop unscheduled ideas in Backlog,
 and append a dated line to the Progress Log each session. Maintaining this file
-is required by `CLAUDE.md`. Design rationale lives in `CONTEXT.md`.
+is described in [AGENTS.md](AGENTS.md). Design rationale lives in [CONTEXT.md](CONTEXT.md).
 
 ## Legend
 `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `(Rn)` see Bug Log
 
 ## Current focus
-> **Stages 0–6 complete.** The brain ingests (import/capture/clip/rss),
-> enriches itself behind guardrails (`okb enrich`), retrieves over keyword +
-> vector + graph + typed-edge relational arms, proposes links through
-> review, runs nightly maintenance (`okb jobs` under OS cron), ships agent
-> skills, packages (vec0 beside the binary, five-target release workflow,
-> one-command offline local package, Homebrew/Scoop templates), mounts
-> multiple brains with per-mount read-only policy (`--brain`, GUI
-> switcher), scores opinions (`okb take` / `resolve` / `calibrate`), and —
-> as of Stage 6 — writes **OKF v0.2** (provenance / trust / lifecycle
-> families, actors, `okb upgrade` for v0.1 bundles) behind a GUI that is a
-> full product surface (Home, Browse, a Concept reader, delete, jobs,
-> upgrade, sanitized rendering). Postgres and a desktop wrapper stay
-> deferred (see 5.4). Next: a tagged `v0.1.0` release, signing when
-> certificates exist, and Backlog items as they earn their way in.
+
+Stages 0–6 built the knowledge bundle, graph, retrieval, CLI, GUI, and MCP.
+The [product plan](docs/PRODUCT-PLAN.md) builds from that base in two directions.
+
+### Stage 7 — Personal second brain
+
+- [x] Import ChatGPT and Claude conversation text as private drafts with
+  provenance, preview, and create-only deduplication.
+- [x] Add explicit local ChatGPT sign-in and cited questions through
+  eligible plans, with separately selected account, model list, and sign-out.
+- [x] Reduce graph reads during link suggestions and incremental provenance refresh.
+- [x] Add browser onboarding and a Sources view for local ChatGPT and Claude
+  exports, with selected-file preview and private draft import.
+- [x] Make first capture, local search, and review discoverable from an empty
+  brain. Verified keyboard navigation at 375 px with outbound browser requests blocked.
+- [x] Add per-source history and reviewed reconciliation for browser
+  bookmarks, Markdown, and Notion exports. Preserve local edits in prior drafts.
+- [x] Add a live, read-only Notion connection limited to the pages a user shares
+  and explicitly previews. Support offline snapshot import and disconnect.
+- [x] Add browser ChatGPT account management with account selection, model
+  selection, sign-out, and exact source preview before sending a question.
+- [x] Add in-app provider key management and local model endpoint settings.
+- [x] Manage named brain folders and loopback MCP HTTP access from Settings.
+- [x] Add bounded focused maps with source, privacy, and date filters and
+  explanations of direct relationships.
+- [x] Package the personal and coding interfaces in a native macOS app.
+- [x] Set Git identity and connect a new HTTPS origin in the Mac and web apps.
+  Show publication destinations and recover interrupted text conflicts in place.
+- [x] Preview, replace, or disconnect a personal Git origin in the Mac and web
+  apps. Keep local history and clear tracking and push bindings to the old origin.
+- [x] Save and remove a private, repository-scoped GitHub credential for
+  app-managed personal HTTPS sync from the Mac or web app.
+- [x] Restore a shared GitHub brain onto a second device from the Mac or web
+  app, validate the bundle, and rebuild local search and graph data.
+- [x] Schedule recurring maintenance in the Mac and web apps with per-brain
+  status, pause and resume, and approval for network jobs.
+- [x] Inspect and copy a note’s saved Markdown and YAML from the Mac and web
+  apps, clear its resource URI, and set the search result limit and profile.
+- [x] Build a first search index and run the original query from Search. Open
+  the reviewed Markdown picker from Add and link directly imported notes.
+- [x] Filter Browse by exact tag and follow note tags into that view. Retain
+  the tag and type when returning from a note.
+- [x] Copy a completed answer and verified bundle citation links from both
+  Ask routes, with selectable Markdown when clipboard access is unavailable.
+- [x] Save a completed answer from either Ask route as a private Markdown
+  draft with model attribution and verified sources. Recover a lost save response.
+- [x] Build a first map and its local index in place with the selected filters.
+- [x] Export the machine-readable graph from the Mac and web apps. Exclude
+  private drafts by default and offer an explicit private export.
+- [x] Keep private notes in local Review while using only public note metadata
+  for optional AI annotations.
+- [x] Use public note tags for optional clip suggestions. Keep marking a note
+  reviewed local even when its vector is missing.
+
+### Stage 8 — Enterprise coding
+
+- [x] Pin Pi Durable and Pi AI 1.0 and exercise crash recovery on real Pi
+  SQLite persistence with a deterministic test provider.
+- [x] Ship local coding sessions with a workspace and attachment scope,
+  request IDs, and reviewable responses.
+- [x] Open standalone CLI sessions in the local Mac and web apps. Preview and
+  send new requests, inspect saved source, and resume or cancel pending work.
+- [x] Delete standalone Pi transcripts in the Mac and web apps using the
+  existing cross-process lease and a recoverable deletion marker.
+- [x] Preview bounded, deterministic excerpts from explicitly scoped Git
+  projects. Bind the reviewed selection to its source bytes at admission and
+  recover from the stored snapshot.
+- [x] Copy the exact source selection manifest before sending a Coding
+  request from the apps or editor. Keep source text out of the copied manifest.
+- [x] Expose local request status, active context estimates, Pi Durable history
+  compaction, and recorded provider usage including cache counters.
+- [x] Show the session input limit, output allowance, and model window alongside
+  the active context estimate in the apps and editor inspection.
+- [x] Copy a versioned JSON run report from app and editor history with
+  status, usage, and references to saved source.
+- [x] Compact older Pi context on demand from the Mac app, web app, and editor.
+  Recover an approved local recap after interruption and keep original runs.
+- [x] Start fresh Pi context in idle sessions from the Mac app, web app, and
+  editor. Preserve earlier requests, source snapshots, and review decisions.
+- [x] Carry an optional owner-authored handoff into fresh Pi context from the
+  apps and editor. Bind confirmation to the reviewed note and active context.
+- [x] Create a native Pi alternative review branch from the latest accepted
+  ordinary answer. Review inherited context and approve a fresh source and
+  branch context preview on each send. Keep separate usage and review with
+  shared transcript retention and an exact editor handoff.
+- [x] Compare saved alternative and original answers, evidence references, and
+  request usage in the Mac and web apps and the editor. Apply a reviewed
+  alternative patch and bind GitHub publication to that run's recorded commit.
+- [x] Support Gemini through Pi AI. Show Pi Durable session usage by model
+  and separate the main conversation from package review children.
+- [x] Surface bounded Pi Durable answer text during runs in browser and editor
+  inspection, with review controls available after completion.
+- [x] Show Pi Durable task stages and counts for the selected request and
+  its child conversations in app and editor run inspection.
+- [x] Let project reviewers inspect the saved task and exact admitted source
+  for a selected run in the app or editor, including each package review.
+- [x] Offer an approved-source line lookup for explicit files and scoped
+  excerpts, using Pi Durable replay against the saved request bytes.
+- [x] Report the approved ranges Pi actually served and counts of refused
+  calls in saved run inspection. Enforce the current approved source on
+  ordinary and alternative requests.
+- [x] Add versioned project profiles, a rebuildable worktree-aware symbol and
+  dependency index, selection explanations, and stable Pi provider affinity.
+- [x] Save reusable project request presets in the Mac and web apps. Use a
+  preset in the apps or editor with a fresh source preview and approval.
+- [x] Compare explicit attachments, scoped lexical previews, and indexed
+  previews in a pinned synthetic monorepo with latency, evidence, and simulated
+  token and cache measurements.
+- [x] Measure evidence recall and preview latency on pinned public Vite source
+  across six repository tasks and two scope and budget settings. Improve
+  indexed excerpt recall from 20.0% to 53.3% with the same source boundaries.
+- [x] Record opt-in evaluations against saved previews, compare strategy usage,
+  and let a different project member review the captured evidence and outcome.
+- [x] Reuse saved evaluation cases in new sessions from the Mac and web apps.
+  Verify the author, reviewer, and injected-provider metrics in separate browsers.
+- [x] Load the six pinned Vite cases and three retrieval recipes from the Mac
+  and web apps. Verify the Git checkout and bind each trial to a fresh preview.
+- [x] Prepare the verified public Vite revision in the project form and show a
+  queue of saved attempts ready for independent project review.
+- [x] Run both Vite source retrieval studies from the Mac and web apps with
+  progress, cancellation, and exportable results from the shared benchmark.
+- [x] Rehearse all 36 pinned Vite trials through the team API on the exact
+  checkout with an injected provider and separate fixture reviewer.
+- [!] Measure live provider usage and tokens per accepted result with
+  independent human review of citations and outcomes. Waiting on an approved
+  provider account and an independent human reviewer.
+- [x] Add project authorization, expiring member tokens, dedicated worker
+  subprocesses, per-project credentials, and team status and cancellation.
+- [x] Verify local crash recovery and request replay, project-scoped audit,
+  transcript deletion, review and approval, and a team browser through local HTTPS.
+- [x] Record durable review decisions and optional notes in the Mac, web, and
+  editor apps. Reuse the latest change-request note in a reviewed follow-up.
+- [x] Open retained requests by session name and request ID in the Mac, web,
+  and editor apps, including requests outside the recent list.
+- [x] Add opt-in Linux Docker worker isolation and owner-configured transcript
+  expiry with expired-ID replay protection. Verify with a real offline Docker run
+  and application-level retention tests.
+- [x] Exercise offline Linux Docker backup and restore with the real worker.
+  Verify saved receipt replay after checkout removal, member scope, and
+  expired-ID protection across restores.
+- [x] Give the local operator deployment settings and a disposable offline
+  Docker worker check in the Mac and web apps. Exercise the real isolation
+  controls, a missing local image, and member and read-only authorization.
+- [x] Add an explicitly approved model metadata lookup from the configured
+  worker so the operator can check provider access on the deployment host.
+- [!] Verify failure, retention, access policy, and worker isolation on the
+  intended enterprise deployment, including actual provider egress and backups.
+  Waiting on access to that host. Local and CI checks use the offline Linux
+  Docker worker.
+- [x] Add explicitly previewed, independent Pi Durable package reviews with
+  task-owned child conversations, combined usage, and a human-reviewed handoff.
+- [x] Preview and apply owner-approved local patches to existing tracked files
+  after accepting a result. Record approval and reconcile interrupted writes.
+- [x] Open exact patch proposals from accepted Pi responses in the Mac and web
+  review form and from VS Code and Cursor. Require preview and approval to apply.
+- [x] Apply approved patches with new files and publish them through the same
+  verified GitHub branch workflow while preserving the local Git index.
+- [x] Bind GitHub repositories, show activity, and prepare a GitHub browser
+  comparison for accepted results.
+- [x] Prepare a shallow GitHub branch checkout from the Mac and web apps before
+  registering a Coding project. Use transient authentication for private source.
+- [x] Preview an issue from the bound GitHub repository and use it in a new
+  Coding draft. Keep task editing, source preview, and approval separate.
+- [x] Preview and publish an owner-approved GitHub pull request from an accepted
+  run using a separate publishing credential and a durable PR receipt.
+- [x] Publish an applied patch from the Mac or web app as a new GitHub branch
+  from a verified base, recover a lost response, and use the branch in the PR flow.
+- [x] Package VS Code and Cursor integration for approved active-file requests
+  and reviewing runs.
+- [x] Preview one-off requests from local registered repositories in VS Code
+  and Cursor. Bind active-file and repository sends to read-only previews.
+- [x] Connect the VS Code and Cursor extension to an HTTPS team workspace
+  for approved repository requests, saved source inspection, and review.
+- [x] Restore an owner-approved team listener across server restarts, report
+  occupied ports, and keep the saved team port separate from the owner app.
+
+Stages 0–6 and the logs below are historical records.
 
 ---
 
@@ -130,8 +293,10 @@ Goal: a real PKM you can write to, conformant on every save, versioned in git.
       under `core.autocrlf=true`; db_only end-to-end; CLI `--status`/`--json`
 
 ### 1.6 Optional
-- [ ] `okb watch` — re-index on file change (cross-platform watcher) —
-      **deferred**: recursive watching differs per OS; revisit when it hurts
+- [x] Refresh keyword search and graph links after external note edits, moves, and
+      deletions with `okb watch` and **Settings → Watch brain folder**. Use
+      the index's portable traversal, coalesce edits into serial index passes,
+      and stop if the watched mount loses write permission.
 
 ---
 
@@ -347,7 +512,8 @@ Goal: the brain improves itself on a schedule.
       rest; a single explicit feed fails loudly); `rss.maxItems` config
 - [x] `import.ts` (bulk md) and `capture.ts` landed at 1.3, clip at F-A —
       this stage's remaining source was feeds
-- [ ] (Later) browser grab; email/calendar
+- [x] Capture browser pages and selected text with the local clip bookmarklet.
+- [x] Preview and import saved email (`.eml`) and calendar (`.ics`) files into private drafts from the web app, macOS app, or CLI.
 - [x] Tests: RSS+Atom parse (rel=alternate, content:encoded, dc:creator,
       relative links, linkless items), idempotent re-pull, in-run dedupe,
       limit paging, doctor-clean output, CLI no-feeds error + live guard
@@ -360,6 +526,9 @@ Goal: the brain improves itself on a schedule.
       ok), path allow/deny prefixes, page cap (checked last so policy
       refusals report their real reason), step cap; guarded fetch underneath
       (SSRF guard stays live)
+- [x] Apply the enrichment host and path rules before following redirects.
+- [x] Connect Clip, RSS, and enrichment to vetted addresses through redirects,
+  preserving the source hostname for TLS and applying one fetch deadline.
 - [x] Crawler loop: JSON-action protocol over the plain-text chat gateway
       (list_concepts / read_concept / fetch_url / write_concept / done);
       enrich existing | mint `references/<slug>` (new ids confined there,
@@ -415,9 +584,9 @@ Goal: the brain improves itself on a schedule.
 
 ### 4.5 Jobs / cron
 - [x] `core/jobs/worker.ts` — sequential runner + `.okb/jobs.lock` (exclusive
-      create; stale lock — dead pid, unreadable, or >24 h — reclaimed once);
-      scheduling belongs to the OS (cron/launchd/Task Scheduler invoking
-      `okb jobs`), no daemon in v1
+      create; stale lock — dead pid, unreadable, or >24 h — reclaimed once).
+      The app schedules jobs while its local server is open. External
+      schedulers can invoke the single-pass `okb jobs` command.
 - [x] `okb jobs [--only …]` runs: index refresh (also regenerates edges/
       backlinks wholesale), embed backfill (only when a vector store already
       exists — never creates one), rss pull (config `rss.feeds`), review
@@ -460,8 +629,9 @@ Goal: the brain improves itself on a schedule.
       verified locally
 - [x] Homebrew formula + Scoop manifest templates (`packaging/`, both built
       on the okb-and-vec0-side-by-side rule) + `packaging/README.md`
-- [!] Signed/notarized binaries — blocked on org certificates; the hook
-      points and per-OS steps are documented in `packaging/README.md`
+- [!] Signed/notarized release artifacts require publisher credentials. The
+      native packagers support macOS Developer ID and notarization and
+      Windows Authenticode. See `packaging/README.md` for both platforms.
 
 ### 5.2 Multi-brain mounts (brains axis)
 - [x] Config `brains` map (string path or `{ path, readonly }`; `~`
@@ -488,14 +658,13 @@ Goal: the brain improves itself on a schedule.
 - [x] Tests: pure Brier/bucket/overdue math + CLI e2e (doctor-clean claims,
       single settlement, validation) (`tests/claims.test.ts`)
 
-### 5.4 Deliberately deferred
-- [!] `core/engine/postgres.ts` (pgvector) + rebuild-parity test — no
-      Postgres in the 3-OS CI matrix means it can't meet the "most
-      well-tested" bar; the engine interface stays the seam; revisit when a
-      bundle actually outgrows SQLite (decision 2026-07-20)
-- [!] Tauri/Electron desktop wrapper — the GUI is already cross-platform
-      via `okb serve`, and a wrapper adds the repo's heaviest dependency
-      for chrome; revisit on real demand (decision 2026-07-20)
+### 5.4 Local cache choice and macOS app
+- [x] Optional local PostgreSQL and pgvector caches for keyword search,
+      graph, review, and embeddings. Select per brain from web and macOS
+      Settings or the CLI. SQLite stays the default across all three OSes.
+      A Linux integration job checks rebuild parity against real pgvector.
+- [x] Native desktop app over the local API. AppKit and WebKit provide the
+      macOS window, folder selection, and both product workflows.
 
 ---
 
@@ -573,7 +742,10 @@ Goal: the brain improves itself on a schedule.
       binary; `okb --version`; MCP server version)
 - [x] `bun run package` — `scripts/package-release.ts --local`: host-only
       archive with the vec0 from `node_modules`, fully offline
-- [x] CI + release pin Bun 1.3.14 (B6 was a `latest` drift)
+- [x] CI, release, and the worker pin Bun 1.4.3 for guarded proxy handling (B6
+      was a `latest` drift).
+- [x] Verify the complete release candidate in PR CI. Match the release tag
+      to the package version and verify the assembled files before publishing.
 - [x] Docs: README (v0.2, GUI tour, offline package, upgrade), CONTEXT,
       CLAUDE.md invariant 1, REFERENCES (R1 updated, R3/R4 added), skills
 - [ ] Tag `v0.1.0` (runs the release workflow) — the maintainer's call
@@ -612,9 +784,16 @@ Goal: the brain improves itself on a schedule.
 ## Cross-cutting (ongoing, never "done")
 - [ ] Cross-platform: every feature green on macOS/Linux/Windows CI
 - [ ] Logging + actionable error messages on every failure path
-- [ ] Performance: cold start, index build, search latency tracked as they grow
+- [x] Track app process startup, fresh index build, and warm search latency in
+  Linux CI. Run `bun run build` and `bun run scripts/benchmark-personal.ts` to
+  repeat the 1,024-note offline benchmark locally.
 - [ ] Security: trust boundary honored on every new op; SSRF guard on `fetch_url`
 - [ ] Docs upkeep: `ROADMAP.md` + `CONTEXT.md` + `docs/context/REFERENCES.md` current
+
+On 2026-11-22, five Linux runs of the compiled CLI against a 512-note
+synthetic bundle measured median process startup of 156 ms, fresh index build
+of 704 ms, and keyword search of 155 ms. Index and search timings include
+process startup.
 
 ---
 
@@ -639,8 +818,10 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B13 | 2026-09-03 | med | gui | `jobs` (admin, not localOnly) had no GUI home although the 3.2 decision promised every network-facing op one; the wiring test listed ops by hand and simply omitted it | hand-maintained expectation list | fixed | Settings → Maintenance runs `jobs` (job subset); the API test now derives the required op set from the registry |
 | B14 | 2026-09-03 | low | authoring | `okb new` derived the directory from the raw type (`Attested Computation` → `Attested Computations/x`, with the space) | `${type}s/` without slugifying | fixed | `slugify(type)+"s"`; test in `tests/okf.v02.test.ts` |
 | B16 | 2026-09-26 | low | gui | The router toggled `active` on every `#nav a`, including the wordmark's own `#home` link — on Home the wordmark took the nav highlight (under the design system: the active tick and weight 720) | selector matched the brand link | fixed | router uses `#nav > a`; found and re-checked by the Chromium drive (no unit surface for it) |
-| B17 | 2026-09-26 | low | viz/gui | `sources[].resource` bundle paths (root-relative per OKF, e.g. `policies/x.md`) render as struck-through "broken" links in `viz.html` (the viewer runs `wireLinks` over the whole detail panel, which resolves them relative to the concept) and navigate to a 401/404 JSON page from the GUI reader | `sourcesList` emits the raw path as `href`; neither surface routes it through `resolvePathField` semantics | open | — |
+| B17 | 2026-09-26 | low | viz/gui | `sources[].resource` bundle paths such as `policies/x.md` show as broken links in the offline graph and open a JSON error page from the note reader | `sourcesList` emitted file paths directly | fixed | Resolve source paths against available notes, including a bundle-root fallback, then route them inside the reader or graph. |
 | B15 | 2026-09-03 | med | ingest | `okb capture` wrote to the `inbox/` directory but never tagged `inbox`, so captures were invisible to `okb inbox`, the Inbox view, and the review queue's inbox signal (the reading inbox is the tag, not the directory) | capture didn't add the tag | fixed | captures carry the `inbox` tag; regression in `tests/authoring.test.ts` |
+| B18 | 2026-11-22 | high | coding | Patch preview and apply refused every tracked file whose permission bits were not exactly `0644` or `0755` ("Use an ordinary tracked UTF-8 file with its Git permissions"). A checkout made under umask `002` or `077` holds `0664` or `0600` files, and `git apply` writes the draft copy under the same umask. Nine patch tests failed on a stock Ubuntu account while CI passed under umask `022` | tracked files were compared with the full index mode, although Git and the new-file branch look only at the owner-executable bit | fixed | compare the owner-executable bit and refuse set-ID and sticky bits for tracked and new files; `tests/coding.approved-patch.test.ts` covers umask `002`, umask `077`, and a `0640` file, and still refuses an executable or set-ID file |
+| B19 | 2026-11-22 | low | tests | `windows-latest` failed on two consecutive heads. `tests/api.sync.test.ts` "Git setup and recovery…" starts 196 Git processes and passed Bun's 5 s default test timeout on the Windows runner. Bun then killed the Git child of the request in flight, so the local sync after an origin disconnect returned 409, or the run reported a bare timeout. Reproduced on Linux by delaying every `git` start by 50 ms | the Git sync test files ran on the default timeout, while slow tests elsewhere already had explicit ones; the Windows `Test` step takes about 180 s against 35 s on Linux | fixed | `setDefaultTimeout(30_000)` in the six Git sync test files and an explicit timeout on two Coding tests; the full suite passes with every `git` start delayed by 60 ms |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -650,12 +831,10 @@ Severity: `crit` (data loss / corruption / non-conformant write) · `high`
 
 ## Backlog (unscheduled ideas)
 Capture anything not yet placed in a stage; promote into a stage when picked up.
-- [ ] Full-text snippet highlighting in `okb search` output
-- [ ] Bulk import performance: each imported file regenerates its whole
-      `index.md` ancestor chain + appends `log.md`; batch the regeneration for
-      large trees if it gets slow
-- [ ] `okb capture` triage flow: promote `inbox/` notes to a proper home
-      (`okb move`? skill?) once graph tooling (1.4) exists
+- [x] Show FTS excerpts with matched terms in browser search and CLI output.
+- [x] Batch `index.md` generation and `log.md` writes across bulk imports. Refresh
+      the derived search index for saved files when a later file fails.
+- [x] File captures from Inbox, the note reader, or `okb inbox file` with a destination preview, explicit confirmation, and a forwarding note at the old address.
 - [x] Writer no-op detection: skip the write (and the `timestamp` refresh) when
       the result would be byte-identical, so re-running imports/agent passes
       never churns git history. `writeConcept` reserializes the candidate with
@@ -666,50 +845,166 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
       `core/stats.ts` (pure `computeStats`): by-type + top-tag breakdowns,
       orphan/inbox/never-reviewed counts, oldest/newest + a stale window. Needs
       an index (fails loudly otherwise, per B3); auto-exposed on CLI/API/MCP.
-- [ ] Bundle templates / starter vocabularies
-- [ ] Export to other PKM formats (one-way) for portability checks
-- [ ] Link extraction and doctor's `log.md` heading scan are regex-based and
-      code-fence-unaware — a `](x.md)` or `## heading` inside a fenced code
-      block is treated as real. Revisit if it bites.
-- [ ] Concept-id case sensitivity differs across filesystems (macOS/Windows
-      case-insensitive); decide on a canonical-casing policy before it matters.
-- [ ] Per-page `db_only` (frontmatter flag → sync appends the path to
-      `.gitignore`); v1 privacy is per-directory only.
+- [x] Optional Personal knowledge and Projects and decisions starter guides for empty brains on Home and through `okb init --template`, with editable Markdown and suggested types and tags.
+- [x] One-way Markdown and Obsidian vault export in Settings and `okb export-markdown`. Keeps frontmatter, makes links between exported notes relative, and excludes private notes unless selected.
+- [x] Preserve fenced Markdown examples when recognizing links and the
+      `index.md` and `log.md` section headings.
+- [x] Preserve existing concept path spelling on writes and delete. Doctor
+      reports aliases that break portability across filesystems.
+- [x] Per-note `db_only: true` in the editor and CLI. Sync stores exact exclusions in local Git metadata, refuses tracked private paths, and leaves Git history intact. Public manifests and default outgoing context omit private notes.
 - [x] `viz.html` and the GUI render concept bodies through
       `core/viz/safe-markdown.js` (raw HTML escaped, URL schemes gated — B9);
       the shared `core/viz/render.js` builds on it.
-- [ ] True token streaming for `okb ask` / the SSE endpoint: the gateway
-      returns whole chat responses, so the `answer` event arrives in one
-      piece; add SSE parsing per dialect when incremental rendering matters.
-- [ ] Per-brain settings: a mount could carry its own retrieval profile /
-      provider defaults (today `brains` entries are path + readonly only).
+- [x] Stream text deltas through configured API and local model routes in Ask
+      and `okb ask --stream`. Verify citations after the provider completes.
+- [x] Override the app's retrieval profile for a named brain from its mount settings.
+- [x] Set independent chat and embedding provider/model defaults for named brains in Settings.
 - [x] GUI brain switcher: the local API re-scopes per request via
       `x-okb-brain` (read-only policy included); the sidebar has the
       dropdown.
-- [ ] Claims in review: surface overdue claims (`resolve_by` past) as a
-      Resurface signal so settling them becomes part of the daily queue.
-- [ ] Per-directory `log.md` (OKF §9 allows one at any level); okbrain
-      maintains only the root log today.
-- [ ] Upstream-style `index.md` (H1 sections, relative links) as a
-      generator option, for bundles shared with the reference tooling.
-- [ ] `usage_count` / `usage_window` credibility signals from local usage
-      (reads, ask citations) — the spec's adoption signal, sourced from
-      the brain's own telemetry, opt-in.
-- [ ] `verified` events for machine checks (`process:okb-doctor` after a
-      clean doctor run?) — decide whether a conformance pass counts as
-      confirmation; today only humans and agents verify.
-- [ ] Attested Computation execution/attestation (§10) — deliberately out of
-      scope for a personal brain; the contract is displayed, not run.
-- [ ] `okb export-viz --fonts`: embed the design system's faces in
-      `viz.html` (+~490 KB base64) for a pixel-faithful shared export
-- [ ] One graph component for both surfaces: the GUI graph view and the
-      static viewer duplicate their Cytoscape wiring (styles, filters,
-      detail panel); a shared `core/viz` module would halve it
+- [x] Surface overdue open claims in Review with a link to the claim outcome controls.
+- [x] Maintain an optional `log.md` in public subfolders, enabled through
+      Settings or `okb log create`.
+- [x] Generate reference-style `index.md` files with H1 sections and relative
+      links through Settings or `okb manifests style reference`.
+- [x] Opt-in local `usage_count` / `usage_window` signals for note opens and
+      verified Ask citations. The app shows these alongside author-supplied
+      sources without modifying their portable provenance.
+- [x] Record `verified` events for explicitly approved successful computation
+      attestations. Doctor reports format conformance separately.
+- [x] Preview, run, and independently attest typed integer count and sum
+      computations over local CSV data. External runtime contracts remain
+      readable with the OKF v0.2 fixtures.
+- [x] Embed the app's licensed fonts on request in `viz.html` from Settings or
+      with `okb export-viz --fonts`.
+- [x] Use one graph component for the app and offline HTML export, including
+      Cytoscape styling, filters, and the note inspector.
 
 ---
 
 ## Progress Log
+
 Newest first. One line per session: what changed + what's next.
+- 2026-11-22 — Added graph JSON export to the Mac and web apps and a source
+  manifest copy to the Coding apps and editor. Fixed patch approval under
+  umasks other than `022` (B18). Local checks passed 741 tests under umask
+  `022` and `002`, 25 editor tests, the 375 px browser smoke, and the compiled
+  binary. The macOS app jobs of CI run 45090959270 built both architectures
+  and saved both graph exports through the app's save handling. Gave the Git
+  sync tests time for Windows runners (B19). Live provider evaluation,
+  intended-host verification, signing credentials, and the `v0.1.0` tag
+  remain open.
+- 2026-11-22 — Added reviewed Git origin replacement and disconnection in
+  Settings, with the old GitHub credential available for separate removal.
+- 2026-11-22 — Added the app source retrieval benchmark with measured results
+  from both pinned studies. The work creates no Coding requests or provider usage.
+- 2026-11-22 — Prepared the exact Vite benchmark checkout in the Coding apps
+  and added a queue for independent evaluation reviewers.
+- 2026-11-22 — Added GitHub checkout setup in the apps and protected private tags
+  and local Review decisions from incidental provider requests.
+- 2026-11-22 — Added retained run lookup and release candidate verification.
+  Built first maps in place and kept private notes out of Review AI annotations.
+- 2026-11-22 — Added an owner-approved model lookup from the configured Coding
+  worker. Live provider evaluation and intended deployment verification remain open.
+- 2026-11-22 — Added private Coding review history, safe review retries,
+  and a browser follow-up draft from saved change requests.
+- 2026-11-22 — Added private Ask drafts with model attribution and verified
+  citations. Tested explicit save, lost-response recovery, and mount binding.
+- 2026-11-22 — Added reviewed GitHub issue drafts in Coding and portable
+  Markdown copy with verified citations in both personal Ask routes.
+- 2026-11-22 — Added exact tag browsing, local repository requests in the
+  editor, and Pi source lookup receipts. Rehearsed all 36 pinned Vite trials
+  with an injected provider and a separate fixture reviewer.
+- 2026-11-22 — Added owner deployment checks in the Mac and web apps and
+  verified the offline Docker probe. Live provider and host drills remain open.
+- 2026-11-22 — Added first search from Search and a Markdown picker from Add,
+  including a reviewed folder import and links to saved notes.
+- 2026-11-22 — Added saved-answer comparison and review in the apps and editor.
+  Tested alternative patch approval, GitHub head checks, and pull request recovery.
+- 2026-11-22 — Added Pi alternative reviews with per-send context approval,
+  separate usage and review, and an editor handoff. Verified the browser,
+  API recovery, transcript expiry, and Docker backup and restore.
+- 2026-11-22 — Added note source access, resource clearing, and offline search
+  result controls to the Mac and web apps. Fixed internal provenance links in
+  the note reader and offline graph.
+- 2026-11-22 — Bound guarded Clip, RSS, and enrichment requests to checked
+  addresses and verified TLS and proxy handling on Bun 1.4.3.
+- 2026-11-22 — Fixed the SQLite cache startup race between watch and foreground
+  reads. Schema initialization and explicit rebuilds now commit atomically.
+- 2026-11-22 — Added the pinned Vite studies and validated checkout and source
+  approval for app-managed evaluation trials.
+- 2026-11-22 — Added evaluation case reuse and tested the author-to-reviewer
+  workflow in two browser sessions with an injected provider.
+- 2026-11-22 — Added machine-readable Coding run reports to the Mac app, web
+  app, and editor, including scoped team run inspection.
+- 2026-11-22 — Applied personal enrichment’s host and path scope to every
+  redirect destination.
+- 2026-11-22 — Added owner-approved local Pi compaction and recovery to the Mac
+  and web apps and the VS Code and Cursor extension.
+- 2026-11-22 — Made Pi context limits visible in the Mac app, web app, and editor.
+- 2026-11-22 — Added optional reviewed handoffs to Pi context resets in the
+  Mac and web apps and the VS Code and Cursor extension.
+- 2026-11-22 — Added explicit team listener startup persistence, bind recovery,
+  and reserved-port isolation across okbrain server restarts.
+- 2026-11-22 — Added owner-confirmed Pi context reset with durable replay and
+  access to saved requests in the Mac app, web app, and editor.
+- 2026-11-22 — Connected team members to HTTPS Coding workspaces from VS Code
+  and Cursor, with project-bound credentials and reviewed repository previews.
+- 2026-11-22 — Added per-brain maintenance schedules to the Mac and web apps,
+  with persisted outcomes and separate RSS and embedding approval.
+- 2026-11-22 — Added in-app GitHub brain restore with local checkout validation,
+  selected-branch tracking, opt-in credential storage, and offline indexing.
+- 2026-11-22 — Added project run presets for recurring task, query, and profile
+  combinations. Preserved per-request approval across the apps and editor.
+- 2026-11-22 — Connected accepted Pi responses to patch review in the apps
+  and editor. Added files can go through local approval and GitHub publication.
+- 2026-11-22 — Added private GitHub sync credentials and owner-confirmed
+  standalone Pi transcript deletion in the Mac and web apps.
+- 2026-11-22 — Added in-app Git identity and origin setup, a reviewable text
+  conflict resolver, and search index refresh after sync and rebase recovery.
+- 2026-11-22 — Blocked remote sync when deleted `db_only/` files remain in
+  Git history. Verified the staging area and a disposable remote stay intact.
+- 2026-11-22 — Added saved source inspection to project review in the Mac app,
+  web app, and editor. Preserved imported source metadata in the note editor
+  and added startup, index, and search measurements to Linux CI.
+- 2026-11-22 — Connected applied coding patches to GitHub branch and pull
+  request creation, with exact file previews and recovery after an interrupted write.
+- 2026-11-22 — Exposed Pi Durable task stages in app and editor run inspection.
+  Tested private state backup, restore, and expired request replay protection
+  through the offline Linux Docker worker and local project API.
+- 2026-11-22 — Connected standalone CLI sessions to the Mac and web apps,
+  with source approval, saved request inspection, resume, and cancellation.
+  Added opt-in macOS notarization and Windows Authenticode packaging.
+- 2026-11-22 — Added Gemini and session usage to Coding. Exposed full
+  conversation import reports, bounded graph traversal, enrichment path
+  allowlists, and a migration actor override in the apps.
+- 2026-11-22 — Added per-brain local PostgreSQL and pgvector caches with
+  web and macOS settings, safe backend switching, and real rebuild parity.
+- 2026-11-22 — Added approved GitHub PR creation and offline email and calendar
+  import. Enforced per-note privacy and path spelling, added local usage,
+  shared the graph component, and added a local CSV computation attester.
+- 2026-11-22 — Added inbox filing with forwarding notes, named-brain provider
+  defaults, folder logs, reference-style Markdown indexes, and an approved-source
+  lookup tool with real Pi replay and usage accounting.
+- 2026-11-22 — Exposed saved feeds, endpoint resets, and brain-level retrieval
+  defaults in Settings. Added portable Markdown export and bounded in-progress
+  Coding answer text across browser and editor surfaces.
+- 2026-11-22 — Streamed answers from configured providers, added folder watch,
+  highlighted search excerpts and overdue claims, and batched Markdown imports.
+  Added independently reviewed coding evaluation, local Docker isolation, and
+  transcript expiry. Live evaluation and intended-host verification remain open.
+- 2026-11-22 — Added both macOS and browser workflows, editor packaging,
+  source reconciliation, consent and focused maps. Coding gained project and
+  team access, subprocess workers, independent package reviews, approved
+  patch application, and GitHub handoff. Live provider and hosted deployment
+  verification remain open.
+- 2026-11-22 — Added local source onboarding and private export previews, and
+  added scoped coding context previews, Pi Durable compaction, and usage inspection.
+  Next milestones are evaluated monorepo indexing and personal source management.
+- 2026-11-22 — Established the personal and enterprise workflows, added
+  local conversation import and ChatGPT plan usage, reduced graph reads,
+  and shipped the local Pi Durable pilot. Next milestones are account and
+  source controls in the GUI and an isolated, authenticated coding worker.
 - 2026-09-26 — **Design system implemented (6.4).** The GUI and the static
   viewer now wear the okbrain design system (R5): dark-first ink on a
   ground, colour only for state and concept types, Literata for the

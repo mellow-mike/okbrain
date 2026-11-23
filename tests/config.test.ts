@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import {
   APP_NAME,
+  configForBrain,
   configDir,
   dataDir,
   resolveBundlePath,
@@ -17,6 +20,22 @@ function platform(over: Partial<Platform>): Platform {
     ...over,
   };
 }
+
+test("configured retrieval follows the actual directory bound to a named mount", () => {
+  const root = mkdtempSync(join(tmpdir(), "okb-mounted-profile-"));
+  try {
+    const target = join(root, "brain");
+    const alias = join(root, "shortcut");
+    mkdirSync(target);
+    symlinkSync(target, alias, process.platform === "win32" ? "junction" : "dir");
+    const cfg = { retrieval: { profile: "balanced" }, brains: { Library: { path: alias, retrievalProfile: "lean" } } };
+    expect(configForBrain(cfg, "Library", realpathSync(target)).retrieval?.profile).toBe("lean");
+    expect(configForBrain(cfg, "Library", realpathSync(root))).toBe(cfg);
+    expect(configForBrain(cfg, undefined, realpathSync(target))).toBe(cfg);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 describe("configDir / dataDir", () => {
   test("linux uses XDG defaults", () => {

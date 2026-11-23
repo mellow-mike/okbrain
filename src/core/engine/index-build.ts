@@ -9,11 +9,13 @@
 // doctor` is where it gets flagged.
 
 import { createHash } from "node:crypto";
-import { sourceTargets } from "../graph/links.ts";
+import { realpathSync } from "node:fs";
+import { pathFieldCandidates, sourceTargets } from "../graph/links.ts";
 import { classifyTargets, type TypedTarget } from "../graph/typed-edges.ts";
 import { log } from "../log.ts";
 import { listConcepts, readConceptPermissive, type PermissiveConcept } from "../okf/bundle.ts";
 import {
+  fmSources,
   fmStatus,
   fmString,
   fmTags,
@@ -23,7 +25,7 @@ import {
   trustTier,
   type OkfDocument,
 } from "../okf/document.ts";
-import type { EdgeRecord, Engine } from "./interface.ts";
+import type { EdgeRecord, IndexEngine } from "./interface.ts";
 
 export interface IndexStats {
   indexed: number;
@@ -33,13 +35,27 @@ export interface IndexStats {
   edges: number;
 }
 
+const indexWrites = new Map<string, Promise<void>>();
+
+/** Keep whole index passes and point updates from interleaving in this process. */
+export function withIndexWrite<T>(root: string, write: () => T | Promise<T>): Promise<T> {
+  const path = realpathSync(root);
+  const result = (indexWrites.get(path) ?? Promise.resolve()).then(write);
+  const release = result.then(() => {}, () => {});
+  indexWrites.set(path, release);
+  void release.then(() => {
+    if (indexWrites.get(path) === release) indexWrites.delete(path);
+  });
+  return result;
+}
+
 const hashOf = (raw: string): string =>
   createHash("sha256").update(raw, "utf8").digest("hex");
 
-function upsertConcept(engine: Engine, { id, doc, parsed }: PermissiveConcept, hash: string): void {
+async function upsertConcept(engine: IndexEngine, { id, doc, parsed }: PermissiveConcept, hash: string): Promise<void> {
   if (!parsed) log.warn("indexing concept with unparseable frontmatter", { id });
   const fm = doc.frontmatter;
-  engine.upsertNode({
+  await engine.upsertNode({
     id,
     type: fmString(fm.type),
     title: fmString(fm.title),
@@ -61,51 +77,70 @@ function upsertConcept(engine: Engine, { id, doc, parsed }: PermissiveConcept, h
  * Outgoing typed targets: body links (classified), then `sources` provenance
  * edges typed `cites` — minus self-links (dangling targets kept; see header).
  */
-function outgoing(id: string, doc: OkfDocument, known: Set<string>): TypedTarget[] {
+function outgoing(id: string, doc: OkfDocument, sources: (string | null)[]): TypedTarget[] {
   const out = classifyTargets(id, doc.body);
   const seen = new Set(out.map((t) => t.dst));
-  for (const dst of sourceTargets(id, doc.frontmatter, known))
-    if (!seen.has(dst)) out.push({ dst, rel: "cites" });
+  for (const dst of sources) {
+    if (dst === null || seen.has(dst)) continue;
+    seen.add(dst);
+    out.push({ dst, rel: "cites" });
+  }
   return out.filter((t) => t.dst !== id);
 }
 
 /** (Re)index the bundle at `root` into `engine`. Safe to run repeatedly. */
-export async function buildIndex(root: string, engine: Engine): Promise<IndexStats> {
+export function buildIndex(root: string, engine: IndexEngine): Promise<IndexStats> {
+  const run = (index: IndexEngine) => reconcileIndex(root, index);
+  return engine.batch ? engine.batch(run) : run(engine);
+}
+
+async function reconcileIndex(root: string, engine: IndexEngine): Promise<IndexStats> {
   const ids = await listConcepts(root);
   const known = new Set(ids);
-  const have = engine.contentHashes();
+  const have = await engine.contentHashes();
   const edges: EdgeRecord[] = [];
   let indexed = 0;
   let skipped = 0;
 
   for (const id of ids) {
     const concept = await readConceptPermissive(root, id);
-    for (const t of outgoing(id, concept.doc, known)) edges.push({ src: id, dst: t.dst, rel: t.rel });
+    const sources = sourceTargets(id, concept.doc.frontmatter, known);
+    for (const t of outgoing(id, concept.doc, sources)) edges.push({ src: id, dst: t.dst, rel: t.rel });
 
     const hash = hashOf(concept.raw);
     if (have.get(id) === hash) {
       skipped++;
       continue;
     }
-    upsertConcept(engine, concept, hash);
+    await upsertConcept(engine, concept, hash);
     indexed++;
   }
 
-  const current = new Set(ids);
   let removed = 0;
   for (const id of have.keys()) {
-    if (current.has(id)) continue;
-    engine.removeNode(id);
+    if (known.has(id)) continue;
+    await engine.removeNode(id);
     removed++;
   }
 
-  engine.replaceEdges(edges);
-  return { indexed, skipped, removed, edges: engine.listEdges().length };
+  await engine.replaceEdges(edges);
+  return { indexed, skipped, removed, edges: (await engine.listEdges()).length };
 }
 
 /** Refresh one concept in an existing index after a write (node + its out-edges). */
-export async function updateIndexFor(root: string, id: string, engine: Engine): Promise<void> {
+export function updateIndexFor(root: string, id: string, engine: IndexEngine): Promise<void> {
+  const run = (index: IndexEngine) => reconcileConcept(root, id, index);
+  return engine.batch ? engine.batch(run) : run(engine);
+}
+
+async function reconcileConcept(root: string, id: string, engine: IndexEngine): Promise<void> {
   const concept = await readConceptPermissive(root, id);
-  upsertConcept(engine, concept, hashOf(concept.raw));
-  engine.replaceEdgesFor(id, outgoing(id, concept.doc, new Set([...engine.listNodeIds(), id])));
+  await upsertConcept(engine, concept, hashOf(concept.raw));
+  const sources = await Promise.all(fmSources(concept.doc.frontmatter).map(async ({ resource }) => {
+    const target = pathFieldCandidates(id, resource);
+    if (!target) return null;
+    const { relative, root } = target;
+    return root !== undefined && !(await engine.hasNode(relative)) && (await engine.hasNode(root)) ? root : relative;
+  }));
+  await engine.replaceEdgesFor(id, outgoing(id, concept.doc, sources));
 }

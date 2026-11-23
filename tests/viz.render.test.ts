@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
+import { resolvePathField } from "../src/core/graph/links.ts";
 
 const VIZ = join(import.meta.dir, "..", "src", "core", "viz");
 
@@ -14,7 +15,12 @@ interface Render {
   renderMarkdown(md: string): string;
   resolveInternal(href: string, baseId?: string): string | null;
   badges(s: { status: string; trust: string; stale: boolean; staleAfter?: string | null }): string;
-  sourcesList(s: unknown[]): string;
+  sourceNoteCandidates(resource: unknown, baseId: string): string[] | null;
+  sourcesList(s: unknown[], localUsage?: Record<string, unknown>, opts?: {
+    baseId: string;
+    known(id: string): boolean;
+    hrefFor(id: string): string;
+  }): string;
   actorLine(ev: { by?: string; at?: string } | null): string;
 }
 
@@ -83,8 +89,55 @@ describe("badges + sources", () => {
     expect(h).toContain('href="https://a.test/&lt;x&gt;"');
     expect(h).toContain("A &lt;t&gt;");
     expect(h).toContain("human:ada · modified 2026-06-15 · 3 uses");
-    expect(h).toContain('<a href="policies/x.md">policies/x.md</a>');
+    expect(h).toContain("<li>policies/x.md</li>");
     expect(R.sourcesList([])).toContain("—");
+  });
+
+  test("source note links follow OKF field resolution and retain local usage by original resource", () => {
+    const baseId = "metrics/gross-margin";
+    const known = new Set(["metrics/policies/local", "policies/local", "policies/root", "policies/quoted & space"]);
+    const opts = { baseId, known: (id: string) => known.has(id), hrefFor: (id: string) => `#concept/${encodeURIComponent(id)}` };
+    const cases: [string, string][] = [
+      ["policies/local.md", "metrics/policies/local"],
+      ["policies/root.md#definition", "policies/root"],
+      ["/policies/local.md", "policies/local"],
+      ["./policies/local.md", "metrics/policies/local"],
+      ["../policies/root.md", "policies/root"],
+      ["<../policies/quoted & space.md#about>", "policies/quoted & space"],
+    ];
+    for (const [resource, id] of cases) {
+      expect(resolvePathField(baseId, resource, known)).toBe(id);
+      expect(R.sourceNoteCandidates(resource, baseId)?.find(opts.known)).toBe(id);
+      expect(R.sourcesList([{ resource }], undefined, opts)).toContain(`href="${opts.hrefFor(id)}" class="internal"`);
+    }
+    const localUsage = { "policies/root.md": { usage_count: 5, usage_window: { from: "2026-06-01", to: "2026-06-30" } } };
+    expect(R.sourcesList(["policies/root.md"], localUsage, opts)).toBe(
+      '<ul class="sources"><li><a href="#concept/policies%2Froot" class="internal" data-id="policies/root">policies/root.md</a>' +
+      ' <span class="muted">(<span title="2026-06-01 to 2026-06-30">5 local uses</span>)</span></li></ul>',
+    );
+  });
+
+  test("absent notes and non-note resources never become raw server or graph hrefs", () => {
+    const baseId = "metrics/gross-margin";
+    const opts = { baseId, known: (id: string) => id === "policies/local", hrefFor: (id: string) => `#concept:${encodeURIComponent(id)}` };
+    const candidates = ["db_only/filtered.md", "./policies/local.md", "/policies/missing.md"];
+    for (const resource of candidates) expect(R.sourceNoteCandidates(resource, baseId)).not.toBeNull();
+    const inert = ["scope:notes", "files/chart.pdf", "//example.test/policies/local.md", "../../policies/local.md", "#concept:policies%2Flocal"];
+    for (const resource of inert) expect(R.sourceNoteCandidates(resource, baseId)).toBeNull();
+    const entries = [...candidates, ...inert].map((resource) => ({ resource, title: "Unavailable <source>" }));
+    const h = R.sourcesList([...entries, null, { title: "Missing resource" }], undefined, opts);
+    expect(h).not.toContain("href=");
+    expect(h).toContain("<li>Unavailable &lt;source&gt;</li>");
+    expect(h).not.toContain("Missing resource");
+    expect(R.sourcesList([{ resource: "https://example.test/record.md" }], undefined, opts)).toContain(
+      'href="https://example.test/record.md" target="_blank" rel="noopener" class="external"',
+    );
+    expect(R.sourceNoteCandidates("https://example.test/record.md", baseId)).toBeNull();
+  });
+
+  test("metadata resource links use the same scheme guard as Markdown links", () => {
+    expect(R.sourcesList([{ resource: "java\nscript:alert(1)", title: "Unsafe source" }])).toBe('<ul class="sources"><li>Unsafe source</li></ul>');
+    expect(R.resolveInternal("#concept:%GG", "note")).toBeNull();
   });
 
   test("actor lines set the actor apart (mono) and escape it", () => {

@@ -8,7 +8,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FetchGuardError } from "../src/core/ingest/fetch-guard.ts";
+import { FetchGuardError, guardedFetch } from "../src/core/ingest/fetch-guard.ts";
 import {
   defaultLimits,
   parseAction,
@@ -187,6 +187,73 @@ describe("runEnrich loop", () => {
       expect(s2.observations[1]).toContain("--no-web");
     } finally {
       rmSync(root2, { recursive: true, force: true });
+    }
+  });
+
+  test("redirects stay within the crawler's allowed hosts and paths", async () => {
+    const root = tempBundle();
+    const visits: string[] = [];
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+      const url = new URL(request.url);
+      visits.push(url.pathname);
+      const foreign = new URL("/allowed/other-host", url);
+      foreign.hostname = "localhost";
+      const redirects: Record<string, string> = {
+        "/allowed/deny-redirect": "/allowed/blocked",
+        "/allowed/outside-redirect": "/elsewhere",
+        "/allowed/host-redirect": foreign.href,
+        "/allowed/start": "topic/article",
+      };
+      const location = redirects[url.pathname];
+      return location ? new Response(null, { status: 302, headers: { location } })
+        : new Response(html("Fixture article", ["next"]), { headers: { "content-type": "text/html" } });
+    } });
+    try {
+      const paths = ["/allowed/deny-redirect", "/allowed/outside-redirect", "/allowed/host-redirect", "/allowed/start"];
+      const seeds = paths.map((path) => new URL(path, server.url).href);
+      const finalUrl = new URL("/allowed/topic/article", server.url).href;
+      const limits = { ...defaultLimits(seeds), maxPages: 1, allowPaths: ["/allowed/"], denyPaths: ["/allowed/blocked"] };
+      const source = { id: "article", resource: finalUrl };
+      const { observations, chat } = scripted([
+        ...seeds.map((url) => act({ action: "fetch_url", url })),
+        act({ action: "write_concept", id: "references/redirected", type: "reference", title: "Fixture article",
+          description: "A source reached through an approved redirect.", body: "Fixture evidence.[^article]", sources: [source] }),
+        act({ action: "done", summary: "" }),
+      ]);
+      const result = await runEnrich(root, "collect fixture sources", seeds, limits,
+        deps(chat, (url, options) => guardedFetch(url, { ...options, allowPrivate: true })));
+      expect(visits).toEqual([...paths, "/allowed/topic/article"]);
+      expect(observations[1]).toContain("path is denied: /allowed/blocked");
+      expect(observations[2]).toContain("path is outside the allowed prefixes: /elsewhere");
+      expect(observations[3]).toContain("host not in the allowlist: localhost");
+      expect(JSON.parse(observations[4]!)).toMatchObject({ url: finalUrl, links: [new URL("next", finalUrl).href] });
+      expect(result.fetched).toEqual([seeds[3]!]);
+      expect(parse(await readFile(join(root, "references", "redirected.md"), "utf8")).frontmatter.sources).toEqual([source]);
+    } finally {
+      await server.stop(true);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an injected fetcher cannot feed out-of-scope returned content to the model", async () => {
+    const root = tempBundle();
+    const linked = "https://ex.org/allowed/discovered";
+    const seed = "https://ex.org/allowed/seed";
+    const { observations, chat } = scripted([
+      act({ action: "fetch_url", url: seed }),
+      act({ action: "fetch_url", url: linked }),
+      act({ action: "done", summary: "" }),
+    ]);
+    try {
+      const limits = { ...defaultLimits([seed]), allowPaths: ["/allowed/"] };
+      const result = await runEnrich(root, "t", [seed], limits, deps(chat, async () => ({
+        url: "https://ex.org/outside", contentType: "text/html", body: html("Refused fixture", [linked]),
+      })));
+      expect(result.fetched).toEqual([]);
+      expect(JSON.parse(observations[1]!)).toEqual({ error: "path is outside the allowed prefixes: /outside" });
+      expect(observations[2]).toContain("seed URLs or links");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

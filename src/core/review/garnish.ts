@@ -4,6 +4,9 @@
 // untouched (the caller catches and warns). Off in the `lean` profile.
 
 import type { ChatMessage, ChatResult } from "../ai/gateway.ts";
+import { readConceptPermissive } from "../okf/bundle.ts";
+import { fmString } from "../okf/document.ts";
+import { isPrivateConcept } from "../okf/privacy.ts";
 
 export interface GarnishNote {
   id: string;
@@ -14,21 +17,40 @@ export interface GarnishNote {
 const RECENT_DAYS = 7;
 const RECENT_CAP = 10;
 
-/** Notes changed within RECENT_DAYS (queue excluded), newest first, capped. */
-export function pickRecent(
-  rows: { id: string; title: string; timestamp: string | null }[],
+/** Use the same Markdown snapshot to check privacy and read metadata for the provider. */
+export async function describePublicReviewNote(bundle: string, id: string): Promise<GarnishNote | undefined> {
+  if (isPrivateConcept(id, {})) return;
+  try {
+    const { parsed, doc } = await readConceptPermissive(bundle, id);
+    if (parsed && !isPrivateConcept(id, doc.frontmatter)) return {
+      id, title: fmString(doc.frontmatter.title) || id, description: fmString(doc.frontmatter.description),
+    };
+  } catch { /* Unavailable notes are never sent to the provider. */ }
+}
+
+/** Eligible notes changed within RECENT_DAYS (queue excluded), newest first, capped. */
+export async function pickRecent(
+  rows: { id: string; timestamp: string | null }[],
   exclude: Set<string>,
   now: Date,
-): { id: string; title: string; timestamp: string }[] {
-  return rows
+  describe: (id: string) => Promise<GarnishNote | undefined>,
+): Promise<GarnishNote[]> {
+  const candidates = rows
     .filter(
       (r): r is typeof r & { timestamp: string } =>
         !exclude.has(r.id) &&
         r.timestamp !== null &&
         now.getTime() - Date.parse(r.timestamp) <= RECENT_DAYS * 86_400_000,
     )
-    .sort((a, b) => (a.timestamp > b.timestamp ? -1 : a.timestamp < b.timestamp ? 1 : 0))
-    .slice(0, RECENT_CAP);
+    .sort((a, b) => (a.timestamp > b.timestamp ? -1 : a.timestamp < b.timestamp ? 1 : 0));
+  const picked: GarnishNote[] = [];
+  for (const { id } of candidates) {
+    const note = await describe(id);
+    if (!note) continue;
+    picked.push(note);
+    if (picked.length === RECENT_CAP) break;
+  }
+  return picked;
 }
 
 const listing = (notes: GarnishNote[]): string =>

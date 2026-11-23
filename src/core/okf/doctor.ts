@@ -7,7 +7,7 @@
 
 import { readFile } from "node:fs/promises";
 import { join, posix } from "node:path";
-import { extractTargets, resolvePathField } from "../graph/links.ts";
+import { extractTargets, markdownOutsideCode, resolvePathField } from "../graph/links.ts";
 import { listMdFiles } from "./bundle.ts";
 import {
   fmSources,
@@ -25,7 +25,7 @@ import {
   type TrustTier,
 } from "./document.ts";
 import { OKF_VERSION } from "./indexmd.ts";
-import { isReservedName, relPathToId } from "./paths.ts";
+import { isReservedName, portablePathKey, relPathToId } from "./paths.ts";
 
 export interface Finding {
   severity: "error" | "warning";
@@ -74,7 +74,7 @@ const COMPUTATION_TYPE = "attested computation";
 function checkLog(path: string, body: string, findings: Finding[]): void {
   let prev: string | undefined;
   let misordered = false;
-  for (const m of body.matchAll(H2)) {
+  for (const m of markdownOutsideCode(body).matchAll(H2)) {
     const h = m[1]!;
     if (!DATE.test(h)) {
       findings.push({
@@ -151,6 +151,8 @@ export async function runDoctor(root: string, now: Date = new Date()): Promise<D
   // Reserved ids included so links to an index.md/log.md aren't "broken".
   const known = new Set(files.map(relPathToId));
   const findings: Finding[] = [];
+  const portablePaths = new Map<string, string>();
+  const reportedAliases = new Set<string>();
   const conceptDirs = new Set([""]); // root always expects an index.md
   const signals: DoctorSignals = {
     trust: { unverified: 0, "machine-confirmed": 0, "human-reviewed": 0 },
@@ -164,6 +166,20 @@ export async function runDoctor(root: string, now: Date = new Date()): Promise<D
   for (const path of files) {
     const name = posix.basename(path);
     const reserved = isReservedName(name);
+    let prefix = "";
+    for (const part of path.split("/")) {
+      prefix = prefix === "" ? part : `${prefix}/${part}`;
+      const key = portablePathKey(prefix);
+      const existing = portablePaths.get(key);
+      if (existing === undefined) portablePaths.set(key, prefix);
+      else if (existing !== prefix && !reportedAliases.has(prefix)) {
+        reportedAliases.add(prefix);
+        findings.push({ severity: "warning", check: "portable-path", path,
+          message: `${prefix} and ${existing} may resolve to the same path on another filesystem.` });
+      }
+    }
+    if (!reserved && isReservedName(portablePathKey(name)))
+      findings.push({ severity: "warning", check: "portable-path", path, message: "This file's name aliases a reserved index.md or log.md." });
     const id = relPathToId(path);
     if (!reserved) {
       concepts++;

@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDoctor } from "../src/core/okf/doctor.ts";
 import { parse } from "../src/core/okf/document.ts";
-import { generateIndexMd, OKF_VERSION } from "../src/core/okf/indexmd.ts";
-import { appendLog, todayUtc } from "../src/core/okf/logmd.ts";
-import { writeConcept } from "../src/core/okf/write.ts";
+import { generateIndexMd, OKF_VERSION, setIndexStyle } from "../src/core/okf/indexmd.ts";
+import { appendLog, createDirectoryLog, todayUtc } from "../src/core/okf/logmd.ts";
+import { writeConcept, writeConceptBatch } from "../src/core/okf/write.ts";
 
 let root: string;
 
@@ -44,13 +44,14 @@ describe("generateIndexMd", () => {
 
   test("preserves H1 and intro; regenerates all ## sections", async () => {
     await writeConcept(root, { id: "d/a", type: "note", title: "A", description: "d1" });
+    const intro = "Hand-written intro.\n\n```markdown\n# Sample title\n## Sample section\n```";
     await writeFile(
       join(root, "d", "index.md"),
-      "# My notes\n\nHand-written intro.\nSecond line.\n\n## stale\n\n- [gone](/nope.md)\n",
+      `${intro}\n\n# My notes\n\n## stale\n\n- [gone](/nope.md)\n`,
     );
     await generateIndexMd(root, "d");
     const body = await read("d", "index.md");
-    expect(body).toStartWith("# My notes\n\nHand-written intro.\nSecond line.\n\n## note\n");
+    expect(body).toStartWith(`# My notes\n\n${intro}\n\n## note\n`);
     expect(body).not.toContain("stale");
   });
 
@@ -74,9 +75,60 @@ describe("generateIndexMd", () => {
     expect(await read("a", "index.md")).toContain("- [b](/a/b/index.md)");
     expect(await read("index.md")).toContain("- [a](/a/index.md)");
   });
+
+  test("reference headings use relative links and preserve the index's authored text on each format change", async () => {
+    await writeFile(join(root, "index.md"), "---\ncustom: keep\n---\n# Field notes\n\nHandwritten intro.\n");
+    await writeConcept(root, { id: "Project files/one", type: "note", title: "One", description: "First" });
+    await setIndexStyle(root, "reference");
+    const formatted = parse(await read("index.md"));
+    expect(formatted.frontmatter).toEqual({ okf_version: OKF_VERSION, custom: "keep", okbrain_index_style: "reference" });
+    expect(formatted.body).toContain("# Field notes\n\nHandwritten intro.");
+    expect(formatted.body).toContain("# Subdirectories\n\n* [Project files](Project%20files/index.md)");
+    expect(await read("Project files", "index.md")).toContain("# note\n\n* [One](one.md) - First");
+    await writeConcept(root, { id: "Project files/two", type: "note", title: "Two", description: "Second" });
+    const reference = await read("Project files", "index.md");
+    expect(reference).toContain("* [Two](two.md) - Second");
+    expect(reference.match(/^# note$/gm)).toHaveLength(1);
+    expect((await runDoctor(root)).findings).toEqual([]);
+    await setIndexStyle(root, "grouped");
+    const grouped = parse(await read("index.md"));
+    expect(grouped.frontmatter).toEqual({ okf_version: OKF_VERSION, custom: "keep" });
+    expect(grouped.body).toContain("# Field notes\n\nHandwritten intro.");
+    expect(await read("Project files", "index.md")).toContain("## note\n\n- [One](/Project files/one.md) — First");
+  });
 });
 
 describe("appendLog", () => {
+  test("adds only public descendant changes to enabled folder logs, including batched imports", async () => {
+    await writeConcept(root, { id: "projects/alpha/setup", type: "note", title: "Setup", description: "Historical" });
+    expect(await createDirectoryLog(root, "projects")).toEqual({ folder: "projects", created: true });
+    expect(await createDirectoryLog(root, "projects/alpha")).toEqual({ folder: "projects/alpha", created: true });
+    await writeConceptBatch(root, async (add) => {
+      await add({ id: "projects/alpha/roadmap", type: "note", title: "Roadmap", description: "Next" });
+      await add({ id: "projects/portfolio", type: "note", title: "Portfolio", description: "Overview" });
+      await add({ id: "projects/alpha/db_only/draft", type: "note", title: "Hidden name", description: "Personal" });
+    });
+    await appendLog(root, "Deletion", "projects/alpha/db_only/draft", "Hidden name");
+    expect(await read("log.md")).toContain("[Setup](/projects/alpha/setup.md)");
+    const parent = await read("projects", "log.md");
+    const child = await read("projects", "alpha", "log.md");
+    expect(parent).toContain("[Portfolio](/projects/portfolio.md)");
+    expect(parent).not.toContain("Setup");
+    expect(child).toContain("[Roadmap](/projects/alpha/roadmap.md)");
+    expect(child).not.toContain("Portfolio");
+    for (const text of [parent, child, await read("log.md")]) expect(text).not.toContain("Hidden name");
+    expect(await createDirectoryLog(root, "projects")).toEqual({ folder: "projects", created: false });
+    expect(await read("projects", "log.md")).toBe(parent);
+  });
+
+  test("appends after fenced examples and validates only actual date sections", async () => {
+    const example = "~~~markdown\n## Sample heading\n## 2099-12-31\n~~~";
+    await writeFile(join(root, "log.md"), `# Log\n\n## ${todayUtc()}\n\n${example}\n`);
+    await appendLog(root, "Creation", "notes/x", "X");
+    expect(await read("log.md")).toBe(`# Log\n\n## ${todayUtc()}\n\n${example}\n\n**Creation**: [X](/notes/x.md)\n`);
+    expect((await runDoctor(root)).findings.filter(({ check }) => check.startsWith("log-"))).toEqual([]);
+  });
+
   test("creates log.md with # Log and a dated Creation entry", async () => {
     await appendLog(root, "Creation", "notes/x", "X", "made it");
     expect(await read("log.md")).toBe(

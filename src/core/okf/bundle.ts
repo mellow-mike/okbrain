@@ -39,8 +39,13 @@ async function* walk(root: string, rel: string): AsyncGenerator<string> {
 /** All `.md` files in the bundle as sorted forward-slash relative paths. */
 export async function listMdFiles(root: string): Promise<string[]> {
   const paths: string[] = [];
-  for await (const relPath of walk(root, "")) paths.push(relPath);
+  for await (const relPath of walkMarkdownFiles(root)) paths.push(relPath);
   return paths.sort();
+}
+
+/** Stream bundle Markdown paths as traversed, including reserved files. */
+export function walkMarkdownFiles(root: string): AsyncGenerator<string> {
+  return walk(root, "");
 }
 
 /** All concept ids in the bundle, sorted; reserved and hidden files excluded. */

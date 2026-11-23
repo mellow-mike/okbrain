@@ -3,6 +3,7 @@
 // (`notes/foo.md` → `notes/foo`); on-disk paths use the OS separator via
 // node:path. Reserved filenames (`index.md`, `log.md`) are not concepts.
 
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 const RESERVED = new Set(["index.md", "log.md"]);
@@ -12,6 +13,36 @@ export function isReservedName(basename: string): boolean {
 }
 
 export class InvalidIdError extends Error {}
+
+/** The portability comparison for names that may alias on another filesystem. */
+export const portablePathKey = (name: string): string => name.normalize("NFC").toLowerCase();
+
+/** Mutations must use the existing spelling and must not introduce case-only aliases. */
+export async function assertConceptPathSpelling(root: string, id: string): Promise<void> {
+  validateId(id);
+  const steps = id.split("/");
+  steps.push(`${steps.pop()!}.md`);
+  if (isReservedName(portablePathKey(steps.at(-1)!)))
+    throw new InvalidIdError("index.md and log.md are reserved in every capitalization.");
+  let directory = root;
+  const prefix: string[] = [];
+  for (const part of steps) {
+    let names: string[];
+    try { names = await readdir(directory); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (!names.includes(part)) {
+      const folded = portablePathKey(part);
+      const alias = names.find((name) => portablePathKey(name) === folded);
+      if (alias !== undefined) throw new InvalidIdError(`Use the existing path spelling ${[...prefix, alias].join("/")}.`);
+      return;
+    }
+    prefix.push(part);
+    directory = join(directory, part);
+  }
+}
 
 /**
  * True when the concept lives under a `db_only/` directory: on disk and in the

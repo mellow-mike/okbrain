@@ -14,6 +14,7 @@ import { SyncError } from "./core/sync.ts";
 import { VERSION } from "./core/version.ts";
 import {
   OpError,
+  checkOpCall,
   operations,
   runOp,
   type Operation,
@@ -47,7 +48,7 @@ const usageFor = (op: Operation): string =>
 
 function helpText(): string {
   const lines = [
-    "okb — OKF-native personal knowledge manager",
+    "okb — personal knowledge and durable coding sessions",
     "",
     "usage: okb <command> [args] [--json] [--bundle <path>]",
     "",
@@ -173,16 +174,19 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     if (spec.stdinFallback && raw[spec.name] === undefined && io.stdin && !process.stdin.isTTY)
       raw[spec.name] = await io.stdin();
 
-  let bundle: string;
+  let bundle = process.cwd();
   let readonly = false;
+  let brainName: string | undefined;
   try {
-    const brainName = brainArg ?? (bundleArg === undefined ? process.env.OKB_BRAIN : undefined);
-    if (brainName !== undefined) {
-      const brain = resolveBrain(brainName);
-      bundle = brain.path;
-      readonly = brain.readonly;
-    } else {
-      bundle = resolveBundlePath(bundleArg);
+    if (!op.bundleIndependent) {
+      brainName = brainArg ?? (bundleArg === undefined ? process.env.OKB_BRAIN : undefined);
+      if (brainName !== undefined) {
+        const brain = resolveBrain(brainName);
+        bundle = brain.path;
+        readonly = brain.readonly;
+      } else {
+        bundle = resolveBundlePath(bundleArg);
+      }
     }
   } catch (e) {
     if (!(e instanceof ConfigError)) throw e;
@@ -197,8 +201,18 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
   let local: LocalContext | undefined;
   try {
     local = openLocalContext(bundle, true, readonly);
-    const result = await runOp(op, local.ctx, raw);
-    io.out((json ? JSON.stringify(result, null, 2) : op.render(result)) + "\n");
+    local.ctx.allowSavedSyncCredential = true;
+    local.ctx.brain = brainName;
+    let written = false;
+    const result = !json && raw.stream === true && op.stream && op.renderStreamFooter
+      ? await op.stream(local.ctx, checkOpCall(op, local.ctx, raw), (event, data) => {
+          if (event !== "delta" || !data || typeof (data as { text?: unknown }).text !== "string") return;
+          written = true;
+          io.out((data as { text: string }).text);
+        })
+      : await runOp(op, local.ctx, raw);
+    const output = json ? JSON.stringify(result, null, 2) : written ? op.renderStreamFooter!(result) : op.render(result);
+    io.out(output + "\n");
     return op.exitCode?.(result) ?? 0;
   } catch (e) {
     if (e instanceof OpError) {
@@ -216,8 +230,12 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     }
     throw e;
   } finally {
-    local?.close();
+    await local?.close();
   }
 }
 
-if (import.meta.main) process.exit(await runCli(process.argv.slice(2)));
+if (import.meta.main) {
+  const args = process.argv.slice(2);
+  const { projectWorkerArg, runProjectWorker } = await import("./core/coding/project-worker.ts");
+  process.exit(args.length === 1 && args[0] === projectWorkerArg ? await runProjectWorker() : await runCli(args));
+}
