@@ -22,6 +22,7 @@ import type { AskResult } from "../src/core/retrieval/ask.ts";
 import { VERSION } from "../src/core/version.ts";
 import {
   bookmarkletJs,
+  clipToken,
   ensureServeToken,
   serveTokenPath,
   tokenMatches,
@@ -97,10 +98,11 @@ describe("request guards", () => {
 
   test("a multibyte token candidate gets 401, not a 500", async () => {
     // Same UTF-16 length as the real token, so the byte-length mismatch is
-    // only discoverable inside the comparison itself.
+    // only discoverable inside the comparison itself. `/clip` is the one
+    // route that still reads a token from the address.
     const candidate = "é".repeat(api.token.length);
     expect(candidate.length).toBe(api.token.length);
-    const res = await fetch(`${base}api/ops?token=${encodeURIComponent(candidate)}`);
+    const res = await fetch(`${base}clip?url=https://example.com&token=${encodeURIComponent(candidate)}`);
     expect(res.status).toBe(401);
   });
 
@@ -111,6 +113,8 @@ describe("request guards", () => {
       expect(res.headers.get("x-frame-options")).toBe("DENY");
       expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      // A linked site or a remote image in a note learns nothing about the local app's address.
+      expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     }
   });
 
@@ -324,12 +328,79 @@ describe("request guards", () => {
     }
   });
 
-  test("token also accepted as Bearer and as query param", async () => {
+  test("the token is accepted as a header or Bearer, never from the address", async () => {
     const bearer = await fetch(base + "api/ops", {
       headers: { authorization: `Bearer ${TOKEN}` },
     });
     expect(bearer.status).toBe(200);
-    expect((await fetch(base + `api/ops?token=${TOKEN}`)).status).toBe(200);
+    expect((await fetch(base + `api/ops?token=${TOKEN}`)).status).toBe(401);
+  });
+
+  // B22: the bookmarklet runs inside the page being clipped, and that page can
+  // read the address it opens. Whatever it finds there must not make it the owner.
+  test("a token read from the bookmarklet's address clips and does nothing else", async () => {
+    const clip = clipToken(TOKEN);
+    const bookmarklet = bookmarkletJs(api.port, TOKEN);
+    expect(bookmarklet).toContain(`/clip?token=${clip}`);
+    expect(bookmarklet).not.toContain(TOKEN);
+    expect(clip).not.toBe(TOKEN);
+    expect(clip).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    // What a page on another origin can send without a preflight: no custom
+    // header, a text/plain body, and the token it read in the address. Both
+    // the clip token and the serve token an older bookmarklet carried fail.
+    const blind = (path: string, token: string, body?: unknown) => fetch(`${base}${path}${path.includes("?") ? "&" : "?"}token=${token}`, {
+      method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body),
+      headers: { origin: "https://clipped.example", ...(body === undefined ? {} : { "content-type": "text/plain;charset=UTF-8" }) },
+    });
+    for (const token of [clip, TOKEN]) {
+      for (const [name, params] of [
+        ["write_concept", { id: "notes/planted", type: "note", title: "Planted", description: "by a clipped page" }],
+        ["delete_concept", { id: "notes/alpha" }],
+        ["init", { "embed-provider": "openai", "embed-base-url": "https://collector.example/v1", "no-default-bundle": true }],
+        ["embed", { "include-private": true }],
+        ["index", {}],
+      ] as const)
+        expect((await blind(`api/op/${name}`, token, params)).status).toBe(401);
+      for (const path of ["api/ops", "api/status", "api/bookmarklet", "api/brains", "api/ask/stream?question=databases"])
+        expect((await blind(path, token)).status).toBe(401);
+    }
+    expect(existsSync(join(bundle, "notes", "planted.md"))).toBe(false);
+    expect(existsSync(join(bundle, "notes", "alpha.md"))).toBe(true);
+    expect(loadConfig().ai?.embedBaseUrl).toBeUndefined();
+
+    // The clip token does reach `/clip`, and only as part of the address.
+    const reached = await fetch(`${base}clip?token=${clip}`);
+    expect(reached.status).toBe(400);
+    expect(await reached.text()).toContain("missing required parameter");
+    expect((await fetch(`${base}clip`, { headers: { "x-okb-token": clip } })).status).toBe(401);
+    expect((await fetch(`${base}api/ops`, { headers: { "x-okb-token": clip } })).status).toBe(401);
+    expect((await fetch(`${base}clip?token=${clip}`, { method: "POST", body: "{}" })).status).toBe(401);
+
+    // A bookmarklet saved by an earlier version still clips, and is told to update.
+    const outdated = await fetch(`${base}clip?token=${TOKEN}`);
+    expect(outdated.status).toBe(400);
+    const page = await outdated.text();
+    expect(page).toContain("Replace it with the one under Add → Bookmarklet");
+    expect(page).not.toContain("window.close");
+    expect(await (await call("clip")).text()).not.toContain("Replace it");
+  });
+
+  test("a request from another origin cannot change anything, even with the token in a header", async () => {
+    const foreign = { origin: "https://other.example", "content-type": "application/json" };
+    for (const [path, body] of [
+      ["api/op/write_concept", { id: "notes/foreign", type: "note", title: "Foreign", description: "from another origin" }],
+      ["api/op/index", {}],
+      ["api/conversations/upload?provider=chatgpt", []],
+      ["api/provider-keys", { provider: "openai", key: "sk-foreign" }],
+    ] as const)
+      expect((await call(path, { method: "POST", headers: foreign, body: JSON.stringify(body) })).status).toBe(403);
+    expect(existsSync(join(bundle, "notes", "foreign.md"))).toBe(false);
+    // The app's own origin and callers without one, such as the CLI's fetch, pass.
+    const own = { origin: `http://127.0.0.1:${api.port}`, "content-type": "application/json" };
+    expect((await call("api/op/search", { method: "POST", headers: own, body: JSON.stringify({ query: "databases" }) })).status).toBe(200);
+    expect((await post("search", { query: "databases" })).status).toBe(200);
+    expect((await call("api/ops", { headers: { origin: "https://other.example" } })).status).toBe(200);
   });
 
   test("a busy port fails with an actionable message", () => {
@@ -437,7 +508,8 @@ describe("server routes for the GUI", () => {
     expect(((await (await call("api/brains")).json()) as { brains: unknown[] }).brains).toEqual([]);
     const bm = (await (await call("api/bookmarklet")).json()) as { port: number; bookmarklet: string };
     expect(bm.port).toBe(api.port);
-    expect(bm.bookmarklet).toContain(`token=${TOKEN}`);
+    expect(bm.bookmarklet).toContain(`token=${clipToken(TOKEN)}`);
+    expect(bm.bookmarklet).not.toContain(TOKEN);
     expect(bm.bookmarklet).toContain(`:${api.port}/clip`);
   });
 
@@ -743,7 +815,8 @@ describe("clip endpoint (bookmarklet)", () => {
     const { bookmarklet, port } = JSON.parse(r.stdout) as { bookmarklet: string; port: number };
     expect(port).toBe(6522);
     expect(bookmarklet.startsWith("javascript:")).toBe(true);
-    expect(bookmarklet).toContain(`token=${ensureServeToken()}`);
+    expect(bookmarklet).toContain(`token=${clipToken(ensureServeToken())}`);
+    expect(bookmarklet).not.toContain(ensureServeToken());
     expect(bookmarklet).toContain("http://127.0.0.1:6522/clip");
     const custom = await okb(["bookmarklet", "--port", "7777", "--json", "--bundle", bundle]);
     expect(JSON.parse(custom.stdout).bookmarklet).toContain(":7777/clip");

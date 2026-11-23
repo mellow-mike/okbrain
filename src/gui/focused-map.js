@@ -23,7 +23,7 @@ function renderFocusedMap(id, seq) {
     '<label class="field"><span>Updated since</span><input name="since" type="date"></label>' +
     '<label><input type="checkbox" name="private"' + (id && id.startsWith('db_only/') ? ' checked' : '') + '> Include private drafts</label></div>' +
     '<div><button class="primary">' + (needsIndex ? 'Build index and map' : 'Build map') + '</button></div></form>' +
-    '<div role="status" id="map-status"></div><div class="stack" id="map-result" tabindex="-1"></div></div>';
+    '<div role="status" id="map-status"></div><div class="stack" id="map-result" data-via="map" tabindex="-1"></div></div>';
   var form = document.getElementById('map-form');
   var submit = form.querySelector('button');
   var result = document.getElementById('map-result');
@@ -75,9 +75,10 @@ function renderFocusedMap(id, seq) {
 
   function draw(map) {
     var nodes = new Map(map.nodes.map(function (node) { return [node.id, node]; }));
-    result.innerHTML = map.nodes.filter(function (item) { return item.root; }).map(function (root) {
+    result.innerHTML = map.nodes.filter(function (item) { return item.root; }).map(function (root, index) {
       var rows = map.edges.filter(function (edge) { return edge.src === root.id || edge.dst === root.id; });
-      return '<section class="card stack"><h3>' + conceptLink(root.id, root.title) + '</h3>' +
+      // Matches are listed strongest first, so a match's place is its rank. Linked notes have none.
+      return '<section class="card stack"><h3 data-rank="' + (index + 1) + '">' + conceptLink(root.id, root.title) + '</h3>' +
         (root.description ? '<p>' + esc(root.description) + '</p>' : '') +
         '<div class="row"><span class="chip">' + esc(root.source) + (root.private ? ' · private' : '') + '</span>' +
         '<a href="' + graphHref(root.id) + '">Open full graph</a></div>' +

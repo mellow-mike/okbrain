@@ -806,6 +806,9 @@ async function ensureLines(
   const path = join(root, name);
   let text = "";
   try {
+    // A shared repository can deliver a link here. Appending would write to its target (B23).
+    if (!(await lstat(path)).isFile())
+      throw new SyncError(`${name} is not a regular file in this brain. Replace the link or special file with a regular file, then sync again.`);
     text = (await readFile(path, "utf8")).replace(/\r\n?/g, "\n");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium, type Browser, type Page, type Request as BrowserRequest } from "playwright";
+import { chromium, type Browser, type Locator, type Page, type Request as BrowserRequest } from "playwright";
 import { createApiServer } from "../src/api.ts";
 import { approvedSourceToolName } from "../src/core/coding/approved-source-tool.ts";
 import { runCodingSession } from "../src/core/coding/durable.ts";
@@ -16,6 +17,7 @@ import { closeCacheClient, createCacheClient, readCacheSettings } from "../src/c
 import { extractTargets } from "../src/core/graph/links.ts";
 import { fmGenerated, fmSources, parse, serialize } from "../src/core/okf/document.ts";
 import type { AskResult } from "../src/core/retrieval/ask.ts";
+import { usabilityStorePath, type UsabilityExport } from "../src/core/usability.ts";
 import type { VizGraph } from "../src/core/viz/export.ts";
 import { githubBranchBrowserFixture } from "./github-branch-browser-fixture.ts";
 
@@ -108,6 +110,9 @@ try {
   const nav = page.getByRole("navigation", { name: "okbrain" });
   const enable = page.getByRole("button", { name: "Enable search and review" });
   await enable.waitFor();
+  // At phone width the links are one row, so the bar leaves most of the screen to the view.
+  assert.ok((await nav.boundingBox())!.height < 210);
+  assert.equal(await page.title(), "Home · okbrain");
   await page.getByRole("heading", { name: "Start with a template" }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Create starter guide" }).isDisabled(), true);
   await page.keyboard.press("Tab");
@@ -335,6 +340,15 @@ try {
   } finally { await page.unroute(askDraftRoute); }
   await nav.getByRole("link", { name: "Review", exact: true }).click();
   await page.getByRole("button", { name: /Reviewed/ }).first().waitFor();
+  // A checkbox keeps its place beside the first line of its label when the words wrap at this width.
+  assert.equal(await page.locator("#rgarnish").evaluate((box) => {
+    const words = document.createRange();
+    words.selectNodeContents(box.nextSibling!);
+    const lines = words.getClientRects();
+    const first = lines[0]!;
+    const edge = box.getBoundingClientRect();
+    return lines.length > 1 && first.top < edge.bottom && first.bottom > edge.top && first.left > edge.right;
+  }), true);
   await page.getByLabel("Queue size", { exact: true }).fill("1");
   await page.locator("#rprofile").selectOption("lean");
   await page.getByRole("button", { name: "Update queue" }).click();
@@ -563,8 +577,13 @@ try {
     await cacheSettings.getByText("SQLite", { exact: true }).waitFor();
   }
   await cacheSettings.getByText("Change cache backend", { exact: true }).click();
+  // A control that does not apply stays hidden, whatever its class displays as (B21).
+  assert.equal(await cacheSettings.getByRole("button", { name: "Use SQLite", exact: true }).isVisible(), false);
+  await page.getByText("Local counts are off.", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Turn off and clear counts" }).isVisible(), false);
   await page.getByRole("button", { name: "Turn on local counts" }).click();
   await page.getByText("Counting local usage.", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Turn on local counts" }).isVisible(), false);
   await page.evaluate((id) => { location.hash = "#concept/" + encodeURIComponent(id); }, answerSource);
   await page.getByText("1 open · 0 Ask citations").waitFor();
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
@@ -1020,6 +1039,15 @@ try {
   await page.getByRole("link", { name: "Watched field note", exact: true }).waitFor();
 
   await nav.getByRole("link", { name: "Graph", exact: true }).click();
+  // Under the top bar the graph and its detail panel end at the bottom of the window, with the hint in sight.
+  const hint = page.locator("#gdetail").getByText("Select a node to see its details.", { exact: true });
+  await hint.waitFor();
+  const windowHeight = page.viewportSize()!.height;
+  const graphView = (await page.locator("#view").boundingBox())!;
+  const hintBox = (await hint.boundingBox())!;
+  assert.ok(Math.round(graphView.y + graphView.height) <= windowHeight);
+  assert.ok(hintBox.y + hintBox.height <= windowHeight);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollHeight - document.documentElement.clientHeight), 0);
   await selectGraphNote(page, "external");
   await page.locator("#gdetail").getByRole("heading", { name: "Watched field note" }).waitFor();
   await page.locator("#gdetail").getByRole("link", { name: "Open", exact: true }).click();
@@ -3605,6 +3633,114 @@ try {
       page.off("request", recordRetrievalPost);
       await page.unroute(endpoint);
     }
+  }
+
+  // A facilitated usability session, by keyboard: start, mark a task, save two
+  // notes, search, open the second result, end the task as found, and export.
+  {
+    // Everything above was ordinary use, which must not have created the store.
+    assert.equal(existsSync(dirname(usabilityStorePath())), false);
+    const marker = "zqxsmokeword";
+    const pressOn = async (target: Locator, key = "Enter") => {
+      await target.focus();
+      await page.keyboard.press(key);
+    };
+    const focused = () => page.evaluate(() => {
+      const element = document.activeElement;
+      return element?.getAttribute("name") ?? element?.textContent ?? "";
+    });
+    await page.evaluate(() => { location.hash = "#settings"; });
+    const card = page.locator("#usability-session");
+    await card.getByText("Not recording.", { exact: true }).waitFor();
+    // Each view names the tab, and on a phone the row of links scrolls to keep the current one in sight.
+    assert.equal(await page.title(), "Settings · okbrain");
+    const current = await nav.getByRole("link", { name: "Settings", exact: true }).boundingBox();
+    assert.ok(current && current.x >= 0 && current.x + current.width <= 375);
+    assert.equal(await nav.getByRole("link", { name: "Settings", exact: true }).getAttribute("aria-current"), "page");
+    assert.equal(await card.getByRole("button", { name: "Stop session", exact: true }).isVisible(), false);
+    assert.equal(await card.getByRole("button", { name: "Export JSON", exact: true }).isVisible(), false);
+    assert.match(await card.innerText(), /Never recorded\. Note text, titles, IDs, paths, or tags\. Search and question text\. Answers\. Error messages\./);
+    const indicator = nav.getByRole("link", { name: "Recording usability session", exact: true });
+    assert.equal(await indicator.count(), 0);
+
+    await pressOn(card.getByRole("button", { name: "Start session", exact: true }));
+    await card.getByText("Recording started.", { exact: true }).waitFor();
+    assert.equal(await focused(), "label");
+    await page.keyboard.type("T3");
+    await page.keyboard.press("Enter");
+    await card.getByText("Task T3 started.", { exact: true }).waitFor();
+    assert.match(await focused(), /^Recording since .+\. 1 event so far\.$/);
+    await card.getByText("Task T3 is open.", { exact: true }).waitFor();
+    await indicator.waitFor();
+
+    await page.evaluate(() => { location.hash = "#home"; });
+    for (const note of ["first", "second"]) {
+      const quick = page.getByRole("textbox", { name: "Quick note" });
+      await quick.focus();
+      await page.keyboard.type(`Usability ${marker} ${note} note`);
+      await page.keyboard.press("Tab");
+      await page.keyboard.press("Enter");
+      await page.getByRole("link", { name: "Open saved note" }).waitFor();
+      await page.waitForFunction(() => (document.getElementById("h-cap-text") as HTMLTextAreaElement).value === "");
+    }
+    await indicator.waitFor();
+    await page.evaluate(() => { location.hash = "#search"; });
+    await page.getByRole("searchbox", { name: "Search notes" }).focus();
+    await page.keyboard.type(marker);
+    await page.keyboard.press("Enter");
+    const hits = page.locator("#sout .card");
+    await hits.nth(1).waitFor();
+    assert.equal(await hits.count(), 2);
+    await pressOn(hits.nth(1).locator(".title a"));
+    await page.locator(".concept-head h2").getByText(new RegExp(`^Usability ${marker} (first|second) note$`)).waitFor();
+    assert.match(await page.title(), new RegExp(`^Usability ${marker} (first|second) note · okbrain$`));
+
+    // The footer link leads back to the controls from any view.
+    await pressOn(indicator);
+    await page.waitForFunction(() => document.activeElement?.id === "usability-title");
+    await card.getByText("Task T3 is open.", { exact: true }).waitFor();
+    await pressOn(card.getByRole("button", { name: "End as found", exact: true }));
+    await card.getByText("Task T3 ended as found.", { exact: true }).waitFor();
+    assert.equal(await focused(), "label");
+    const saving = page.waitForEvent("download");
+    await pressOn(card.getByRole("button", { name: "Export JSON", exact: true }));
+    const download = await saving;
+    assert.equal(download.suggestedFilename(), "okbrain-usability.json");
+    const saved = join(root, "okbrain-usability.json");
+    await download.saveAs(saved);
+    const text = await Bun.file(saved).text();
+    const exported = JSON.parse(text) as UsabilityExport;
+    assert.equal(exported.schema, "okbrain-usability/1");
+    assert.equal(exported.sessions.length, 1);
+    const [session] = exported.sessions;
+    const kinds = session!.events.map(({ kind, via, rank, label, outcome }) =>
+      [kind, via, rank, label, outcome].filter((part) => part !== undefined).join(" "));
+    // Home lists recent notes on arrival and again after each capture.
+    assert.deepEqual(kinds.filter((kind) => !kind.startsWith("browse")), [
+      "task_start T3", "save capture", "save capture", "search", "open search 2", "task_end T3 found",
+    ]);
+    assert.ok(session!.events.every((event) => event.surface === "gui"));
+    assert.equal(session!.events.find((event) => event.kind === "search")!.count, 2);
+    assert.equal(session!.summary.timeToFirstSaveMs, session!.events.find((event) => event.kind === "save")!.offsetMs);
+    assert.equal(session!.summary.firstSaveKind, "capture");
+    assert.deepEqual(session!.summary.tasks.map(({ label, outcome, searches, opens, firstOpenRank, firstOpenVia }) =>
+      ({ label, outcome, searches, opens, firstOpenRank, firstOpenVia })),
+    [{ label: "T3", outcome: "found", searches: 1, opens: 1, firstOpenRank: 2, firstOpenVia: "search" }]);
+    assert.deepEqual(session!.summary.refind, { tasks: 1, found: 1, notFound: 0, abandoned: 0, successRate: 1,
+      medianFoundMs: session!.summary.tasks[0]!.durationMs });
+    for (const content of [marker, "Usability", "inbox/", bundle, root]) assert.equal(text.includes(content), false);
+    await card.getByText(/^Saving okbrain-usability\.json with 1 session and \d+ events\.$/).waitFor();
+
+    await pressOn(card.getByRole("button", { name: "Stop session", exact: true }));
+    await card.getByText("Recording stopped. Export the session before you clear it.", { exact: true }).waitFor();
+    assert.equal(await focused(), "Export JSON");
+    assert.equal(await indicator.count(), 0);
+    page.once("dialog", (dialog) => dialog.accept());
+    await pressOn(card.getByRole("button", { name: "Clear sessions", exact: true }));
+    await card.getByText("Stored sessions cleared.", { exact: true }).waitFor();
+    assert.equal(await focused(), "Start session");
+    await card.getByText("Not recording.", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
   }
 
   await page.evaluate(() => { location.hash = "#concept/%ZZ"; });

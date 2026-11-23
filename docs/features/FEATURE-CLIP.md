@@ -15,7 +15,9 @@ Replace `references/article` with the concept ID printed by `okb clip`. Use `--q
 
 Run `okb serve --open` and use the **Clip** form in **Add**. The bookmarklet in **Add** or **Settings** can be saved to your bookmarks bar and used on the page you want to clip. To print the same bookmarklet on the command line, run `okb bookmarklet`.
 
-The bookmarklet needs the local server running on the port it was generated for. It sends the page URL and selected text to the loopback server in a popup. It carries the same local access token used by the web app. Keep it private. The server validates the token on the clip request and restricts allowed hosts and cross-origin access. An MCP client can clip when the MCP server was started with `--trusted`.
+The bookmarklet needs the local server running on the port it was generated for. It sends the page URL and selected text to the loopback server in a popup. It carries a clip token that the server accepts for clipping and for nothing else. The page you clip can read that token, so it is kept separate from the access token the web app uses. The server validates the token on the clip request and restricts allowed hosts and cross-origin access. An MCP client can clip when the MCP server was started with `--trusted`.
+
+A bookmarklet saved from an earlier version carries the web app's access token. It still clips, and its result window asks you to replace it. Drag the current one from **Add** or **Settings** to your bookmarks bar and delete the old one.
 
 ## What is saved
 

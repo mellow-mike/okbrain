@@ -5,7 +5,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { OkfParseError, parse, type OkfDocument } from "./document.ts";
-import { idToAbsPath, isReservedName, relPathToId, validateId } from "./paths.ts";
+import { conceptFile, isReservedName, relPathToId } from "./paths.ts";
 
 export interface Concept {
   id: string;
@@ -36,6 +36,21 @@ async function* walk(root: string, rel: string): AsyncGenerator<string> {
   }
 }
 
+/**
+ * Symbolic links below the root, as sorted forward-slash paths. The walk above
+ * skips them and no reader or writer follows them, so `okb doctor` names them.
+ */
+export async function listLinks(root: string, rel = ""): Promise<string[]> {
+  const links: string[] = [];
+  for (const entry of await readdir(rel ? join(root, rel) : root, { withFileTypes: true })) {
+    const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+    if (entry.isSymbolicLink()) links.push(childRel);
+    else if (entry.isDirectory() && !entry.name.startsWith(".") && !SKIP_DIRS.has(entry.name))
+      links.push(...await listLinks(root, childRel));
+  }
+  return links.sort();
+}
+
 /** All `.md` files in the bundle as sorted forward-slash relative paths. */
 export async function listMdFiles(root: string): Promise<string[]> {
   const paths: string[] = [];
@@ -57,8 +72,7 @@ export async function listConcepts(root: string): Promise<string[]> {
 
 /** Read and parse one concept by id. Throws if the id is unsafe or absent. */
 export async function readConcept(root: string, id: string): Promise<Concept> {
-  validateId(id);
-  const raw = await readFile(idToAbsPath(root, id), "utf8");
+  const raw = await readFile(await conceptFile(root, id), "utf8");
   return { id, raw, doc: parse(raw) };
 }
 
@@ -67,8 +81,7 @@ export async function readConceptPermissive(
   root: string,
   id: string,
 ): Promise<PermissiveConcept> {
-  validateId(id);
-  const raw = await readFile(idToAbsPath(root, id), "utf8");
+  const raw = await readFile(await conceptFile(root, id), "utf8");
   try {
     return { id, raw, doc: parse(raw), parsed: true };
   } catch (e) {

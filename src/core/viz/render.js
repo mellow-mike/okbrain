@@ -23,8 +23,11 @@
    * `[^id]` references (keyed to sources[].id) become superscript links and
    * their `[^id]: text` definitions collect into a numbered list at the end.
    * marked has no footnote syntax, so definitions are lifted out before
-   * parsing and references are swapped in the rendered output — where they
-   * survive as literal text — so nothing here ever bypasses the sanitizer.
+   * parsing and references are swapped in the rendered output, where they
+   * survive as literal text. The swap passes over tags and code, so a
+   * reference is only ever replaced in running text. Replacing one inside an
+   * attribute value, such as an image's alt text, would close that attribute
+   * with the superscript's own quotes.
    */
   function renderMarkdown(md) {
     var defs = {};
@@ -34,8 +37,8 @@
     });
     var html = okbMarkdown(src);
     var used = [];
-    html = html.replace(/\[\^([^\]\s<&]+)\]/g, function (m, id) {
-      if (!Object.prototype.hasOwnProperty.call(defs, id)) return m;
+    html = html.replace(/<code[^>]*>[\s\S]*?<\/code>|<[^>]*>|\[\^([^\]\s<&]+)\]/g, function (m, id) {
+      if (id === undefined || !Object.prototype.hasOwnProperty.call(defs, id)) return m;
       if (used.indexOf(id) < 0) used.push(id);
       return '<sup class="fn"><a href="#fn-' + esc(encodeURIComponent(id)) +
         '" title="' + esc(defs[id]) + '">' + (used.indexOf(id) + 1) + '</a></sup>';

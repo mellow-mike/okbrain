@@ -17,6 +17,7 @@ import {
   checkOpCall,
   operations,
   runOp,
+  runOpStream,
   type Operation,
   type ParamSpec,
 } from "./core/operations.ts";
@@ -203,9 +204,10 @@ export async function runCli(argv: string[], io: Io = defaultIo): Promise<number
     local = openLocalContext(bundle, true, readonly);
     local.ctx.allowSavedSyncCredential = true;
     local.ctx.brain = brainName;
+    local.ctx.surface = "cli";
     let written = false;
     const result = !json && raw.stream === true && op.stream && op.renderStreamFooter
-      ? await op.stream(local.ctx, checkOpCall(op, local.ctx, raw), (event, data) => {
+      ? await runOpStream(op, local.ctx, checkOpCall(op, local.ctx, raw), (event, data) => {
           if (event !== "delta" || !data || typeof (data as { text?: unknown }).text !== "string") return;
           written = true;
           io.out((data as { text: string }).text);

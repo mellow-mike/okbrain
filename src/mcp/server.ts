@@ -32,10 +32,10 @@ export interface McpOptions {
   mountAllowed?: () => boolean;
 }
 
-/** The MCP tool surface: no admin, no localOnly; write only when trusted. */
+/** The MCP tool surface: no admin, no localOnly, no host paths; write only when trusted. */
 export const mcpOps = (trusted: boolean): Operation[] =>
   operations.filter(
-    (o) => !o.localOnly && o.scope !== "admin" && (trusted || o.scope === "read"),
+    (o) => !o.localOnly && !o.ownerOnly && o.scope !== "admin" && (trusted || o.scope === "read"),
   );
 
 const toolOf = (op: Operation) => ({
@@ -89,6 +89,7 @@ export function createMcpServer(opts: McpOptions): Server {
       mcpActor(server.getClientVersion()),
     );
     local.ctx.brain = opts.brain;
+    local.ctx.surface = "mcp";
     try {
       const result = await runOp(op, local.ctx, req.params.arguments ?? {});
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };

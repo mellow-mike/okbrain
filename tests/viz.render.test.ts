@@ -57,6 +57,24 @@ describe("renderMarkdown", () => {
     expect(out).not.toContain("javascript:");
     expect(out).toContain("&lt;b&gt;bold&lt;/b&gt;"); // definitions render through the sanitizer too
   });
+
+  // A reference swapped in inside an attribute value closed that attribute
+  // with the superscript's own quotes and left a stray `fn"` attribute behind.
+  test("a footnote reference is replaced in running text only, never inside a tag or code", () => {
+    const out = R.renderMarkdown([
+      "[^a]: First", "[^b]: Second", "",
+      'Text[^a] ![alt [^a]](pic.png "title [^b]") [link]([^a] "about [^b]")', "",
+      "Inline `[^a]` stays code.", "", "```", "fenced [^b]", "```",
+    ].join("\n"));
+    expect(out).toContain('Text<sup class="fn"><a href="#fn-a" title="First">1</a></sup>');
+    expect(out).toContain('<img src="pic.png" alt="alt [^a]" title="title [^b]">');
+    expect(out).toContain('<a href="[^a]" title="about [^b]">link</a>');
+    expect(out).toContain("<code>[^a]</code>");
+    expect(out).toContain("fenced [^b]");
+    expect(out).not.toContain('fn"><a href="#fn-b"'); // b is only ever named inside tags and code
+    expect(out.match(/<sup class="fn">/g)).toHaveLength(1);
+    expect(out).toContain('<ol class="footnotes"><li id="fn-a"><code>a</code> First</li></ol>');
+  });
 });
 
 describe("resolveInternal", () => {

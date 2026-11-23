@@ -6,7 +6,7 @@ import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { markdownOutsideCode } from "../graph/links.ts";
 import { walkMarkdownFiles } from "./bundle.ts";
-import { inDbOnlyDir, validateId } from "./paths.ts";
+import { inDbOnlyDir, InvalidIdError, validateId } from "./paths.ts";
 
 export type LogKind = "Creation" | "Update" | "Deprecation" | "Deletion";
 export interface ConceptLogEntry { id: string; entry: string; date: string }
@@ -28,6 +28,9 @@ export async function appendLogEntry(directory: string, entry: string, date = to
 }
 
 async function appendDateSection(path: string, entry: string, date: string): Promise<void> {
+  // A link in the log's place would send the entry to another file on this computer (B23).
+  if ((await lstatIfPresent(path))?.isFile() === false)
+    throw new InvalidIdError("log.md is not a regular file in this brain. okbrain does not follow links or open special files.");
   let text: string;
   try {
     text = (await readFile(path, "utf8")).replace(/\r\n?/g, "\n");

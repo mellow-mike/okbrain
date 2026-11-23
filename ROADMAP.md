@@ -76,10 +76,11 @@ are in [the open items handoff](docs/plans/2026-11-23-open-items.md).
   for optional AI annotations.
 - [x] Use public note tags for optional clip suggestions. Keep marking a note
   reviewed local even when its vector is missing.
-- [ ] Add opt-in, local-only usability sessions that measure time to first
+- [x] Add opt-in, local-only usability sessions that measure time to first
   saved item and re-finding success without recording note content or query
   text. Export a JSON summary and add a facilitator protocol in
-  `docs/USABILITY.md`.
+  `docs/USABILITY.md`. Verified by keyboard at 375 px with outbound browser
+  requests blocked.
 
 ### Stage 8 — Enterprise coding
 
@@ -802,6 +803,19 @@ Goal: the brain improves itself on a schedule.
 - [x] Driven in headless Chromium against the compiled binary: every view in
       both themes, reduced motion, 390px, `viz.html`; zero page errors,
       zero external requests
+- [x] 2026-11-23 refinement pass over fifteen views at 1280 px and 375 px:
+      at 480 px or less the nav links are one row that scrolls sideways and
+      keeps the current link in view (at 375 px the bar went from 271 px to
+      169 px tall, and the first Tab still reaches the skip link); each
+      route names the tab and the reader uses the note's title; a checkbox
+      stays beside the first line of its label when the words wrap, with
+      one gap everywhere; a button or checkbox beside a labelled field lines
+      up with the field's control; each footer dot stays with its own word
+      and says `built` or `not built` to a screen reader; the graph filter,
+      graph layout, link picker, and source editor inputs have accessible
+      names; sentence-case labels; the graph fits under the top bar (B26).
+      The browser smoke asserts the nav height, the titles, the current
+      link, the wrapped checkbox, and the graph's fit at 375 px
 
 ---
 
@@ -847,6 +861,13 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B18 | 2026-11-22 | high | coding | Patch preview and apply refused every tracked file whose permission bits were not exactly `0644` or `0755` ("Use an ordinary tracked UTF-8 file with its Git permissions"). A checkout made under umask `002` or `077` holds `0664` or `0600` files, and `git apply` writes the draft copy under the same umask. Nine patch tests failed on a stock Ubuntu account while CI passed under umask `022` | tracked files were compared with the full index mode, although Git and the new-file branch look only at the owner-executable bit | fixed | compare the owner-executable bit and refuse set-ID and sticky bits for tracked and new files; `tests/coding.approved-patch.test.ts` covers umask `002`, umask `077`, and a `0640` file, and still refuses an executable or set-ID file |
 | B19 | 2026-11-22 | low | tests | `windows-latest` failed on two consecutive heads. `tests/api.sync.test.ts` "Git setup and recovery…" starts 196 Git processes and passed Bun's 5 s default test timeout on the Windows runner. Bun then killed the Git child of the request in flight, so the local sync after an origin disconnect returned 409, or the run reported a bare timeout. Reproduced on Linux by delaying every `git` start by 50 ms | the Git sync test files ran on the default timeout, while slow tests elsewhere already had explicit ones; the Windows `Test` step takes about 180 s against 35 s on Linux | fixed | `setDefaultTimeout(30_000)` in the six Git sync test files and an explicit timeout on two Coding tests; the full suite passes with every `git` start delayed by 60 ms |
 | B20 | 2026-11-23 | low | tests | Two CI jobs timed out on the docs-only PR #24. `tests/e2e.postgres.test.ts` passed in 24.3 s against its 25 s limit, then timed out on the next head, and took 22.9 s locally. `windows-latest` timed out three `tests/api.coding.test.ts` tests at Bun's 5 s default; locally they take 150–310 ms. Reproduced the Coding timeout on Linux by pinning the tests to one CPU core shared with 15 busy loops | The PostgreSQL test simulated an outage with a peer that accepts and then closes. Bun's SQL client waits out the full 4 s `connectionTimeout` on every request in that case (status, search, and two for the write: about 17 s), while a refused port fails in 2 ms. The Coding tests call `waitFor`, which allows each wait 4 s, two to four times each, but ran on the 5 s default | fixed | The PostgreSQL test points the cache at a refused loopback port, keeping the same degraded-mode assertions (22.9 s → 6 s locally). `setDefaultTimeout(30_000)` in `tests/api.coding.test.ts`; under the contended core its slowest test took 5.7 s and passes |
+| B21 | 2026-11-23 | low | gui | **Settings → Local note usage** showed both **Turn on local counts** and **Turn off and clear counts** at once, and **Use SQLite** could show beside a SQLite cache. The app marks the unused control `hidden`, but `button { display: inline-flex }` in the stylesheet outranks the browser's `[hidden]` rule, so the control still painted. Confirmed in Chromium by listing `[hidden]` elements whose computed `display` was not `none` | no stylesheet rule kept `hidden` elements hidden; earlier fixes patched single selectors (`#askstop[hidden]`, `.field[hidden]`) | fixed | one `[hidden] { display: none !important; }` rule in `gui/style.css`; the browser smoke asserts that each of those controls is hidden when it does not apply |
+| B22 | 2026-11-23 | high | api | The clip bookmarklet opened `/clip?token=<serve token>`, and the serve token gates the whole `/api` surface. A bookmarklet runs inside the page being clipped, which can replace `window.open` and read that address. With the token in a query string, the page could then send blind cross-origin requests that need no preflight (a `text/plain` body, no custom header) to any `/api/op/*` route. Reproduced end to end: the page planted and deleted notes, set `embed-base-url` with `init`, ran `embed --include-private`, and its own endpoint received the note text and the user's provider API key | one token for both the bookmarklet and the API, accepted from the address on every route, with no `Origin` or content-type check on generic op routes | fixed | the serve token is read from a header only; `/clip` takes a clip-only HMAC token in the address; every non-`GET` request with another site's `Origin` is refused; saved bookmarklets still clip and are told to update. Regression tests in `tests/api.test.ts` |
+| B23 | 2026-11-23 | crit | okf/sync | Notes, `index.md`, `log.md`, `viz.html`, and `.gitignore` were opened by path, so a symbolic link in their place was followed. `okb sync` can pull one from a shared repository (only **Restore from GitHub** rejected branches with links). Reproduced: `okb read` returned a file from outside the brain, `okb write` rewrote it, and with `index.md` linked to a shell startup file the next ordinary note write replaced that file with generated index rows. A two-line note title that sorts first put a command on its own line, and it ran when a shell sourced the file. A linked subfolder `index.md` also had its first line copied into the parent index, which Git then shares | `readFile` and `writeFile` on paths built from IDs, with link checks only in newer modules (export, filing, computation, privacy) | fixed | `assertBundleFile` in `core/okf/paths.ts` refuses any path that passes through or ends at a link or special file, applied to note reads and writes, both generated manifests, the graph export, the upgrade, and the sync's seeded files. A note write checks every file it will touch first. `okb doctor` reports links. Regression tests in `tests/okf.links.test.ts`, which fail without the guards |
+| B24 | 2026-11-23 | low | viz/gui | The footnote pass replaced `[^id]` anywhere in the rendered HTML, including inside attribute values such as an image's alt text or a link's title. The inserted superscript's quotes closed the attribute and left a stray `fn"` attribute on the element. No script ran in a 96-payload Chromium run, because every dynamic part is escaped, but the sanitizer's output was being rewritten after the fact | a text-level regex over HTML | fixed | the pass skips tags and code, so a reference is only replaced in running text; test in `tests/viz.render.test.ts` |
+| B25 | 2026-11-23 | med | mcp | `import` takes any path on the computer and has scope `write`, so `okb mcp --trusted` listed it. A trusted agent, or text that steers one, could import every Markdown file under a folder such as the home directory into the brain, read it there, and have Git share it. The other host-path commands were already `localOnly` | `import` predates the MCP surface and was never marked | fixed | new `ownerOnly` flag keeps `import` off MCP while the CLI and the local app keep it, and the handler refuses an agent's context; test in `tests/mcp.test.ts` |
+| B26 | 2026-11-23 | low | gui | Below 860 px wide the graph view was sized as the window height minus 120 px, but the top bar is 163 to 271 px tall. The view ran 43 to 151 px past the bottom of the window: the page gained a second scrollbar, the end of the detail panel could not be reached, and the hint that tells you to pick a node never showed, because a `40vh` margin meant for the side panel pushed it out of its box. Measured in Chromium at 375×780, 375×560, 700×500, and 844×390 | a fixed number stood in for the height of the top bar | fixed | the view now fills exactly what the bar leaves (`#view.bare` is a flex column and `#gwrap` takes the rest), the stacked panels share it 3 to 2, and the hint has a small margin there; the browser smoke asserts at 375 px that the view and the hint end inside the window and that the page does not scroll |
+| B27 | 2026-11-23 | low | usability | A usability session past its 30 days stopped recording but stayed in `usability/sessions.db` until someone ran a session command again (status, start, stop, clear, a task marker, or an export). A person who finished a study and went back to ordinary use kept the timeline indefinitely, against the stated retention. Raised by the automated review of the pull request and confirmed by ageing a stopped session by 31 days and searching: the session and its event were still in the file | expired rows were deleted only inside the session commands' transaction | fixed | the recorder and the app's status check now drop expired sessions whenever the store exists, reading first and taking the write lock only when something has expired. MCP activity still never opens the store. Test in `tests/usability.test.ts` covers the app, the CLI, a read-only brain's status check, and an MCP caller |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -914,6 +935,23 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-23 — Landed WP2 of the open items handoff: opt-in, local-only
+  usability sessions. `core/usability.ts` keeps event kinds, timings, counts,
+  ranks, and task labels in per-user application data, behind `CHECK`
+  constraints that leave no column for note content. `runOp` reports to it,
+  the CLI, local API, and MCP adapters name their surface, and MCP never
+  records. Settings has the session controls and the footer shows a recording
+  indicator. `docs/USABILITY.md` is the facilitator protocol, with an invented
+  five-conversation export for the import task. Fixed B21 on the way. A
+  security audit of the local API, the bundle readers and writers, sync, the
+  MCP surface, and the Markdown renderer then found and fixed B22–B25: the
+  serve token no longer travels in an address, links inside a bundle are
+  never followed, a footnote marker cannot break out of an attribute, and
+  `import` is off MCP. A refinement pass over the GUI followed (6.4), which
+  also fixed B26. Review of the pull request found B27: expired sessions now
+  go during ordinary use. Next:
+  WP1 (signed release workflow), then the maintainer's prerequisites, a signed
+  dry run, and the `v0.1.0` tag.
 - 2026-11-23 — Reviewed the project (typecheck clean, 746 tests passing, main
   CI green, no open PRs or issues) and recorded maintainer decisions. v0.1.0
   ships through GitHub Releases with a GPG-signed checksum manifest and build

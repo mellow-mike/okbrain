@@ -313,6 +313,18 @@ Every write produces a conformant bundle (`writeConcept`, exposed as the
   Mutations use the exact filesystem spelling of each component and reject
   case-only or Unicode-normalization aliases. Doctor reports portable-path
   conflicts in older bundles while their notes remain readable.
+- **Links are never followed.** okbrain reads and writes regular files in
+  real folders below the brain's root. A symbolic link can point anywhere on
+  the computer, and a shared Git repository can deliver one, so
+  `assertBundleFile` (`core/okf/paths.ts`) checks every part of a path with
+  `lstat` before it is opened. It guards note reads and writes by ID, the
+  generated `index.md` and `log.md` files, `viz.html`, the upgrade's root
+  index, and the `.gitignore` and `.gitattributes` that sync seeds. A note
+  write checks its own file, each `index.md` above it, and the logs beside
+  them before any byte is written, so a refused write leaves no half-saved
+  note. The bundle walk already skips links, a link in a subfolder's
+  `index.md` place is treated as absent when its parent index is built, and
+  `okb doctor` reports each link with the `link` check (B23).
 - `index.md` regenerated for the touched directory and every ancestor
   (`core/okf/indexmd.ts`): each index keeps a human-editable head (H1 +
   intro paragraphs before the first `##`, preserved on regeneration) above
@@ -392,7 +404,8 @@ directory with concepts (or the root) lacking `index.md`; v0.1 leftovers
 without `by`, non-actor `by` values, `status` outside draft|stable|deprecated,
 `stale_after` without an explicit offset, `sources` entries without
 `resource` or with a non-ISO `last_modified`); an `Attested Computation`
-without `runtime`. Links to reserved files (`/index.md`, `/notes/log.md`) are
+without `runtime`; a symbolic link anywhere below the root (`link`), which
+okbrain never reads, writes, or follows. Links to reserved files (`/index.md`, `/notes/log.md`) are
 valid targets. The report also carries **signals** — counts by trust tier and
 status, concepts past `stale_after`, and concepts still on v0.1 — so the walk
 doubles as the health report the GUI's Home shows. The consumer itself never
@@ -717,15 +730,25 @@ clears the tag through the writer. Resurface scores `inbox` as a signal.
 
 ### Bookmarklet (built with 3.1)
 Any web page can fire requests at localhost, so a naive clip endpoint is a
-CSRF hole into the brain. The `/clip` endpoint demands the per-install secret
-token (`core/serve-token.ts` — minted at first use, mode 0600 beside
-config.json, embedded by `okb bookmarklet`, constant-time validated);
-tokenless requests are rejected, and the same token gates the whole `/api`
-surface. The bookmarklet itself is a top-level `window.open` GET navigation
-to `/clip?token=…&url=…` (+ the current selection as `quote`) — navigations
-bypass CORS, mixed-content, and private-network-access rules that would
-break a cross-origin `fetch` from an HTTPS page, so it works from any site
-with zero server relaxations. The confirmation page auto-closes on success.
+CSRF hole into the brain. The `/clip` endpoint demands a secret, and
+tokenless requests are rejected. The bookmarklet itself is a top-level
+`window.open` GET navigation to `/clip?token=…&url=…` (+ the current
+selection as `quote`) — navigations bypass CORS, mixed-content, and
+private-network-access rules that would break a cross-origin `fetch` from an
+HTTPS page, so it works from any site with zero server relaxations. The
+confirmation page auto-closes on success.
+
+A bookmarklet runs inside the page being clipped, and that page can read the
+address it opens (for example by replacing `window.open`). So the address
+carries a **clip token**, an HMAC-SHA256 of the per-install serve token
+(`core/serve-token.ts` — minted at first use, mode 0600 beside config.json).
+`/clip` accepts the clip token and no other route does. The serve token
+gates the `/api` surface and travels in a request header only. A page that
+captures the clip token can ask for more clips, which the fetch guard still
+vets, and nothing else. Bookmarklets saved before the clip token existed
+carry the serve token. They still clip, their result window asks the person
+to replace them, and the token they expose no longer opens `/api` from a
+page (B22).
 
 ### RSS ingest (`okb rss`, Stage 4.1)
 Feeds are the second ingest source (after import/capture/clip): `okb rss
@@ -931,12 +954,16 @@ CLI and local API, so surfaces can't drift. Trust is fail-closed in three
 layers: connections are **untrusted by default** (read ops only — write
 tools are hidden from `tools/list`, refused by name if called anyway, and
 `runOp` re-gates scope underneath); `okb mcp --trusted` deliberately exposes
-write ops for clients the user fully trusts; admin and `localOnly` ops never
-appear on this surface at all. Transports: stdio (default — stdout carries
+write ops for clients the user fully trusts; admin, `localOnly`, and
+`ownerOnly` ops never appear on this surface at all. `ownerOnly` marks an op
+that takes a path anywhere on this computer (`import`): the owner may name
+one from the CLI or the local app, and an agent works inside the brain it
+was given. Transports: stdio (default — stdout carries
 only protocol JSON, logs go to stderr) and Streamable HTTP via `--http`
 (stateless server-per-request, binds 127.0.0.1, Host-checked like the local
 API). Filesystem confinement is the ops' own: concept ids reject traversal
-segments before any path is built. Writes over MCP are attributed to the
+segments before any path is built, and no reader or writer follows a
+symbolic link below the brain's root (Writer guarantees). Writes over MCP are attributed to the
 connected client — `<client name>/<client version>` from the MCP initialize
 handshake (`mcp-client/unknown` when it withholds them) — so an agent's
 edits and review stamps read as machine-confirmed, never as a human's.
@@ -953,8 +980,9 @@ validates trust (fail-closed: untrusted ⇒ read-scope only), the read-only
 mount policy, and params before any handler runs; the `OpContext` also
 carries the caller's `actor()` so every write is attributed. Three adapters
 are generated: the CLI, the GUI's local HTTP API, and the MCP server. The
-adapter filters operations by scope and `localOnly`. The registry also marks
-account and coding commands that operate independently of a selected brain.
+adapter filters operations by scope, `localOnly`, and `ownerOnly` (an op that
+takes a host path stays off MCP). The registry also marks account and coding
+commands that operate independently of a selected brain.
 
 ### CLI surface
 | Command | Scope | Purpose |
@@ -1002,6 +1030,7 @@ account and coding commands that operate independently of a selected brain.
 | `okb export-viz` | read | Self-contained graph HTML with optional embedded fonts and explicit consent for private notes |
 | `okb export-graph` | read | Graph nodes and edges as portable JSON, with explicit consent for private notes |
 | `okb cache-settings [sqlite\|postgres]` | admin | Choose per-brain SQLite or local PostgreSQL and pgvector caches |
+| `okb usability [start\|stop\|clear]` / `usability task` / `usability export` | admin | Run an opt-in, local-only usability session for this brain, mark facilitator tasks, and print the sessions and summaries as JSON |
 | `okb version` / `--version` | — | okbrain's version |
 
 Global flags: `--json` everywhere, `--bundle <path>`, `--brain <name>`
@@ -1018,7 +1047,8 @@ over the registry, trusted like the CLI but defended like a network surface:
   `GET /clip` (bookmarklet), `GET /` + `/gui/*` (the app and its
   vendored assets). Dedicated routes include `GET /api/status`
   (version, OKF version, active bundle path, brain, read-only, default folder status,
-  retrieval profile, index/vector presence, actor, port), `GET /api/brains`
+  retrieval profile, index/vector presence, actor, port, and whether a
+  usability session is recording), `GET /api/brains`
   (mount names, policy, retrieval preference, and provider/model defaults), `GET /api/bookmarklet`, and
   `POST /api/conversations/upload`. The upload accepts browser-selected JSON
   bytes, checks the write policy, and binds confirmation to the bytes,
@@ -1031,10 +1061,17 @@ over the registry, trusted like the CLI but defended like a network surface:
   re-opens a read-only brain. Unknown names are a 400.
 - **Security (fail-closed):** binds 127.0.0.1 only; the Host header must be
   the server's own `127.0.0.1/localhost/[::1]:port` (defeats DNS rebinding);
-  every `/api` and `/clip` request must present the per-install token
-  (header `x-okb-token`, `Authorization: Bearer`, or `?token=`;
-  constant-time compare); CORS reflects only the server's own localhost
-  origins — everything else gets no CORS headers and preflights are 403.
+  every `/api` request must present the per-install token in a header
+  (`x-okb-token` or `Authorization: Bearer`; constant-time compare). The
+  token is never read from the address. A page on another origin cannot set
+  either header without a preflight, and preflights from other origins are
+  403, so a token that leaked into a page could not act as the owner. `/clip`
+  alone accepts a token in the address, and that token is the clip-only one
+  (Bookmarklet, below). Every request that is not a `GET` is refused when it
+  carries another site's `Origin`. CORS reflects only the server's own
+  localhost origins — everything else gets no CORS headers. Responses send
+  `Referrer-Policy: no-referrer`, so a site linked from a note, or a remote
+  image in one, does not learn the app's address and port.
   HTTP errors map from `OpError` codes (bad_params 400, not_found 404,
   untrusted/refused 403; anything else 500).
 - Each request runs in a fresh `OpContext` (shared `core/context.ts`, also
@@ -1048,7 +1085,12 @@ imports embed them into the compiled binary (the viz-vendor pattern; the
 fonts via `file` imports). Presentation only: every data access is a
 `/api/op/*` call or one of the dedicated local routes above. Hash routing, each route
 a page turn; look, type and motion from the design system (Look & feel,
-below); responsive down to phone widths (the sidebar becomes a top bar).
+below); responsive down to phone widths (the sidebar becomes a top bar, and
+at 480 px or less its links become one row that scrolls sideways and keeps
+the current link in view, so the bar takes about a fifth of a phone screen).
+Under the top bar the graph view fills exactly what the bar leaves, with the
+detail panel below the graph. Each route names the tab
+(`Settings · okbrain`), and the reader uses the note's own title.
 Every non-`localOnly` op has a home
 on one of the views below — a registry-derived test enforces it — and the
 `localOnly` ones surface as a brain switcher, a status footer, the
@@ -1100,7 +1142,16 @@ Views:
   retrieval profile (`init`), git `sync`, `enrich` guardrails, maintenance
   (`index`, `embed`, `doctor`, `export_viz`, `export_graph` saved as a JSON
   file, confirm-gated `rebuild`, `jobs` with a job subset, `upgrade` preview
-  + run), MCP setup snippets, the bookmarklet.
+  + run), MCP setup snippets, the bookmarklet. A **Usability session** card
+  states what a session records, starts and stops it (`usability_session`),
+  marks facilitator tasks (`usability_task`), saves `usability_export` as a
+  JSON file, and clears stored sessions.
+
+While a usability session records, the status footer shows a link to its
+controls on every view. The footer refreshes when the window regains focus,
+so a session started from the CLI appears there too. Lists mark the kind of
+list (`data-via`) and each row's position (`data-rank`). Following a note
+link passes those two values to `read_concept` and nothing else.
 The bundle remains plain Markdown and external editors can edit it directly.
 The AppKit macOS app embeds the same interface from its bundled loopback
 runtime. Native menus open brain or coding workspace folders and pass external
@@ -1136,7 +1187,14 @@ the bundle's words (titles, descriptions, bodies) are Literata, everything
 okbrain says is Recursive Sans, identifiers Recursive Mono; borders, not
 shadows (only floating layers take `shadow`); at most one inverted
 (primary) button per view; no emoji and no icon font (a few Unicode glyphs;
-an inline Lucide SVG if a view ever needs a pictogram). The faces —
+an inline Lucide SVG if a view ever needs a pictogram). Layout rules the
+stylesheet holds once, so views do not restate them: an element marked
+`hidden` never paints, whatever `display` its selector sets; a checkbox sits
+beside the first line of its label, 6 px from the words, and stays there
+when the words wrap; in a row with a labelled field, a button or checkbox
+lines up with the field's control, not with its label. State is never
+colour alone: the footer's index and vector dots are filled or hollow and
+carry `built` / `not built` for a screen reader. The faces —
 Recursive Sans/Mono and Literata roman/italic, subset woff2, 366 KB,
 OFL-1.1 (`gui/fonts/README.md`) — are embedded in the binary and served at
 `/gui/fonts/`; nothing is fetched from a network.
@@ -1147,6 +1205,31 @@ and attributed to the configured human actor; MCP/remote is untrusted unless
 explicitly local and attributed to the connecting client. Not-strictly-trusted
 ⇒ untrusted (fail-closed). Untrusted callers get read ops; write/admin are
 gated and filesystem confinement tightens.
+
+Each adapter also names itself on the `OpContext` (`surface`: `gui`, `cli`,
+or `mcp`). The opt-in usability sessions (`core/usability.ts`,
+[protocol](docs/USABILITY.md)) use it as a second gate. Only a trusted call
+from the local app or the CLI, acting for the owner on a writable brain, can
+start a session or add to one. An MCP caller is refused by the session ops
+and never generates an event, even with `--trusted`. `runOp` reports each
+settled op to the recorder, which keeps an explicit allowlist of op names and
+returns after one `existsSync` until a first session creates the store.
+
+The store is `usability/sessions.db` under the per-user data directory
+(folder mode `0700`), outside every bundle and outside Git. It holds a random
+session ID, a SHA-256 of the brain's real path, timestamps, the app version
+and platform, and events made of an enumerated kind, surface, outcome, and
+source, whole-number offsets, durations, counts, and ranks, and a task label
+limited to 16 letters, digits, hyphens, or underscores. `CHECK` constraints
+enforce every one of those, so note IDs, titles, paths, tags, bodies, query
+text, model output, and error messages have no column to reach. A failed op
+keeps its `OpError` code and drops the message. Sessions expire after 30
+days: a session past that no longer records, and the owner's next use of an
+existing store deletes it with its events. That is any recorded kind of
+action in the app or the CLI, or the app's status check, so a finished study
+does not wait for someone to reopen the controls. **Clear** deletes a
+brain's sessions at once with `secure_delete` on, and the export leaves out
+the brain key.
 
 ### Multi-brain mounts (Stage 5)
 The gbrain "brains" axis: config `brains` maps a name to a bundle path
@@ -1241,6 +1324,7 @@ okbrain/
 │   │   ├── version.ts           # okbrain's version + the tool actor (okb/<version>)
 │   │   ├── claims.ts            # calibration: takes vs facts (Brier, buckets)
 │   │   ├── stats.ts             # okb stats: counts, status/trust, orphans, freshness
+│   │   ├── usability.ts         # opt-in local usability sessions: store, events, export
 │   │   ├── browser.ts           # `okb serve --open` (per-OS opener, argv spawn)
 │   │   ├── log.ts               # structured logger
 │   │   ├── okf/                 # document (v0.2 readers), paths, bundle, write,
@@ -1365,6 +1449,22 @@ sections above as current truth; this log says *why/when*.
   recorded. MCP callers never generate events. A facilitator exports a JSON
   summary on request, and a written protocol in `docs/USABILITY.md` defines the
   tasks.
+- 2026-11-23 — **What a usability session counts.** The recorder keeps an
+  explicit map from op names to event kinds. A `save` is a capture, a new or
+  edited note, a clip, a confirmed import, a saved answer draft, a claim, or
+  an RSS pull that added notes, so the first-save measure cannot miss a
+  person's first item. Previews and unchanged saves are left out. `review`
+  is the act of marking a note reviewed or snoozed, and `browse` is a note
+  listing with details, because Home loads the review queue and plain ID
+  lists on its own and would bury a participant's actions. A failed attempt
+  becomes an `error` event that names the activity and the `OpError` code.
+  Browser uploads, the answer draft, the Ask stream, and plan answers run
+  outside `runOp`, so they report through `observeActivity` and
+  `runOpStream`. The session controls take the local app header, origin, and
+  JSON like the other owner actions. Stopping a session ends an open task as
+  abandoned, so every marked task has a result. The re-find measures cover
+  every marked task, and the protocol marks only the tasks that end as found
+  or not found.
 - 2026-11-23 — **Concept types stay free-form.** okbrain enforces no type
   vocabulary. The starter templates suggest lowercase types (`note`, `source`,
   `project`, `decision`, `guide`), and readers keep tolerating any value,

@@ -3,7 +3,7 @@
 // CSRF fail-closed. Generated once, stored beside config.json, embedded into
 // the bookmarklet by `okb bookmarklet`.
 
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { configDir, type Platform } from "./config.ts";
@@ -63,15 +63,27 @@ export function tokenMatches(candidate: string | null, token: string): boolean {
 }
 
 /**
+ * The credential a bookmarklet carries. A bookmarklet runs inside whatever
+ * page it is clicked on, and that page can read the address it opens. So the
+ * address holds a token derived from the serve token that `/clip` accepts and
+ * no other route does. The serve token itself travels in a request header
+ * only, which a foreign page cannot set.
+ */
+export function clipToken(token: string): string {
+  return createHmac("sha256", token).update("okbrain clip bookmarklet v1").digest("base64url");
+}
+
+/**
  * The clip bookmarklet: opens a small window on the local clip endpoint —
  * a top-level GET navigation, so no CORS/mixed-content/private-network rules
  * apply from whatever page it runs on. The current selection rides along as
- * the highlight quote.
+ * the highlight quote. `token` is the install's serve token. The bookmarklet
+ * embeds only the clip token derived from it.
  */
 export function bookmarkletJs(port: number, token: string): string {
   const js =
     `var q=String(getSelection()).trim();` +
-    `window.open('http://127.0.0.1:${port}/clip?token=${token}` +
+    `window.open('http://127.0.0.1:${port}/clip?token=${clipToken(token)}` +
     `&url='+encodeURIComponent(location.href)+(q?'&quote='+encodeURIComponent(q):''),` +
     `'okb','width=460,height=200');`;
   return `javascript:(function(){${js}})()`;

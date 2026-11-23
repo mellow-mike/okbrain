@@ -185,21 +185,36 @@ function rememberBrain(name) {
   } catch (err) {}
 }
 
-async function refreshStatus() {
+/** The status footer. A recording usability session shows on every view and links to its controls. */
+/** One derived store in the footer: a filled dot when it is built, a hollow one when it is not. */
+function cacheState(built, word, name) {
+  var state = built ? 'built' : 'not built';
+  return '<span class="state" title="' + name + ' ' + state + '"><span class="dot' + (built ? ' on' : '') +
+    '" role="img" aria-label="' + state + '"></span>' + word + '</span>';
+}
+
+function paintStatus() {
+  document.getElementById('nav-brain').textContent = STATUS.brain || basename(STATUS.bundle);
+  document.getElementById('nav-status').innerHTML =
+    (STATUS.usabilityRecording ? '<div><a class="recording" href="#settings/usability"><span class="dot rec"></span>Recording usability session</a></div>' : '') +
+    '<div>' + cacheState(STATUS.hasIndex, 'index', 'Search index') + cacheState(STATUS.hasVectors, 'vectors', 'Vector index') + '</div>' +
+    '<div>okb ' + esc(STATUS.version) + ' · OKF ' + esc(STATUS.okfVersion) +
+    (STATUS.readonly ? ' · <span class="chip warn">read-only</span>' : '') + '</div>';
+}
+
+var statusCheckedAt = 0;
+/** `keep` leaves the last known status in place when the check itself fails. */
+async function refreshStatus(keep) {
   var el = document.getElementById('nav-status');
   var selected = BRAIN;
+  statusCheckedAt = Date.now();
   try {
     var status = await get('/api/status');
     if (selected !== BRAIN) return;
     STATUS = status;
-    document.getElementById('nav-brain').textContent = STATUS.brain || basename(STATUS.bundle);
-    el.innerHTML =
-      '<div><span class="dot' + (STATUS.hasIndex ? ' on' : '') + '"></span>index' +
-      ' <span class="dot' + (STATUS.hasVectors ? ' on' : '') + '"></span>vectors</div>' +
-      '<div>okb ' + esc(STATUS.version) + ' · OKF ' + esc(STATUS.okfVersion) +
-      (STATUS.readonly ? ' · <span class="chip warn">read-only</span>' : '') + '</div>';
+    paintStatus();
   } catch (e) {
-    if (selected !== BRAIN) return;
+    if (selected !== BRAIN || keep === true) return;
     if (selected && e.code === 'unknown_brain') {
       rememberBrain('');
       await loadBrains().catch(function () {});
@@ -209,6 +224,14 @@ async function refreshStatus() {
     el.innerHTML = '<span class="error">' + esc(e.message) + '</span>';
   }
 }
+
+// A session can start or stop from the CLI, and an index can be built there,
+// while the app sits in the background. Catch up when the person comes back.
+function refreshStatusOnReturn() {
+  if (document.visibilityState === 'visible' && Date.now() - statusCheckedAt > 5000) void refreshStatus(true);
+}
+window.addEventListener('focus', refreshStatusOnReturn);
+document.addEventListener('visibilitychange', refreshStatusOnReturn);
 
 async function loadBrains() {
   var sel = document.getElementById('brain');
@@ -258,6 +281,13 @@ var routes = {
   stats: renderStats, settings: renderSettings,
 };
 
+// The tab and window title for each route. The reader replaces it with the note's own title.
+var VIEW_TITLES = {
+  home: 'Home', browse: 'Browse', concept: 'Note', edit: 'Edit concept', editor: 'New concept', graph: 'Graph', search: 'Search',
+  ask: 'Ask', 'ask-plan': 'Ask with ChatGPT', accounts: 'Accounts', map: 'Focused map', add: 'Add', sources: 'Sources',
+  review: 'Review', inbox: 'Inbox', 'inbox-file': 'File inbox note', claims: 'Claims', coding: 'Coding', stats: 'Stats', settings: 'Settings',
+};
+
 var DIR_MARK = { out: '→', in: '←', both: '↔' };
 
 // Every render gets a generation number; async work checks `stale(seq)` after
@@ -279,6 +309,30 @@ view.addEventListener('click', function (e) {
   carry = row && row.querySelector('.title a, td > a:first-child');
 });
 
+// How the reader was reached, for an opt-in usability session: which kind of
+// list a note link was followed from (`data-via` on the list) and the note's
+// position there (`data-rank` on its row). Nothing else about the link is sent.
+var arrival = null;
+view.addEventListener('click', function (e) {
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  var a = e.target.closest('a[href^="#concept/"], a[href^="#edit/"]');
+  if (!a) return;
+  var source = a.closest('[data-via]');
+  var ranked = source && a.closest('[data-rank]');
+  arrival = { href: a.getAttribute('href'), via: source ? source.getAttribute('data-via') : 'link',
+    rank: ranked && source.contains(ranked) ? Number(ranked.getAttribute('data-rank')) : 0 };
+});
+/** `read_concept` params for the note being opened. A reload in place counts as direct. */
+function openParams(id) {
+  var params = { id: id };
+  if (arrival) {
+    params.via = arrival.via;
+    if (arrival.rank >= 1) params.rank = arrival.rank;
+  }
+  arrival = null;
+  return params;
+}
+
 // Each route is a page turn (Okb.go): the render runs inside one view
 // transition, which captures the new view once the render has settled.
 function route() {
@@ -299,17 +353,26 @@ function route() {
   var seq = ++gen;
   var shared = name === 'concept' && carry && carry.getAttribute('href') === location.hash ? carry : null;
   carry = null;
+  if (arrival && arrival.href !== location.hash) arrival = null;
   return Okb.go(function () {
     activeGraph?.destroy();
     activeGraph = null;
-    document.querySelectorAll('#nav > a').forEach(function (a) { // not the wordmark's link
+    document.querySelectorAll('#nav .links > a').forEach(function (a) { // not the wordmark's link
       var target = a.getAttribute('data-nav') || a.getAttribute('href').slice(1);
       var active = target === name || (name === 'editor' && target === 'edit') || (name === 'ask-plan' && target === 'ask') ||
         (name === 'inbox-file' && target === 'inbox');
       a.classList.toggle('active', active);
-      if (active) a.setAttribute('aria-current', 'page');
-      else a.removeAttribute('aria-current');
+      if (active) {
+        a.setAttribute('aria-current', 'page');
+        // On a phone the links are one scrolling row. Bring the current one to
+        // its middle by moving the row itself: scrollIntoView would also move
+        // where the next Tab starts, past the skip link.
+        var row = a.parentElement;
+        if (row.scrollWidth > row.clientWidth)
+          row.scrollLeft += a.getBoundingClientRect().left - row.getBoundingClientRect().left - (row.clientWidth - a.offsetWidth) / 2;
+      } else a.removeAttribute('aria-current');
     });
+    document.title = VIEW_TITLES[name] ? VIEW_TITLES[name] + ' · okbrain' : 'okbrain';
     view.className = name === 'graph' ? 'bare' : '';
     view.scrollTop = 0;
     return fn(arg, seq);
@@ -430,9 +493,9 @@ async function renderHome(_arg, seq) {
     (readonly ? '' : '<form id="h-cap" class="card stack"><label class="field"><span>Quick note</span>' +
     '<textarea rows="2" id="h-cap-text" placeholder="Capture a thought…" required></textarea></label>' +
     '<div class="row"><button class="primary">Capture</button><span id="h-cap-msg" class="muted" role="status"></span></div></form>') +
-    '<div class="split"><div><h3>Worth another look</h3><div id="h-review" class="list"></div></div>' +
-    '<div><h3>Inbox</h3><div id="h-inbox" class="list"></div></div>' +
-    '<div><h3>Recently changed</h3><div id="h-recent"></div></div></div>' +
+    '<div class="split"><div><h3>Worth another look</h3><div id="h-review" class="list" data-via="review"></div></div>' +
+    '<div><h3>Inbox</h3><div id="h-inbox" class="list" data-via="browse"></div></div>' +
+    '<div><h3>Recently changed</h3><div id="h-recent" data-via="browse"></div></div></div>' +
     '<h3>Health</h3><div class="row"><button id="h-doctor">Check conformance</button>' +
     '<a href="#stats" class="link-button">Stats</a><a href="#settings" class="link-button">Settings</a></div>' +
     '<div id="h-doctor-out"></div></div>';
@@ -517,8 +580,8 @@ async function renderHome(_arg, seq) {
     try {
       var q = await api('review_queue', {});
       el.innerHTML = q.length
-        ? q.map(function (it) {
-            return '<div class="card compact" data-id="' + esc(it.id) + '"><div class="title">' +
+        ? q.map(function (it, i) {
+            return '<div class="card compact" data-id="' + esc(it.id) + '" data-rank="' + (i + 1) + '"><div class="title">' +
               conceptLink(it.id, it.title) + '</div><div class="why">' + esc(it.reasons.join('; ')) + '</div>' +
               '<div class="row">' + reviewClaimLink(it) + '<button class="small" data-act="done" title="records a verified event by you">Reviewed ✓</button>' +
               '<button class="small" data-act="snooze">Snooze</button></div></div>';
@@ -538,8 +601,8 @@ async function renderHome(_arg, seq) {
     try {
       var rows = await api('inbox_list', {});
       el.innerHTML = rows.length
-        ? rows.slice(0, 6).map(function (r) {
-            return '<div class="card compact" data-id="' + esc(r.id) + '"><div class="title">' +
+        ? rows.slice(0, 6).map(function (r, i) {
+            return '<div class="card compact" data-id="' + esc(r.id) + '" data-rank="' + (i + 1) + '"><div class="title">' +
               conceptLink(r.id, r.title) + '</div><div class="row"><button class="small" data-act="read">Mark read</button></div></div>';
           }).join('') + (rows.length > 6 ? '<p class="muted"><a href="#inbox">' + (rows.length - 6) + ' more…</a></p>' : '')
         : '<div class="empty">Inbox is empty.</div>';
@@ -565,8 +628,8 @@ async function renderHome(_arg, seq) {
       setTypes(rows.map(function (r) { return r.type; }));
       rows.sort(function (a, b) { return (b.updated || '') < (a.updated || '') ? -1 : 1; });
       el.innerHTML = rows.length
-        ? '<table class="tbl">' + rows.slice(0, 8).map(function (r) {
-            return '<tr><td>' + conceptLink(r.id, r.title) + '<br>' + badges(r) + '</td>' +
+        ? '<table class="tbl">' + rows.slice(0, 8).map(function (r, i) {
+            return '<tr data-rank="' + (i + 1) + '"><td>' + conceptLink(r.id, r.title) + '<br>' + badges(r) + '</td>' +
               '<td class="nowrap muted">' + dateOf(r.updated) + '</td></tr>';
           }).join('') + '</table>' + (rows.length > 8 ? '<p class="muted"><a href="#browse">browse all ' + rows.length + '…</a></p>' : '')
         : '<div class="empty">No notes yet.' + (readonly ? '' : ' Capture one above or <a href="#sources">import conversations</a>.') + '</div>';
@@ -617,7 +680,7 @@ async function renderBrowse(filters, seq) {
     '<select id="b-tag" aria-label="Tag"><option value="">Any tag</option></select>' +
     '<select id="b-status" aria-label="Status"><option value="">any status</option><option>draft</option><option>stable</option><option>deprecated</option></select>' +
     '<select id="b-sort" aria-label="Sort by"><option value="updated">newest first</option><option value="title">title</option><option value="type">type</option></select>' +
-    '<span id="b-count" class="muted right"></span></div><div id="b-out"></div></div>';
+    '<span id="b-count" class="muted right"></span></div><div id="b-out" data-via="browse"></div></div>';
   var out = document.getElementById('b-out');
   Okb.working(out, 'loading');
   var rows;
@@ -667,8 +730,8 @@ async function renderBrowse(filters, seq) {
     document.getElementById('b-count').textContent = list.length + ' of ' + rows.length;
     out.innerHTML = list.length
       ? '<table class="tbl"><thead><tr><th>Concept</th><th>Type</th><th>Signals</th><th>Updated</th><th>Tags</th></tr></thead><tbody>' +
-        list.map(function (r) {
-          return '<tr><td>' + conceptLink(r.id, r.title) + '<br><code>' + esc(r.id) + '</code>' +
+        list.map(function (r, i) {
+          return '<tr data-rank="' + (i + 1) + '"><td>' + conceptLink(r.id, r.title) + '<br><code>' + esc(r.id) + '</code>' +
             (r.description ? '<div class="muted">' + esc(r.description) + '</div>' : '') + '</td>' +
             '<td>' + typeChip(r.type) + '</td><td>' + badges(r) + '</td>' +
             '<td class="nowrap muted">' + dateOf(r.updated) + '</td><td>' + tagLinks(r.tags, type) + '</td></tr>';
@@ -716,10 +779,11 @@ function mountMarkdownSource(container, raw) {
 async function renderConcept(id, seq, was) {
   if (!id) { location.hash = '#browse'; return; }
   var c;
-  try { c = await api('read_concept', { id: id }); }
+  try { c = await api('read_concept', openParams(id)); }
   catch (e) { if (!stale(seq)) view.innerHTML = errorBox(e); return; }
   if (stale(seq)) return;
   var fm = c.frontmatter, s = c.signals;
+  document.title = (typeof fm.title === 'string' && fm.title.trim() ? fm.title : id) + ' · okbrain';
   if (fm.type === 'forwarding' && typeof fm.filed_to === 'string') {
     view.innerHTML = '<div class="stack"><h2>' + esc(fm.title || id) + '</h2>' +
       '<p>This capture was filed at ' + conceptLink(fm.filed_to) + '.</p><div id="c-source"></div></div>';
@@ -905,7 +969,7 @@ async function renderEdit(id, seq) {
   var fm = {}, body = '', exists = false;
   if (id) {
     try {
-      var c = await api('read_concept', { id: id });
+      var c = await api('read_concept', openParams(id));
       fm = c.frontmatter;
       body = c.body;
       exists = true;
@@ -936,7 +1000,7 @@ async function renderEdit(id, seq) {
     (!exists && !STATUS?.readonly ? '<label class="row"><input id="ed-private" type="checkbox"> Keep this note private</label>' : '') +
     '<div class="row">' +
     '<button class="primary">Save</button>' +
-    '<select id="ed-linkpick"><option value="">insert link to…</option></select>' +
+    '<select id="ed-linkpick" aria-label="Insert a link to a note"><option value="">insert link to…</option></select>' +
     (exists ? '<button type="button" id="ed-suggest">Suggest links</button>' : '') +
     (exists ? '<a href="' + conceptHref(id) + '" class="link-button">Cancel</a>' : '') +
     '<span id="ed-msg" class="muted"></span></div>' +
@@ -967,10 +1031,10 @@ async function renderEdit(id, seq) {
   function addSource(original) {
     var s = typeof original === 'string' ? { resource: original } : original || {};
     srcEl.insertAdjacentHTML('beforeend',
-      '<div class="srow"><input placeholder="id" value="' + esc(s.id || '') + '" data-k="id">' +
-      '<input placeholder="resource (URL, /path.md, or scope)" value="' + esc(s.resource || '') + '" data-k="resource">' +
-      '<input placeholder="title" value="' + esc(s.title || '') + '" data-k="title">' +
-      '<input placeholder="author (actor)" value="' + esc(s.author || '') + '" data-k="author">' +
+      '<div class="srow"><input aria-label="Source ID" placeholder="id" value="' + esc(s.id || '') + '" data-k="id">' +
+      '<input aria-label="Source resource" placeholder="resource (URL, /path.md, or scope)" value="' + esc(s.resource || '') + '" data-k="resource">' +
+      '<input aria-label="Source title" placeholder="title" value="' + esc(s.title || '') + '" data-k="title">' +
+      '<input aria-label="Source author" placeholder="author (actor)" value="' + esc(s.author || '') + '" data-k="author">' +
       '<button type="button" class="small" data-del title="remove" aria-label="remove source">✕</button></div>');
     if (original !== undefined) {
       var row = srcEl.lastElementChild;
@@ -1092,12 +1156,12 @@ async function renderEdit(id, seq) {
 async function renderGraph(focusId, seq) {
   view.innerHTML =
     '<div id="gwrap"><div id="gmain">' +
-    '<div id="gbar"><input id="gsearch" type="search" placeholder="Filter title / id / tags…">' +
-    '<select id="glayout"><option value="cose">cose</option><option value="concentric">concentric</option>' +
+    '<div id="gbar"><input id="gsearch" type="search" aria-label="Filter the graph by title, ID, or tags" placeholder="Filter title / id / tags…">' +
+    '<select id="glayout" aria-label="Graph layout"><option value="cose">cose</option><option value="concentric">concentric</option>' +
     '<option value="breadthfirst">breadth-first</option><option value="circle">circle</option><option value="grid">grid</option></select>' +
     '<button id="gfit">Fit</button><span id="gstats" class="muted"></span></div>' +
     '<div id="gcy"></div><div id="glegend"></div></div>' +
-    '<div id="gdetail"><p class="empty">Click a node.</p></div></div>';
+    '<div id="gdetail" data-via="map"><p class="empty">Select a node to see its details.</p></div></div>';
   var g;
   // Node labels are canvas text in Literata, and a canvas never loads a face itself.
   try { g = (await Promise.all([api('graph_data', {}), document.fonts.load('9px Literata')]))[0]; }
@@ -1148,7 +1212,7 @@ function renderSearch(initialQ, seq) {
     '<option>balanced</option><option>max</option></select></label>' +
     '<label class="field"><span>Maximum results</span><input id="s-limit" type="number" value="20" min="1" required></label></div></form>' +
     '<p id="s-index-help" class="muted"' + (needsIndex ? '' : ' hidden') + '>Build a local index to search this brain’s notes.</p>' +
-    '<div id="sout" class="list" aria-live="polite" tabindex="-1"></div></div>';
+    '<div id="sout" class="list" data-via="search" aria-live="polite" tabindex="-1"></div></div>';
   var form = document.getElementById('sf');
   var submit = form.querySelector('button');
   var indexHelp = document.getElementById('s-index-help');
@@ -1188,8 +1252,8 @@ function renderSearch(initialQ, seq) {
       var hits = await api('search', params);
       if (!current()) return;
       out.innerHTML = hits.length
-        ? hits.map(function (h) {
-            return '<div class="card"><div class="title">' + conceptLink(h.id, h.title) +
+        ? hits.map(function (h, i) {
+            return '<div class="card" data-rank="' + (i + 1) + '"><div class="title">' + conceptLink(h.id, h.title) +
               ' <span class="muted">(' + h.score.toFixed(3) + ')</span></div>' +
               '<div class="why"><code>' + esc(h.id) + '</code> · ' + chips(h.sources) + '</div>' +
               (h.description ? '<div class="why">' + esc(h.description) + '</div>' : '') +
@@ -1198,7 +1262,7 @@ function renderSearch(initialQ, seq) {
               }).join('') + '</div>' : h.snippet ? '<div class="muted">' + esc(h.snippet.slice(0, 240)) + '…</div>' : '') +
               '<div class="row"><a href="' + conceptHref(h.id) + '" class="link-button small">Open</a>' +
               (readonly ? '' : '<a href="' + editHref(h.id) + '" class="link-button small">Edit</a>') +
-              '<a href="' + mapHref(h.id) + '">Focused map</a></div></div>';
+              '<a href="' + mapHref(h.id) + '" class="link-button small">Focused map</a></div></div>';
           }).join('')
         : '<div class="empty">No hits.</div>';
       Okb.enter(out);
@@ -1457,13 +1521,13 @@ async function renderReview() {
   view.innerHTML = '<div class="stack"><h2>Review</h2>' +
     '<p class="muted">A small daily queue with stated reasons. “Reviewed ✓” records a <code>verified</code> event by you (OKF trust tier: human-reviewed).</p>' +
     '<form id="rform" class="stack"><div class="row">' +
-    '<label class="field">Queue size<input id="rlimit" type="number" min="1" step="1" placeholder="Default"></label>' +
-    '<label class="field">Retrieval profile<select id="rprofile"><option value="">Default</option>' +
+    '<label class="field"><span>Queue size</span><input id="rlimit" type="number" min="1" step="1" placeholder="Default"></label>' +
+    '<label class="field"><span>Retrieval profile</span><select id="rprofile"><option value="">Default</option>' +
     '<option value="lean">Lean</option><option value="balanced">Balanced</option><option value="max">Max</option></select></label></div>' +
     '<label class="row"><input type="checkbox" id="rgarnish"> Ask the configured model to relate public review items to recent public notes</label>' +
     '<div class="row"><button id="rload" type="submit">Update queue</button></div></form>' +
-    (STATUS?.readonly ? '' : '<div class="row"><label class="field">Snooze days<input id="rdays" type="number" min="1" step="1" value="7" required></label></div>') +
-    '<div id="rlist" class="list"></div></div>';
+    (STATUS?.readonly ? '' : '<div class="row"><label class="field"><span>Snooze days</span><input id="rdays" type="number" min="1" step="1" value="7" required></label></div>') +
+    '<div id="rlist" class="list" data-via="review"></div></div>';
   var listEl = document.getElementById('rlist');
   var limitEl = document.getElementById('rlimit');
   var profileEl = document.getElementById('rprofile');
@@ -1481,8 +1545,8 @@ async function renderReview() {
     catch (e) { listEl.innerHTML = errorBox(e); return; }
     finally { loadButton.disabled = false; }
     if (!q.length) { listEl.innerHTML = '<div class="empty">Nothing needs review.</div>'; return; }
-    listEl.innerHTML = q.map(function (it) {
-      return '<div class="card" data-id="' + esc(it.id) + '">' +
+    listEl.innerHTML = q.map(function (it, i) {
+      return '<div class="card" data-id="' + esc(it.id) + '" data-rank="' + (i + 1) + '">' +
         '<div class="title">' + conceptLink(it.id, it.title) +
         ' <span class="muted">(' + it.score.toFixed(2) + ')</span></div>' +
         '<div class="why">' + esc(it.reasons.join('; ')) + '</div>' +
@@ -1577,7 +1641,7 @@ async function renderInboxFiling(id, seq) {
 }
 
 async function renderInbox() {
-  view.innerHTML = '<div class="stack"><h2>Inbox</h2><div id="ilist" class="list"></div></div>';
+  view.innerHTML = '<div class="stack"><h2>Inbox</h2><div id="ilist" class="list" data-via="browse"></div></div>';
   var listEl = document.getElementById('ilist');
   async function load() {
     Okb.working(listEl, 'loading');
@@ -1585,8 +1649,8 @@ async function renderInbox() {
     try { rows = await api('inbox_list', {}); }
     catch (e) { listEl.innerHTML = errorBox(e); return; }
     if (!rows.length) { listEl.innerHTML = '<div class="empty">Inbox is empty.</div>'; return; }
-    listEl.innerHTML = rows.map(function (r) {
-      return '<div class="card" data-id="' + esc(r.id) + '">' +
+    listEl.innerHTML = rows.map(function (r, i) {
+      return '<div class="card" data-id="' + esc(r.id) + '" data-rank="' + (i + 1) + '">' +
         '<div class="title">' + conceptLink(r.id, r.title) + '</div>' +
         '<div class="why"><code>' + esc(r.id) + '</code> · ' + dateOf(r.timestamp) + '</div>' +
         cardActions(r.id, '<button class="small" data-act="read">Mark read</button>' + inboxFileLink(r.id)) + '</div>';
@@ -1612,9 +1676,9 @@ function showBookmarklet() {
     a.href = r.bookmarklet;
     a.textContent = 'Clip to okbrain';
     a.className = 'chip';
-    a.title = 'drag me to your bookmarks bar';
+    a.title = 'Drag to your bookmarks bar';
     el.replaceChildren(a);
-    el.insertAdjacentHTML('beforeend', ' <span class="muted">drag this to your bookmarks bar; clicking it on any page clips that page (needs okb serve on port ' + esc(r.port) + ')</span>');
+    el.insertAdjacentHTML('beforeend', ' <span class="muted">Drag this to your bookmarks bar. Selecting it on a page clips that page while okbrain is running on port ' + esc(r.port) + '.</span>');
   }).catch(function (e) { setHtml('bm-out', errorBox(e)); });
 }
 
@@ -1668,8 +1732,8 @@ function renderAdd(_arg, seq) {
     '<label class="field"><span>Comment</span><textarea id="clip-note" rows="2"></textarea></label>' +
     '<label class="field"><span>Tags</span><input id="clip-tags" placeholder="Comma-separated"></label></div></details>' +
     '<div class="row">' +
-    '<label class="row" style="gap:5px"><input type="checkbox" id="clip-read"> already read</label>' +
-    '<label class="row" style="gap:5px"><input type="checkbox" id="clip-auto"> Suggest tags with AI using public tags</label>' +
+    '<label class="row"><input type="checkbox" id="clip-read"> Already read</label>' +
+    '<label class="row"><input type="checkbox" id="clip-auto"> Suggest tags with AI using public tags</label>' +
     '<button>Clip</button></div></form><div id="clip-out"></div>' +
     '<p class="muted">Clipped pages arrive as <code>references/</code> concepts with the page recorded under <code>sources</code>.</p>' +
     '<h3>Bookmarklet</h3><div id="bm-out"></div>' +
@@ -1689,7 +1753,7 @@ function renderAdd(_arg, seq) {
     '<label class="field"><span>File or folder path on the okbrain server</span><input id="imp-path" required></label>' +
     '<div class="grid"><label class="field"><span>Destination folder</span><input id="imp-dest" placeholder="Brain root by default"></label>' +
     '<label class="field"><span>Type for files without one</span><input id="imp-type" placeholder="Note by default"></label></div><div class="row">' +
-    '<label class="row" style="gap:5px"><input type="checkbox" id="imp-over"> overwrite</label>' +
+    '<label class="row"><input type="checkbox" id="imp-over"> Overwrite existing notes</label>' +
     '<button>Import</button></div></form><div id="imp-out" aria-live="polite"></div></details>') + '</div>';
 
   var out = setHtml;
@@ -2220,7 +2284,7 @@ async function renderClaims(focusId, seq) {
     '<textarea id="t-body" rows="3"></textarea></label>' +
     '<div class="row"><button class="primary">Stake claim</button>' +
     '<span id="t-msg" class="muted"></span></div></form>' +
-    '<div id="c-out"></div></div>';
+    '<div id="c-out" data-via="browse"></div></div>';
 
   document.getElementById('tf').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -2312,7 +2376,7 @@ async function renderStats(_arg, seq) {
     '<label class="field"><span>Max path hops</span><input id="p-depth" type="number" min="0" placeholder="10"></label>' +
     '</div><div class="row"><button class="primary">Find path</button></div></form>' +
     '<div id="p-out"></div>' +
-    '<h3>Orphans (no links in or out)</h3><div id="or-out"></div></div>';
+    '<h3>Orphans (no links in or out)</h3><div id="or-out" data-via="browse"></div></div>';
   working('st-out', 'counting');
   working('or-out', 'loading');
   var pathForm = document.getElementById('pf');
@@ -2694,6 +2758,124 @@ function mountNoteUsageSettings(panel) {
   enable.addEventListener('click', function () { void update(true); });
   disable.addEventListener('click', function () { void update(false); });
   void update();
+}
+
+// The facilitator's controls for an opt-in usability session (docs/USABILITY.md).
+// Each control that acts is replaced by the next one, so focus moves with it.
+function mountUsabilitySession(panel, seq) {
+  var brain = BRAIN;
+  var state = panel.querySelector('[data-usability-state]');
+  var feedback = panel.querySelector('[data-usability-feedback]');
+  var idle = panel.querySelector('[data-usability-idle]');
+  var active = panel.querySelector('[data-usability-active]');
+  var next = panel.querySelector('[data-usability-next]');
+  var openTask = panel.querySelector('[data-usability-open]');
+  var stored = panel.querySelector('[data-usability-stored]');
+  var start = panel.querySelector('[data-usability-start]');
+  var stop = panel.querySelector('[data-usability-stop]');
+  var save = panel.querySelector('[data-usability-export]');
+  var clear = panel.querySelector('[data-usability-clear]');
+  var label = next.elements.label;
+  var controls = Array.from(panel.querySelectorAll('button, input'));
+  var task = null;
+  var busy = false;
+
+  function current() { return panel.isConnected && !stale(seq) && brain === BRAIN; }
+  function notice(message, error) {
+    feedback.className = error ? 'error' : message ? 'notice' : '';
+    feedback.textContent = message;
+  }
+  function count(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+  function paint(status) {
+    task = status.task;
+    idle.hidden = status.recording;
+    active.hidden = !status.recording;
+    next.hidden = Boolean(task);
+    openTask.hidden = !task;
+    stored.hidden = !status.sessions;
+    panel.querySelector('#usability-open-task').textContent = task ? 'Task ' + task + ' is open.' : '';
+    state.textContent = status.recording
+      ? 'Recording since ' + new Date(status.startedAt).toLocaleTimeString() + '. ' + count(status.events, 'event', 'events') + ' so far.'
+      : 'Not recording.' + (status.sessions ? ' ' + count(status.sessions, 'session is', 'sessions are') + ' stored for this brain.' : '');
+    if (STATUS && STATUS.usabilityRecording !== status.recording) {
+      STATUS.usabilityRecording = status.recording;
+      paintStatus();
+    }
+  }
+  // `done` returns the control to focus next. After an error, focus goes back to the trigger.
+  async function act(trigger, working, request, done) {
+    if (busy || !current()) return;
+    busy = true;
+    controls.forEach(function (control) { control.disabled = true; });
+    notice(working);
+    var focus = trigger;
+    try {
+      var result = await request();
+      if (!current()) return;
+      focus = done(result);
+    } catch (error) {
+      if (current()) notice(error.message, true);
+    } finally {
+      busy = false;
+      if (current()) {
+        controls.forEach(function (control) { control.disabled = false; });
+        // Leave focus alone when the person has moved on to another part of the page.
+        if (document.activeElement === document.body || panel.contains(document.activeElement)) focus.focus();
+      }
+    }
+  }
+  function change(trigger, working, op, params, message, focus) {
+    return act(trigger, working, function () { return api(op, params); }, function (status) {
+      paint(status);
+      notice(message);
+      return focus;
+    });
+  }
+
+  start.addEventListener('click', function () {
+    void change(start, 'Starting session…', 'usability_session', { action: 'start' }, 'Recording started.', label);
+  });
+  stop.addEventListener('click', function () {
+    void change(stop, 'Stopping session…', 'usability_session', { action: 'stop' },
+      'Recording stopped. Export the session before you clear it.', save);
+  });
+  next.addEventListener('submit', function (event) {
+    event.preventDefault();
+    var name = label.value.trim();
+    if (!name) return;
+    void act(label, 'Starting task…', function () { return api('usability_task', { action: 'start', label: name }); }, function (status) {
+      label.value = '';
+      paint(status);
+      notice('Task ' + name + ' started.');
+      return state;
+    });
+  });
+  openTask.addEventListener('click', function (event) {
+    var button = event.target.closest('button[data-outcome]');
+    if (!button || !task) return;
+    var name = task;
+    void change(button, 'Ending task…', 'usability_task', { action: 'end', label: name, outcome: button.dataset.outcome },
+      'Task ' + name + ' ended as ' + button.dataset.outcome.replace('_', ' ') + '.', label);
+  });
+  save.addEventListener('click', function () {
+    void act(save, 'Preparing the export…', function () { return api('usability_export', {}); }, function (exported) {
+      var events = exported.sessions.reduce(function (total, session) { return total + session.events.length; }, 0);
+      saveFile('okbrain-usability.json', JSON.stringify(exported, null, 2) + '\n', 'application/json');
+      notice('Saving okbrain-usability.json with ' + count(exported.sessions.length, 'session', 'sessions') + ' and ' +
+        count(events, 'event', 'events') + '.');
+      return save;
+    });
+  });
+  clear.addEventListener('click', function () {
+    if (!confirm('Delete every stored usability session for this brain from this device? A recording session stops.')) return;
+    void change(clear, 'Clearing sessions…', 'usability_session', { action: 'clear' }, 'Stored sessions cleared.', start);
+  });
+
+  api('usability_session', {}).then(function (status) {
+    if (current()) paint(status);
+  }).catch(function (error) {
+    if (current()) state.textContent = error.message;
+  });
 }
 
 function mountCacheSettings(panel) {
@@ -3366,7 +3548,7 @@ function mountMaintenanceSchedule(panel, readonly, seq) {
   syncControls();
 }
 
-async function renderSettings(_arg, seq) {
+async function renderSettings(section, seq) {
   var st = STATUS || {};
   var mcpArgs = st.brain ? ['--brain', st.brain, 'mcp'] : ['--bundle', st.bundle || '<bundle>', 'mcp'];
   var mcpJson = JSON.stringify({ mcpServers: { okbrain: { command: 'okb', args: mcpArgs } } }, null, 2);
@@ -3388,6 +3570,31 @@ async function renderSettings(_arg, seq) {
       '<p class="muted">Count opens and verified Ask citations for this brain on this device. The last 30 days of counts appear on notes.</p>' +
       '<div class="row"><button data-usage-enable type="button" hidden>Turn on local counts</button>' +
       '<button data-usage-disable type="button" hidden>Turn off and clear counts</button></div><div role="status"></div></section>') +
+    '<section id="usability-session" class="stack" aria-labelledby="usability-title">' +
+    '<h3 id="usability-title" tabindex="-1">Usability session</h3>' +
+    (st.readonly ? '<p>Open a writable brain to run a usability session.</p>' :
+      '<p class="muted">Measure the time to a first saved note and how well notes are found again in a facilitated session. ' +
+      'Recording is off until you start it. It covers this brain only and stays on this device.</p>' +
+      '<p><strong>Recorded.</strong> The kind of each action (save, search, open, browse, map, ask, review, or error), ' +
+      'when it happened after the session started, how long it took, result counts, the position of an opened result, ' +
+      'and the task labels you enter.</p>' +
+      '<p><strong>Never recorded.</strong> Note text, titles, IDs, paths, or tags. Search and question text. Answers. Error messages.</p>' +
+      '<p data-usability-state role="status" tabindex="-1">Checking for a session…</p>' +
+      '<div class="row" data-usability-idle hidden><button type="button" data-usability-start>Start session</button></div>' +
+      '<div class="stack" data-usability-active hidden>' +
+      '<form class="stack" data-usability-next hidden><div class="row"><label class="field"><span>Task label</span>' +
+      '<input name="label" maxlength="16" pattern="[A-Za-z0-9_\\-]{1,16}" required autocomplete="off" spellcheck="false" ' +
+      'placeholder="T3" aria-describedby="usability-label-help"></label><button type="submit">Start task</button></div>' +
+      '<p class="muted" id="usability-label-help">Use up to 16 letters, digits, hyphens, or underscores.</p></form>' +
+      '<div class="stack" data-usability-open role="group" aria-labelledby="usability-open-task" hidden>' +
+      '<p id="usability-open-task"></p><div class="row">' +
+      '<button type="button" data-outcome="found">End as found</button>' +
+      '<button type="button" data-outcome="not_found">End as not found</button>' +
+      '<button type="button" data-outcome="abandoned">End as abandoned</button></div></div>' +
+      '<div class="row"><button type="button" data-usability-stop>Stop session</button></div></div>' +
+      '<div class="row" data-usability-stored hidden><button type="button" data-usability-export>Export JSON</button>' +
+      '<button type="button" class="danger" data-usability-clear>Clear sessions</button></div>' +
+      '<div data-usability-feedback role="status"></div>') + '</section>' +
     '<section id="cache-settings" class="stack"><h3>Search and graph cache</h3>' +
     '<p>Active backend <strong data-cache-backend></strong></p>' + (st.readonly ? '' :
       '<details><summary>Change cache backend</summary><p class="muted">Connect to PostgreSQL with pgvector on this computer. The database stores searchable note text, including private drafts, along with graph data and any embeddings you build. Use a database you trust.</p>' +
@@ -3511,7 +3718,7 @@ async function renderSettings(_arg, seq) {
       '<div class="row"><button type="submit">Export Markdown</button><span role="status"></span></div></form>') + '</section>' +
     '<div class="row"><span class="muted">Jobs:</span>' +
     ['index', 'embed', 'rss', 'review', 'doctor'].map(function (j) {
-      return '<label class="row" style="gap:4px"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
+      return '<label class="row"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
     }).join('') + '<button id="mx-jobs">Run jobs</button></div>' +
     (st.readonly ? '' : '<form id="mx-upgrade-form" class="stack"><h4>OKF v0.2 migration</h4>' +
       field('upgrade-by', 'Actor to credit (optional)', '', 'Current actor') +
@@ -3525,6 +3732,9 @@ async function renderSettings(_arg, seq) {
   var show = setHtml;
   var usagePanel = document.getElementById('note-usage-settings');
   if (usagePanel) mountNoteUsageSettings(usagePanel);
+  if (!st.readonly) mountUsabilitySession(document.getElementById('usability-session'), seq);
+  // The footer's recording indicator links here.
+  if (section === 'usability') document.getElementById('usability-title').focus();
   mountCacheSettings(document.getElementById('cache-settings'));
   showBookmarklet();
   mountBundleWatch(document.getElementById('bundle-watch'), Boolean(st.readonly), seq);

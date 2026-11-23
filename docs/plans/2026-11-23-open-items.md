@@ -156,6 +156,10 @@ downloaded copy, and the docs describe exactly that.
 
 ## WP2: Opt-in, local-only usability sessions
 
+**Status.** Landed on 2026-11-23. The choices made while building it are in
+the [CONTEXT.md Decisions Log](../../CONTEXT.md#decisions-log) under "What a
+usability session counts", and the protocol is [docs/USABILITY.md](../USABILITY.md).
+
 **Goal.** Measure the product plan's time to first saved item and re-finding
 success during facilitated sessions, with locally collected performance data
 and no source-content telemetry. Covers both the web app and the Mac app,

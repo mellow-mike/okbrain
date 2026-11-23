@@ -8,7 +8,7 @@
 import { readFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { extractTargets, markdownOutsideCode, resolvePathField } from "../graph/links.ts";
-import { listMdFiles } from "./bundle.ts";
+import { listLinks, listMdFiles } from "./bundle.ts";
 import {
   fmSources,
   fmStatus,
@@ -34,7 +34,7 @@ export interface Finding {
    * broken-source · legacy-timestamp · legacy-citations · generated-shape ·
    * verified-shape · status-value · stale-after-format · sources-shape ·
    * computation-runtime · index-frontmatter · okf-version · log-heading ·
-   * log-order · missing-index
+   * log-order · missing-index · link
    */
   check: string;
   /** Bundle-relative forward-slash path the finding is about. */
@@ -151,6 +151,10 @@ export async function runDoctor(root: string, now: Date = new Date()): Promise<D
   // Reserved ids included so links to an index.md/log.md aren't "broken".
   const known = new Set(files.map(relPathToId));
   const findings: Finding[] = [];
+  // Nothing in okbrain follows a symbolic link, so say where they are (B23).
+  for (const path of await listLinks(root))
+    findings.push({ severity: "warning", check: "link", path,
+      message: "This is a symbolic link. okbrain does not read, write, or follow it. Replace it with a regular file or folder." });
   const portablePaths = new Map<string, string>();
   const reportedAliases = new Set<string>();
   const conceptDirs = new Set([""]); // root always expects an index.md

@@ -1,0 +1,122 @@
+[
+  {
+    "conversation_id": "5b0f6c1e-2f4a-4d7b-9c1e-0a1b2c3d4e01",
+    "title": "Sourdough starter schedule",
+    "create_time": 1788336000,
+    "update_time": 1788336300,
+    "current_node": "answer",
+    "mapping": {
+      "root": { "parent": null, "message": null },
+      "question": {
+        "parent": "root",
+        "message": {
+          "author": { "role": "user" },
+          "content": { "parts": ["How often should I feed a starter that I keep on the counter?"] }
+        }
+      },
+      "answer": {
+        "parent": "question",
+        "message": {
+          "author": { "role": "assistant" },
+          "content": { "parts": ["At room temperature, feed it once a day. Keep 50 g of starter, then add 50 g of flour and 50 g of water. If you move the jar to the fridge, once a week is enough. Feed it twice before baking so it is active again."] }
+        }
+      }
+    }
+  },
+  {
+    "conversation_id": "5b0f6c1e-2f4a-4d7b-9c1e-0a1b2c3d4e02",
+    "title": "Two ways to cycle to the station",
+    "create_time": 1788422400,
+    "update_time": 1788422700,
+    "current_node": "answer",
+    "mapping": {
+      "root": { "parent": null, "message": null },
+      "question": {
+        "parent": "root",
+        "message": {
+          "author": { "role": "user" },
+          "content": { "parts": ["I can ride to the station along the river path or on the main road. Which should I pick?"] }
+        }
+      },
+      "answer": {
+        "parent": "question",
+        "message": {
+          "author": { "role": "assistant" },
+          "content": { "parts": ["The river path is about 4 km and takes 18 minutes. It is quiet, but unlit after dark and muddy after rain. The main road is 3 km and takes 12 minutes, with a painted lane and two busy junctions. Take the river path on dry mornings and the main road when it is dark or wet."] }
+        }
+      }
+    }
+  },
+  {
+    "conversation_id": "5b0f6c1e-2f4a-4d7b-9c1e-0a1b2c3d4e03",
+    "title": "Spacing tomato seedlings",
+    "create_time": 1788508800,
+    "update_time": 1788509100,
+    "current_node": "answer",
+    "mapping": {
+      "root": { "parent": null, "message": null },
+      "question": {
+        "parent": "root",
+        "message": {
+          "author": { "role": "user" },
+          "content": { "parts": ["How far apart should I plant tomato seedlings in a raised bed?"] }
+        }
+      },
+      "answer": {
+        "parent": "question",
+        "message": {
+          "author": { "role": "assistant" },
+          "content": { "parts": ["Leave 45 to 60 cm between plants and 90 cm between rows. Bush varieties can sit at the closer end. Plant deep, up to the first true leaves, and add a stake at planting time so you do not damage roots later."] }
+        }
+      }
+    }
+  },
+  {
+    "conversation_id": "5b0f6c1e-2f4a-4d7b-9c1e-0a1b2c3d4e04",
+    "title": "Packing for a wet weekend walk",
+    "create_time": 1788595200,
+    "update_time": 1788595500,
+    "current_node": "answer",
+    "mapping": {
+      "root": { "parent": null, "message": null },
+      "question": {
+        "parent": "root",
+        "message": {
+          "author": { "role": "user" },
+          "content": { "parts": ["What should I pack for two days of walking when rain is forecast?"] }
+        }
+      },
+      "answer": {
+        "parent": "question",
+        "message": {
+          "author": { "role": "assistant" },
+          "content": { "parts": ["Pack a waterproof jacket and overtrousers, two pairs of wool socks, a dry bag for spare clothes, a paper map in a zip bag, a head torch, and a flask. Line the rucksack with a bin liner. Leave cotton layers at home because they stay wet."] }
+        }
+      }
+    }
+  },
+  {
+    "conversation_id": "5b0f6c1e-2f4a-4d7b-9c1e-0a1b2c3d4e05",
+    "title": "Sharing costs in a three-person flat",
+    "create_time": 1788681600,
+    "update_time": 1788681900,
+    "current_node": "answer",
+    "mapping": {
+      "root": { "parent": null, "message": null },
+      "question": {
+        "parent": "root",
+        "message": {
+          "author": { "role": "user" },
+          "content": { "parts": ["Three of us share a flat and the rooms are different sizes. How can we split the bills fairly?"] }
+        }
+      },
+      "answer": {
+        "parent": "question",
+        "message": {
+          "author": { "role": "assistant" },
+          "content": { "parts": ["Split rent by room area and split utilities and internet equally. Keep one shared list for groceries and settle it on the first of each month. Agree on a small buffer, such as 20 per person, for cleaning supplies."] }
+        }
+      }
+    }
+  }
+]

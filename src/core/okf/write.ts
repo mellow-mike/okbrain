@@ -29,10 +29,24 @@ import {
 } from "./document.ts";
 import { regenerateIndexBranches, regenerateIndexes } from "./indexmd.ts";
 import { appendConceptLogs, appendLog, formatLogEntry, todayUtc, type ConceptLogEntry } from "./logmd.ts";
-import { assertConceptPathSpelling, idToAbsPath, isReservedName, slugify } from "./paths.ts";
+import { assertBundleFile, assertConceptPathSpelling, idToAbsPath, isReservedName, slugify } from "./paths.ts";
 import { isPrivateConcept } from "./privacy.ts";
 
 export class OkfWriteError extends Error {}
+
+/**
+ * Everything a note write touches must be a regular file before any byte is
+ * written: the note, each `index.md` above it, and the logs beside them. A
+ * link among them would send the write somewhere else on this computer (B23).
+ */
+async function assertWriteTargets(root: string, id: string): Promise<void> {
+  await assertBundleFile(root, `${id}.md`);
+  const folders = id.split("/").slice(0, -1);
+  for (let depth = 0; depth <= folders.length; depth++) {
+    const folder = folders.slice(0, depth).join("/");
+    for (const name of ["index.md", "log.md"]) await assertBundleFile(root, folder ? `${folder}/${name}` : name);
+  }
+}
 
 export interface WriteConceptInput {
   id: string;
@@ -193,6 +207,7 @@ export async function writeFilingDocument(root: string, id: string, doc: OkfDocu
   const path = idToAbsPath(root, id);
   if (isReservedName(posix.basename(id) + ".md")) throw new OkfWriteError("Choose a concept path for filing.");
   await assertConceptPathSpelling(root, id);
+  await assertWriteTargets(root, id);
   const privateConcept = isPrivateConcept(id, doc.frontmatter);
   return publishConcept(path, serialize(doc), privateConcept ? 0o600 : undefined, expected);
 }
@@ -209,6 +224,7 @@ export async function writeConcept(
       `${input.id} is a reserved file, not a concept; index.md/log.md are maintained by okbrain`,
     );
   await assertConceptPathSpelling(root, input.id);
+  await assertWriteTargets(root, input.id);
 
   let existing;
   try {

@@ -42,8 +42,10 @@ are what's tested. Pattern (the full driver from the 2026-09-03 session is
 ```ts
 import { chromium } from "playwright";
 // spawn: okb serve --port 6591 --bundle <tmp copy of bundles/example> with
-// env XDG_CONFIG_HOME=<tmp>; poll GET /api/status?token=<serve-token> until
-// its `bundle` equals yours — a stale server on the port answers too.
+// env XDG_CONFIG_HOME=<tmp> (and XDG_DATA_HOME=<tmp>); poll GET /api/status
+// with the header `x-okb-token: <serve-token>` (the token is in
+// <XDG_CONFIG_HOME>/okbrain/serve-token; it is not accepted in the address)
+// until its `bundle` equals yours — a stale server on the port answers too.
 const browser = await chromium.launch({ executablePath: "<chrome path>" });
 const page = await browser.newPage();
 page.on("pageerror", (e) => fail("JS " + e.message + "\n" + e.stack));
