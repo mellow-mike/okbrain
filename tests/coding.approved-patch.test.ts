@@ -86,6 +86,8 @@ test("tracked files keep their Git mode under any umask, and a changed executabl
   for (const permissions of [0o755, 0o744, 0o2644, 0o4644]) {
     await fixture(async (workspace) => {
       await chmod(join(workspace, target), permissions);
+      // A system clears set-group-ID when the file's group is not one of the caller's groups.
+      if (((await stat(join(workspace, target))).mode & 0o7777) !== permissions) return;
       await expect(withPreparedPatch(workspace, ["src"], diff(), async () => {})).rejects.toThrow("with its Git permissions");
       expect(await readFile(join(workspace, target), "utf8")).toBe(original);
     });

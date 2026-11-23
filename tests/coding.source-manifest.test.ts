@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApiServer } from "../src/api.ts";
@@ -29,7 +29,8 @@ let root: string;
 let workspace: string;
 
 beforeAll(async () => {
-  root = await mkdtemp(join(tmpdir(), "okb-source-manifest-"));
+  // The attachment preview takes a canonical workspace, and a temporary directory can be a symlink.
+  root = await realpath(await mkdtemp(join(tmpdir(), "okb-source-manifest-")));
   workspace = join(root, "work");
   await mkdir(join(workspace, "apps", "web"), { recursive: true });
   await mkdir(join(workspace, "packages", "auth"), { recursive: true });
