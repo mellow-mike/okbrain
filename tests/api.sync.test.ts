@@ -9,6 +9,11 @@ import { mcpOps } from "../src/mcp/server.ts";
 
 const ownerToken = "sync-fixture-owner-0123456789";
 
+/** Keep the server's explanation beside the status, so a refused sync names its cause in the failure. */
+async function outcome(response: Response) {
+  return { status: response.status, body: await response.json() as unknown };
+}
+
 function request(api: ApiServer, action: string, input: unknown, headers?: Record<string, string>) {
   return fetch(new URL(`/api/op/${action}`, api.url), {
     method: "POST", body: JSON.stringify(input),
@@ -49,9 +54,8 @@ test("Git setup and recovery require the local owner and a writable brain", asyn
     } });
     expect((await request(writable, "index", {})).status).toBe(200);
     await writeFile(join(bundle, "example.md"), "---\ntype: note\ntitle: Example\ndescription: Offline test\n---\n\nAsync lookup fixture.\n");
-    const synced = await request(writable, "sync", {});
-    expect(synced.status).toBe(200);
-    expect(await synced.json()).toMatchObject({ result: { committed: expect.any(String), pushed: false } });
+    expect(await outcome(await request(writable, "sync", {})))
+      .toMatchObject({ status: 200, body: { result: { committed: expect.any(String), pushed: false } } });
     const searched = await request(writable, "search", { query: "lookup fixture", "keyword-only": true });
     expect(await searched.json()).toMatchObject({ result: [{ id: "example" }] });
     const url = "https://git.example.test/team/brain.git";
@@ -88,9 +92,8 @@ test("Git setup and recovery require the local owner and a writable brain", asyn
     const disconnected = await request(writable, "sync_settings", { action: "origin-apply", ...disconnect, approval: disconnection.approval });
     expect(disconnected.status).toBe(200);
     expect(await disconnected.json()).toMatchObject({ result: { originConfigured: false, origin: null } });
-    const local = await request(writable, "sync", {});
-    expect(local.status).toBe(200);
-    expect(await local.json()).toMatchObject({ result: { pushed: false, remote: null } });
+    expect(await outcome(await request(writable, "sync", {})))
+      .toMatchObject({ status: 200, body: { result: { pushed: false, remote: null } } });
 
     const current = await request(writable, "sync_recovery", { action: "status" });
     expect(current.status).toBe(200);
