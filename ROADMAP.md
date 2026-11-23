@@ -24,7 +24,8 @@ are in [the open items handoff](docs/plans/2026-11-23-open-items.md).
 - [ ] Add a signed dry run of the release workflow that publishes nothing.
 - [ ] Document download verification, and the first-launch approval for
   binaries without a publisher signature.
-- [ ] Tag `v0.1.0` after a signed dry run passes. The maintainer pushes the tag.
+- [ ] Tag `v0.1.0` after a signed dry run passes and the Stage 7 usability
+  sessions item has landed. The maintainer pushes the tag.
 
 ### Stage 7 — Personal second brain
 
@@ -917,7 +918,8 @@ Newest first. One line per session: what changed + what's next.
   ships through GitHub Releases with a GPG-signed checksum manifest and build
   provenance attestations. Publisher signing, the extra channels, live provider
   evaluation, and intended-host verification are deferred. Usability sessions
-  get local-only measurement, and concept types stay free-form. Next:
+  get local-only measurement, and the `v0.1.0` tag waits for them. Concept
+  types stay free-form. Next:
   [the open items handoff](docs/plans/2026-11-23-open-items.md).
 - 2026-11-22 — Added graph JSON export to the Mac and web apps and a source
   manifest copy to the Coding apps and editor. Fixed patch approval under

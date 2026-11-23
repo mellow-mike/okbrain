@@ -1335,6 +1335,9 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-11-23 — **v0.1.0 waits for the usability sessions.** The maintainer chose
+  to tag `v0.1.0` only after both the signed release workflow and the opt-in,
+  local-only usability sessions have landed and a signed dry run has passed.
 - 2026-11-23 — **v0.1.0 carries release-integrity signatures, not publisher
   signatures.** The maintainer chose to sign before tagging. The release
   workflow signs `SHA256SUMS.txt` with a dedicated release GPG key (a detached,

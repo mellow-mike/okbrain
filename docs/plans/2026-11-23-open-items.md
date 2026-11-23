@@ -28,10 +28,8 @@ It follows the maintainer's answers recorded in the
 | Live provider evaluation | Defer, not a blocker | Stays `[!]` with no work now |
 | Intended enterprise host verification | Defer, not a blocker | Stays `[!]` with no work now |
 | Usability measurement | Local metrics plus a session script | WP2 |
+| Does v0.1.0 wait for WP2? | Wait | Tag only after WP1 and WP2 both land |
 | Concept type vocabulary | Free-form with starter suggestions | Recorded in CONTEXT.md, no code |
-
-Assumption: the `v0.1.0` tag waits only for WP1. WP2 can ship in a later
-release. Confirm with the maintainer before holding the tag for WP2.
 
 ## WP1: Signed v0.1.0 release
 
@@ -60,8 +58,9 @@ chat, commits, or logs.
    the `main` branch (the dry run needs `main`). Add the environment secrets
    `OKB_RELEASE_GPG_PRIVATE_KEY` (the armored subkey export) and
    `OKB_RELEASE_GPG_PASSPHRASE`.
-3. **Push the tag** after WP1 merges and a dry run passes (step 9). An agent
-   pushes a tag only with the maintainer's explicit approval in that session.
+3. **Push the tag** after WP1 and WP2 both merge and a dry run passes (step 9).
+   An agent pushes a tag only with the maintainer's explicit approval in that
+   session.
 
 ### Implementation
 
@@ -144,7 +143,8 @@ chat, commits, or logs.
    `okbrain-signed-release-assets` artifact contains `SHA256SUMS.txt.asc`, that
    `gpg --verify` passes locally against the committed key, and that the run
    created no release and no attestation.
-9. **Tag and check.** The maintainer runs
+9. **Tag and check** once WP2 has also merged. Run the dry run again on that
+   `main` if anything release-related changed since step 8. The maintainer runs
    `git tag -a v0.1.0 -m "okbrain 0.1.0"` on the merged `main`, pushes it, and
    approves the environment. Download every published asset, then verify the
    GPG signature, each checksum, and each attestation. Update the README
@@ -284,10 +284,12 @@ condition is met.
 
 1. **Decisions** (this PR, docs only): CONTEXT.md, ROADMAP.md, and this plan.
 2. **WP1** (one PR): the signing script, the asset check, the workflow, tests,
-   and docs. After merge, the maintainer completes the prerequisites, runs the
-   dry run, and pushes `v0.1.0`.
-3. **WP2** (one PR, independent of WP1): the usability store, ops, GUI,
-   protocol, and tests.
+   and docs. After merge, the maintainer completes the prerequisites and runs
+   the dry run.
+3. **WP2** (one PR, independent of WP1, can run in parallel): the usability
+   store, ops, GUI, protocol, and tests.
+4. **Tag `v0.1.0`** once WP1 and WP2 have both merged and a signed dry run has
+   passed (decided 2026-11-23).
 
 Run `/verify` before each code commit. Follow the AGENTS.md rules
 throughout: cross-platform paths, argument-array subprocesses, ops declared
