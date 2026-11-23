@@ -272,6 +272,9 @@ sources may still be mirrored as first-class concepts under `references/`.
   `last_reviewed` counts as a review when no human `verified` event exists.
   This is the permissive consumer OKF mandates, so bundles authored by other
   tools (see `bundles/acme_retail/`) open cleanly.
+- **Type vocabulary:** free-form. The starter templates suggest lowercase
+  types (`note`, `source`, `project`, `decision`, `guide`), and nothing
+  enforces a set. Upstream Title Case types stay conformant.
 
 ### Writer guarantees (`core/okf/write.ts` over `document.ts`)
 Every write produces a conformant bundle (`writeConcept`, exposed as the
@@ -1332,6 +1335,41 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-11-23 — **v0.1.0 waits for the usability sessions.** The maintainer chose
+  to tag `v0.1.0` only after both the signed release workflow and the opt-in,
+  local-only usability sessions have landed and a signed dry run has passed.
+- 2026-11-23 — **v0.1.0 carries release-integrity signatures, not publisher
+  signatures.** The maintainer chose to sign before tagging. The release
+  workflow signs `SHA256SUMS.txt` with a dedicated release GPG key (a detached,
+  armored `SHA256SUMS.txt.asc`) and adds GitHub build provenance attestations
+  for every release asset. The key and its passphrase live in a protected
+  `release` GitHub environment that needs maintainer approval. macOS Developer
+  ID signing with notarization and Windows Authenticode stay deferred beyond
+  v0.1.0. The local packagers keep supporting them, the Mac apps stay ad hoc
+  signed, and the CLI archives carry no publisher signature. Tag `v0.1.0` only
+  after a signed dry run of the release workflow passes.
+- 2026-11-23 — **GitHub Releases is the only v0.1.0 distribution channel.** The
+  Homebrew tap, Scoop bucket, VS Code Marketplace, and Open VSX remain
+  candidates for 1.0. Each release keeps attaching the VSIX for
+  **Install from VSIX** in VS Code and Cursor.
+- 2026-11-23 — **Live provider evaluation and intended-host verification are
+  deferred and do not block v0.1.0.** Both stay blocked until an approved
+  provider account and an independent reviewer, and access to the intended
+  host, are available. The offline 36-trial rehearsal and the Linux Docker
+  drills remain the published evidence.
+- 2026-11-23 — **Usability sessions use opt-in, local-only measurement.** The
+  product plan's time to first saved item and re-finding success are recorded
+  only while a person starts a session for a brain from Settings or the CLI.
+  Event kinds, timings, counts, and result ranks go to per-user application
+  data. Note content, IDs, titles, paths, tags, and query text are never
+  recorded. MCP callers never generate events. A facilitator exports a JSON
+  summary on request, and a written protocol in `docs/USABILITY.md` defines the
+  tasks.
+- 2026-11-23 — **Concept types stay free-form.** okbrain enforces no type
+  vocabulary. The starter templates suggest lowercase types (`note`, `source`,
+  `project`, `decision`, `guide`), and readers keep tolerating any value,
+  including upstream Title Case. This resolves the open question about a
+  default type set.
 - 2026-11-22 — **Patch approval compares file modes the way Git does.** Check
   the owner-executable bit and refuse set-ID and sticky bits, for tracked and
   new files alike. Requiring exactly `0644` or `0755` refused every tracked
@@ -1939,9 +1977,8 @@ sections above as current truth; this log says *why/when*.
   upgrade behind the engine interface.
 
 ### Open questions (decide as they come up; record the answer here)
-- Concept `type` vocabulary: ship a small non-binding default set (Note, Person,
-  Project, Reference, Idea, Meeting…) vs fully free-form? (okbrain writes
-  lowercase types; upstream samples use Title Case — both are conformant.)
+- None open. The concept type vocabulary question was resolved on 2026-11-23:
+  types stay free-form, with lowercase starter suggestions.
 
 ### Format decisions
 
