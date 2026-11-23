@@ -217,6 +217,16 @@ Private notes remain in local search. Git sync keeps them out of staging and rec
 
 Ask, ChatGPT previews, focused maps, embeddings, and both export workflows have an explicit private-note option. Ask and embeddings send private text only when enabled for that request. Web enrichment excludes private notes. Authorized MCP clients can still read local notes within their connected brain.
 
+## Run a usability session
+
+A usability session measures how long a first saved note takes and how often notes are found again. It is for facilitated studies, and it stays off until you start it. The [facilitator protocol](USABILITY.md) has the consent wording, the tasks, an observation sheet, and the export format.
+
+In the Mac or web app, open **Settings → Usability session** in a writable brain and choose **Start session**. The footer shows **Recording usability session** on every view while it runs, and selecting it returns to the controls. To mark a task, enter a short label such as `T3`, choose **Start task**, and end it with **End as found**, **End as not found**, or **End as abandoned**. Choose **Stop session**, then **Export JSON** to save `okbrain-usability.json`. **Clear sessions** deletes this brain's stored sessions at once.
+
+The session keeps the kind of each action, its timing, result counts, the position of an opened result, and your task labels. It never keeps note text, titles, IDs, paths, tags, search or question text, answers, or error messages. The record lives in per-user application data on this device, covers the current brain only, and is deleted after 30 days. Activity from MCP clients is left out, and a read-only brain cannot record.
+
+The terminal equivalents are `okb usability start`, `okb usability task start T3`, `okb usability task end T3 --outcome found`, `okb usability stop`, `okb usability export`, and `okb usability clear`. Run `okb usability` to see whether the brain is recording.
+
 ## Verify a local CSV computation
 
 Add an **Attested Computation** concept and place the source CSV inside the writable brain's folder. On the concept screen, open **Configure CSV computation** and save the contract. This example counts rows where the integer `year` column equals the supplied `year` parameter.

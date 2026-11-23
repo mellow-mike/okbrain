@@ -1002,6 +1002,7 @@ account and coding commands that operate independently of a selected brain.
 | `okb export-viz` | read | Self-contained graph HTML with optional embedded fonts and explicit consent for private notes |
 | `okb export-graph` | read | Graph nodes and edges as portable JSON, with explicit consent for private notes |
 | `okb cache-settings [sqlite\|postgres]` | admin | Choose per-brain SQLite or local PostgreSQL and pgvector caches |
+| `okb usability [start\|stop\|clear]` / `usability task` / `usability export` | admin | Run an opt-in, local-only usability session for this brain, mark facilitator tasks, and print the sessions and summaries as JSON |
 | `okb version` / `--version` | — | okbrain's version |
 
 Global flags: `--json` everywhere, `--bundle <path>`, `--brain <name>`
@@ -1018,7 +1019,8 @@ over the registry, trusted like the CLI but defended like a network surface:
   `GET /clip` (bookmarklet), `GET /` + `/gui/*` (the app and its
   vendored assets). Dedicated routes include `GET /api/status`
   (version, OKF version, active bundle path, brain, read-only, default folder status,
-  retrieval profile, index/vector presence, actor, port), `GET /api/brains`
+  retrieval profile, index/vector presence, actor, port, and whether a
+  usability session is recording), `GET /api/brains`
   (mount names, policy, retrieval preference, and provider/model defaults), `GET /api/bookmarklet`, and
   `POST /api/conversations/upload`. The upload accepts browser-selected JSON
   bytes, checks the write policy, and binds confirmation to the bytes,
@@ -1100,7 +1102,16 @@ Views:
   retrieval profile (`init`), git `sync`, `enrich` guardrails, maintenance
   (`index`, `embed`, `doctor`, `export_viz`, `export_graph` saved as a JSON
   file, confirm-gated `rebuild`, `jobs` with a job subset, `upgrade` preview
-  + run), MCP setup snippets, the bookmarklet.
+  + run), MCP setup snippets, the bookmarklet. A **Usability session** card
+  states what a session records, starts and stops it (`usability_session`),
+  marks facilitator tasks (`usability_task`), saves `usability_export` as a
+  JSON file, and clears stored sessions.
+
+While a usability session records, the status footer shows a link to its
+controls on every view. The footer refreshes when the window regains focus,
+so a session started from the CLI appears there too. Lists mark the kind of
+list (`data-via`) and each row's position (`data-rank`). Following a note
+link passes those two values to `read_concept` and nothing else.
 The bundle remains plain Markdown and external editors can edit it directly.
 The AppKit macOS app embeds the same interface from its bundled loopback
 runtime. Native menus open brain or coding workspace folders and pass external
@@ -1147,6 +1158,27 @@ and attributed to the configured human actor; MCP/remote is untrusted unless
 explicitly local and attributed to the connecting client. Not-strictly-trusted
 ⇒ untrusted (fail-closed). Untrusted callers get read ops; write/admin are
 gated and filesystem confinement tightens.
+
+Each adapter also names itself on the `OpContext` (`surface`: `gui`, `cli`,
+or `mcp`). The opt-in usability sessions (`core/usability.ts`,
+[protocol](docs/USABILITY.md)) use it as a second gate. Only a trusted call
+from the local app or the CLI, acting for the owner on a writable brain, can
+start a session or add to one. An MCP caller is refused by the session ops
+and never generates an event, even with `--trusted`. `runOp` reports each
+settled op to the recorder, which keeps an explicit allowlist of op names and
+returns after one `existsSync` until a first session creates the store.
+
+The store is `usability/sessions.db` under the per-user data directory
+(folder mode `0700`), outside every bundle and outside Git. It holds a random
+session ID, a SHA-256 of the brain's real path, timestamps, the app version
+and platform, and events made of an enumerated kind, surface, outcome, and
+source, whole-number offsets, durations, counts, and ranks, and a task label
+limited to 16 letters, digits, hyphens, or underscores. `CHECK` constraints
+enforce every one of those, so note IDs, titles, paths, tags, bodies, query
+text, model output, and error messages have no column to reach. A failed op
+keeps its `OpError` code and drops the message. Sessions expire after 30
+days, **Clear** deletes a brain's sessions at once with `secure_delete` on,
+and the export leaves out the brain key.
 
 ### Multi-brain mounts (Stage 5)
 The gbrain "brains" axis: config `brains` maps a name to a bundle path
@@ -1241,6 +1273,7 @@ okbrain/
 │   │   ├── version.ts           # okbrain's version + the tool actor (okb/<version>)
 │   │   ├── claims.ts            # calibration: takes vs facts (Brier, buckets)
 │   │   ├── stats.ts             # okb stats: counts, status/trust, orphans, freshness
+│   │   ├── usability.ts         # opt-in local usability sessions: store, events, export
 │   │   ├── browser.ts           # `okb serve --open` (per-OS opener, argv spawn)
 │   │   ├── log.ts               # structured logger
 │   │   ├── okf/                 # document (v0.2 readers), paths, bundle, write,
@@ -1365,6 +1398,22 @@ sections above as current truth; this log says *why/when*.
   recorded. MCP callers never generate events. A facilitator exports a JSON
   summary on request, and a written protocol in `docs/USABILITY.md` defines the
   tasks.
+- 2026-11-23 — **What a usability session counts.** The recorder keeps an
+  explicit map from op names to event kinds. A `save` is a capture, a new or
+  edited note, a clip, a confirmed import, a saved answer draft, a claim, or
+  an RSS pull that added notes, so the first-save measure cannot miss a
+  person's first item. Previews and unchanged saves are left out. `review`
+  is the act of marking a note reviewed or snoozed, and `browse` is a note
+  listing with details, because Home loads the review queue and plain ID
+  lists on its own and would bury a participant's actions. A failed attempt
+  becomes an `error` event that names the activity and the `OpError` code.
+  Browser uploads, the answer draft, the Ask stream, and plan answers run
+  outside `runOp`, so they report through `observeActivity` and
+  `runOpStream`. The session controls take the local app header, origin, and
+  JSON like the other owner actions. Stopping a session ends an open task as
+  abandoned, so every marked task has a result. The re-find measures cover
+  every marked task, and the protocol marks only the tasks that end as found
+  or not found.
 - 2026-11-23 — **Concept types stay free-form.** okbrain enforces no type
   vocabulary. The starter templates suggest lowercase types (`note`, `source`,
   `project`, `decision`, `guide`), and readers keep tolerating any value,

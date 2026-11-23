@@ -225,6 +225,7 @@ Global flags: `--json`, `--bundle <path>`, `--brain <name>`, `--version`.
 | serve | `serve` · `bookmarklet` · `mcp` |
 | coding | `code context` · `code run` · `code status` |
 | setup | `init` · `brains` · `version` |
+| usability study | `usability` · `usability task` · `usability export` |
 
 ### Provenance and trust
 
@@ -385,6 +386,7 @@ ever living behind it.
 | [Product plan](docs/PRODUCT-PLAN.md) | Personal and enterprise direction |
 | [Personal guide](docs/PERSONAL.md) | Subscription accounts, conversation imports, and data sharing |
 | [Coding guide](docs/CODING.md) | Run and recover local Pi Durable requests |
+| [Usability protocol](docs/USABILITY.md) | Run an opt-in, local-only usability session and read its export |
 | [skills/](skills/) | Agent skills: capture, ingest, enrich, query, daily-note, link-suggest |
 | [bundles/](bundles/README.md) | The example bundle and the vendored OKF v0.2 sample |
 | [packaging/](packaging/) | Release flow, offline packaging, Homebrew and Scoop manifests, signing notes |

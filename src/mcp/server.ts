@@ -89,6 +89,7 @@ export function createMcpServer(opts: McpOptions): Server {
       mcpActor(server.getClientVersion()),
     );
     local.ctx.brain = opts.brain;
+    local.ctx.surface = "mcp";
     try {
       const result = await runOp(op, local.ctx, req.params.arguments ?? {});
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };

@@ -14,6 +14,8 @@
 /* ---- base ------------------------------------------------------------------ */
 *, *::before, *::after { box-sizing: border-box; }
 * { margin: 0; }
+/* An element marked hidden stays hidden, whatever display its class sets. */
+[hidden] { display: none !important; }
 html { color-scheme: dark; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 [data-theme="light"] { color-scheme: light; }
 body {
@@ -185,6 +187,11 @@ div.error::before { content: "Error"; display: block; margin-bottom: var(--space
 .source-choice > span { min-width: 0; }
 .source-entry-detail { display: block; }
 .source-previous { margin-left: 1.6em; }
+/* Usability session: the label field and its button share a baseline, and a
+   focused status line is outlined around its words. */
+#usability-session form .row { align-items: flex-end; }
+#usability-session [data-usability-state] { align-self: flex-start; }
+#usability-session [data-usability-feedback]:empty { display: none; }
 .brain-mount-card summary { cursor: pointer; }
 .brain-mount-body { margin-top: var(--space-4); }
 #brain-mount-feedback:empty { display: none; }
@@ -297,6 +304,11 @@ ul.plain a { font-family: var(--font-read); font-size: 14px; }
 #nav-status .dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; vertical-align: 1px;
                    border: 1px solid var(--muted); border-radius: var(--radius-full); }
 #nav-status .dot.on { background: var(--ok); border-color: var(--ok); }
+/* A usability session is recording: the one state the footer must never hide. */
+#nav-status .dot.rec { background: var(--danger); border-color: var(--danger); }
+#nav #nav-status a.recording { display: inline; padding: 0; color: var(--ink); font-weight: 560; background: none;
+                               text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 0.25em; }
+#nav #nav-status a.recording:hover { text-decoration-color: currentColor; }
 #theme { align-self: flex-start; }
 
 #view { min-width: 0; overflow-y: auto; padding: var(--space-6) var(--space-8) var(--space-12); outline: none; view-transition-name: view; }

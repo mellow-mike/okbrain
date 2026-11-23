@@ -76,10 +76,11 @@ are in [the open items handoff](docs/plans/2026-11-23-open-items.md).
   for optional AI annotations.
 - [x] Use public note tags for optional clip suggestions. Keep marking a note
   reviewed local even when its vector is missing.
-- [ ] Add opt-in, local-only usability sessions that measure time to first
+- [x] Add opt-in, local-only usability sessions that measure time to first
   saved item and re-finding success without recording note content or query
   text. Export a JSON summary and add a facilitator protocol in
-  `docs/USABILITY.md`.
+  `docs/USABILITY.md`. Verified by keyboard at 375 px with outbound browser
+  requests blocked.
 
 ### Stage 8 — Enterprise coding
 
@@ -847,6 +848,7 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B18 | 2026-11-22 | high | coding | Patch preview and apply refused every tracked file whose permission bits were not exactly `0644` or `0755` ("Use an ordinary tracked UTF-8 file with its Git permissions"). A checkout made under umask `002` or `077` holds `0664` or `0600` files, and `git apply` writes the draft copy under the same umask. Nine patch tests failed on a stock Ubuntu account while CI passed under umask `022` | tracked files were compared with the full index mode, although Git and the new-file branch look only at the owner-executable bit | fixed | compare the owner-executable bit and refuse set-ID and sticky bits for tracked and new files; `tests/coding.approved-patch.test.ts` covers umask `002`, umask `077`, and a `0640` file, and still refuses an executable or set-ID file |
 | B19 | 2026-11-22 | low | tests | `windows-latest` failed on two consecutive heads. `tests/api.sync.test.ts` "Git setup and recovery…" starts 196 Git processes and passed Bun's 5 s default test timeout on the Windows runner. Bun then killed the Git child of the request in flight, so the local sync after an origin disconnect returned 409, or the run reported a bare timeout. Reproduced on Linux by delaying every `git` start by 50 ms | the Git sync test files ran on the default timeout, while slow tests elsewhere already had explicit ones; the Windows `Test` step takes about 180 s against 35 s on Linux | fixed | `setDefaultTimeout(30_000)` in the six Git sync test files and an explicit timeout on two Coding tests; the full suite passes with every `git` start delayed by 60 ms |
 | B20 | 2026-11-23 | low | tests | Two CI jobs timed out on the docs-only PR #24. `tests/e2e.postgres.test.ts` passed in 24.3 s against its 25 s limit, then timed out on the next head, and took 22.9 s locally. `windows-latest` timed out three `tests/api.coding.test.ts` tests at Bun's 5 s default; locally they take 150–310 ms. Reproduced the Coding timeout on Linux by pinning the tests to one CPU core shared with 15 busy loops | The PostgreSQL test simulated an outage with a peer that accepts and then closes. Bun's SQL client waits out the full 4 s `connectionTimeout` on every request in that case (status, search, and two for the write: about 17 s), while a refused port fails in 2 ms. The Coding tests call `waitFor`, which allows each wait 4 s, two to four times each, but ran on the 5 s default | fixed | The PostgreSQL test points the cache at a refused loopback port, keeping the same degraded-mode assertions (22.9 s → 6 s locally). `setDefaultTimeout(30_000)` in `tests/api.coding.test.ts`; under the contended core its slowest test took 5.7 s and passes |
+| B21 | 2026-11-23 | low | gui | **Settings → Local note usage** showed both **Turn on local counts** and **Turn off and clear counts** at once, and **Use SQLite** could show beside a SQLite cache. The app marks the unused control `hidden`, but `button { display: inline-flex }` in the stylesheet outranks the browser's `[hidden]` rule, so the control still painted. Confirmed in Chromium by listing `[hidden]` elements whose computed `display` was not `none` | no stylesheet rule kept `hidden` elements hidden; earlier fixes patched single selectors (`#askstop[hidden]`, `.field[hidden]`) | fixed | one `[hidden] { display: none !important; }` rule in `gui/style.css`; the browser smoke asserts that each of those controls is hidden when it does not apply |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -914,6 +916,16 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-23 — Landed WP2 of the open items handoff: opt-in, local-only
+  usability sessions. `core/usability.ts` keeps event kinds, timings, counts,
+  ranks, and task labels in per-user application data, behind `CHECK`
+  constraints that leave no column for note content. `runOp` reports to it,
+  the CLI, local API, and MCP adapters name their surface, and MCP never
+  records. Settings has the session controls and the footer shows a recording
+  indicator. `docs/USABILITY.md` is the facilitator protocol, with an invented
+  five-conversation export for the import task. Fixed B21 on the way. Next:
+  WP1 (signed release workflow), then the maintainer's prerequisites, a signed
+  dry run, and the `v0.1.0` tag.
 - 2026-11-23 — Reviewed the project (typecheck clean, 746 tests passing, main
   CI green, no open PRs or issues) and recorded maintainer decisions. v0.1.0
   ships through GitHub Releases with a GPG-signed checksum manifest and build

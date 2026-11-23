@@ -33,6 +33,11 @@ import { extractTargets } from "./graph/links.ts";
 import { orphans, shortestPath } from "./graph/queries.ts";
 import { log } from "./log.ts";
 import { noteUsageSettings, recordCitedNotes, recordNoteOpen, type LocalUsageView } from "./local-usage.ts";
+import {
+  recordOpEvent, recordUsabilityActivity, recordUsabilityFailure, UsabilityError, usabilityExport, usabilitySession, usabilityTask,
+  USABILITY_OPEN_VIA, USABILITY_TASK_OUTCOMES,
+  type UsabilityActivity, type UsabilityDetail, type UsabilityErrorCode, type UsabilityStatus,
+} from "./usability.ts";
 import { publicTagVocabulary, suggestTags } from "./ingest/autotag.ts";
 import { captureNote } from "./ingest/capture.ts";
 import { clipUrl, type ClipOptions, type ClipResult } from "./ingest/clip.ts";
@@ -111,6 +116,8 @@ export interface OpContext {
   trusted: boolean;
   /** Local owner surfaces may contribute to explicitly enabled usage counts. */
   localUsage?: boolean;
+  /** The adapter serving this call. Only the local app and the CLI add to a usability session. */
+  surface?: "gui" | "cli" | "mcp";
   /** Direct local owner requests may use the brain’s saved GitHub credential. */
   allowSavedSyncCredential?: boolean;
   /** Recheck the selected mount's write policy while publishing Git settings. */
@@ -679,6 +686,50 @@ const computationReceipt: ParamSpec = { name: "receipt", type: "string", require
 const computationApproval: ParamSpec = { name: "approval", type: "string", required: true, description: "digest from the reviewed preview or verified receipt" };
 const renderComputation = (value: unknown) => JSON.stringify(value, null, 2);
 
+const usabilityCode = (error: unknown): UsabilityErrorCode => error instanceof OpError ? error.code : "failed";
+
+function localUsability<T>(action: () => T): T {
+  try { return action(); }
+  catch (error) {
+    if (error instanceof UsabilityError) throw new OpError(error.message, error.code);
+    throw error;
+  }
+}
+
+const renderUsabilityStatus = (result: unknown): string => {
+  const { recording, startedAt, events, task, sessions, retentionDays } = result as UsabilityStatus;
+  const stored = `${sessions} ${sessions === 1 ? "session" : "sessions"} stored for this brain (kept ${retentionDays} days).`;
+  return recording
+    ? `Recording since ${startedAt}: ${events} ${events === 1 ? "event" : "events"}${task ? `, task ${task} open` : ""}. ${stored}`
+    : `Not recording. ${stored}`;
+};
+
+/**
+ * Time an owner activity that runs outside `runOp` (browser uploads, the
+ * answer draft, plan answers) and add it to a recording usability session.
+ * `detail` keeps counts only, and returns undefined when nothing happened.
+ */
+export async function observeActivity<T>(
+  ctx: OpContext,
+  kind: UsabilityActivity,
+  run: () => Promise<T>,
+  detail: (value: T) => UsabilityDetail | undefined,
+): Promise<T> {
+  const started = performance.now();
+  let value: T;
+  try { value = await run(); }
+  catch (error) {
+    recordUsabilityFailure(ctx, kind, usabilityCode(error), performance.now() - started);
+    throw error;
+  }
+  const kept = detail(value);
+  if (kept) recordUsabilityActivity(ctx, kind, kept, performance.now() - started);
+  return value;
+}
+
+const importedDrafts = ({ imported }: { imported: readonly unknown[] }): UsabilityDetail | undefined =>
+  imported.length ? { via: "import", count: imported.length } : undefined;
+
 async function refreshPrivateImportIndex(ctx: OpContext, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   try {
@@ -693,50 +744,56 @@ async function refreshPrivateImportIndex(ctx: OpContext, ids: string[]): Promise
 }
 
 /** Browser-only Ask saving. The owner adapter authenticates the completed answer before dispatch. */
-export async function runAskDraftSave(ctx: OpContext, draft: AskDraftInput, authorize?: () => void): Promise<AskDraftResult> {
-  checkOpScope({ name: "Ask draft save", scope: "write" }, ctx);
-  const result = await writing(() => saveAskDraft(ctx.bundle, draft, authorize));
-  if (result.created) await refreshPrivateImportIndex(ctx, [result.id]);
-  return result;
+export function runAskDraftSave(ctx: OpContext, draft: AskDraftInput, authorize?: () => void): Promise<AskDraftResult> {
+  return observeActivity(ctx, "save", async () => {
+    checkOpScope({ name: "Ask draft save", scope: "write" }, ctx);
+    const result = await writing(() => saveAskDraft(ctx.bundle, draft, authorize));
+    if (result.created) await refreshPrivateImportIndex(ctx, [result.id]);
+    return result;
+  }, (result) => result.created ? { via: "answer", count: 1 } : undefined);
 }
 
 /** Scoped browser upload workflow. The CLI operation only accepts local paths. */
-export async function runConversationUpload(
+export function runConversationUpload(
   ctx: OpContext,
   provider: unknown,
   preview: string | null,
   read: () => Promise<Uint8Array>,
 ): Promise<ConversationUploadResult & { preview: string }> {
-  checkOpScope({ name: "conversation upload", scope: "write" }, ctx);
-  if (!isConversationProvider(provider)) throw new OpError("Choose ChatGPT or Claude as the export provider.", "bad_params");
-  const raw = await read();
-  const receipt = new Bun.CryptoHasher("sha256")
-    .update(JSON.stringify([ctx.bundle, provider]))
-    .update(raw)
-    .digest("hex");
-  if (preview !== null && preview !== receipt)
-    throw new OpError("The file, provider, or brain changed. Preview this import again.", "bad_params");
-  const result = await writing(() => importConversationUpload(ctx.bundle, raw, { provider, dryRun: preview === null }));
-  await refreshPrivateImportIndex(ctx, result.imported);
-  return { ...result, preview: receipt };
+  return observeActivity(ctx, "save", async () => {
+    checkOpScope({ name: "conversation upload", scope: "write" }, ctx);
+    if (!isConversationProvider(provider)) throw new OpError("Choose ChatGPT or Claude as the export provider.", "bad_params");
+    const raw = await read();
+    const receipt = new Bun.CryptoHasher("sha256")
+      .update(JSON.stringify([ctx.bundle, provider]))
+      .update(raw)
+      .digest("hex");
+    if (preview !== null && preview !== receipt)
+      throw new OpError("The file, provider, or brain changed. Preview this import again.", "bad_params");
+    const result = await writing(() => importConversationUpload(ctx.bundle, raw, { provider, dryRun: preview === null }));
+    await refreshPrivateImportIndex(ctx, result.imported);
+    return { ...result, preview: receipt };
+  }, importedDrafts);
 }
 
 /** Browser-only import accepts selected bytes and never reads caller-supplied host paths. */
-export async function runPersonalSourceUpload(
+export function runPersonalSourceUpload(
   ctx: OpContext,
   kind: unknown,
   preview: string | null,
   read: () => Promise<{ name: string; files: SourceUploadFile[]; selected: number[] }>,
 ): Promise<SourceUploadResult> {
-  checkOpScope({ name: "personal source import", scope: "write" }, ctx);
-  if (!isSourceKind(kind) || kind === "notion-live")
-    throw new OpError("Choose a bookmarks, Markdown, Notion, email, or calendar export.", "bad_params");
-  const { name, files, selected } = await read();
-  const result = await writing(() => importPersonalSource(
-    ctx.bundle, kind, name, files, preview === null ? undefined : { preview, selected },
-  ));
-  await refreshPrivateImportIndex(ctx, result.imported);
-  return result;
+  return observeActivity(ctx, "save", async () => {
+    checkOpScope({ name: "personal source import", scope: "write" }, ctx);
+    if (!isSourceKind(kind) || kind === "notion-live")
+      throw new OpError("Choose a bookmarks, Markdown, Notion, email, or calendar export.", "bad_params");
+    const { name, files, selected } = await read();
+    const result = await writing(() => importPersonalSource(
+      ctx.bundle, kind, name, files, preview === null ? undefined : { preview, selected },
+    ));
+    await refreshPrivateImportIndex(ctx, result.imported);
+    return result;
+  }, importedDrafts);
 }
 
 /** The connector is available only to the trusted local browser adapter. */
@@ -748,11 +805,11 @@ export async function runNotionSource(ctx: OpContext, connector: NotionSource, a
     case "connect": return connector.connect(input);
     case "disconnect": return connector.disconnect();
     case "preview": return writing(() => connector.preview(ctx.bundle, input));
-    case "import": {
+    case "import": return observeActivity(ctx, "save", async () => {
       const outcome = await writing(() => connector.commit(ctx.bundle, input.previewId));
       await refreshPrivateImportIndex(ctx, outcome.imported);
       return outcome;
-    }
+    }, importedDrafts);
     default: throw new OpError("Notion action not found.", "not_found");
   }
 }
@@ -1230,8 +1287,13 @@ export const operations: readonly Operation[] = [
     scope: "read",
     params: [
       { name: "id", type: "string", required: true, positional: true, description: "concept id, e.g. notes/foo" },
+      { name: "via", type: "string", description: `where the note was opened from, kept only by a local usability session: ${USABILITY_OPEN_VIA.join("|")}` },
+      { name: "rank", type: "int", description: "1-based position in the list the note was opened from, kept only by a local usability session" },
     ],
     handler: async (ctx, p): Promise<ConceptView & { localUsage?: LocalUsageView }> => {
+      if (p.via !== undefined && !(USABILITY_OPEN_VIA as readonly unknown[]).includes(p.via))
+        throw new OpError(`via must be one of ${USABILITY_OPEN_VIA.join(", ")}`, "bad_params");
+      if (p.rank !== undefined && (p.rank as number) < 1) throw new OpError("rank must be 1 or more", "bad_params");
       const view = await readConceptView(ctx.bundle, p.id as string);
       const localUsage = recordNoteOpen(ctx, view.id, view.frontmatter);
       return localUsage ? { ...view, localUsage } : view;
@@ -2746,6 +2808,53 @@ export const operations: readonly Operation[] = [
     },
   },
   {
+    // Admin scope keeps these off MCP. The store itself also refuses any
+    // caller that is not the local app or the CLI on a writable brain.
+    name: "usability_session",
+    cliName: "usability",
+    summary: "View, start, stop, or clear an opt-in local usability session for this brain",
+    scope: "admin",
+    params: [
+      { name: "action", type: "string", positional: true, description: "status (default), start, stop, or clear (deletes this brain's stored sessions)" },
+    ],
+    handler: async (ctx, p) => {
+      const action = p.action ?? "status";
+      if (action !== "status" && action !== "start" && action !== "stop" && action !== "clear")
+        throw new OpError("Choose status, start, stop, or clear.", "bad_params");
+      return localUsability(() => usabilitySession(ctx, action));
+    },
+    render: renderUsabilityStatus,
+  },
+  {
+    name: "usability_task",
+    cliName: "usability task",
+    summary: "Mark the start or end of a facilitator task in the recording usability session",
+    scope: "admin",
+    params: [
+      { name: "action", type: "string", required: true, positional: true, description: "start or end" },
+      { name: "label", type: "string", required: true, positional: true, description: "task label: 1 to 16 letters, digits, hyphens, or underscores" },
+      { name: "outcome", type: "string", description: `how the task ended: ${USABILITY_TASK_OUTCOMES.join(", ")}` },
+    ],
+    handler: async (ctx, p) => {
+      const { action, outcome } = p;
+      if (action !== "start" && action !== "end") throw new OpError("Choose start or end.", "bad_params");
+      const ended = USABILITY_TASK_OUTCOMES.find((known) => known === outcome);
+      if (outcome !== undefined && !ended)
+        throw new OpError(`outcome must be one of ${USABILITY_TASK_OUTCOMES.join(", ")}`, "bad_params");
+      return localUsability(() => usabilityTask(ctx, action, p.label as string, ended));
+    },
+    render: renderUsabilityStatus,
+  },
+  {
+    name: "usability_export",
+    cliName: "usability export",
+    summary: "Print this brain's usability sessions and their summaries as JSON, without note content",
+    scope: "admin",
+    params: [],
+    handler: async (ctx) => localUsability(() => usabilityExport(ctx)),
+    render: (result) => JSON.stringify(result, null, 2),
+  },
+  {
     name: "init",
     cliName: "init",
     summary: "Set up a brain, its AI providers, and an optional starter template",
@@ -3016,11 +3125,49 @@ export function checkOpCall(
   return params;
 }
 
-/** Validate trust and params per the op's declaration, then run its handler. */
+/**
+ * Validate trust and params per the op's declaration, then run its handler.
+ * Once it settles, a recording usability session keeps what kind of thing
+ * happened and how long it took (`core/usability.ts`), never the content.
+ */
 export async function runOp(
   op: Operation,
   ctx: OpContext,
   raw: Record<string, unknown>,
 ): Promise<unknown> {
-  return op.handler(ctx, checkOpCall(op, ctx, raw));
+  const started = performance.now();
+  let params: Record<string, unknown> = {};
+  let result: unknown;
+  try {
+    params = checkOpCall(op, ctx, raw);
+    result = await op.handler(ctx, params);
+  } catch (error) {
+    recordOpEvent(ctx, op.name, params, { error: usabilityCode(error) }, performance.now() - started);
+    throw error;
+  }
+  recordOpEvent(ctx, op.name, params, { result }, performance.now() - started);
+  return result;
+}
+
+/**
+ * The streaming twin of `runOp`, for adapters that already validated the call
+ * with `checkOpCall`. A cancelled stream is not an event.
+ */
+export async function runOpStream(
+  op: Operation,
+  ctx: OpContext,
+  params: Record<string, unknown>,
+  emit: (event: string, data: unknown) => void,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const started = performance.now();
+  let result: unknown;
+  try {
+    result = await op.stream!(ctx, params, emit, signal);
+  } catch (error) {
+    if (!signal?.aborted) recordOpEvent(ctx, op.name, params, { error: usabilityCode(error) }, performance.now() - started);
+    throw error;
+  }
+  if (!signal?.aborted) recordOpEvent(ctx, op.name, params, { result }, performance.now() - started);
+  return result;
 }

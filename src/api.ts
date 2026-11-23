@@ -40,6 +40,7 @@ import {
   checkOpCall,
   getOp,
   maintenanceApprovals,
+  observeActivity,
   OpError,
   operations,
   runAskDraftSave,
@@ -48,11 +49,13 @@ import {
   runConversationUpload,
   runNotionSource,
   runOp,
+  runOpStream,
   runPersonalSourceUpload,
   runRssSettings,
   runScheduledMaintenance,
   type Operation,
 } from "./core/operations.ts";
+import { usabilityRecording } from "./core/usability.ts";
 import {
   bookmarkletJs,
   DEFAULT_PORT,
@@ -278,6 +281,7 @@ function scopeOf(req: Request, url: URL, o: ServeState): Scope {
 const open = (s: Scope): LocalContext => {
   const local = openLocalContext(s.bundle, true, s.readonly);
   local.ctx.brain = s.brain ?? s.servedBrain;
+  local.ctx.surface = "gui";
   return local;
 };
 
@@ -602,7 +606,8 @@ async function browserPlan(req: Request, path: string, plan: BrowserPlan, scope:
         const local = open(scope);
         try {
           if (path === "preview") return json(200, { result: await plan.preview(local.ctx, body, binding) }, headers);
-          const { result, question, draftBrain } = await plan.answer(local.ctx, body.id);
+          const { result, question, draftBrain } = await observeActivity(local.ctx, "ask", () => plan.answer(local.ctx, body.id),
+            (answered) => ({ count: answered.result.citations.length }));
           const draftReceipt = binding && binding === draftBrain ? drafts?.issue(binding, question, result) : undefined;
           return json(200, { result: draftReceipt ? { ...result, draftReceipt } : result }, headers);
         } finally { await local.close(); }
@@ -688,7 +693,7 @@ async function askStream(req: Request, url: URL, scope: Scope, cors: Hdrs, draft
     }
     const params = checkOpCall(op, local.ctx, raw);
     return sse(local, req, async (send, signal) => {
-      const result = await op.stream!(local.ctx, params, send, signal) as AskResult;
+      const result = await runOpStream(op, local.ctx, params, send, signal) as AskResult;
       const draftReceipt = binding ? drafts?.issue(binding, params.question as string, result) : undefined;
       return draftReceipt ? { ...result, draftReceipt } : result;
     }, cors);
@@ -905,6 +910,8 @@ async function status(scope: Scope, o: ServeState) {
       hasVectors,
       actor: local.ctx.actor(),
       port: o.port,
+      // The app shows this in its footer for as long as a session is recording.
+      usabilityRecording: usabilityRecording(local.ctx),
     };
   } finally {
     await local.close();
@@ -1061,6 +1068,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     return json(401, { error: "missing or invalid token (see okb bookmarklet / serve)" }, cors);
   const recoveryAction = url.pathname === "/api/op/sync_recovery";
   const ownerFileAction = recoveryAction || url.pathname.startsWith("/api/op/computation_") ||
+    url.pathname.startsWith("/api/op/usability_") ||
     ["/api/op/export_markdown", "/api/op/export_graph", "/api/op/inbox_file", "/api/op/keep_private", "/api/op/cache_settings",
       "/api/op/sync_settings"].includes(url.pathname);
   if (ownerFileAction) {
