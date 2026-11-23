@@ -99,12 +99,14 @@ test.skipIf(!postgresUrl)("CLI PostgreSQL cache matches local keyword, graph, an
     expect((await semantic(bundles.postgres))[0]?.id).toBe("notes/fruit");
 
     // Simulate a failed database connection without affecting other tests using the fixture.
-    const failedDatabase = Bun.listen({
-      hostname: "127.0.0.1", port: 0,
-      socket: { open(socket) { socket.end(); }, data() {} },
-    });
+    // Point the cache at a loopback port with nothing listening, so each connection is refused
+    // at once. A peer that accepts and then closes makes Bun's client wait out the whole
+    // connectionTimeout on every request, which once used about 17 s of this test's budget.
+    const reserved = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+    const refusedPort = reserved.port;
+    reserved.stop(true);
     const unavailable = new URL(address);
-    unavailable.port = String(failedDatabase.port);
+    unavailable.port = String(refusedPort);
     unavailable.searchParams.set("sslmode", "disable");
     ensureExtensionCapableSqlite();
     {
@@ -156,7 +158,6 @@ test.skipIf(!postgresUrl)("CLI PostgreSQL cache matches local keyword, graph, an
       clearTimeout(stopUnreadyServer);
       server.kill();
       await server.exited;
-      failedDatabase.stop(true);
     }
     await succeeds(bundles.postgres, "index");
     expect(existsSync(join(bundles.postgres, ".okb", "index.db"))).toBe(true);
