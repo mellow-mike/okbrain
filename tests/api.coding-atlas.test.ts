@@ -242,6 +242,16 @@ test("the repository map commands stay local and work from the command line", as
   expect(briefJson.id).toBe(fullJson.id);
   expect(briefJson.orders.every((order) => !("map" in order) && !("facts" in order) && !("excerpts" in order))).toBe(true);
 
+  // Excerpts approved for lookup are printed too: approving the ID approves sending them on request.
+  const lookup = ["code", "recall", "--workspace", workspace, "--query", "session token", "--context-tokens", "600", "--deferred"];
+  const named = await okb(lookup);
+  expect(named.stdout).toMatch(/On request: \S+:\d+-\d+/u);
+  expect(named.stdout).not.toContain("--- On request:");
+  const shownLookup = await okb([...lookup, "--show-content"]);
+  const onRequest = /--- On request: (\S+):(\d+)-(\d+) ---\n([^\n]+)/u.exec(shownLookup.stdout);
+  expect(onRequest).not.toBeNull();
+  expect(onRequest![4]!.length).toBeGreaterThan(0);
+
   const map = await okb(["code", "map", "--workspace", workspace]);
   expect(map.stdout).toContain("in 12 packages");
   expect((await okb(["code", "map", "--workspace", root])).stdout).toContain("has not been imported");

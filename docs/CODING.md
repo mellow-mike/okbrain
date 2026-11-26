@@ -221,7 +221,7 @@ okb code recall --workspace ./my-monorepo \
   --query 'refreshSession rotates the token twice' --context-tokens 2500 --show-content
 ```
 
-The preview prints a context ID, each excerpt's path, lines, and the reason it was chosen, and how much of the budget the selection uses. `--show-content` adds the text, the navigation map, and the facts. `--explain` lists the strongest candidates with their scores. `--projects` and `--exclude` narrow the selection to, or away from, up to eight directories each.
+The preview prints a context ID, each excerpt's path, lines, and the reason it was chosen, and how much of the budget the selection uses. `--show-content` adds the text, the navigation map, the facts, and the text of any excerpts approved for lookup, which together are everything the request can send. `--explain` lists the strongest candidates with their scores. `--projects` and `--exclude` narrow the selection to, or away from, up to eight directories each.
 
 The budget defaults to 4,096 estimated tokens and accepts 1–16,384. It covers everything the selection sends: excerpts, a short navigation map of the packages involved (up to 15% of the budget), and facts (up to 10%). A selection holds at most 32 excerpts from 24 files.
 

@@ -312,6 +312,8 @@ function renderAtlasContext(context: Pick<AtlasContext, "manifest"> & Partial<At
   }
   if (context.map?.length) lines.push("\n--- Map ---", ...context.map);
   if (context.skills?.length) lines.push("\n--- Facts ---", ...context.skills.map(({ text }) => text));
+  // Approving the request approves these too, so their text is shown with the rest.
+  for (const excerpt of context.deferred ?? []) lines.push(`\n--- On request: ${excerpt.path}:${excerpt.startLine}-${excerpt.endLine} ---`, excerpt.content);
   if (explain && context.ranked?.length) {
     lines.push("\n--- Ranking ---");
     for (const unit of context.ranked.slice(0, 20)) {
