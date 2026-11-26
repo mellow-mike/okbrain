@@ -135,8 +135,11 @@ test("package detection reads manifests into packages and argument-array command
 });
 
 test("import maps the repository, links files, and writes a readable knowledge bundle", async () => {
-  await symlink("/etc/hostname", join(workspace, "packages/auth/src/linked.ts"));
-  git("add", "--", "packages/auth/src/linked.ts");
+  // Creating a link needs a privilege the Windows runner lacks. The exclusion below holds either way.
+  if (process.platform !== "win32") {
+    await symlink("/etc/hostname", join(workspace, "packages/auth/src/linked.ts"));
+    git("add", "--", "packages/auth/src/linked.ts");
+  }
   const report = await importRepository({ workspace });
   expect(report.files).toBeGreaterThan(fixture.files);
   expect(report.packages).toBe(12);
