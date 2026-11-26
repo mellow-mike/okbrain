@@ -220,6 +220,28 @@ test("the repository map commands stay local and work from the command line", as
   expect((await okb(["code", "plan", "--workspace", workspace, "--provider", "openai", "--model", "gpt-5-mini", "--prompt", "x", "--workers", "many"])).code).toBe(2);
   expect((await okb(["code", "plan", "--workspace", workspace, "--provider", "openai", "--model", "gpt-5-mini", "--prompt", "x", "--routing-json", "{"])).code).toBe(2);
 
+  // A plan lists everything each worker is sent, and prints all of it on request: excerpts, map lines, and facts.
+  const planned = ["code", "plan", "--workspace", workspace, "--provider", "openai", "--model", "gpt-5-mini", "--workers", "2", "--context-tokens", "900",
+    "--prompt", "Trace refreshSession, endSession and signToken, and computeTax with publishInvoice and InvoiceSchema.",
+    "--routing-json", JSON.stringify({ version: 1, roles: { worker: [{ provider: "openai", model: "gpt-5-mini", thinkingLevel: "low" }] }, openRouter: { dataCollection: "deny" } })];
+  const brief = await okb(planned);
+  expect(brief.stdout).toContain("2 workers.");
+  expect(brief.stdout).toContain("openai/gpt-5-mini (low reasoning)");
+  expect(brief.stdout).toContain("OpenRouter preferences for every call: data collection deny.");
+  expect(brief.stdout).toMatch(/Map: \d+ lines sent with the excerpts\./u);
+  expect(brief.stdout).toContain("Facts delivered: builtin/test-map");
+  expect(brief.stdout).not.toContain("--- Map for");
+  const full = await okb([...planned, "--show-content"]);
+  expect(full.stdout).toContain("--- Map for packages/auth ---");
+  expect(full.stdout).toContain("--- Facts for packages/billing ---");
+  expect(full.stdout).toContain("Tests that cover the selected files:");
+  expect(full.stdout).toContain("AUTH_REFRESH");
+  const fullJson = JSON.parse((await okb([...planned, "--show-content", "--json"])).stdout) as { id: string; orders: { map: string[]; facts: string[] }[] };
+  expect(fullJson.orders.every(({ map: lines, facts }) => lines.length > 0 && facts.length > 0)).toBe(true);
+  const briefJson = JSON.parse((await okb([...planned, "--json"])).stdout) as { id: string; orders: Record<string, unknown>[] };
+  expect(briefJson.id).toBe(fullJson.id);
+  expect(briefJson.orders.every((order) => !("map" in order) && !("facts" in order) && !("excerpts" in order))).toBe(true);
+
   const map = await okb(["code", "map", "--workspace", workspace]);
   expect(map.stdout).toContain("in 12 packages");
   expect((await okb(["code", "map", "--workspace", root])).stdout).toContain("has not been imported");

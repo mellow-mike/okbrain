@@ -17,6 +17,7 @@ import { readTrackedText, type RepositoryContextExcerpt, type RepositoryContextM
 import { profilePath } from "../project-profile.ts";
 import type { AtlasManifest } from "./manifest.ts";
 import { defaultParams, type Lane, type LearningView, type ReadoutParams } from "./params.ts";
+import { AtlasScanError, trackedAmong } from "./scan.ts";
 import { Atlas, AtlasError, AtlasMissingError, type AtlasLocation, type AtlasVectors } from "./store.ts";
 import { analyzeSource, roles, type Role } from "./structure.ts";
 import {
@@ -41,6 +42,9 @@ const minExcerptLines = 10;
 const mapShare = 0.15;
 const skillShare = 0.1;
 const maxDeferred = 16;
+/** Deferred excerpts may come from a little below the floor. Nothing weaker is ever read, named, or sent. */
+const deferredShare = 0.6;
+const maxCheckedFiles = 512;
 /** Sharpness of slot attention over fused evidence. */
 const sharpness = 8;
 /**
@@ -88,7 +92,7 @@ export interface SkillRequest {
   seed: string;
 }
 
-export type SkillSelector = (request: SkillRequest) => { skills: PackSkill[]; withheld: string[] };
+export type SkillSelector = (request: SkillRequest) => Promise<{ skills: PackSkill[]; withheld: string[] }>;
 
 export interface RankedUnit {
   path: string;
@@ -557,9 +561,41 @@ export async function readAtlas(
     atlas.close();
   }
 
+  // ----- Tracking -----
+  // The map holds the Git index as it stood at import. A file removed from the index since
+  // then is no longer tracked source, even while it is still on disk, so it leaves the
+  // candidates before anything of it is read, named in the map, or sent.
+  const floorOf = (candidates: readonly Scored[]) =>
+    Math.max(Math.min(candidates.reduce((max, candidate) => Math.max(max, candidate.evidence), 0), floorReference) * relativeFloor, absoluteFloor);
+  const tracking = new Map<string, boolean>();
+  let untrackedFiles = 0;
+  for (let round = 0; round < 4; round++) {
+    const reachable = floorOf(scored) * deferredShare;
+    const unknown = [...new Set(scored.filter((candidate) => candidate.evidence >= reachable && !tracking.has(candidate.unit.path)).map(({ unit }) => unit.path))]
+      .slice(0, maxCheckedFiles - tracking.size);
+    if (!unknown.length) break;
+    let tracked: Set<string>;
+    try {
+      tracked = await trackedAmong(workspace, unknown);
+    } catch (error) {
+      if (error instanceof AtlasScanError) throw new AtlasError("Git could not confirm that the selected files are still tracked. Use the repository map from a Git checkout.", { cause: error });
+      throw error;
+    }
+    for (const path of unknown) tracking.set(path, tracked.has(path));
+    untrackedFiles += unknown.length - tracked.size;
+    // Removing a candidate can lower the floor and bring others into reach, which the next round checks.
+    scored = scored.filter((candidate) => tracking.get(candidate.unit.path) !== false);
+  }
+  {
+    // What is within reach but was never confirmed is left out as well.
+    const reachable = floorOf(scored) * deferredShare;
+    scored = scored.filter((candidate) => candidate.evidence < reachable || tracking.get(candidate.unit.path) === true);
+    // A reason never cites a file that is no longer tracked.
+    for (const [unit, link] of neighbours) if (tracking.get(link.via) === false) neighbours.delete(unit);
+  }
+
   // ----- Slots -----
-  const best = scored.reduce((max, candidate) => Math.max(max, candidate.evidence), 0);
-  const floor = Math.max(Math.min(best, floorReference) * relativeFloor, absoluteFloor);
+  const floor = floorOf(scored);
   const regionMass = new Map<string, number>();
   for (const candidate of scored) regionMass.set(candidate.region, (regionMass.get(candidate.region) ?? 0) + candidate.evidence);
   const regionNames = [...regionMass.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name]) => name);
@@ -735,7 +771,7 @@ export async function readAtlas(
   for (const id of packageOrder.slice(0, 8)) {
     const pkg = packages.get(id);
     if (!pkg) continue;
-    const symbols = [...new Set(scored.filter(({ unit }) => unit.package === id && unit.kind === "symbol" && unit.role !== "test" && !unit.name.includes(" "))
+    const symbols = [...new Set(scored.filter(({ unit, evidence: score }) => score >= floor * deferredShare && unit.package === id && unit.kind === "symbol" && unit.role !== "test" && !unit.name.includes(" "))
       .slice(0, 5).map(({ unit }) => unit.name))];
     const parts = [`${pkg.root === "." ? "(root)" : pkg.root} — ${pkg.name}${pkg.description ? `: ${clip(pkg.description, 90)}` : ""} (${pkg.files} files)`];
     if (symbols.length) parts.push(`relevant: ${symbols.join(", ")}`);
@@ -750,7 +786,7 @@ export async function readAtlas(
   const deferred: RepositoryContextExcerpt[] = [];
   if (options.deferred) {
     let deferredBytes = 0;
-    const order = scored.map((candidate, index) => [candidate, index] as const).filter(([candidate, index]) => !taken.has(index) && candidate.evidence >= floor * 0.6)
+    const order = scored.map((candidate, index) => [candidate, index] as const).filter(([candidate, index]) => !taken.has(index) && candidate.evidence >= floor * deferredShare)
       .sort((a, b) => b[0].evidence - a[0].evidence || a[0].unit.path.localeCompare(b[0].unit.path));
     for (const [candidate] of order) {
       if (deferred.length >= maxDeferred || deferredBytes > excerptBudget) break;
@@ -767,7 +803,7 @@ export async function readAtlas(
     }
   }
   const seed = sha256(JSON.stringify([query, merged.map(({ path, startLine, endLine }) => [path, startLine, endLine]), params.version]));
-  const delivered = hooks.skills && merged.length ? hooks.skills({
+  const delivered = hooks.skills && merged.length ? await hooks.skills({
     packages: packageOrder.flatMap((id) => packages.get(id)?.root ?? []), paths: [...selectedFiles], queryVector, query, budgetBytes: skillBudget, seed,
   }) : { skills: [], withheld: [] };
 
@@ -775,7 +811,7 @@ export async function readAtlas(
   const atlasManifest: AtlasManifest = {
     version: 1, generation: meta.generation, ...(meta.importedAt ? { importedAt: meta.importedAt } : {}),
     slots: slots.filter((slot) => slot.units > 0).map((slot) => ({ name: slot.name, units: slot.units, tokens: estimateTokens(slot.spent) })),
-    staleFiles, map: { sha256: sha256(JSON.stringify(map)), lines: map.length },
+    staleFiles, ...(untrackedFiles ? { untrackedFiles } : {}), map: { sha256: sha256(JSON.stringify(map)), lines: map.length },
     skills: delivered.skills.map(({ id, text, trial }) => ({ id, sha256: sha256(text), ...(trial ? { trial } : {}) })),
     ...(delivered.withheld.length ? { withheld: delivered.withheld } : {}),
     deferred: deferred.map(({ path, startLine, endLine, content }) => ({ path, startLine, endLine, sha256: sha256(content) })),

@@ -90,6 +90,36 @@ export async function listTrackedPaths(
   }
 }
 
+/**
+ * Which of these paths are regular files in the Git index right now. The map
+ * records the index as it stood at import, and a file can leave it afterwards
+ * while staying on disk. Paths go to Git in small groups, so the argument list
+ * stays within every platform's limit.
+ */
+export async function trackedAmong(workspace: string, paths: readonly string[], options: { signal?: AbortSignal } = {}): Promise<Set<string>> {
+  const groups: string[][] = [];
+  let group: string[] = [];
+  let bytes = 0;
+  for (const path of new Set(paths)) {
+    if (!validPath(path)) continue;
+    const size = Buffer.byteLength(path) + 1;
+    if (group.length >= 96 || bytes + size > 12_000) {
+      groups.push(group);
+      group = [];
+      bytes = 0;
+    }
+    group.push(path);
+    bytes += size;
+  }
+  if (group.length) groups.push(group);
+  const wanted = new Set(paths);
+  const tracked = new Set<string>();
+  // A literal pathspec that names a file lists that file alone.
+  const listings = await Promise.all(groups.map((entry) => listTrackedPaths(workspace, entry, { ...(options.signal ? { signal: options.signal } : {}), timeoutMs: 20_000 })));
+  for (const { paths: listed } of listings) for (const path of listed) if (wanted.has(path)) tracked.add(path);
+  return tracked;
+}
+
 async function gitText(workspace: string, args: string[], maxBytes: number, timeoutMs: number, signal?: AbortSignal): Promise<string | undefined> {
   let child;
   try {

@@ -374,7 +374,7 @@ export async function previewCodingOrchestration(
     for (const model of [...input.orders.flatMap(({ models }) => models), ...(input.synthesis?.models ?? [])]) {
       if (!catalog.getModel(model.provider, model.model)) throw new CodingError(`Pi 1.0 does not list model ${model.model} for ${model.provider}.`);
     }
-    return { plan, input: { ...input, ...(routing?.openRouter ? { openRouter: routing.openRouter } : {}) } };
+    return { plan, input };
   } catch (error) {
     if (error instanceof OrchestrationError || error instanceof AtlasError) throw new CodingError(error.message, { cause: error });
     throw error;

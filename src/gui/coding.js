@@ -482,7 +482,7 @@
   }
 
   function routeLabel(route) {
-    const name = (model) => model.provider + '/' + model.model;
+    const name = (model) => model.provider + '/' + model.model + (model.thinkingLevel ? ' (' + model.thinkingLevel + ' reasoning)' : '');
     const chosen = name(route.choice);
     return chosen + (chosen === name(route.baseline) ? '' : ' (first choice ' + name(route.baseline) + ')') +
       (route.fallbacks.length ? ', then ' + route.fallbacks.map(name).join(', ') + ' if its provider fails' : '');
@@ -493,6 +493,20 @@
     summary.textContent = (plan.mode === 'fan-out' ? plan.orders.length + ' workers. ' : 'One worker. ') + plan.reason + ' About ' +
       plan.estimatedTokens.toLocaleString() + ' estimated input tokens across all planned calls.';
     const pieces = [summary];
+    if (plan.openRouter) {
+      const preferences = plan.openRouter;
+      const note = document.createElement('p');
+      note.className = 'muted';
+      note.dataset.openRouter = '';
+      note.textContent = 'OpenRouter preferences for every call: ' + [
+        preferences.dataCollection ? 'data collection ' + preferences.dataCollection : '',
+        preferences.zdr === undefined ? '' : preferences.zdr ? 'zero data retention endpoints only' : 'zero data retention not required',
+        preferences.order?.length ? 'providers in order ' + preferences.order.join(', ') : '',
+        preferences.allowFallbacks === undefined ? '' : preferences.allowFallbacks ? 'other providers allowed' : 'no other providers',
+        preferences.sort ? 'sorted by ' + preferences.sort : '',
+      ].filter(Boolean).join('; ') + '.';
+      pieces.push(note);
+    }
     for (const warning of plan.warnings || []) {
       const note = document.createElement('p');
       note.className = 'muted';
@@ -571,6 +585,13 @@
     if (facts?.length) pieces.push(listBlock('Facts from the repository map', facts));
     for (const part of preview.deferred || [])
       pieces.push(disclosure('On request · ' + part.path + ':' + part.startLine + '–' + part.endLine, part.content, 'Sent only if the model looks it up'));
+    const untracked = manifest?.atlas?.untrackedFiles;
+    if (untracked) {
+      const note = document.createElement('p');
+      note.className = 'muted';
+      note.textContent = untracked + ' files with evidence for this task are no longer tracked by Git and were left out. Import again to refresh the map.';
+      pieces.push(note);
+    }
     const stale = manifest?.atlas?.staleFiles;
     if (stale) {
       const note = document.createElement('p');

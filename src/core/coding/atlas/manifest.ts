@@ -9,6 +9,8 @@ export interface AtlasManifest {
   slots: { name: string; units: number; tokens: number }[];
   /** Selected files whose bytes changed after the import. Their excerpts come from the current worktree. */
   staleFiles: number;
+  /** Files with evidence for the task that Git no longer tracks. They were left out, and nothing of them is sent. */
+  untrackedFiles?: number;
   /** The navigation map sent with the excerpts. */
   map: { sha256: string; lines: number };
   /** Skills and lessons delivered with this selection. `trial` marks one still being measured. */

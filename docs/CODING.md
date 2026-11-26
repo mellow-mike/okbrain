@@ -225,7 +225,7 @@ The preview prints a context ID, each excerpt's path, lines, and the reason it w
 
 The budget defaults to 4,096 estimated tokens and accepts 1–16,384. It covers everything the selection sends: excerpts, a short navigation map of the packages involved (up to 15% of the budget), and facts (up to 10%). A selection holds at most 32 excerpts from 24 files.
 
-The map only decides where to look. Every excerpt is read from the current working tree when you preview, so you approve current text. If a selected file changed since the import, the preview says how many did.
+The map only decides where to look. Every excerpt is read from the current working tree when you preview, so you approve current text. If a selected file changed since the import, the preview says how many did. Before reading anything, okbrain asks Git whether each candidate file is still tracked. A file that has left the Git index since the import is left out, even if it is still on disk, and the preview says how many were. The repository map therefore needs a Git checkout for every preview and send. A resumed request reads its saved copy and needs neither.
 
 Each candidate unit collects evidence from five sources:
 
@@ -304,7 +304,7 @@ okb code plan --workspace ./my-monorepo --provider openai --model gpt-5 \
   --prompt 'Add a currency field to the invoice payload and update every publisher.'
 ```
 
-The plan lists its work orders. Each has a scope, its own selection within the budget, the model it will use, and the links between its code and the other scopes. `--show-content` prints each order's source. With `--workers auto`, the default, the plan uses one worker unless the task's evidence falls in at least two separate areas and a single selection could not hold it. `--workers 2` to `--workers 4` asks for that many when the evidence supports them. `--context-tokens` applies to each worker.
+The plan lists its work orders. Each has a scope, its own selection within the budget, the model it will use, and the links between its code and the other scopes. The plan lists each excerpt's path and lines, the number of map lines, and the facts by ID. `--show-content` prints each order's excerpts, map lines, and facts in full, which is everything that worker is sent. With `--workers auto`, the default, the plan uses one worker unless the task's evidence falls in at least two separate areas and a single selection could not hold it. `--workers 2` to `--workers 4` asks for that many when the evidence supports them. `--context-tokens` applies to each worker.
 
 ```sh
 okb code run --workspace ./my-monorepo --session invoices --request-id inv-1 \
@@ -347,7 +347,7 @@ The model for each work order is chosen when the plan is built and is shown in t
 
 The chance of acceptance starts from the order of your list, with earlier models assumed somewhat more likely to be accepted. Your reviews then update it separately for each role and request size. Each plan draws the chance from what is known so far, so a model with little history is still tried now and then. The draw is fixed by the plan, so a preview and its send agree. Set `"learn": false` to always use the first model. The other listed models are tried in order only when the chosen model's provider fails or returns no text. The plan records the baseline next to each choice so you can compare them.
 
-A plan's models are part of what you approve. If the policy or the learned statistics change between preview and send, the send asks for a fresh preview.
+A plan's models, their reasoning levels, and the OpenRouter preferences are part of what you approve, and the preview shows them. If any of them, or the learned statistics, change between preview and send, the send asks for a fresh preview.
 
 ### Use OpenRouter
 

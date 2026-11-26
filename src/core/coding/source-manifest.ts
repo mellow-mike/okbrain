@@ -47,6 +47,7 @@ function atlasManifest(atlas: NonNullable<RepositoryContextManifest["atlas"]>): 
   return {
     version: atlas.version, generation: atlas.generation, ...(atlas.importedAt === undefined ? {} : { importedAt: atlas.importedAt }),
     slots: atlas.slots.map(({ name, units, tokens }) => ({ name, units, tokens })), staleFiles: atlas.staleFiles,
+    ...(atlas.untrackedFiles ? { untrackedFiles: atlas.untrackedFiles } : {}),
     map: { sha256: atlas.map.sha256, lines: atlas.map.lines },
     skills: atlas.skills.map(({ id, sha256, trial }) => ({ id, sha256, ...(trial ? { trial } : {}) })),
     ...(atlas.withheld?.length ? { withheld: [...atlas.withheld] } : {}),

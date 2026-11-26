@@ -24,7 +24,9 @@ import {
 import { selectAtlasContext, type AtlasContext } from "./atlas/context.ts";
 import { Atlas, AtlasError, type AtlasLocation } from "./atlas/store.ts";
 import type { RepositoryContextExcerpt, RepositoryContextManifest } from "./repository-context.ts";
-import { chooseRoute, routeKey, type RouteCandidate, type RouteDecision, type RoutePrices, type RouteStats, type RoutingPolicy } from "./router.ts";
+import {
+  chooseRoute, routeKey, type OpenRouterPreferences, type RouteCandidate, type RouteDecision, type RoutePrices, type RouteStats, type RoutingPolicy,
+} from "./router.ts";
 
 export class OrchestrationError extends Error {}
 
@@ -74,6 +76,8 @@ export interface OrchestrationPlan {
   orders: WorkOrderPreview[];
   /** Present when reports from several workers are combined by a model. */
   synthesis?: { route: RouteDecision };
+  /** Provider preferences sent with every OpenRouter call in this plan. They are part of what is approved. */
+  openRouter?: OpenRouterPreferences;
   /** Things the operator should know before sending, such as a model without a credential. */
   warnings?: string[];
   /** Estimated input tokens across every planned model call. */
@@ -86,6 +90,7 @@ export interface OrchestrationInput {
   mode: OrchestrationPlan["mode"];
   orders: WorkOrder[];
   synthesis?: { requestId: string; models: RouteCandidate[] };
+  openRouter?: OpenRouterPreferences;
 }
 
 export interface OrderResult {
@@ -283,10 +288,15 @@ export async function planOrchestration(
   }
   const synthesisRoute = mode === "fan-out"
     ? route("orchestrator", Math.min(8000, 400 + previews.length * 1500), `${previews.map(({ manifest }) => manifest.id).join(":")}:synthesis`) : undefined;
+  // Everything that decides how an approved call runs is part of the approval: each model with its
+  // reasoning level, in the order they would be tried, and the provider preferences sent with them.
+  const configuration = ({ provider, model, thinkingLevel }: RouteCandidate) => [provider, model, thinkingLevel ?? null];
+  const openRouter = policy?.openRouter && Object.keys(policy.openRouter).length ? policy.openRouter : undefined;
   const plan: OrchestrationPlan = {
-    id: sha256(JSON.stringify([1, task, mode, orders.map(({ id, scope, content, models }) => [id, scope, sha256(content), models.map(routeKey)]),
-      synthesisRoute ? [synthesisRoute.choice, ...synthesisRoute.fallbacks].map(routeKey) : null])),
-    mode, reason, orders: previews, ...(synthesisRoute ? { synthesis: { route: synthesisRoute } } : {}), ...(warnings.length ? { warnings } : {}),
+    id: sha256(JSON.stringify([2, task, mode, orders.map(({ id, scope, content, models }) => [id, scope, sha256(content), models.map(configuration)]),
+      synthesisRoute ? [synthesisRoute.choice, ...synthesisRoute.fallbacks].map(configuration) : null, openRouter ?? null])),
+    mode, reason, orders: previews, ...(synthesisRoute ? { synthesis: { route: synthesisRoute } } : {}), ...(openRouter ? { openRouter } : {}),
+    ...(warnings.length ? { warnings } : {}),
     estimatedTokens: previews.reduce((total, { manifest }) => total + manifest.estimatedTokens, 0) + (synthesisRoute ? 400 + previews.length * 1500 : 0),
   };
   return {
@@ -294,6 +304,7 @@ export async function planOrchestration(
     input: {
       requestId, task, mode, orders,
       ...(synthesisRoute ? { synthesis: { requestId: `${requestId}-synthesis`, models: [synthesisRoute.choice, ...synthesisRoute.fallbacks] } } : {}),
+      ...(openRouter ? { openRouter } : {}),
     },
   };
 }

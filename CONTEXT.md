@@ -126,16 +126,18 @@ calls no model. It also writes an OKF bundle of package cards and draft
 skills in application data that a person can read and edit. A request can
 select its source from the map inside one token budget that covers excerpts,
 a short navigation map, and facts. The map decides where to look, and every
-excerpt is read from the current worktree at preview. Admission saves the
+excerpt is read from the current worktree at preview, after Git confirms the
+file is still tracked. Admission saves the
 approved bytes, and recovery reads them. Excerpts that did not fit can be
 approved for lookup and are then served only from the saved selection.
 Reviews update a separate learned state that holds no source, prompt, or
 answer text. It can be forgotten per session, rolled back, or reset.
 An orchestrated request is a previewed plan of scoped work orders. Each runs
 in its own Pi Durable conversation with only its source, and one further call
-combines the reports. The plan, including every model, is approved and saved
-before the first call. A routing policy lists the models a role may use, and
-the choice is made at planning time and bound into the approval. A project
+combines the reports. The plan, including every model, its reasoning level,
+and any OpenRouter preferences, is approved and saved before the first call.
+A routing policy lists the models a role may use, and the choice is made at
+planning time and bound into the approval. A project
 keeps its own map, bundle, and learned state under its project directory,
 imports only its permitted directories, and routes within its own provider.
 The control plane prepares map and plan input, so workers never open the map.

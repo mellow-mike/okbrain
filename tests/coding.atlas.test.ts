@@ -339,3 +339,54 @@ test("an interrupted import never leaves a half-updated map in use", async () =>
   expect(after.excerpts.some(({ path, content }) => path === "packages/auth/src/session.ts" && content.includes("TOUCHED_MARKER"))).toBe(true);
   expect(after.manifest.atlas).toMatchObject({ generation: 2, staleFiles: 0 });
 });
+
+test("a file that leaves the Git index after import is never read, named, or sent", async () => {
+  const repo = await buildMonorepo(join(root, "untracked"), 48);
+  const location = { stateDir: join(root, "untracked-atlas") };
+  const run = (...args: string[]) => {
+    const result = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", ...args], { cwd: repo.workspace, stderr: "pipe" });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  };
+  await importRepository({ workspace: repo.workspace }, location);
+  const identifier = repo.tasks[0]!;
+  const select = (extra: { deferred?: true } = {}) => selectAtlasContext({ workspace: repo.workspace, query: "refreshSession signToken", tokenBudget: 1500, ...extra }, location);
+  const before = await select();
+  expect(evidenceRecall(identifier, before.excerpts)).toBe(1);
+  expect(before.manifest.atlas?.untrackedFiles).toBeUndefined();
+
+  // The file stays on disk, as it does when someone untracks a file that should never have been committed.
+  run("rm", "--cached", "--quiet", "--", "packages/auth/src/session.ts");
+  expect(existsSync(join(repo.workspace, "packages/auth/src/session.ts"))).toBe(true);
+  for (const context of [await select(), await select({ deferred: true })]) {
+    const sent = JSON.stringify([context.excerpts, context.deferred, context.map, context.skills, context.manifest.files, context.manifest.atlas?.deferred]);
+    expect(sent).not.toContain("packages/auth/src/session.ts");
+    // Text that only that file holds. The tracked test still names the function it calls.
+    expect(sent).not.toContain("SESSION_EXPIRED");
+    expect(sent).not.toContain("Rotate the refresh token");
+    expect(sent).not.toContain("endSession");
+    expect(context.manifest.atlas?.untrackedFiles).toBe(1);
+    // Code that is still tracked is found as before.
+    expect(context.excerpts.some(({ path }) => path === "packages/auth/src/token-signer.ts")).toBe(true);
+  }
+
+  // Tracking it again restores it without another import, and a new import drops what stays untracked.
+  run("add", "--", "packages/auth/src/session.ts");
+  const restored = await select();
+  expect(evidenceRecall(identifier, restored.excerpts)).toBe(1);
+  expect(JSON.stringify(restored.skills)).toContain("packages/auth/src/session.ts is tested by packages/auth/tests/session.test.ts");
+  // A fact about the selection never names a linked file that has left the index either.
+  run("rm", "--cached", "--quiet", "--", "packages/auth/tests/session.test.ts");
+  const withoutTest = await select();
+  expect(evidenceRecall(identifier, withoutTest.excerpts)).toBe(1);
+  expect(JSON.stringify([withoutTest.excerpts, withoutTest.map, withoutTest.skills, withoutTest.manifest.files])).not.toContain("packages/auth/tests/session.test.ts");
+  run("add", "--", "packages/auth/tests/session.test.ts");
+  run("rm", "--cached", "--quiet", "--", "packages/auth/src/session.ts");
+  await importRepository({ workspace: repo.workspace }, location);
+  const after = await select();
+  expect(after.manifest.atlas?.untrackedFiles).toBeUndefined();
+  expect(JSON.stringify(after)).not.toContain("packages/auth/src/session.ts");
+
+  // Outside a Git checkout the map cannot confirm anything, so it selects nothing.
+  await rm(join(repo.workspace, ".git"), { recursive: true, force: true });
+  await expect(select()).rejects.toThrow("Git could not confirm");
+});

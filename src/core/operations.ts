@@ -305,6 +305,7 @@ function renderAtlasContext(context: Pick<AtlasContext, "manifest"> & Partial<At
     lines.splice(1, 0, `Repository map generation ${atlas.generation}${atlas.importedAt ? `, imported ${atlas.importedAt}` : ""}. Learned parameters v${atlas.params}.`);
     if (atlas.slots.length) lines.push(`Slots: ${atlas.slots.map(({ name, units, tokens }) => `${name} (${units} units, ${tokens} tokens)`).join("; ")}.`);
     if (atlas.staleFiles) lines.push(`${atlas.staleFiles} selected files changed since the import. Their excerpts come from the current worktree. Run \`okb code import\` to refresh the map.`);
+    if (atlas.untrackedFiles) lines.push(`${atlas.untrackedFiles} files with evidence for this task are no longer tracked by Git and were left out. Run \`okb code import\` to refresh the map.`);
     if (atlas.skills.length) lines.push(`Facts delivered: ${atlas.skills.map(({ id, trial }) => trial ? `${id} (on trial)` : id).join(", ")}.`);
     if (atlas.withheld?.length) lines.push(`Withheld for measurement: ${atlas.withheld.join(", ")}.`);
     if (atlas.deferred.length) lines.push(`On request: ${atlas.deferred.map(({ path, startLine, endLine }) => `${path}:${startLine}-${endLine}`).join(", ")}.`);
@@ -1499,7 +1500,7 @@ export const operations: readonly Operation[] = [
       { name: "projects", type: "string", description: "comma-separated workspace-relative directories to read from" },
       { name: "context-tokens", type: "int", description: "estimated token budget for each worker's source (default 4096)" },
       { name: "routing-json", type: "string", description: "versioned routing policy as JSON" },
-      { name: "show-content", type: "boolean", description: "include each work order's selected text" },
+      { name: "show-content", type: "boolean", description: "include each work order's selected text, map, and facts" },
     ],
     handler: async (_ctx, p) => {
       const { CodingError, previewCodingOrchestration } = await import("./coding/durable.ts");
@@ -1513,25 +1514,42 @@ export const operations: readonly Operation[] = [
             ...(workers !== undefined ? { workers } : {}), ...(routing ? { routing } : {}),
           },
         });
-        return p["show-content"] ? plan : { ...plan, orders: plan.orders.map(({ excerpts: _excerpts, ...order }) => order) };
+        // Without the flag the manifest still names every excerpt, the map's digest, and each fact's ID and digest.
+        return p["show-content"] ? plan : { ...plan, orders: plan.orders.map(({ excerpts: _excerpts, map: _map, facts: _facts, ...order }) => order) };
       } catch (error) {
         if (error instanceof CodingError) throw new OpError(error.message, "refused");
         throw error;
       }
     },
     render: (r) => {
-      const plan = r as OrchestrationPlan;
-      const model = ({ provider, model }: { provider: string; model: string }) => `${provider}/${model}`;
+      const plan = r as Omit<OrchestrationPlan, "orders"> & { orders: (Omit<OrchestrationPlan["orders"][number], "excerpts" | "map" | "facts"> & Partial<OrchestrationPlan["orders"][number]>)[] };
+      const model = ({ provider, model, thinkingLevel }: { provider: string; model: string; thinkingLevel?: string }) =>
+        `${provider}/${model}${thinkingLevel ? ` (${thinkingLevel} reasoning)` : ""}`;
       const lines = [`Plan ID ${plan.id}`, `${plan.mode === "fan-out" ? `${plan.orders.length} workers` : "One worker"}. ${plan.reason}`,
         `About ${plan.estimatedTokens} estimated input tokens across all planned calls.`];
+      if (plan.openRouter) {
+        const { dataCollection, zdr, order, allowFallbacks, sort } = plan.openRouter;
+        lines.push(`OpenRouter preferences for every call: ${[
+          dataCollection ? `data collection ${dataCollection}` : "", zdr === undefined ? "" : zdr ? "zero data retention endpoints only" : "zero data retention not required",
+          order?.length ? `providers in order ${order.join(", ")}` : "", allowFallbacks === undefined ? "" : allowFallbacks ? "other providers allowed" : "no other providers",
+          sort ? `sorted by ${sort}` : "",
+        ].filter(Boolean).join("; ")}.`);
+      }
       for (const order of plan.orders) {
+        const atlas = order.manifest.atlas;
         lines.push(`\n${order.id} — ${order.scope} — ${model(order.route.choice)}${model(order.route.choice) === model(order.route.baseline) ? "" : ` (baseline ${model(order.route.baseline)})`}`,
           `  ${order.route.reason}${order.route.fallbacks.length ? ` Falls back to ${order.route.fallbacks.map(model).join(", ")}.` : ""}`,
           ...order.manifest.files.map(({ path, startLine, endLine, reason }) => `  ${path}:${startLine}-${endLine}${reason ? ` (${reason})` : ""}`),
           ...order.interfaces.map((line) => `  interface: ${line}`));
+        // Everything a worker is sent is listed here, and printed in full with --show-content.
+        if (atlas?.map.lines) lines.push(`  Map: ${atlas.map.lines} lines sent with the excerpts.`);
+        if (atlas?.skills.length) lines.push(`  Facts delivered: ${atlas.skills.map(({ id, trial }) => trial ? `${id} (on trial)` : id).join(", ")}.`);
+        if (atlas?.untrackedFiles) lines.push(`  ${atlas.untrackedFiles} files with evidence are no longer tracked by Git and were left out.`);
         for (const excerpt of order.excerpts ?? []) lines.push(`\n--- ${excerpt.path}:${excerpt.startLine}-${excerpt.endLine} ---`, excerpt.content);
+        if (order.map?.length) lines.push(`\n--- Map for ${order.scope} ---`, ...order.map);
+        if (order.facts?.length) lines.push(`\n--- Facts for ${order.scope} ---`, ...order.facts);
       }
-      if (plan.synthesis) lines.push(`\nCombining step — ${model(plan.synthesis.route.choice)}. ${plan.synthesis.route.reason}`);
+      if (plan.synthesis) lines.push(`\nCombining step — ${model(plan.synthesis.route.choice)}${plan.synthesis.route.fallbacks.length ? `, then ${plan.synthesis.route.fallbacks.map(model).join(", ")}` : ""}. ${plan.synthesis.route.reason}`);
       for (const warning of plan.warnings ?? []) lines.push(`\nNote: ${warning}`);
       return stripVTControlCharacters(lines.join("\n"));
     },

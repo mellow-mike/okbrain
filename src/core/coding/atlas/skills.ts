@@ -15,6 +15,7 @@ import { join, posix } from "node:path";
 import { fmStatus, fmString, parse } from "../../okf/document.ts";
 import type { SkillRecord, SkillState } from "./learn.ts";
 import type { PackSkill, SkillRequest, SkillSelector } from "./readout.ts";
+import { trackedAmong } from "./scan.ts";
 import { Atlas, knowledgeDirectory, type AtlasLocation } from "./store.ts";
 import { cosine, embedBag, terms, unitDraw } from "./text.ts";
 
@@ -77,7 +78,7 @@ function anchored(anchors: readonly string[], request: SkillRequest): boolean {
 
 /** Build the selector the readout calls once it knows which files and packages a request touches. */
 export function createSkillSelector(workspace: string, records: ReadonlyMap<string, SkillRecord>, location: AtlasLocation = {}): SkillSelector {
-  return (request: SkillRequest) => {
+  return async (request: SkillRequest) => {
     const delivered: PackSkill[] = [];
     const withheld: string[] = [];
     let remaining = request.budgetBytes;
@@ -89,9 +90,27 @@ export function createSkillSelector(workspace: string, records: ReadonlyMap<stri
       return true;
     };
     const enabled = (id: string) => records.get(id)?.state !== "disabled";
+    const sources = request.paths.slice(0, 24);
     let atlas: Atlas;
     try { atlas = Atlas.open(workspace, location); } catch { return { skills: [], withheld: [] }; }
     try {
+      // The built-in facts name files linked to the selection. Git is asked which of those are
+      // still tracked, so a fact never names a file that has left the index since the import.
+      let links = enabled("builtin/test-map") && sources.length ? atlas.all<{ source: string; test: string }>(
+        `SELECT s.path AS source, t.path AS test FROM file_edges e JOIN files t ON t.id = e.src JOIN files s ON s.id = e.dst
+         WHERE e.kind = 'test' AND s.path IN (${sources.map(() => "?").join(",")}) ORDER BY s.path, t.path LIMIT 24`, ...sources) : [];
+      let coupled = enabled("builtin/change-coupling") && sources.length ? atlas.all<{ a: string; b: string; weight: number }>(
+        `SELECT fa.path AS a, fb.path AS b, e.weight FROM file_edges e JOIN files fa ON fa.id = e.src JOIN files fb ON fb.id = e.dst
+         WHERE e.kind = 'cochange' AND (fa.path IN (${sources.map(() => "?").join(",")}) OR fb.path IN (${sources.map(() => "?").join(",")}))
+         ORDER BY e.weight DESC, fa.path, fb.path LIMIT 24`, ...sources, ...sources) : [];
+      const selectedPaths = new Set(sources);
+      const named = [...new Set([...links.map(({ test }) => test), ...coupled.flatMap(({ a, b }) => [a, b])])].filter((path) => !selectedPaths.has(path));
+      // The selected files were confirmed by the readout. Without an answer from Git, no other file is named.
+      const stillTracked = named.length ? await trackedAmong(workspace, named).catch(() => new Set<string>()) : new Set<string>();
+      const current = (path: string) => selectedPaths.has(path) || stillTracked.has(path);
+      links = links.filter(({ test }) => current(test));
+      coupled = coupled.filter(({ a, b }) => current(a) && current(b));
+
       const bundle = readBundleSkills(atlas.directory, records);
       const queryBag = terms(request.query, 256);
       const queryVector = embedBag(queryBag);
@@ -111,11 +130,7 @@ export function createSkillSelector(workspace: string, records: ReadonlyMap<stri
         else withheld.push(skill.id);
       }
 
-      const sources = request.paths.slice(0, 24);
-      if (enabled("builtin/test-map") && sources.length) {
-        const links = atlas.all<{ source: string; test: string }>(
-          `SELECT s.path AS source, t.path AS test FROM file_edges e JOIN files t ON t.id = e.src JOIN files s ON s.id = e.dst
-           WHERE e.kind = 'test' AND s.path IN (${sources.map(() => "?").join(",")}) ORDER BY s.path, t.path LIMIT 24`, ...sources);
+      if (enabled("builtin/test-map") && links.length) {
         const bySource = new Map<string, string[]>();
         for (const { source, test } of links) {
           const list = bySource.get(source);
@@ -140,13 +155,9 @@ export function createSkillSelector(workspace: string, records: ReadonlyMap<stri
         }
         if (parts.length) offer({ id: "builtin/checks", title: "Checks the project runs", text: clip(`Commands this project uses to check a change. ${parts.join(". ")}.`, maxSkillBytes) });
       }
-      if (enabled("builtin/change-coupling") && sources.length) {
-        const selected = new Set(sources);
-        const pairs = atlas.all<{ a: string; b: string; weight: number }>(
-          `SELECT fa.path AS a, fb.path AS b, e.weight FROM file_edges e JOIN files fa ON fa.id = e.src JOIN files fb ON fb.id = e.dst
-           WHERE e.kind = 'cochange' AND (fa.path IN (${sources.map(() => "?").join(",")}) OR fb.path IN (${sources.map(() => "?").join(",")}))
-           ORDER BY e.weight DESC, fa.path, fb.path LIMIT 24`, ...sources, ...sources)
-          .filter(({ a, b }) => selected.has(a) !== selected.has(b)).slice(0, 4);
+      if (enabled("builtin/change-coupling") && coupled.length) {
+        const selected = selectedPaths;
+        const pairs = coupled.filter(({ a, b }) => selected.has(a) !== selected.has(b)).slice(0, 4);
         if (pairs.length) offer({
           id: "builtin/change-coupling", title: "Files that change together",
           text: clip(`In this repository's history these usually change together: ${pairs.map(({ a, b }) => selected.has(a) ? `${a} with ${b}` : `${b} with ${a}`).join("; ")}.`, maxSkillBytes),

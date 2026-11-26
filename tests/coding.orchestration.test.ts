@@ -199,6 +199,36 @@ test("a plan is local, reproducible, and splits work only when it should", async
   await expect(previewCodingOrchestration({ ...session("plan", "p"), prompt: "zeppelin ingress annotations", orchestration: {} }, { models })).rejects.toThrow("found no source");
 });
 
+test("an approval covers how each call runs: reasoning level and provider preferences as well as the model", async () => {
+  const { models } = scripted(() => "unused");
+  const orchestration = { workers: 2, tokenBudget: 900 };
+  const worker = (thinkingLevel?: "low" | "high"): RouteCandidate[] => [{ provider, model: "cheap", ...(thinkingLevel ? { thinkingLevel } : {}) }];
+  const preview = async (routing: RoutingPolicy) =>
+    (await previewCodingOrchestration({ ...session("bind", "b"), prompt: task, orchestration: { ...orchestration, routing } }, { models })).plan;
+  const base: RoutingPolicy = { version: 1, learn: false, roles: { worker: worker() } };
+  const plain = await preview(base);
+  // The same models with a different reasoning level, or different data handling, are a different plan.
+  const low = await preview({ ...base, roles: { worker: worker("low") } });
+  const high = await preview({ ...base, roles: { worker: worker("high") } });
+  const denied = await preview({ ...base, openRouter: { dataCollection: "deny", zdr: true } });
+  const allowed = await preview({ ...base, openRouter: { dataCollection: "allow" } });
+  expect(new Set([plain.id, low.id, high.id, denied.id, allowed.id]).size).toBe(5);
+  expect(denied.openRouter).toEqual({ dataCollection: "deny", zdr: true });
+  expect(plain.openRouter).toBeUndefined();
+  expect((await preview({ ...base, openRouter: {} })).id).toBe(plain.id);
+  expect(low.orders[0]!.route.choice).toEqual({ provider, model: "cheap", thinkingLevel: "low" });
+
+  // A plan approved with data collection denied cannot be admitted once that restriction is gone, or with another reasoning level.
+  const run = (requestId: string, id: string, routing: RoutingPolicy) =>
+    runCodingSession({ ...session("bind", requestId), prompt: task, orchestration: { ...orchestration, routing, id } }, { models, stateDir });
+  await expect(run("b-1", denied.id, base)).rejects.toThrow("Preview the plan again");
+  await expect(run("b-2", denied.id, { ...base, openRouter: { dataCollection: "allow", zdr: true } })).rejects.toThrow("Preview the plan again");
+  await expect(run("b-3", low.id, { ...base, roles: { worker: worker("high") } })).rejects.toThrow("Preview the plan again");
+  // What was approved is what is saved for the run and for any recovery.
+  const { input } = await previewCodingOrchestration({ ...session("bind", "b"), prompt: task, orchestration: { ...orchestration, routing: { ...base, openRouter: { dataCollection: "deny", zdr: true } } } }, { models });
+  expect(input.openRouter).toEqual({ dataCollection: "deny", zdr: true });
+});
+
 test("workers see only their own scope, and a combining step answers from their reports", async () => {
   const orchestration = { workers: 2, tokenBudget: 900 };
   const { models, seen, faux } = scripted(({ request }) => {
