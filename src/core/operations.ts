@@ -1291,6 +1291,10 @@ export const operations: readonly Operation[] = [
       if (!mapped && (p.exclude !== undefined || p.deferred !== undefined || p["plan-id"] !== undefined || p.workers !== undefined || p["routing-json"] !== undefined))
         throw new OpError("Use --exclude and --deferred with --atlas, and --plan-id, --workers and --routing-json with --orchestrate.", "bad_params");
       if (mapped) {
+        if (p.atlas === true && (p["plan-id"] !== undefined || p.workers !== undefined || p["routing-json"] !== undefined))
+          throw new OpError("Use --plan-id, --workers and --routing-json with --orchestrate.", "bad_params");
+        if (p.orchestrate === true && (p.exclude !== undefined || p.deferred !== undefined || p.query !== undefined || p["context-id"] !== undefined))
+          throw new OpError("Use the task and --plan-id to run an orchestrated plan.", "bad_params");
         if (p.prompt === undefined) throw new OpError("Use --atlas or --orchestrate with a new request prompt.", "bad_params");
         if (p.files !== undefined || p["profile-json"] !== undefined) throw new OpError("The repository map selects its own source. Remove --files and --profile-json.", "bad_params");
         const id = p.atlas === true ? p["context-id"] : p["plan-id"];
@@ -1379,8 +1383,9 @@ export const operations: readonly Operation[] = [
       if (context.compactionPending) lines.push("Local compaction is awaiting recovery. Open this session in the app and choose Compact context locally.");
       const renderUsage = (label: string, tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number }) =>
         `${label}: ${tokens.totalTokens} total tokens (${tokens.input} input, ${tokens.output} output, ${tokens.cacheRead} cache read, ${tokens.cacheWrite} cache write).`;
-      const sessionUsage = usage.models[`${result.provider}/${result.model}`];
-      if (sessionUsage) lines.push(renderUsage("Session usage", sessionUsage));
+      const models = Object.entries(usage.models).sort(([left], [right]) => left.localeCompare(right));
+      if (models.length === 1 && models[0]![0] === `${result.provider}/${result.model}`) lines.push(renderUsage("Session usage", models[0]![1]));
+      else if (models.length) lines.push(...models.map(([model, tokens]) => renderUsage(`Session usage (${model})`, tokens)));
       else lines.push("Session usage: no provider usage recorded.");
       if (request) {
         lines.push(`Request ${request.requestId}: ${request.status}${request.reason ? ` (${request.reason})` : ""}.`);
@@ -1467,7 +1472,7 @@ export const operations: readonly Operation[] = [
       codingWorkspace,
       { name: "query", type: "string", required: true, description: "the task, or a narrower search text" },
       ...atlasSelectionParams,
-      { name: "show-content", type: "boolean", description: "include the selected text, the map, and the facts" },
+      { name: "show-content", type: "boolean", description: "include the selected text, the map, the facts, and excerpts approved for lookup" },
       { name: "explain", type: "boolean", description: "show the strongest candidates and their lane scores" },
     ],
     handler: async (_ctx, p) => {
@@ -1531,7 +1536,7 @@ export const operations: readonly Operation[] = [
         `About ${plan.estimatedTokens} estimated input tokens across all planned calls.`];
       if (plan.openRouter) {
         const { dataCollection, zdr, order, allowFallbacks, sort } = plan.openRouter;
-        lines.push(`OpenRouter preferences for every call: ${[
+        lines.push(`OpenRouter provider preferences: ${[
           dataCollection ? `data collection ${dataCollection}` : "", zdr === undefined ? "" : zdr ? "zero data retention endpoints only" : "zero data retention not required",
           order?.length ? `providers in order ${order.join(", ")}` : "", allowFallbacks === undefined ? "" : allowFallbacks ? "other providers allowed" : "no other providers",
           sort ? `sorted by ${sort}` : "",
@@ -1541,6 +1546,7 @@ export const operations: readonly Operation[] = [
         const atlas = order.manifest.atlas;
         lines.push(`\n${order.id} — ${order.scope} — ${model(order.route.choice)}${model(order.route.choice) === model(order.route.baseline) ? "" : ` (baseline ${model(order.route.baseline)})`}`,
           `  ${order.route.reason}${order.route.fallbacks.length ? ` Falls back to ${order.route.fallbacks.map(model).join(", ")}.` : ""}`,
+          ...(order.allowedDirectories?.length ? [`  Allowed directories: ${order.allowedDirectories.join(", ")}.`] : []),
           ...order.manifest.files.map(({ path, startLine, endLine, reason }) => `  ${path}:${startLine}-${endLine}${reason ? ` (${reason})` : ""}`),
           ...order.interfaces.map((line) => `  interface: ${line}`));
         // Everything a worker is sent is listed here, and printed in full with --show-content.
@@ -1618,8 +1624,10 @@ export const operations: readonly Operation[] = [
       }
     },
     render: (r) => {
-      const { id, path } = r as { id: string; path: string };
-      return stripVTControlCharacters(`Saved ${id} as a draft at ${path}. It is delivered to about half of the matching requests until review outcomes show whether it helps.`);
+      const { id, path, created } = r as { id: string; path: string; created: boolean };
+      return stripVTControlCharacters(created
+        ? `Saved ${id} as a draft at ${path}. It is delivered to about half of the matching requests until review outcomes show whether it helps.`
+        : `Kept the existing lesson ${id} at ${path}.`);
     },
   },
   {
@@ -1648,7 +1656,7 @@ export const operations: readonly Operation[] = [
           if (typeof id !== "string" || !/^[\w./-]{1,200}$/u.test(id)) throw new OpError("Enter a skill ID as `okb code skills` lists it.", "bad_params");
           learning!.setSkillState(id, state);
         }
-        return listSkills(workspace, learning?.skillRecords() ?? new Map());
+        return await listSkills(workspace, learning?.skillRecords() ?? new Map());
       } catch (error) {
         if (error instanceof AtlasError) throw new OpError(error.message, "refused");
         throw error;

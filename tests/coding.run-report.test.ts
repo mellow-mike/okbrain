@@ -116,3 +116,21 @@ test("reports require matching saved requests and discard invalid identity and n
   expect(report?.context).toEqual({ limitTokens: 4096, modelWindowTokens: 8192, historyCompacted: true });
   expect(JSON.stringify(report)).not.toContain(privateText);
 });
+
+test("OpenRouter reports preserve routed model usage and deferred lookup ranges", () => {
+  const deferred = { path: "src/later.ts", startLine: 7, endLine: 9, sha256: "d".repeat(64) };
+  const { sha256: _, ...lookup } = deferred;
+  const repositoryContext = {
+    id: "b".repeat(64), files: [], atlas: { deferred: [{ ...deferred, content: privateText }] },
+  } as unknown as NonNullable<NonNullable<CodingSessionStatusResult["request"]>["repositoryContext"]>;
+  const request = { requestId, status: "done" as const, repositoryContext, approvedSourceLookup: true as const,
+    sourceLookup: { served: [lookup], refused: 0, incomplete: 0 } };
+  const model = "~anthropic/claude-sonnet-latest";
+  const routed = { ...snapshot(request), provider: "openrouter" as const, model,
+    usage: { models: { [`openrouter/${model}`]: usage, "openrouter/vendor/model:free": usage, [modelKey]: usage }, tools: {} } };
+  const report = codingRunReport(routed, { requestId, status: "done" });
+  expect(report?.request.repositoryContext?.deferred).toEqual([deferred]);
+  expect(report?.request.sourceLookup?.served).toEqual([lookup]);
+  expect(report?.usage.models).toEqual(routed.usage.models);
+  expect(JSON.stringify(report)).not.toContain(privateText);
+});

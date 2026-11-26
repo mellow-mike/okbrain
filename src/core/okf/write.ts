@@ -112,7 +112,7 @@ interface WriteOptions {
 
 /** Import a group of concepts through the same writer and refresh metadata even after a partial import. */
 export async function writeConceptBatch<T>(root: string, write: (
-  add: (input: WriteConceptInput, options?: Pick<WriteOptions, "createOnly">) => Promise<WriteResult>,
+  add: (input: WriteConceptInput, options?: Pick<WriteOptions, "createOnly" | "expected">) => Promise<WriteResult>,
 ) => Promise<T>): Promise<T> {
   const batch = { dirs: new Set<string>(), log: [] as ConceptLogEntry[] };
   try {

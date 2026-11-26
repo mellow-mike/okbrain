@@ -43,7 +43,8 @@ test('editor inspection shows the context budget and opens approved source only 
   ];
   const source = {
     prompt: 'Review the saved input.', guidance: 'Project rules.',
-    groups: [{ label: 'Package fixture', files: [{ path: 'package/example.ts', startLine: 3, endLine: 9, text: '<source>&</source>' }] }],
+    groups: [{ label: 'Package fixture', files: [{ path: 'package/example.ts', startLine: 3, endLine: 9, text: '<source>&</source>' }],
+      map: ['Package entry'], facts: ['Fixture fact'], deferred: [{ path: 'package/later.ts', startLine: 1, endLine: 2, text: 'Deferred source' }] }],
   };
   let selectedRun = 'active';
   let openSource = false;
@@ -137,6 +138,8 @@ test('editor inspection shows the context budget and opens approved source only 
   assert.ok(lastDocument.text.includes(source.prompt));
   assert.ok(lastDocument.text.includes('Project guidance\nProject rules.'));
   assert.ok(lastDocument.text.includes('Package fixture\n\npackage/example.ts:3–9\n<source>&</source>'));
+  assert.ok(lastDocument.text.includes('Saved repository map\nPackage entry\n\nSaved repository facts\nFixture fact'));
+  assert.ok(lastDocument.text.includes('On request · package/later.ts:1–2\nDeferred source'));
   assert.equal(provideSource(lastDocument.uri), '');
 });
 

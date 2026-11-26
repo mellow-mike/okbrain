@@ -498,7 +498,7 @@
       const note = document.createElement('p');
       note.className = 'muted';
       note.dataset.openRouter = '';
-      note.textContent = 'OpenRouter preferences for every call: ' + [
+      note.textContent = 'OpenRouter provider preferences: ' + [
         preferences.dataCollection ? 'data collection ' + preferences.dataCollection : '',
         preferences.zdr === undefined ? '' : preferences.zdr ? 'zero data retention endpoints only' : 'zero data retention not required',
         preferences.order?.length ? 'providers in order ' + preferences.order.join(', ') : '',
@@ -526,7 +526,11 @@
       const items = document.createElement('div');
       items.className = 'stack';
       previewContents(items, order);
-      section.append(title, model, items);
+      const goal = document.createElement('p');
+      goal.textContent = order.goal;
+      section.append(title, model, goal);
+      if (order.allowedDirectories?.length) section.append(listBlock('Allowed directories', order.allowedDirectories));
+      section.append(items);
       if (order.interfaces.length) section.append(listBlock('Links to other work orders', order.interfaces));
       pieces.push(section);
     }
@@ -606,8 +610,9 @@
   function mountSourceManifest(el, preview, feedback) {
     const manifest = preview?.sourceManifest;
     const id = preview?.manifest?.id || preview?.id;
-    const selected = Array.isArray(preview?.packages)
-      ? preview.packages.length > 0 && preview.packages.every((part) => part.excerpts?.length)
+    const groups = preview?.plan?.orders ?? preview?.packages;
+    const selected = Array.isArray(groups)
+      ? groups.length > 0 && groups.every((part) => part.excerpts?.length)
       : (preview?.excerpts || preview?.files || []).length > 0;
     if (!selected || manifest?.version !== 1 || manifest.source !== preview.source || typeof id !== 'string' || manifest.id !== id) return;
     const row = document.createElement('div');
@@ -685,6 +690,11 @@
         const lines = file.startLine === undefined ? '' : ':' + file.startLine + '–' + file.endLine;
         panel.append(disclosure(file.path + lines, file.text));
       }
+      if (group.map?.length) panel.append(listBlock('Saved repository map', group.map));
+      if (group.facts?.length) panel.append(listBlock('Saved repository facts', group.facts));
+      if (group.interfaces?.length) panel.append(listBlock('Links to other work orders', group.interfaces));
+      for (const file of group.deferred || [])
+        panel.append(disclosure('On request · ' + file.path + ':' + file.startLine + '–' + file.endLine, file.text));
     }
   }
 
@@ -894,7 +904,7 @@
       '<div data-atlas-query>' + field('Map search text (optional)', '', 'search', 'name="mapQuery" maxlength="2048" placeholder="Defaults to the task"') + '</div>' +
       '<div class="coding-grid">' + field('Map directories', project.scopes.join(', '), 'text', 'name="mapProjects" spellcheck="false"') +
       field('Map token budget', '4096', 'number', 'name="mapBudget" min="1" max="16384"') + '</div>' +
-      '<label class="field" data-atlas-workers><span>Workers</span><select name="mapWorkers"><option value="auto">Decide from the task</option><option value="1">1</option>' +
+      '<label class="field" data-atlas-workers><span id="coding-map-workers-label">Workers</span><select name="mapWorkers" aria-labelledby="coding-map-workers-label"><option value="auto">Decide from the task</option><option value="1">1</option>' +
       '<option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label>' +
       '<label class="row" data-atlas-deferred><input type="checkbox" name="mapDeferred"><span>Also approve further excerpts the model may look up by path and line</span></label></div>' +
       '<label class="row" data-source-lookup><input type="checkbox" name="approvedSourceLookup"><span>Let the model look up line numbers within this request’s approved source</span></label>' +
@@ -1022,8 +1032,17 @@
       form.querySelector('[data-source-lookup]').hidden = source.value === 'packages' || mapped;
       if (source.value === 'packages' || mapped) approvedSourceLookup.checked = false;
       previewButton.textContent = source.value === 'orchestrated' ? 'Preview plan' : 'Preview source';
+      updateEvaluationAvailability();
     }
     source.addEventListener('change', updateSourceFields);
+    function updateEvaluationAvailability() {
+      const unavailable = onBranch() || source.value === 'orchestrated';
+      enrollment.disabled = readonly || unavailable;
+      if (unavailable && enrollment.checked) {
+        enrollment.checked = false;
+        enrollment.dispatchEvent(new Event('change'));
+      }
+    }
     function updateBranchMode() {
       const branch = onBranch();
       if (branch) evaluationPrompt = undefined;
@@ -1037,11 +1056,7 @@
         files.value = '';
         updateSourceFields();
       }
-      enrollment.disabled = readonly || branch;
-      if (branch && enrollment.checked) {
-        enrollment.checked = false;
-        enrollment.dispatchEvent(new Event('change'));
-      }
+      updateEvaluationAvailability();
       clearPreview();
     }
     session.addEventListener('input', updateBranchMode);
@@ -1084,7 +1099,8 @@
         approveText.textContent = result.source === 'packages'
           ? 'Approve sending the shared task and each package’s selected text to ' + provider + '.'
           : result.source === 'orchestrated'
-            ? 'Approve sending the task and each work order’s selected text to ' + provider + ', using the models shown.'
+            ? 'Approve sending the task and each work order’s excerpts, map, and facts to the models shown, including the listed fallbacks.' +
+              (result.plan.synthesis ? ' The combining model receives the worker reports.' : '')
             : result.source === 'atlas'
               ? 'Approve sending the task, the selected text, the map and facts shown, and active session history to ' + provider + '.' +
                 (result.deferred?.length ? ' The excerpts marked “on request” are sent only if the model looks them up.' : '')
@@ -1974,6 +1990,22 @@
         const sources = (child.sources ?? []).map((file) => file.path + ':' + file.startLine + '–' + file.endLine);
         bar.before(disclosure(child.project + ' · ' + child.requestId, child.summary || child.reason || '', [usageText(child.usage), ...sources]));
       }
+      const plan = receipt?.orchestration;
+      if (plan) {
+        for (const order of plan.orders) {
+          const sources = order.sources.map((file) => file.path + ':' + file.startLine + '–' + file.endLine);
+          bar.before(disclosure((order.scope === '.' ? 'Whole selection' : order.scope) + ' · ' + order.requestId,
+            order.report || order.reason || '', [order.model, usageText(order.usage), ...sources].filter(Boolean)));
+        }
+        if (plan.synthesis) {
+          const combining = document.createElement('p');
+          combining.className = 'muted';
+          combining.textContent = ['Combining call', plan.synthesis.model, usageText(plan.synthesis.usage), plan.synthesis.reason].filter(Boolean).join(' · ');
+          bar.before(combining);
+        }
+        if (plan.conflicts.length) bar.before(listBlock('Files changed by multiple work orders', plan.conflicts));
+        if (plan.outOfScope.length) bar.before(listBlock('Changes outside a work order’s scope', plan.outOfScope.map(({ order, path }) => order + ' · ' + path)));
+      }
       if (readonly) return row;
       if ((!branch || ownerActions) && row.status === 'running') appendAction(bar, 'Cancel run', '/cancel', row);
       if ((!branch || ownerActions) && row.status === 'interrupted') {
@@ -2349,9 +2381,9 @@
       report(feedback);
       try {
         const anchors = entries(lesson.elements.anchors.value);
-        await coding(prefix + '/lesson', { text: lesson.elements.text.value, ...(anchors.length ? { anchors } : {}) });
+        const { created } = await coding(prefix + '/lesson', { text: lesson.elements.text.value, ...(anchors.length ? { anchors } : {}) });
         lesson.reset();
-        feedback.textContent = 'Lesson recorded on trial.';
+        feedback.textContent = created ? 'Lesson recorded on trial.' : 'The existing lesson was kept.';
         await refresh();
       } catch (error) { report(feedback, error); }
     });

@@ -28,6 +28,7 @@ function validPath(path: string): boolean {
 export async function listTrackedPaths(
   workspace: string, scopes: readonly string[] = ["."], options: { maxPaths?: number; signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<TrackedListing> {
+  if (options.signal?.aborted) throw new AtlasScanError("The repository import was cancelled.");
   const maxPaths = options.maxPaths ?? defaultMaxTrackedPaths;
   let child;
   try {
@@ -173,18 +174,21 @@ export async function mineChangeCoupling(
 ): Promise<ChangeCoupling> {
   const count = Math.max(0, Math.min(options.commits ?? 2000, 20_000));
   if (count === 0) return { commits: 0, pairs: [] };
-  const text = await gitText(workspace, ["log", "--no-merges", "--no-renames", `-n${count}`, "--name-only", "--format=format:%x1e%H"],
+  const text = await gitText(workspace, ["log", "--no-merges", "--no-renames", "--no-show-signature", "--relative", `-n${count}`, "--name-only", "-z", "--format=format:%H%x00", "--", "."],
     48 * 1024 * 1024, 60_000, options.signal);
   if (!text) return { commits: 0, pairs: [] };
   const weights = new Map<string, number>();
   const support = new Map<string, number>();
   let commits = 0;
-  for (const record of text.split("\x1e")) {
-    const lines = record.split("\n");
-    if (!/^[0-9a-f]{40,64}$/u.test(lines[0]?.trim() ?? "")) continue;
+  // `git log -z` separates commits with an empty field and adds one separator newline before their first path.
+  for (const record of text.split("\0\0")) {
+    const [commit, first, ...rest] = record.split("\0");
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(commit ?? "")) continue;
     commits++;
-    const files = [...new Set(lines.slice(1).map((line) => line.trim()).filter((line) => known.has(line)))].sort();
-    if (files.length < 2 || files.length > maxCommitFiles) continue;
+    const changed = [...new Set([first?.replace(/^\n/u, ""), ...rest].filter((path): path is string => Boolean(path)))];
+    if (changed.length > maxCommitFiles) continue;
+    const files = changed.filter((path) => known.has(path)).sort();
+    if (files.length < 2) continue;
     const share = 1 / (files.length - 1);
     for (let i = 0; i < files.length; i++) for (let j = i + 1; j < files.length; j++) {
       const key = `${files[i]}\0${files[j]}`;

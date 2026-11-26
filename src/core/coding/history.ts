@@ -5,7 +5,7 @@ import { estimateContextTokens, estimateMessageTokens, estimateTextTokens } from
 import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { CompactionTask, defineExtension, hook, type CompactionPolicy } from "@earendil-works/pi-durable";
 import { approvedSourceToolName } from "./approved-source-tool.ts";
-import { withOpenRouterPreferences, type OpenRouterPreferences } from "./router.ts";
+import { openRouterRouting, type OpenRouterPreferences } from "./router.ts";
 
 export const contextBudgetError = "The saved coding context exceeds the active token budget. Start a new session or submit a smaller request.";
 
@@ -133,10 +133,10 @@ function blockedRequest(model: Model<Api>, errorMessage: string) {
 export interface RequestRouting { openRouter?: OpenRouterPreferences }
 
 export function budgetedModels(models: Models, sessionBudget: CodingBudget, sessionId: string, routing: RequestRouting = {}): Models {
-  const streamSimple: Models["streamSimple"] = (requested, context, options) => {
-    let model = requested;
-    try { model = withOpenRouterPreferences(requested, routing.openRouter); }
-    catch (error) { return blockedRequest(requested, (error as Error).message); }
+  const streamSimple: Models["streamSimple"] = (model, context, options) => {
+    let provider;
+    try { provider = openRouterRouting(model, routing.openRouter); }
+    catch (error) { return blockedRequest(model, (error as Error).message); }
     // A routed child conversation may use a model with a different window than the session's.
     const budget = model.contextWindow > 0 ? codingBudget(model) : sessionBudget;
     const messages = outboundCodingMessages(context.messages);
@@ -151,6 +151,16 @@ export function budgetedModels(models: Models, sessionBudget: CodingBudget, sess
     if (estimateOutboundTokens(messages) <= budget.limitTokens) {
       return models.streamSimple(model, { ...context, messages }, {
         ...options,
+        ...(provider ? { onPayload: async (original, requestModel) => {
+          // Pi calls the hook just before sending either OpenRouter request format.
+          const updated = await options?.onPayload?.(original, requestModel);
+          const payload = updated === undefined ? original : updated;
+          if (typeof payload !== "object" || payload === null || Array.isArray(payload))
+            throw new Error("Could not attach the approved OpenRouter preferences.");
+          const existing = "provider" in payload ? payload.provider : undefined;
+          const defaults = typeof existing === "object" && existing !== null && !Array.isArray(existing) ? existing : {};
+          return { ...payload, provider: { ...defaults, ...provider } };
+        } } : {}),
         ...(toolRounds ? { toolChoice: "none" } : {}),
         // Preserve provider affinity across harness openings, scoped to this transcript.
         sessionId,

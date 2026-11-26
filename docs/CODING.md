@@ -225,7 +225,7 @@ The preview prints a context ID, each excerpt's path, lines, and the reason it w
 
 The budget defaults to 4,096 estimated tokens and accepts 1–16,384. It covers everything the selection sends: excerpts, a short navigation map of the packages involved (up to 15% of the budget), and facts (up to 10%). A selection holds at most 32 excerpts from 24 files.
 
-The map only decides where to look. Every excerpt is read from the current working tree when you preview, so you approve current text. If a selected file changed since the import, the preview says how many did. Before reading anything, okbrain asks Git whether each candidate file is still tracked. A file that has left the Git index since the import is left out, even if it is still on disk, and the preview says how many were. The repository map therefore needs a Git checkout for every preview and send. A resumed request reads its saved copy and needs neither.
+The map only decides where to look. Every excerpt is read from the current working tree when you preview, so you approve current text. If a selected file changed since the import, the preview says how many did. Code-derived map entries and facts also respect the selected directories and exclude files Git no longer tracks. Reimport after moving or removing declarations to refresh their positions and links. A new map-based request needs a Git checkout for preview and admission. Resume uses the saved input, so it works after the checkout has been removed.
 
 Each candidate unit collects evidence from five sources:
 
@@ -252,7 +252,7 @@ Pass the same selection options to both commands. Without `--query`, the selecti
 
 In the app, choose **Repository map** as the request's source, set the directories and budget, and choose **Preview source**. The preview shows the excerpts, the map lines, and the facts that accompany them. Approve it to send.
 
-The provider receives the task, the excerpts, the map lines, and the facts. The transcript saves those bytes, and a resumed request uses the saved copy.
+The provider receives the task, the excerpts, the map lines, and the facts. The transcript saves those bytes, and a resumed request uses the saved copy. In **Run history**, choose **View saved request source** to see the admitted map, facts, and excerpts approved for lookup.
 
 Add `--deferred`, or select **Also approve further excerpts the model may look up by path and line**, to approve up to 16 more excerpts that did not fit. They are saved with the request. The provider first receives only their paths and line ranges, and the model can read them through [approved source lookup](#work-in-the-app). The preview shows their text, because approving the request approves sending them.
 
@@ -283,7 +283,7 @@ okb code lesson --workspace ./my-monorepo --anchors packages/auth \
 okb code skills --workspace ./my-monorepo
 ```
 
-`okb code skills` lists each fact, skill, and lesson with its state and its acceptance counts when sent and when withheld. `--disable <id>` stops delivery, and `--enable <id>` starts a new trial. Setting `status: stable` or `status: deprecated` in a skill's file overrides the measurement. In a project, the owner records lessons under **Project settings → Repository map**, which also lists the measured skills.
+`okb code skills` lists each fact, skill, and lesson with its state and its acceptance counts when sent and when withheld. `--disable <id>` stops delivery, and `--enable <id>` clears its earlier counts and starts a new trial. An explicit `status: stable` or `status: deprecated` in a skill's file overrides its measured state. Measurements live in `learning.sqlite`, so `--everything` clears them while preserving the Markdown. In a project, the owner records lessons under **Project settings → Repository map**, which also lists the measured skills. Recording the same lesson with the same anchors again preserves the existing note.
 
 Learned state is a separate `learning.sqlite` beside the map. For each of the most recent 2,000 reviewed requests it keeps the session name, request ID, outcome, a 256-number hashed sketch of the task's words, and the paths, names, and scores of up to 96 candidate units. Vocabulary is stored as single words attached to a declaration, up to six per accepted request. It holds no source text, no prompts, and no answers. Because it contains words from your tasks and the names of your files and declarations, protect it like a transcript.
 
@@ -301,7 +301,7 @@ For a task that spans several packages, preview a plan. Planning is local and ma
 
 ```sh
 okb code plan --workspace ./my-monorepo --provider openai --model gpt-5 \
-  --prompt 'Add a currency field to the invoice payload and update every publisher.'
+  --prompt 'Add a currency field to the invoice payload and update every publisher.' --show-content
 ```
 
 The plan lists its work orders. Each has a scope, its own selection within the budget, the model it will use, and the links between its code and the other scopes. The plan lists each excerpt's path and lines, the number of map lines, and the facts by ID. `--show-content` prints each order's excerpts, map lines, and facts in full, which is everything that worker is sent. With `--workers auto`, the default, the plan uses one worker unless the task's evidence falls in at least two separate areas and a single selection could not hold it. `--workers 2` to `--workers 4` asks for that many when the evidence supports them. `--context-tokens` applies to each worker.
@@ -312,13 +312,13 @@ okb code run --workspace ./my-monorepo --session invoices --request-id inv-1 \
   --prompt 'Add a currency field to the invoice payload and update every publisher.'
 ```
 
-In the app, choose **Orchestrated plan** as the source. The preview shows every work order with its source and model. Approving the plan approves all of them.
+In the app, choose **Orchestrated plan** as the source. The preview shows each work order's scope, excerpts, map, facts, and model. A work order stays inside the directories chosen for the request, even when its package is wider. **Copy source manifest** copies the plan ID, the work orders' source references and digests, and their model choices. Approving the plan approves all of its calls.
 
 Each worker runs in its own Pi Durable conversation with its work order and source. It receives no session history, no other worker's source, and no workspace tools. It proposes changes only inside its scope and lists what it needs from other scopes. Workers exchange nothing with each other while they run. One further call combines their reports and is instructed to add no findings of its own. If that call fails, the result shows the reports as the workers wrote them. With one worker there is no combining call.
 
 The result names every file that more than one worker proposed to change and every proposed change outside its worker's scope. Resolve those in review. The reviewer decides on the combined result, and patches are applied by the operator as for any other request.
 
-Work orders use request IDs derived from yours, such as `inv-1-work-2` and `inv-1-synthesis`. The plan, including every model choice, is saved before the first call. A resumed request continues from the saved plan, keeps finished work orders, and selects nothing again. Cancelling stops the outstanding work orders. **Run history** counts work orders by stage while the request runs. Usage is reported per work order and in total.
+Work orders use request IDs derived from yours, such as `inv-1-work-2` and `inv-1-synthesis`. The plan, including every model choice, is saved before the first call. A resumed request continues from the saved plan and reuses finished work orders. Cancelling stops the outstanding work orders. **Run history** shows work orders by stage during the run and lists their models, reports, and usage after completion. A copied run report includes their status, usage, and source references.
 
 The work orders and the combined result are saved with the request. They are kept apart from the session's conversation, so a follow-up request in the same session does not carry them. A request that fans out uses more tokens in total than a single request, in exchange for smaller individual contexts. Use it when the task really spans packages.
 
@@ -347,13 +347,13 @@ The model for each work order is chosen when the plan is built and is shown in t
 
 The chance of acceptance starts from the order of your list, with earlier models assumed somewhat more likely to be accepted. Your reviews then update it separately for each role and request size. Each plan draws the chance from what is known so far, so a model with little history is still tried now and then. The draw is fixed by the plan, so a preview and its send agree. Set `"learn": false` to always use the first model. The other listed models are tried in order only when the chosen model's provider fails or returns no text. The plan records the baseline next to each choice so you can compare them.
 
-A plan's models, their reasoning levels, and the OpenRouter preferences are part of what you approve, and the preview shows them. If any of them, or the learned statistics, change between preview and send, the send asks for a fresh preview.
+A plan's models, their reasoning levels, and the OpenRouter preferences are part of what you approve, and the preview shows them. If a policy or a learning update changes the planned calls before admission, get a fresh preview. Retrying an identical submitted request with the same ID returns its existing run, including after a policy change.
 
 ### Use OpenRouter
 
 Set `OPENROUTER_API_KEY` and use `--provider openrouter` with a model ID from Pi 1.0's OpenRouter catalog, such as `anthropic/claude-sonnet-4.6`. A project can choose OpenRouter as its provider and hold its own key. OpenRouter requests use the same budgets, previews, and recovery as the other providers.
 
-The `openRouter` section of a routing policy sets OpenRouter's provider preferences for every call in the request: `dataCollection` (`deny` excludes upstream providers that may store or train on prompts), `zdr` (zero-data-retention endpoints only), `order` (upstream providers to try, by name), `allowFallbacks`, and `sort` (`price`, `throughput`, or `latency`). The request fails closed when `dataCollection: "deny"` or `zdr` cannot be applied to a model. [OpenRouter provider selection](https://openrouter.ai/docs/guides/routing/provider-selection.md)
+The `openRouter` section of a routing policy sets the provider preferences for every OpenRouter call in the plan. Use `dataCollection` with `deny` to exclude upstream providers that may store or train on prompts, `zdr` for zero-data-retention endpoints, `order` for the upstream providers to try by name, `allowFallbacks` to control upstream fallback, and `sort` with `price`, `throughput`, or `latency`. Preview rejects a plan when Pi's adapter cannot carry the configured preferences for one of its models. [OpenRouter provider selection](https://openrouter.ai/docs/guides/routing/provider-selection.md)
 
 In the CLI a policy can name models from several providers, and each provider's key comes from its own environment variable. A project holds one provider's key, so every model in its policy must use the project's provider. Choose OpenRouter as the project's provider to route across vendors with one key.
 
@@ -361,27 +361,27 @@ In the CLI a policy can name models from several providers, and each provider's 
 
 `bun run scripts/benchmark-coding-atlas.ts` generates TypeScript monorepos of increasing size and reports import time, the time and size of one request's selection, and whether the selection holds each task's evidence. `--scales 400,4000,20000` sets the background file counts, `--budget` the token budget, and `--json` prints the full result. It is local and deterministic and calls no model.
 
-The fixture has eleven packages whose background modules share each package's vocabulary, and six tasks with known evidence: a named function, a cross-package contract, a function that exists in two apps, a description in ordinary words, a function with its tests, and a request that shares no words with the code that answers it. The run below used Linux x64, Bun 1.4.4, and four cores of an Intel Xeon at 2.1 GHz.
+The fixture has eleven packages whose background modules share each package's vocabulary, and six tasks with known evidence: a named function, a cross-package contract, a function that exists in two apps, a description in ordinary words, a function with its tests, and a request that shares no words with the code that answers it. The run below used Linux x64, Bun 1.4.3, and an Intel Core i7-1260P.
 
 | Files | Units | Full import | Import with nothing changed | Import after 10 edits | On disk |
 |---:|---:|---:|---:|---:|---:|
-| 435 | 1,239 | 0.43 s | 0.06 s | 0.09 s | 2.2 MB |
-| 4,035 | 12,039 | 2.4 s | 0.20 s | 0.23 s | 17.9 MB |
-| 20,035 | 60,039 | 10.6 s | 0.88 s | 0.90 s | 88.8 MB |
-| 100,035 | 300,039 | 52.8 s | 4.6 s | 4.9 s | 447.6 MB |
+| 435 | 1,239 | 0.50 s | 0.07 s | 0.10 s | 2.2 MB |
+| 4,035 | 12,039 | 2.45 s | 0.29 s | 0.26 s | 18.1 MB |
+| 20,035 | 60,039 | 9.82 s | 1.60 s | 1.08 s | 89.4 MB |
+| 100,035 | 300,039 | 43.16 s | 3.29 s | 3.54 s | 450 MB |
 
 With a 2,000-token budget, the selection stays the same size while the repository grows 230 times. The lexical preview from [Scope context in a monorepo](#scope-context-in-a-monorepo), pointed at the whole workspace, reads 256 files per request and loses evidence as the repository outgrows that.
 
 | Files | Map p50 / p95 | Map tokens, mean / max | Map evidence recall | Lexical preview p50 | Lexical evidence recall |
 |---:|---:|---:|---:|---:|---:|
-| 435 | 7 / 13 ms | 805 / 1,712 | 83% | 113 ms | 100% |
-| 4,035 | 16 / 28 ms | 799 / 1,712 | 83% | 128 ms | 42% |
-| 20,035 | 31 / 59 ms | 833 / 1,712 | 83% | 207 ms | 42% |
-| 100,035 | 75 / 106 ms | 927 / 1,712 | 83% | 200 ms | 17% |
+| 435 | 11.0 / 17.8 ms | 791 / 1,712 | 83% | 61.8 ms | 100% |
+| 4,035 | 20.4 / 28.3 ms | 785 / 1,712 | 83% | 62.2 ms | 42% |
+| 20,035 | 32.4 / 55.5 ms | 829 / 1,712 | 83% | 104.7 ms | 42% |
+| 100,035 | 79.5 / 99.8 ms | 918 / 1,712 | 83% | 107.1 ms | 17% |
 
 The map finds all the evidence for five of the six tasks at every size. Of the files it selects, 54% hold task evidence at 435 files and 41% at 100,035. The rest are linked context such as a function's test or the definition it calls. For the lexical preview that share falls from 38% to 2%.
 
-The sixth task is the one that shares no words with its answer, and the map misses it at every size before any review. After two accepted reviews that used the right file, a third request worded differently from both finds it at every size, and the other five tasks keep full recall. Recording a review takes 12 to 69 ms.
+The sixth task shares no words with its answer, and the map misses it at every size before any review. After two accepted reviews that used the right file, a third request worded differently from both finds it at every size, and the other five tasks keep full recall. Recording a review takes 12 to 51 ms.
 
 These numbers describe selection on a generated fixture. They do not measure answer quality, and recall on your repository will differ. Use [independent evaluation](#evaluate-provider-runs-with-independent-review) with the **Repository map** source to measure reviewed outcomes.
 
@@ -525,6 +525,6 @@ The preview includes a Markdown comment that links GitHub's receipt to the local
 
 ## Validation status
 
-The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, retention, review and approved patch replay. For the repository map they also cover import and re-import, interrupted imports, stale approvals, separate maps for projects that share a checkout, learning from a review and forgetting it with the transcript, and orchestrated requests with a scripted provider: fan-out, provider fallback, a failed combining call, cancellation, and recovery after the process is killed during generation, with the map and the checkout's source removed before the resume. A headless Chromium run drove import, map preview, send, review, an orchestrated plan, lessons, and routing through the app, and the compiled binary's commands and embedded app were driven separately.
+The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, retention, review and approved patch replay. The map tests also cover narrowed directories, untracked files, interrupted imports, stale approvals, project isolation, review learning, and forgetting learned episodes during transcript deletion. Scripted orchestration tests cover provider fallback, a failed combining call, cancellation, and recovery after the process is stopped during generation and the checkout and map are removed. The Chromium smoke walks through importing a map, previewing and sending both new source modes, copying the plan manifest, and inspecting the admitted source and order reports. The compiled binary's commands and embedded app were exercised separately.
 
-No live provider was called for the repository map, orchestration, or routing. OpenRouter requests, its provider preferences, and its key lookup follow Pi's adapter and OpenRouter's documentation and still need a run with a real key. Selection quality is measured on a generated fixture only. Whether orchestration, learned routing, or measured skills improve accepted results is unknown until reviewed live runs exist. A local HTTPS reverse proxy was exercised in Chromium with a project token. The Linux Docker drill exercises offline Pi admission, the worker boundary, fail-closed launch, and a backup and restore using disposable local state. Live provider evaluation needs an independently reviewed set of tasks and an approved provider account. The intended enterprise host, its provider egress, backup policy and access controls still need verification. [Roadmap](../ROADMAP.md)
+Tests verify OpenRouter key lookup with a fixture and capture the approved provider preferences from Pi's Chat Completions and Messages serializers. Live generation still needs an approved provider account, and evaluating accepted results also needs independent human reviews. Selection quality was measured on generated repositories. A local HTTPS reverse proxy was exercised in Chromium with a project token. The Linux Docker drill exercises offline Pi admission, the worker boundary, fail-closed launch, and backup and restore with disposable state. The intended enterprise host, its provider egress, backup policy and access controls still need verification. [Roadmap](../ROADMAP.md)

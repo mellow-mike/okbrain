@@ -67,9 +67,14 @@ async function measure(backgroundFiles: number) {
 
     const full = await timed(() => importRepository({ workspace }, location));
     const unchanged = await timed(() => importRepository({ workspace }, location));
-    // Ten edited files, the size of an ordinary change.
-    for (let index = 0; index < 10; index++)
-      await appendFile(join(workspace, `packages/search/src/query/module-${String(index * 6).padStart(5, "0")}.ts`), `\nexport const touched${index} = ${index};\n`);
+    const source = join(workspace, "packages", "search", "src");
+    const targets: string[] = [];
+    for (const directory of (await readdir(source, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map(({ name }) => name).sort()) {
+      const modules = (await readdir(join(source, directory))).filter((name) => name.startsWith("module-")).sort();
+      targets.push(...modules.slice(0, 10 - targets.length).map((name) => join(source, directory, name)));
+      if (targets.length === 10) break;
+    }
+    for (const [index, path] of targets.entries()) await appendFile(path, `\nexport const touched${index} = ${index};\n`);
     const edited = await timed(() => importRepository({ workspace }, location));
 
     const tasks: TaskResult[] = [];
@@ -156,7 +161,7 @@ if (asJson) {
   const megabytes = (bytes: number) => `${round(bytes / (1024 * 1024))} MB`;
   console.log(`\nRepository map benchmark (${process.platform}-${process.arch}, Bun ${Bun.version}). Budget ${budget} tokens per request. No model calls.\n`);
   console.log("Import");
-  console.log("| Files | Units | Full import | Files/s | Unchanged | 10 files edited | On disk |");
+  console.log("| Files | Units | Full import | Files/s | Unchanged | Up to 10 files edited | On disk |");
   console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const { files, units, import: imported } of results)
     console.log(`| ${files.toLocaleString()} | ${units.toLocaleString()} | ${round(imported.fullMs / 1000, 2)} s | ${imported.filesPerSecond.toLocaleString()} | ${imported.unchangedMs} ms | ${imported.tenEditedMs} ms | ${megabytes(imported.diskBytes)} |`);

@@ -2,6 +2,7 @@
 // fact carries the manifest path and line that proves it, so a reviewer can
 // check a command before running it. Nothing here executes repository code.
 
+import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -439,6 +440,7 @@ export async function detectPackages(
 
   const packages: PackageInfo[] = [];
   const tools: CommandTool[] = [];
+  const ids = new Set<string>();
   for (const { info, tools: drafted } of drafts.values()) {
     info.dependencies = [...new Set(info.dependencies)].slice(0, 400);
     packages.push(info);
@@ -446,10 +448,14 @@ export async function detectPackages(
     const order: ToolKind[] = ["test", "typecheck", "lint", "build", "format", "run", "other"];
     const ranked = [...drafted].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind) || a.name.length - b.name.length);
     for (const tool of ranked) {
-      const key = JSON.stringify(tool.argv);
+      const key = JSON.stringify([tool.cwd, tool.argv]);
       if (seen.has(key) || seen.size >= maxToolsPerPackage) continue;
       seen.add(key);
-      tools.push({ ...tool, id: `${info.root}#${tool.kind}:${tool.name}`.slice(0, 200), package: info.root });
+      const base = `${info.root}#${tool.kind}:${tool.name}`;
+      const id = base.length <= 200 && !ids.has(base)
+        ? base : `${base.slice(0, 183)}#${createHash("sha256").update(JSON.stringify([base, key])).digest("hex").slice(0, 16)}`;
+      ids.add(id);
+      tools.push({ ...tool, id, package: info.root });
     }
   }
   packages.sort((a, b) => (a.root < b.root ? -1 : a.root > b.root ? 1 : 0));

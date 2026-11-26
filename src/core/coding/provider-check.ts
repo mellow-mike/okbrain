@@ -111,7 +111,11 @@ function matchesModel(provider: CodingProvider, model: string, value: unknown): 
   const row = value as Record<string, unknown>;
   if (provider === "openai") return row.object === "model" && row.id === model;
   // The key lookup describes the credential. Which models exist is Pi's catalog, checked before the request.
-  if (provider === "openrouter") return typeof row.data === "object" && row.data !== null && !Array.isArray(row.data);
+  if (provider === "openrouter") {
+    const data = row.data;
+    return typeof data === "object" && data !== null && "label" in data && typeof data.label === "string"
+      && "limit" in data && (data.limit === null || (typeof data.limit === "number" && Number.isFinite(data.limit)));
+  }
   if (provider === "google") return row.name === `models/${model}`;
   if (row.type !== "model" || typeof row.id !== "string") return false;
   // Claude 4.5 also has short aliases that resolve to a dated snapshot of the same model.

@@ -38,7 +38,7 @@ import { checkProviderModel, type ProviderCheckOutcome } from "./provider-check.
 import { measurePinnedViteRetrieval, requirePinnedViteRetrievalScope, RetrievalBenchmarkError, type BenchmarkReport } from "./retrieval-benchmark.ts";
 import type { CodingTaskProgress } from "./task-progress.ts";
 import type { TeamStartup } from "./team-listener.ts";
-import { addLesson, AtlasError, atlasStatus, forgetLearning } from "./atlas/context.ts";
+import { addLesson, AtlasError, atlasStatus, forgetLearningSession } from "./atlas/context.ts";
 import { importRepository, type ImportProgress, type ImportReport } from "./atlas/import.ts";
 import type { AtlasLocation } from "./atlas/store.ts";
 import { maxWorkers } from "./orchestrator.ts";
@@ -267,8 +267,6 @@ type ImportState = {
   report?: ImportReport;
   error?: string;
 };
-
-/** Episodes are kept per workspace, so a project's sessions are named apart from another project's on the same checkout. */
 
 type ProviderDiagnosticCode = ProviderCheckOutcome["code"] | "worker-unavailable";
 const providerCheckMessages: Record<ProviderDiagnosticCode, string> = {
@@ -735,15 +733,17 @@ export class CodingProjectControl {
     if (binding) await verifyPinnedEvaluationWorkspace(workspace);
     const measuredFrom = binding ? performance.now() : started;
     if (source.atlas || source.orchestration) {
-      if (branchContext || evaluation && source.orchestration)
-        throw new ProjectControlError("Choose an ordinary files or repository review for an alternative branch or an orchestrated evaluation.", 409);
+      if (branchContext) throw new ProjectControlError("Choose an ordinary files or repository review for an alternative branch.", 409);
+      if (evaluation && source.orchestration) throw new ProjectControlError("Choose another source for a measured trial.", 409);
+      if (source.atlas && body.approvedSourceLookup === true)
+        throw new ProjectControlError("Use the repository map's deferred option to approve source lookup.");
       const prompt = field(body, "prompt", 16384);
       if (source.orchestration) {
         const { plan } = await previewCodingOrchestration({
           ...this.#session(project, { session: "plan", requestId: "plan" }), prompt,
           orchestration: { ...source.orchestration, ...this.#routing(project.id) },
         }, this.#dependencies(project, actor));
-        return { source: "orchestrated" as const, plan, id: plan.id };
+        return { source: "orchestrated" as const, plan, id: plan.id, sourceManifest: codingSourceManifest({ source: "orchestrated", plan }) };
       }
       const { ranked: _ranked, ...context } = await previewAtlasContext(workspace, prompt, source.atlas, this.#atlas(project.id));
       if (body.measurePreview === true) this.#evaluations.preview(project.id, actor.id, context.manifest.id, performance.now() - started, undefined);
@@ -986,29 +986,34 @@ export class CodingProjectControl {
     if (body.approvedSourceLookup !== undefined && typeof body.approvedSourceLookup !== "boolean")
       throw new ProjectControlError("Choose whether to allow lookups in approved source.");
     const approvedSourceLookup = body.approvedSourceLookup === true;
-    if (approvedSourceLookup && (selection.packages || selection.orchestration || (!selection.repository && !selection.atlas && !selection.files?.length)))
+    if (approvedSourceLookup && selection.atlas)
+      throw new ProjectControlError("Use the repository map's deferred option to approve source lookup.");
+    if (approvedSourceLookup && (selection.packages || selection.orchestration || (!selection.repository && !selection.files?.length)))
       throw new ProjectControlError("Choose explicit files or repository excerpts to allow approved source lookup.");
     const capabilities = approvedSourceLookup ? { approvedSourceLookup: true as const } : {};
     const evaluation = parseEvaluation(body.evaluation, JSON.parse(project.scopes));
     if (branch && (evaluation || selection.packages || selection.atlas || selection.orchestration))
       throw new ProjectControlError("Choose an ordinary files or repository review for an alternative branch.", 409);
     if (evaluation && selection.orchestration) throw new ProjectControlError("Evaluate an orchestrated request by reviewing its result. Choose another source for a measured trial.", 409);
-    // The routing policy is part of what the operator approved, so it is bound into the request's signature.
-    const routing = selection.orchestration ? this.#routing(project.id) : {};
     const branchContextId = branch ? field(body, "branchContextId", 64) : undefined;
     if (branchContextId !== undefined && !branchVersionPattern.test(branchContextId))
       throw new ProjectControlError("Preview and approve the current alternative branch context before sending.", 409);
     const binding = pinnedEvaluationBinding(evaluation, prompt, selection, approvedSourceLookup);
-    const signature = digest(JSON.stringify({ prompt, previewId, selection, ...(evaluation ? { evaluation } : {}), ...capabilities,
-      ...(branchContextId ? { branchContextId } : {}), ...routing,
-    }));
-    const workspace = await this.#workspace(project);
+    // The plan ID binds the approved routes. A replay uses that ID even after project routing changes.
+    const submission = { prompt, previewId, selection, ...(evaluation ? { evaluation } : {}), ...capabilities,
+      ...(branchContextId ? { branchContextId } : {}),
+    };
+    const signature = digest(JSON.stringify(submission));
     const prior = this.#get<RunRow>("SELECT * FROM runs WHERE project = ? AND session = ? AND id = ?", project.id, run.session, run.requestId);
     if (prior && prior.status !== "failed") {
-      if (prior.signature !== signature) throw new ProjectControlError("This request ID is bound to a different task or source selection.", 409);
+      const legacySignature = selection.orchestration && prior.signature !== signature
+        ? digest(JSON.stringify({ ...submission, ...this.#routing(project.id) })) : undefined;
+      if (prior.signature !== signature && prior.signature !== legacySignature)
+        throw new ProjectControlError("This request ID is bound to a different task or source selection.", 409);
       return this.#runView(prior);
     }
     if (prior?.admitted) throw new ProjectControlError("This request was already admitted. Inspect it and use Resume to recover its saved input.", 409);
+    const workspace = await this.#workspace(project);
     if (!hasCodingCredential(project.provider, this.#dependencies(project, actor)))
       throw new ProjectControlError("Add a provider API key for this project before sending requests.", 409);
     this.#canSchedule(project, run);
@@ -1023,8 +1028,9 @@ export class CodingProjectControl {
     if (branch) {
       if ((await previewCodingBranchContext(identity, this.#dependencies(project, actor))).version !== branchContextId)
         throw new ProjectControlError("The branch context changed. Preview it again before sending.", 409);
-      if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to send from this branch.", 403);
     } else await requireNoPendingCodingContextCompaction(identity, { stateDir, models, workspaceBinding, allowEnvKey: false });
+    if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to send this request.", 403);
+    const routing = selection.orchestration ? this.#routing(project.id) : {};
     this.#db.transaction(() => {
       if (prior) {
         this.#write("UPDATE runs SET status = 'running', signature = ?, actor = ?, updated = ?, error = NULL WHERE project = ? AND session = ? AND id = ?",
@@ -1085,7 +1091,7 @@ export class CodingProjectControl {
       let alternativeBranchEligible = false;
       let alternativeBranchReason: string | undefined;
       if (actor.owner && canWrite() && !inspected.branch && inspected.review === "accepted" && pi.request?.receipt?.status === "done" &&
-        !pi.request.receipt.packageReviews && !this.#unfinishedRun(project.id, run.session) && !this.#get(
+        !pi.request.receipt.packageReviews && !pi.request.receipt.orchestration && !this.#unfinishedRun(project.id, run.session) && !this.#get(
           "SELECT 1 FROM conversation_branches WHERE project = ? AND parent_session = ? AND parent_request = ?", project.id, run.session, run.requestId,
         )) {
         try {
@@ -1414,6 +1420,9 @@ export class CodingProjectControl {
   }
 
   #finishDeletion(project: string, session: string, actor: string, automatic: boolean) {
+    const workspace = this.#get<{ workspace: string }>("SELECT workspace FROM projects WHERE id = ?", project)?.workspace;
+    // Leave the deletion marker in place until both the transcript and its learned episodes have been removed.
+    if (workspace) forgetLearningSession(workspace, this.#atlas(project), session);
     this.#db.transaction(() => {
       const family = `project = ? AND (session = ? OR session IN
         (SELECT session FROM conversation_branches WHERE project = ? AND parent_session = ?))`;
@@ -1429,9 +1438,6 @@ export class CodingProjectControl {
       this.#write("DELETE FROM session_deletions WHERE project = ? AND session = ?", project, session);
       this.#audit(project, automatic ? "session_expired" : "session_deleted", actor, session);
     })();
-    // What was recorded from the deleted transcript goes with it. Aggregates already learned stay.
-    const workspace = this.#get<{ workspace: string }>("SELECT workspace FROM projects WHERE id = ?", project)?.workspace;
-    if (workspace) void forgetLearning(workspace, this.#atlas(project), session).catch(() => {});
   }
 
   async #removeSession(project: string, session: string, actor: string, automatic: boolean) {
@@ -2122,14 +2128,14 @@ export class CodingProjectControl {
     const saved = this.#get<{ policy: string }>("SELECT policy FROM project_routing WHERE project = ?", project)?.policy;
     if (!saved) return {};
     try { return { routing: validateRoutingPolicy(JSON.parse(saved), codingProviders) }; }
-    catch { return {}; }
+    catch { throw new ProjectControlError("The saved routing policy is invalid. Replace or clear it in Project settings before planning a request.", 409); }
   }
 
   #routingSettings(project: ProjectRow, method: string, body: Json, actor: Actor, canWrite: () => boolean) {
     this.#requireOwner(actor);
     if (method === "POST") {
       if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to change project routing.", 403);
-      if (body.policy === null || body.policy === undefined) {
+      if (body.policy === null) {
         this.#db.transaction(() => {
           this.#write("DELETE FROM project_routing WHERE project = ?", project.id);
           this.#audit(project.id, "routing_cleared", actor.id);
@@ -2158,12 +2164,13 @@ export class CodingProjectControl {
 
   /** Map the project's permitted directories. Runs in the background and reports progress. */
   async #importMap(project: ProjectRow, method: string, actor: Actor, canWrite: () => boolean) {
-    const current = this.#imports.get(project.id);
     if (method === "POST") {
       this.#requireOwner(actor);
       if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to import this repository.", 403);
-      if (current?.status === "running") return this.#importView(current);
       const workspace = await this.#workspace(project);
+      if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to import this repository.", 403);
+      const current = this.#imports.get(project.id);
+      if (current?.status === "running") return this.#importView(current);
       const cancel = new AbortController();
       const state: ImportState = { status: "running", cancel, promise: Promise.resolve() };
       state.promise = importRepository({
@@ -2181,6 +2188,7 @@ export class CodingProjectControl {
       return this.#importView(state);
     }
     const status = await atlasStatus(project.workspace, this.#atlas(project.id)).catch(() => ({ imported: false as const }));
+    const current = this.#imports.get(project.id);
     return {
       ...(current ? this.#importView(current) : { status: "idle" as const }),
       imported: status.imported,
@@ -2210,9 +2218,9 @@ export class CodingProjectControl {
     if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to record a lesson.", 403);
     const anchors = body.anchors === undefined ? undefined : pathsInProject(project, body.anchors);
     try {
-      const { id } = await addLesson({ workspace: project.workspace, text: field(body, "text", 600), ...(anchors ? { anchors } : {}), actor: resolveActor() }, this.#atlas(project.id));
-      this.#audit(project.id, "lesson_recorded", actor.id);
-      return { id };
+      const { id, created } = await addLesson({ workspace: project.workspace, text: field(body, "text", 600), ...(anchors ? { anchors } : {}), actor: resolveActor() }, this.#atlas(project.id));
+      if (created) this.#audit(project.id, "lesson_recorded", actor.id);
+      return { id, created };
     } catch (error) {
       if (error instanceof AtlasError) throw new ProjectControlError(error.message, 409);
       throw error;

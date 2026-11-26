@@ -66,11 +66,11 @@ export async function recordCodingOutcome(input: CodingOutcomeInput, location: A
       const accepted = input.outcome === "accepted";
       for (const order of orders) {
         if (!order.model || !order.report) continue;
-        learning.recordRoute("worker", routeCell(order.manifest?.estimatedTokens ?? 0), order.model, accepted, order.usage?.cost.total ?? 0);
+        learning.recordRoute("worker", routeCell(order.manifest?.estimatedTokens ?? 0), order.model, accepted, (order.modelUsage ?? order.usage)?.cost.total ?? 0);
         report.routes++;
       }
       if (synthesis?.model && synthesis.text) {
-        learning.recordRoute("orchestrator", routeCell(Math.min(8000, 400 + orders.length * 1500)), synthesis.model, accepted, synthesis.usage?.cost.total ?? 0);
+        learning.recordRoute("orchestrator", routeCell(Math.min(8000, 400 + orders.length * 1500)), synthesis.model, accepted, (synthesis.modelUsage ?? synthesis.usage)?.cost.total ?? 0);
         report.routes++;
       }
     } finally {

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { selectAtlasContext } from "../src/core/coding/atlas/context.ts";
@@ -127,6 +127,8 @@ test("package detection reads manifests into packages and argument-array command
   expect(tool("ml#test:pytest")?.source).toEqual({ path: "ml/pyproject.toml", line: 8 });
   expect(tool("ml#lint:ruff")?.argv).toEqual(["ruff", "check", "."]);
   expect(tool(".#format:fmt")?.argv).toEqual(["make", "fmt"]);
+  expect(map.tools.find(({ source, name }) => source.path === "Makefile" && name === "test")?.argv).toEqual(["make", "test"]);
+  expect(new Set(map.tools.map(({ id }) => id)).size).toBe(map.tools.length);
   // CI steps with pipes, substitutions or downloads are not offered as commands.
   expect(map.tools.filter(({ source }) => source.path.endsWith("ci.yml")).map(({ argv }) => argv.join(" "))).toEqual(["bun run typecheck"]);
   expect([toolKind("test:unit"), toolKind("type-check"), toolKind("deploy")]).toEqual(["test", "typecheck", "other"]);
@@ -275,6 +277,21 @@ test("an excerpt always comes from the current worktree, even when the map is be
   } finally { await writeFile(path, original); }
 });
 
+test("a deleted declaration does not select unrelated current lines from its old file", async () => {
+  const path = join(workspace, "packages/auth/src/token-signer.ts");
+  const original = await readFile(path, "utf8");
+  const options = { workspace, query: "signToken", projects: ["packages/auth/src"], tokenBudget: 1500 };
+  const before = await selectAtlasContext(options);
+  expect(before.manifest.files.some(({ path, reason }) => path.endsWith("/token-signer.ts") && reason === "Declares signToken")).toBe(true);
+  await writeFile(path, 'export function computeShippingCost() { return "UNRELATED"; }\n');
+  try {
+    const after = await selectAtlasContext({ ...options, deferred: true });
+    expect([...after.excerpts, ...after.deferred].every(({ path }) => !path.endsWith("/token-signer.ts"))).toBe(true);
+    expect(after.manifest.atlas?.staleFiles).toBe(1);
+    expect(after.ranked.find(({ path }) => path.endsWith("/token-signer.ts"))?.selected).toBe(false);
+  } finally { await writeFile(path, original); }
+});
+
 test("deferred excerpts are approved and saved but named apart from what is sent", async () => {
   const context = await selectAtlasContext({ workspace, query: "session token", tokenBudget: 600, deferred: true });
   expect(context.deferred.length).toBeGreaterThan(0);
@@ -286,6 +303,93 @@ test("deferred excerpts are approved and saved but named apart from what is sent
   const without = await selectAtlasContext({ workspace, query: "session token", tokenBudget: 600 });
   expect(without.deferred).toEqual([]);
   expect(without.manifest.id).not.toBe(context.manifest.id);
+
+  const tiny = { workspace, query: "refreshSession", tokenBudget: 1 };
+  const emptyDeferred = await selectAtlasContext({ ...tiny, deferred: true });
+  expect(emptyDeferred.deferred).toEqual([]);
+  expect(emptyDeferred.manifest.id).not.toBe((await selectAtlasContext(tiny)).manifest.id);
+});
+
+test("merging nearby excerpts cannot spend the budget on an oversized gap", async () => {
+  const repo = join(root, "excerpt-gap");
+  await mkdir(repo);
+  const run = (...args: string[]) => {
+    const result = Bun.spawnSync(["git", ...args], { cwd: repo, stderr: "pipe" });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+  };
+  const body = (name: string) => [`export function ${name}() {`, ...Array<string>(10).fill("  prepareRecord();"), "}"].join("\n");
+  await writeFile(join(repo, "records.ts"), `${body("loadRecord")}\n${" ".repeat(3500)}\n${body("saveRecord")}\n`);
+  run("init", "--quiet");
+  run("add", "--", "records.ts");
+  const location = { stateDir: join(root, "excerpt-gap-atlas") };
+  await importRepository({ workspace: repo, historyCommits: 0 }, location);
+  const { manifest, excerpts } = await readAtlas({ workspace: repo, query: "loadRecord saveRecord", tokenBudget: 800 }, {}, location);
+  expect(excerpts.map(({ content }) => content.split("\n")[0])).toEqual(["export function loadRecord() {", "export function saveRecord() {"]);
+  expect(manifest.estimatedTokens).toBeLessThanOrEqual(800);
+});
+
+test("map facts stay in request scope and are dropped when their source leaves Git", async () => {
+  const repo = await buildMonorepo(join(root, "map-sources"), 48);
+  const location = { stateDir: join(root, "map-sources-atlas") };
+  const options = { workspace: repo.workspace, query: "refreshSession", tokenBudget: 3000 };
+  await importRepository({ workspace: repo.workspace }, location);
+  const select = (scope: Pick<Parameters<typeof selectAtlasContext>[0], "projects" | "exclude"> = {}) =>
+    selectAtlasContext({ ...options, ...scope }, location);
+  const navigation = ({ map, skills }: Awaited<ReturnType<typeof selectAtlasContext>>) => JSON.stringify([map, skills]);
+  const before = navigation(await select({ projects: ["packages/auth"] }));
+  expect(before).toContain("packages/auth/tests");
+  expect(before).toContain("packages/auth/package.json");
+  expect(before).not.toContain("@acme/contracts");
+  const narrow = navigation(await select({ projects: ["packages/auth/src"] }));
+  expect(narrow).not.toContain("packages/auth/tests");
+  expect(narrow).not.toContain("packages/auth/package.json");
+  expect(narrow).not.toContain("checks:");
+  expect(narrow).not.toContain("Auth domain logic for the storefront");
+  const excluded = navigation(await select({ projects: ["packages/auth"], exclude: ["packages/auth/tests"] }));
+  expect(excluded).not.toContain("packages/auth/tests");
+  expect(excluded).toContain("packages/auth/package.json");
+
+  const result = Bun.spawnSync(["git", "rm", "--cached", "--quiet", "--", "packages/auth/package.json", "packages/auth/tests/session.test.ts"], { cwd: repo.workspace, stderr: "pipe" });
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  const refreshed = await select({ projects: ["packages/auth"] });
+  expect(refreshed.excerpts.some(({ path }) => path === "packages/auth/src/session.ts")).toBe(true);
+  const after = navigation(refreshed);
+  expect(after).not.toContain("packages/auth/tests");
+  expect(after).not.toContain("packages/auth/package.json");
+  expect(after).not.toContain("checks:");
+  expect(after).not.toContain("Auth domain logic for the storefront");
+});
+
+test("scope filters exact declaration matches before the candidate limit", async () => {
+  const repo = join(root, "scoped-matches");
+  await mkdir(join(repo, "background"), { recursive: true });
+  await mkdir(join(repo, "target"));
+  const declaration = "export function sharedLookup() { return 1; }\n";
+  for (let start = 0; start < 264; start += 24) {
+    await Promise.all(Array.from({ length: 24 }, (_, offset) =>
+      writeFile(join(repo, "background", `file-${start + offset}.ts`), declaration)));
+  }
+  await writeFile(join(repo, "target", "lookup.ts"), declaration);
+  for (const args of [["init", "--quiet"], ["add", "--", "."]]) {
+    const result = Bun.spawnSync(["git", ...args], { cwd: repo, stderr: "pipe" });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+  }
+  const location = { stateDir: join(root, "scoped-matches-atlas") };
+  const { files } = await importRepository({ workspace: repo, historyCommits: 0 }, location);
+  expect(files).toBe(265);
+  const { manifest } = await readAtlas({ workspace: repo, query: "sharedLookup", projects: ["target"] }, {}, location);
+  expect(manifest.files).toMatchObject([{ path: "target/lookup.ts", reason: "Declares sharedLookup" }]);
+});
+
+test("re-import applies a narrower history limit even when the checkout is unchanged", async () => {
+  const repo = await buildMonorepo(join(root, "history-limit"), 48);
+  const location = { stateDir: join(root, "history-limit-atlas") };
+  const options = { workspace: repo.workspace };
+  expect(await importRepository({ ...options, historyCommits: 3 }, location)).toMatchObject({ historyCommits: 3, couplingEdges: 1 });
+  expect(await importRepository({ ...options, historyCommits: 1 }, location)).toMatchObject({ historyCommits: 1, couplingEdges: 0, changedFiles: 0 });
+  expect(await importRepository({ ...options, historyCommits: 2 }, location)).toMatchObject({ historyCommits: 2, couplingEdges: 1, changedFiles: 0 });
+  expect(await importRepository({ workspace: join(repo.workspace, "packages"), historyCommits: 2 }, location))
+    .toMatchObject({ historyCommits: 2, couplingEdges: 1 });
 });
 
 test("the readout's cost does not grow with the repository", async () => {
@@ -332,7 +436,17 @@ test("an interrupted import never leaves a half-updated map in use", async () =>
   }
   expect(readdirSync(atlasDirectory(repo.workspace, location)).filter((name) => name.endsWith(".vec"))).toContain("units-1.vec");
 
-  const second = await importRepository({ workspace: repo.workspace }, location);
+  const beforeCommit = new AbortController();
+  await expect(importRepository({ workspace: repo.workspace, signal: beforeCommit.signal, progress: ({ phase, done, total }) => {
+    if (phase === "publish" && done === total) beforeCommit.abort();
+  } }, location)).rejects.toThrow("The repository import was cancelled.");
+  const unchanged = await selectAtlasContext({ workspace: repo.workspace, query: identifier.query }, location);
+  expect(unchanged.manifest.atlas?.generation).toBe(1);
+
+  const afterCommit = new AbortController();
+  const second = await importRepository({ workspace: repo.workspace, signal: afterCommit.signal, progress: ({ phase }) => {
+    if (phase === "knowledge") afterCommit.abort();
+  } }, location);
   expect(second).toMatchObject({ generation: 2, changedFiles: 1 });
   expect(readdirSync(atlasDirectory(repo.workspace, location)).filter((name) => name.endsWith(".vec"))).toEqual(["units-2.vec"]);
   const after = await selectAtlasContext({ workspace: repo.workspace, query: "touchedSession", tokenBudget: 1200 }, location);

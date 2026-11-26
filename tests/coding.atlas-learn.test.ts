@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addLesson, atlasStatus, forgetLearning, recordAtlasOutcome, selectAtlasContext, usedEvidence } from "../src/core/coding/atlas/context.ts";
@@ -39,6 +39,11 @@ const outcome = (requestId: string, ranked: RankedUnit[], usedPath: string, extr
   session: "s", requestId, outcome: "accepted", queryVector: embedBag(terms(`task ${requestId}`)), queryTerms: [], ranked,
   sent: ranked.map(({ path, startLine, endLine }) => ({ path, startLine, endLine })), used: [{ path: usedPath }], skills: [], withheldSkills: [], ...extra,
 });
+
+function git(directory: string, ...args: string[]): void {
+  const result = Bun.spawnSync(["git", ...args], { cwd: directory, stderr: "pipe", stdout: "ignore" });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+}
 
 test("an answer's citations and diffs say which files and lines it needed", () => {
   const answer = "See packages/a/x.ts:12-18 and `packages/a/y.ts`. Not other/packages/a/y.ts.bak or packages/a/x.tsx.\n" +
@@ -152,6 +157,21 @@ test("a lane-weight update that would rank past requests worse is rejected", () 
   } finally { learning.close(); }
 });
 
+test("learning accumulates across overlapping handles and requires two distinct outcomes for aliases", () => {
+  const scratch = join(root, "parallel-learning");
+  using first = Learning.open(scratch, { stateDir: scratch }, true)!;
+  using second = Learning.open(scratch, { stateDir: scratch })!;
+  const path = "src/overloads.ts";
+  const ranked = [unit(path, "lookup", { exact: 0.9 }), unit(path, "lookup", { exact: 0.8 }, 11)];
+  const extra = { queryTerms: ["terminology", "terminology"] };
+  expect(first.recordOutcome(outcome("one", ranked, path, extra))).toMatchObject({ learned: true, aliases: 0, params: 1 });
+  expect(first.admittedAliases().size).toBe(0);
+  expect(second.recordOutcome(outcome("one", ranked, path, extra))).toMatchObject({ learned: false, aliases: 0, params: 1 });
+  expect(second.recordOutcome(outcome("two", ranked, path, extra))).toMatchObject({ learned: true, aliases: 1, params: 2 });
+  expect(first.admittedAliases().get(`${path}\0lookup`)?.terms).toEqual(["terminology"]);
+  expect(first.rollback().version).toBe(3);
+});
+
 test("a skill on trial is kept or retired by what reviews show, not by its own claims", () => {
   const scratch = join(root, "skills");
   const learning = Learning.open(scratch, { stateDir: scratch }, true)!;
@@ -174,6 +194,9 @@ test("a skill on trial is kept or retired by what reviews show, not by its own c
     expect(learning.skillRecords().get("skills/new")?.state).toBe("trial");
     learning.setSkillState("skills/helpful", "disabled");
     expect(learning.skillRecords().get("skills/helpful")?.state).toBe("disabled");
+    learning.setSkillState("skills/helpful", "trial");
+    expect(learning.skillRecords().get("skills/helpful")).toEqual({ id: "skills/helpful", state: "trial", shown: 0,
+      shownAccepted: 0, withheld: 0, withheldAccepted: 0 });
   } finally { learning.close(); }
 });
 
@@ -185,6 +208,7 @@ test("a lesson is written as a readable draft and delivered on a fixed, measurab
   expect(note.body).toContain("Check for an existing reversal before crediting.");
   await expect(addLesson({ workspace, text: "x".repeat(700), actor: "human:reviewer" })).rejects.toThrow("1–600 UTF-8 bytes");
   await expect(addLesson({ workspace, text: "ok", anchors: ["../x"], actor: "human:reviewer" })).rejects.toThrow("workspace-relative");
+  await expect(addLesson({ workspace, text: "ok", anchors: Array.from({ length: 9 }, () => "."), actor: "human:reviewer" })).rejects.toThrow("at most eight anchors");
   await expect(addLesson({ workspace, text: "ok", actor: "not an actor" })).rejects.toThrow("actor convention");
   await expect(addLesson({ workspace: root, text: "ok", actor: "human:reviewer" })).rejects.toThrow("Import this repository");
 
@@ -207,6 +231,8 @@ test("a lesson is written as a readable draft and delivered on a fixed, measurab
   expect(elsewhere.skills.some(({ id }) => id === lesson.id) || (elsewhere.manifest.atlas!.withheld ?? []).includes(lesson.id)).toBe(false);
   // A person who marks it stable takes it off trial.
   await writeFile(lesson.path, readFileSync(lesson.path, "utf8").replace("status: draft", "status: stable"));
+  expect(await addLesson({ workspace, text: note.body, anchors: ["packages/billing/src"], actor: "human:another-reviewer" })).toMatchObject({ id: lesson.id, created: false });
+  expect(parse(await readFile(lesson.path, "utf8")).frontmatter).toMatchObject({ status: "stable", generated: { by: "human:reviewer" } });
   for (let index = 0; index < 4; index++) {
     const context = await selectAtlasContext({ workspace, query: `reverseSettledCharge ledger credit case ${index}`, tokenBudget: 1200 });
     expect(context.skills.find(({ id }) => id === lesson.id)).toMatchObject({ text: expect.stringContaining("Ledger reversals must be idempotent") });
@@ -226,4 +252,80 @@ test("forgetting removes what was learned and leaves the map and the bundle", as
   expect((await selectAtlasContext({ workspace, query: "refreshSession", tokenBudget: 1500 })).manifest.atlas?.params).toBe(0);
   expect(await forgetLearning(workspace)).toEqual({ reset: false });
   expect(status.imported && status.skills.some(({ kind }) => kind === "lesson")).toBe(true);
+});
+
+test("measured skill outcomes reset without editing a portable lesson", async () => {
+  const location = { stateDir: join(root, "measured-lesson") };
+  await importRepository({ workspace }, location);
+  const lesson = await addLesson({ workspace, text: "返金の前に支払いを確認する。", anchors: ["packages/billing"], actor: "human:reviewer" }, location);
+  expect(lesson.id).toMatch(/^lessons\/lesson-[\da-f]{8}$/u);
+  const selected = await selectAtlasContext({ workspace, query: "reverseSettledCharge", tokenBudget: 1500 }, location);
+  const manifest = selected.manifest;
+  for (let index = 0; index < 8; index++) {
+    const shown = index % 2 === 0;
+    await recordAtlasOutcome({ workspace, session: "trials", requestId: `request-${index}`, outcome: shown ? "accepted" : "changes_requested", used: [],
+      manifest: { ...manifest, atlas: { ...manifest.atlas!, skills: shown ? [{ id: lesson.id, sha256: "test-fact", trial: true }] : [], withheld: shown ? [] : [lesson.id] } },
+    }, location);
+  }
+  const measured = await atlasStatus(workspace, location);
+  expect(measured.imported && measured.skills.find(({ id }) => id === lesson.id)?.state).toBe("established");
+  expect(parse(await readFile(lesson.path, "utf8")).frontmatter.status).toBe("draft");
+  expect(await forgetLearning(workspace, location)).toEqual({ reset: true });
+  const reset = await atlasStatus(workspace, location);
+  expect(reset.imported && reset.skills.find(({ id }) => id === lesson.id)?.state).toBe("trial");
+});
+
+test("imports rebuild missing portable cards and restore a returning package's prior status", async () => {
+  const checkout = join(root, "cards");
+  const packageRoot = "請求";
+  await mkdir(join(checkout, packageRoot), { recursive: true });
+  git(checkout, "init", "--quiet");
+  const modules = ["alpha", "bravo", "charlie", "delta"];
+  await writeFile(join(checkout, "index.ts"), modules.map((module) => `import "./${module}";`).join("\n"));
+  for (const module of modules) await writeFile(join(checkout, `${module}.ts`), `export const ${module} = true;\n`);
+  await writeFile(join(checkout, packageRoot, "package.json"), '{ "name": "invoicing" }\n');
+  await writeFile(join(checkout, packageRoot, "index.ts"), "export const invoice = true;\n");
+  git(checkout, "add", "--", ".");
+  const first = await importRepository({ workspace: checkout });
+  const skillPath = join(first.knowledge.directory, "skills", "wiring-root.md");
+  const skillText = await readFile(skillPath, "utf8");
+  const rootSkill = parse(skillText);
+  expect(rootSkill.frontmatter.evidence_paths).toEqual(["index.ts", "alpha.ts", "bravo.ts", "charlie.ts"]);
+  await writeFile(skillPath, skillText.replace("status: draft", "status: stable"));
+  const selection = { workspace: checkout, query: "alpha", tokenBudget: 2000 };
+  const hasWiringFact = async () => (await selectAtlasContext(selection)).skills.some(({ id }) => id === "skills/wiring-root");
+  expect(await hasWiringFact()).toBe(true);
+  git(checkout, "rm", "--force", "--cached", "--", "bravo.ts");
+  expect(await hasWiringFact()).toBe(false);
+  git(checkout, "add", "--", "bravo.ts");
+  const file = (await readdir(join(first.knowledge.directory, "packages"))).find((name) => /^package-[\da-f]{12}\.md$/u.test(name));
+  expect(file).toBeDefined();
+  const path = join(first.knowledge.directory, "packages", file!);
+  expect(parse(await readFile(path, "utf8")).frontmatter.root).toBe(packageRoot);
+  await rm(path);
+  await importRepository({ workspace: checkout });
+  const recreated = await readFile(path, "utf8");
+  await writeFile(path, `${recreated.trimEnd()}\n\n## Notes\n\nKeep this note.\n`);
+  git(checkout, "rm", "--force", "--cached", "--", `${packageRoot}/package.json`, `${packageRoot}/index.ts`);
+  await importRepository({ workspace: checkout });
+  expect(parse(await readFile(path, "utf8")).frontmatter.status).toBe("deprecated");
+  git(checkout, "add", "--", packageRoot);
+  await importRepository({ workspace: checkout });
+  const restored = parse(await readFile(path, "utf8"));
+  expect(restored.frontmatter.status).toBeUndefined();
+  expect(restored.body).toContain("## Notes\n\nKeep this note.");
+});
+
+test.skipIf(process.platform === "win32")("repository selections ignore linked notes in the knowledge bundle", async () => {
+  const location = { stateDir: join(root, "linked-lesson") };
+  const imported = await importRepository({ workspace }, location);
+  const folder = join(imported.knowledge.directory, "lessons");
+  await mkdir(folder);
+  const outside = join(root, "outside.md");
+  await writeFile(outside, "---\ntitle: Outside note\nstatus: stable\nanchors: ['.']\n---\nOutside content.\n");
+  await symlink(outside, join(folder, "linked.md"));
+  const status = await atlasStatus(workspace, location);
+  expect(status.imported && status.skills.some(({ id }) => id === "lessons/linked")).toBe(false);
+  const selection = await selectAtlasContext({ workspace, query: "refreshSession", tokenBudget: 2000 }, location);
+  expect(selection.skills.some(({ id }) => id === "lessons/linked")).toBe(false);
 });

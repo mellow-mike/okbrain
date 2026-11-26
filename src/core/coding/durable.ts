@@ -15,7 +15,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, realpath, stat, unlink } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { dataDir } from "../config.ts";
 import { ensureExtensionCapableSqlite } from "../engine/custom-sqlite.ts";
 import { approvedSourceLookupEnabled, approvedSourceTool } from "./approved-source-tool.ts";
@@ -44,7 +44,7 @@ import {
   orchestrationTaskName, planOrchestration, savedOrchestrationOrders,
   type OrchestrationInput, type OrchestrationOptions, type OrchestrationPlan, type OrchestrationResult,
 } from "./orchestrator.ts";
-import type { OpenRouterPreferences, RouteCandidate, RouteStats, RoutingPolicy } from "./router.ts";
+import { openRouterRouting, RoutingError, type OpenRouterPreferences, type RouteCandidate, type RouteStats, type RoutingPolicy } from "./router.ts";
 import { openDurableDatabase } from "./sqlite.ts";
 import { observeCodingTaskProgress, readCodingTaskProgress, type CodingTaskProgress } from "./task-progress.ts";
 
@@ -135,7 +135,13 @@ export type CodingContextCompactionPreview = { version: string; recovering?: tru
 export type CodingContextCompactionResult = { version: string; compacted: boolean; replayed?: true };
 
 export type SavedCodingSource = { source: "files"; files: { path: string; content: string }[] }
-  | ({ source: "repository" } & RepositoryContextSelection);
+  | ({
+    source: "repository";
+    excerpts: (RepositoryContextSelection["excerpts"][number] & { deferred?: true })[];
+    map?: string[];
+    facts?: string[];
+    interfaces?: string[];
+  } & Omit<RepositoryContextSelection, "excerpts">);
 
 export interface CodingSessionStatusResult {
   session: string;
@@ -293,13 +299,14 @@ async function requestContent(
   }
   if (atlas) {
     if (paths.length || repository) throw new CodingError("Choose one source for this request: explicit files, previewed excerpts, or the repository map.");
+    if (approvedSourceLookup) throw new CodingError("Preview deferred excerpts to approve repository map lookups.");
     const { id, ...selection } = atlas;
     const context = await previewAtlasContext(workspace, prompt, selection, location);
     if (context.manifest.id !== id) {
       throw new CodingError("The repository map selection changed or the options differ. Preview it again and use its context ID.");
     }
     if (!context.excerpts.length) throw new CodingError("The repository map selected no source for this task. Name a path or identifier, or attach files explicitly.");
-    return atlasRequestContent(prompt, context, Boolean(selection.deferred) || approvedSourceLookup === true);
+    return atlasRequestContent(prompt, context, selection.deferred === true);
   }
   const capabilities = approvedSourceLookup ? { approvedSourceLookup } : {};
   if (repository) {
@@ -357,7 +364,7 @@ export async function previewCodingOrchestration(
   if (!isCodingProvider(provider)) throw new CodingError("Choose openai, anthropic, google, or openrouter as the Pi Durable provider.");
   if (!options.prompt.trim() || Buffer.byteLength(options.prompt) > maxPromptBytes) throw new CodingError("Enter a coding prompt of 1–16384 UTF-8 bytes.");
   const workspace = dependencies.workspaceBinding ?? await canonicalWorkspace(options.workspace);
-  const catalog = dependencies.models ?? apiKeyModels(provider);
+  const catalog = dependencies.models ?? apiKeyModels();
   const session: RouteCandidate = { provider, model: options.model, ...(options.thinkingLevel !== undefined ? { thinkingLevel: options.thinkingLevel } : {}) };
   const { routing, ...scope } = options.orchestration;
   const learned = routeStats(workspace, dependencies.atlas ?? {});
@@ -368,15 +375,18 @@ export async function previewCodingOrchestration(
         const cost = catalog.getModel(name, model)?.cost;
         return cost ? { input: cost.input, output: cost.output } : undefined;
       },
-      credentialed: (name) => dependencies.models !== undefined
-        || (isCodingProvider(name) && (name === provider ? hasCodingCredential(provider, dependencies) : otherProviderKey(name, dependencies) !== undefined)),
+      credentialed: (name) => hasRouteCredential(name, provider, dependencies),
     }, dependencies.atlas);
-    for (const model of [...input.orders.flatMap(({ models }) => models), ...(input.synthesis?.models ?? [])]) {
-      if (!catalog.getModel(model.provider, model.model)) throw new CodingError(`Pi 1.0 does not list model ${model.model} for ${model.provider}.`);
+    for (const candidate of [...input.orders.flatMap(({ models }) => models), ...(input.synthesis?.models ?? [])]) {
+      const model = catalog.getModel(candidate.provider, candidate.model);
+      if (!model) throw new CodingError(`Pi 1.0 does not list model ${candidate.model} for ${candidate.provider}.`);
+      if (candidate.thinkingLevel !== undefined && !getSupportedThinkingLevels(model).includes(candidate.thinkingLevel))
+        throw new CodingError(`${candidate.provider}/${candidate.model} does not support the ${candidate.thinkingLevel} reasoning level.`);
+      openRouterRouting(model, input.openRouter);
     }
     return { plan, input };
   } catch (error) {
-    if (error instanceof OrchestrationError || error instanceof AtlasError) throw new CodingError(error.message, { cause: error });
+    if (error instanceof OrchestrationError || error instanceof AtlasError || error instanceof RoutingError) throw new CodingError(error.message, { cause: error });
     throw error;
   } finally {
     learned.close();
@@ -457,16 +467,21 @@ function otherProviderKey(provider: CodingProvider, dependencies: CodingDependen
   return dependencies.allowEnvKey !== false ? process.env[providers[provider].key]?.trim() || undefined : undefined;
 }
 
+function hasRouteCredential(name: string, provider: CodingProvider, dependencies: CodingDependencies): boolean {
+  return dependencies.models !== undefined || (isCodingProvider(name) && (name === provider
+    ? hasCodingCredential(provider, dependencies) : otherProviderKey(name, dependencies) !== undefined));
+}
+
 /**
  * Every coding provider's catalog, with credentials resolved narrowly: the
  * session's provider uses the given key, and any other provider only its own
  * environment variable, and only when environment keys are allowed at all.
  */
-function apiKeyModels(provider: CodingProvider, key?: string, dependencies?: CodingDependencies): Models {
+function apiKeyModels(provider?: CodingProvider, key?: string, dependencies?: CodingDependencies): Models {
   const models = createModels({
     authContext: {
       env: async (name) => {
-        if (name === providers[provider].key) return key;
+        if (provider && name === providers[provider].key) return key;
         const other = dependencies && codingProviders.find((candidate) => providers[candidate].key === name);
         return other ? otherProviderKey(other, dependencies) : undefined;
       },
@@ -478,10 +493,11 @@ function apiKeyModels(provider: CodingProvider, key?: string, dependencies?: Cod
 }
 
 export function listCodingModels(injected?: Models) {
-  return (Object.keys(providers) as CodingProvider[]).map((provider) => ({
+  const catalog = injected ?? apiKeyModels();
+  return codingProviders.map((provider) => ({
     provider,
     label: codingProviderLabel(provider),
-    models: (injected ?? apiKeyModels(provider)).getModels(provider).map((model) => ({
+    models: catalog.getModels(provider).map((model) => ({
       id: model.id, name: model.name, thinkingLevels: getSupportedThinkingLevels(model),
     })),
   }));
@@ -598,7 +614,11 @@ async function withCodingSession<T>(
   const provider = validateOptions(options);
   const bindLocalSource = create && "prompt" in options && options.prompt !== undefined;
   const workspace = dependencies.workspaceBinding !== undefined && !bindLocalSource
-    ? options.workspace : await canonicalWorkspace(options.workspace);
+    ? options.workspace : await canonicalWorkspace(options.workspace).catch((error: unknown) => {
+      const cause = error instanceof CodingError ? error.cause as NodeJS.ErrnoException | undefined : undefined;
+      if (!create && cause?.code === "ENOENT") return resolve(options.workspace);
+      throw error;
+    });
   if (dependencies.workspaceBinding !== undefined && workspace !== dependencies.workspaceBinding)
     throw new CodingError("The authorized workspace path changed since this project was registered.");
   const models = dependencies.models ?? apiKeyModels(provider, codingCredential(provider, dependencies), dependencies);
@@ -1045,14 +1065,21 @@ function savedSource(content: string | undefined): Pick<NonNullable<CodingSessio
       task?: unknown;
       files?: { path: string; content: string }[];
       repositoryContext?: RepositoryContextManifest;
-      excerpts?: RepositoryContextSelection["excerpts"];
+      excerpts?: Extract<SavedCodingSource, { source: "repository" }>["excerpts"];
       guidance?: string;
+      map?: unknown;
+      facts?: unknown;
+      workOrder?: { interfaces?: unknown };
     } | null;
     if (!saved || typeof saved.task !== "string") return {};
     const savedPrompt = saved.task;
     if (saved.repositoryContext && Array.isArray(saved.excerpts) && saved.excerpts.every(validSavedFile)) {
+      const interfaces = saved.workOrder?.interfaces;
       return { savedPrompt, savedSource: { source: "repository", manifest: saved.repositoryContext,
-        excerpts: saved.excerpts, ...(typeof saved.guidance === "string" ? { guidance: saved.guidance } : {}) } };
+        excerpts: saved.excerpts, ...(typeof saved.guidance === "string" ? { guidance: saved.guidance } : {}),
+        ...(savedStringList(saved.map) ? { map: saved.map } : {}), ...(savedStringList(saved.facts) ? { facts: saved.facts } : {}),
+        ...(savedStringList(interfaces) ? { interfaces } : {}),
+      } };
     }
     if (Array.isArray(saved.files) && saved.files.every(validSavedFile))
       return { savedPrompt, savedSource: { source: "files", files: saved.files } };
@@ -1064,16 +1091,33 @@ function validSavedFile(value: { path: string; content: string }): boolean {
   return Boolean(value && typeof value.path === "string" && typeof value.content === "string");
 }
 
+function savedStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === "string");
+}
+
+type SavedCodingSourceFile = { path: string; text: string; startLine?: number; endLine?: number };
+
 type SavedSourceGroup = {
   label?: string;
-  files: Array<{ path: string; text: string; startLine?: number; endLine?: number }>;
+  files: SavedCodingSourceFile[];
+  deferred?: SavedCodingSourceFile[];
+  map?: string[];
+  facts?: string[];
+  interfaces?: string[];
 };
 
 export type SavedCodingRequestInput = { prompt: string; guidance?: string; groups: SavedSourceGroup[] };
 
-function sourceFiles(source: SavedCodingSource): SavedSourceGroup["files"] {
-  if (source.source === "files") return source.files.map(({ path, content }) => ({ path, text: content }));
-  return source.excerpts.map(({ path, content, startLine, endLine }) => ({ path, text: content, startLine, endLine }));
+function sourceGroup(source: SavedCodingSource): SavedSourceGroup {
+  if (source.source === "files") return { files: source.files.map(({ path, content }) => ({ path, text: content })) };
+  const { excerpts, map, facts, interfaces } = source;
+  const files: SavedCodingSourceFile[] = [];
+  const deferred: SavedCodingSourceFile[] = [];
+  for (const { path, content, startLine, endLine, deferred: lookup } of excerpts) {
+    (lookup === true ? deferred : files).push({ path, text: content, startLine, endLine });
+  }
+  return { files, ...(deferred.length ? { deferred } : {}), ...(map ? { map } : {}),
+    ...(facts ? { facts } : {}), ...(interfaces ? { interfaces } : {}) };
 }
 
 function savedPackageSource(input: unknown, requestId: string): SavedCodingRequestInput | null {
@@ -1087,7 +1131,7 @@ function savedPackageSource(input: unknown, requestId: string): SavedCodingReque
     if (savedPrompt === undefined || !source || source.source !== "repository" ||
         (prompt !== undefined && prompt !== savedPrompt)) return null;
     prompt = savedPrompt;
-    groups.push({ label: part.project, files: sourceFiles(source) });
+    groups.push({ label: part.project, ...sourceGroup(source) });
   }
   return prompt === undefined ? null : { prompt, groups };
 }
@@ -1218,7 +1262,7 @@ function savedOrchestrationSource(input: unknown, requestId: string): SavedCodin
   for (const { scope, content } of saved.orders) {
     const { savedSource: source } = savedSource(content);
     if (!source) return null;
-    groups.push({ label: scope, files: sourceFiles(source) });
+    groups.push({ label: scope, ...sourceGroup(source) });
   }
   return { prompt: saved.task, groups };
 }
@@ -1256,7 +1300,8 @@ export async function runCodingSession(
       inspection.tasks.some(({ record }) => record.conversationId !== target)))
       throw new CodingSessionBusyError("Resume or cancel work in the other conversation before continuing in this transcript.");
     if (!budget) throw new CodingError(`Pi 1.0 does not list model ${options.model} for ${provider}.`);
-    if (!hasCodingCredential(provider, dependencies)) {
+    const newOrchestration = !existing && !packageTask && (options.orchestration || dependencies.preparedInput?.kind === "orchestration");
+    if (!packageTask?.orchestrated && !newOrchestration && !hasCodingCredential(provider, dependencies)) {
       throw new CodingError(dependencies.allowEnvKey === false
         ? `Set a project API key to use ${provider} with Pi Durable.`
         : `Set ${providers[provider].key} to use ${provider} with Pi Durable.`);
@@ -1282,10 +1327,15 @@ export async function runCodingSession(
       } else if (input.kind === "orchestration") {
         if (options.branch) throw new CodingError("Choose files or repository excerpts for an alternative branch request.");
         orchestration = input.input;
+        for (const order of [...orchestration.orders, ...(orchestration.synthesis ? [orchestration.synthesis] : [])]) {
+          if (!order.models.some(({ provider: name }) => hasRouteCredential(name, provider, dependencies))) {
+            throw new CodingError(`Set an API key for one of the approved providers: ${[...new Set(order.models.map(({ provider: name }) => name))].join(", ")}.`);
+          }
+        }
         routing.openRouter = orchestration.openRouter;
       }
       else content = input.content;
-      if ([...(content === undefined ? [] : [content]), ...(packageParts?.map((part) => part.content) ?? []), ...(orchestration?.orders.map((order) => order.content) ?? [])]
+      if ([...(content === undefined ? [] : [content]), ...(packageParts?.map((part) => part.content) ?? [])]
         .some((input) => !newRequestFits(input, instructions, budget))) {
         throw new CodingError(`The new coding request exceeds the ${budget.limitTokens}-token input budget. Use fewer lines, files, or prompt tokens.`);
       }
@@ -1428,9 +1478,9 @@ export async function getSavedCodingRequestInput(
       const content = await savedUserContent(storage, submission) ?? await queuedUserContent(harness, submission);
       const { savedPrompt: prompt, savedSource: source } = savedSource(content);
       if (prompt === undefined) return null;
-      const files = source ? sourceFiles(source) : [];
+      const group = source && sourceGroup(source);
       return {
-        prompt, groups: files.length ? [{ files }] : [],
+        prompt, groups: group && (group.files.length || group.deferred || group.map || group.facts) ? [group] : [],
         ...(source?.source === "repository" && source.guidance !== undefined ? { guidance: source.guidance } : {}),
       };
     });

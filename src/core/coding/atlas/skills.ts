@@ -3,16 +3,18 @@
 // applies by checking its anchors against the selection, so nothing depends
 // on the model remembering to ask.
 //
-// Built-in facts come straight from the atlas and are always current: which
+// Built-in facts come from the imported atlas and respect current Git tracking: which
 // tests cover the selected files, which commands check the packages involved,
 // and what usually changes alongside. Skills and lessons from the knowledge
 // bundle are delivered while their status allows it. One marked `draft` is
 // still on trial: an eligible request receives it or not by a fixed draw, and
 // the review outcomes of both groups decide whether it stays (see learn.ts).
 
-import { readdirSync, readFileSync } from "node:fs";
+import { lstat, readdir } from "node:fs/promises";
 import { join, posix } from "node:path";
-import { fmStatus, fmString, parse } from "../../okf/document.ts";
+import { readConceptPermissive } from "../../okf/bundle.ts";
+import { fmStatus, fmString } from "../../okf/document.ts";
+import { authoredByImporter } from "./knowledge.ts";
 import type { SkillRecord, SkillState } from "./learn.ts";
 import type { PackSkill, SkillRequest, SkillSelector } from "./readout.ts";
 import { trackedAmong } from "./scan.ts";
@@ -31,6 +33,8 @@ export interface BundleSkill {
   title: string;
   text: string;
   anchors: string[];
+  /** Files used by an importer-owned skill. Human-authored notes have no derived evidence. */
+  evidencePaths?: string[];
   state: SkillState;
 }
 
@@ -43,28 +47,39 @@ function clip(text: string, bytes: number): string {
 }
 
 /** Skills and lessons in the knowledge bundle, with the state measurement or their own status gives them. */
-export function readBundleSkills(directory: string, records: ReadonlyMap<string, SkillRecord> = new Map()): BundleSkill[] {
+async function readBundleSkills(directory: string, records: ReadonlyMap<string, SkillRecord>): Promise<BundleSkill[]> {
   const skills: BundleSkill[] = [];
+  const bundle = knowledgeDirectory(directory);
+  if (!await lstat(bundle).then((entry) => entry.isDirectory(), () => false)) return skills;
   for (const kind of ["lesson", "skill"] as const) {
-    const folder = join(knowledgeDirectory(directory), `${kind}s`);
+    const folder = join(bundle, `${kind}s`);
     let names: string[];
-    try { names = readdirSync(folder).filter((name) => name.endsWith(".md") && name !== "index.md" && name !== "log.md").sort(); }
+    try {
+      if (!(await lstat(folder)).isDirectory()) continue;
+      names = (await readdir(folder, { withFileTypes: true })).filter((entry) => entry.isFile() && entry.name.endsWith(".md")
+        && !entry.name.startsWith(".") && !["index.md", "log.md"].includes(entry.name.toLowerCase())).map(({ name }) => name).sort();
+    }
     catch { continue; }
     for (const name of names) {
       if (skills.length >= maxBundleSkills) break;
       const id = `${kind}s/${name.slice(0, -3)}`;
       try {
-        const document = parse(readFileSync(join(folder, name), "utf8"));
+        const { doc: document } = await readConceptPermissive(bundle, id);
         const title = fmString(document.frontmatter.title);
         if (!title) continue;
         const anchors = Array.isArray(document.frontmatter.anchors)
           ? document.frontmatter.anchors.filter((anchor): anchor is string => typeof anchor === "string" && anchor.length > 0 && anchor.length <= 512).slice(0, 8) : [];
+        const evidencePaths = authoredByImporter(document.frontmatter)
+          ? Array.isArray(document.frontmatter.evidence_paths)
+            ? document.frontmatter.evidence_paths.filter((path): path is string => typeof path === "string" && path.length > 0 && path.length <= 2048).slice(0, 8)
+            : []
+          : undefined;
         const body = document.body.split(/\r?\n/u).filter((line) => line.trim() && !/^#/u.test(line)).map((line) => line.replace(/^\s*[-*]\s+/u, "").trim()).join(" ");
         const status = fmStatus(document.frontmatter);
         const recorded = records.get(id)?.state;
         // A person's status in the file wins over the measured one, except while the file still says draft.
         const state: SkillState = recorded === "disabled" ? "disabled" : status === "deprecated" ? "retired" : status === "stable" ? "established" : recorded ?? "trial";
-        skills.push({ id, kind, title, text: clip(`${title}. ${body}`, maxSkillBytes), anchors, state });
+        skills.push({ id, kind, title, text: clip(`${title}. ${body}`, maxSkillBytes), anchors, ...(evidencePaths ? { evidencePaths } : {}), state });
       } catch { /* An unreadable note is skipped, not fatal. */ }
     }
   }
@@ -103,19 +118,26 @@ export function createSkillSelector(workspace: string, records: ReadonlyMap<stri
         `SELECT fa.path AS a, fb.path AS b, e.weight FROM file_edges e JOIN files fa ON fa.id = e.src JOIN files fb ON fb.id = e.dst
          WHERE e.kind = 'cochange' AND (fa.path IN (${sources.map(() => "?").join(",")}) OR fb.path IN (${sources.map(() => "?").join(",")}))
          ORDER BY e.weight DESC, fa.path, fb.path LIMIT 24`, ...sources, ...sources) : [];
+      const checks = enabled("builtin/checks") ? request.packages.slice(0, 3).map((root) => ({ root, tools: atlas.all<{ argv: string; source_path: string; source_line: number }>(
+        `SELECT t.argv, t.source_path, t.source_line FROM tools t JOIN packages p ON p.id = t.package
+         WHERE p.root = ? AND t.kind IN ('test', 'typecheck', 'lint') ORDER BY CASE t.kind WHEN 'test' THEN 0 WHEN 'typecheck' THEN 1 ELSE 2 END, length(t.argv) LIMIT 3`, root),
+      })) : [];
+      const bundle = (await readBundleSkills(atlas.directory, records)).filter((skill) => skill.state === "trial" || skill.state === "established");
       const selectedPaths = new Set(sources);
-      const named = [...new Set([...links.map(({ test }) => test), ...coupled.flatMap(({ a, b }) => [a, b])])].filter((path) => !selectedPaths.has(path));
+      const named = [...links.map(({ test }) => test), ...coupled.flatMap(({ a, b }) => [a, b]),
+        ...checks.flatMap(({ tools }) => tools.map(({ source_path }) => source_path)),
+        ...bundle.flatMap(({ evidencePaths }) => evidencePaths ?? []),
+      ].filter((path) => request.allowsPath(path) && !selectedPaths.has(path));
       // The selected files were confirmed by the readout. Without an answer from Git, no other file is named.
       const stillTracked = named.length ? await trackedAmong(workspace, named).catch(() => new Set<string>()) : new Set<string>();
-      const current = (path: string) => selectedPaths.has(path) || stillTracked.has(path);
+      const current = (path: string) => request.allowsPath(path) && (selectedPaths.has(path) || stillTracked.has(path));
       links = links.filter(({ test }) => current(test));
       coupled = coupled.filter(({ a, b }) => current(a) && current(b));
 
-      const bundle = readBundleSkills(atlas.directory, records);
       const queryBag = terms(request.query, 256);
       const queryVector = embedBag(queryBag);
-      const applies = (skill: BundleSkill) => anchored(skill.anchors, request)
-        || (skill.kind === "lesson" && !skill.anchors.length && cosine(queryVector, embedBag(terms(skill.text))) >= semanticFloor);
+      const applies = (skill: BundleSkill) => (!skill.evidencePaths || (skill.evidencePaths.length > 0 && skill.evidencePaths.every(current)))
+        && (anchored(skill.anchors, request) || (skill.kind === "lesson" && !skill.anchors.length && cosine(queryVector, embedBag(terms(skill.text))) >= semanticFloor));
 
       for (const skill of bundle) if (skill.kind === "lesson" && skill.state === "established" && applies(skill)) offer({ id: skill.id, title: skill.title, text: skill.text });
       // Skills on trial are drawn before the built-in facts spend the budget, so the two
@@ -142,13 +164,10 @@ export function createSkillSelector(workspace: string, records: ReadonlyMap<stri
           text: clip(`Tests that cover the selected files: ${[...bySource].slice(0, 6).map(([source, tests]) => `${source} is tested by ${tests.join(" and ")}`).join("; ")}.`, maxSkillBytes),
         });
       }
-      if (enabled("builtin/checks") && request.packages.length) {
+      if (checks.length) {
         const parts: string[] = [];
-        for (const root of request.packages.slice(0, 3)) {
-          const tools = atlas.all<{ kind: string; argv: string; source_path: string; source_line: number }>(
-            `SELECT t.kind, t.argv, t.source_path, t.source_line FROM tools t JOIN packages p ON p.id = t.package
-             WHERE p.root = ? AND t.kind IN ('test', 'typecheck', 'lint') ORDER BY CASE t.kind WHEN 'test' THEN 0 WHEN 'typecheck' THEN 1 ELSE 2 END, length(t.argv) LIMIT 3`, root);
-          const commands = tools.flatMap(({ argv, source_path, source_line }) => {
+        for (const { root, tools } of checks) {
+          const commands = tools.filter(({ source_path }) => current(source_path)).flatMap(({ argv, source_path, source_line }) => {
             try { return [`\`${(JSON.parse(argv) as string[]).join(" ")}\` (${source_path}:${source_line})`]; } catch { return []; }
           });
           if (commands.length) parts.push(`${root === "." ? "repository root" : root}: ${commands.join(", ")}`);
@@ -175,10 +194,10 @@ export function createSkillSelector(workspace: string, records: ReadonlyMap<stri
 }
 
 /** Skills as an operator sees them: built-ins, bundle skills, and what has been measured. */
-export function listSkills(workspace: string, records: ReadonlyMap<string, SkillRecord>, location: AtlasLocation = {}) {
+export async function listSkills(workspace: string, records: ReadonlyMap<string, SkillRecord>, location: AtlasLocation = {}) {
   const atlas = Atlas.open(workspace, location);
   try {
-    const bundle = readBundleSkills(atlas.directory, records);
+    const bundle = await readBundleSkills(atlas.directory, records);
     const rows = [
       ...builtinSkills.map((id) => ({ id, kind: "built-in", title: id.slice(posix.dirname(id).length + 1), anchors: [] as string[], state: records.get(id)?.state === "disabled" ? "disabled" as const : "established" as const })),
       ...bundle.map(({ id, kind, title, anchors, state }) => ({ id, kind, title, anchors, state })),

@@ -174,6 +174,10 @@ async function showSavedRequestSource(connection, project, identity, isCurrent) 
       const range = file.startLine === undefined ? '' : `:${file.startLine}–${file.endLine}`;
       lines.push('', file.path + range, file.text);
     }
+    if (group.map?.length) lines.push('', 'Saved repository map', ...group.map);
+    if (group.facts?.length) lines.push('', 'Saved repository facts', ...group.facts);
+    if (group.interfaces?.length) lines.push('', 'Links to other work orders', ...group.interfaces);
+    for (const file of group.deferred ?? []) lines.push('', `On request · ${file.path}:${file.startLine}–${file.endLine}`, file.text);
   }
   await showReadOnlyText('Saved request source', lines.join('\n'), isCurrent);
 }
@@ -657,6 +661,8 @@ async function inspectRun(connection, project, selected, pendingReview) {
       liveAnswer.truncated ? 'Response in progress. Preview limit reached.' : 'Response in progress.', liveAnswer.text] : []),
     ...(receipt?.text ? ['', 'Pi response', receipt.text] : []),
     ...(receipt?.reason ? ['', receipt.reason] : []),
+    ...(receipt?.orchestration?.orders ?? []).flatMap((order) => ['',
+      [order.scope === '.' ? 'Whole selection' : order.scope, order.requestId, order.model].filter(Boolean).join(' · '), order.report || order.reason || '']),
     ...(lookup.length ? ['', ...lookup] : []),
     ...(budget.length ? ['', ...budget] : []),
     ...(pi?.usage ? ['', 'Recorded session usage', JSON.stringify(pi.usage, null, 2)] : []),

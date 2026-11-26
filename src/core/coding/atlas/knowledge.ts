@@ -6,8 +6,8 @@
 
 import { posix } from "node:path";
 import { readConceptPermissive } from "../../okf/bundle.ts";
-import { fmGenerated } from "../../okf/document.ts";
-import { slugify } from "../../okf/paths.ts";
+import { fmGenerated, fmStatus } from "../../okf/document.ts";
+import { InvalidIdError, slugify } from "../../okf/paths.ts";
 import { writeConceptBatch } from "../../okf/write.ts";
 import { VERSION } from "../../version.ts";
 import { knowledgeDirectory, type Atlas } from "./store.ts";
@@ -16,8 +16,6 @@ export const importActor = `okb-import/${VERSION}`;
 export const packageType = "code package";
 export const skillType = "code skill";
 export const lessonType = "code lesson";
-/** Everything from this heading on belongs to the people who maintain the bundle. */
-export const notesHeading = "## Notes";
 
 export interface KnowledgeReport {
   directory: string;
@@ -32,6 +30,14 @@ export interface KnowledgeReport {
 
 const maxPatternSkills = 24;
 const maxEdgeRows = 400_000;
+const removedStatusKey = "okb_import_previous_status";
+
+export const authoredByImporter = (frontmatter: Record<string, unknown>) => fmGenerated(frontmatter)?.by.startsWith("okb-import/") ?? false;
+
+export function knowledgeSlug(text: string, fallback: string): string {
+  try { return slugify(text).slice(0, 160).replace(/-$/u, ""); }
+  catch (error) { if (error instanceof InvalidIdError) return fallback; throw error; }
+}
 
 function code(text: string): string {
   // Paths and names come from the repository. Keep them inside one inline code span.
@@ -44,11 +50,11 @@ function plain(text: string, length = 200): string {
 
 interface PackageRow { id: number; root: string; name: string; ecosystem: string; manifest: string | null; description: string | null; owners: string; files: number; units: number }
 
-function packageIds(packages: readonly PackageRow[]): Map<number, string> {
+function packageIds(packages: readonly PackageRow[], digest: (text: string) => string): Map<number, string> {
   const ids = new Map<number, string>();
   const used = new Set<string>();
   for (const pkg of packages) {
-    const base = slugify(pkg.root === "." ? `root ${pkg.name}` : pkg.root) || `package-${pkg.id}`;
+    const base = knowledgeSlug(pkg.root === "." ? `root ${pkg.name}` : pkg.root, `package-${digest(pkg.root).slice(0, 12)}`);
     let slug = base;
     for (let suffix = 2; used.has(slug); suffix++) slug = `${base}-${suffix}`;
     used.add(slug);
@@ -129,10 +135,10 @@ function packageCard(atlas: Atlas, pkg: PackageRow, ids: ReadonlyMap<number, str
   return { description, body: lines.join("\n") };
 }
 
-interface PatternSkill { id: string; title: string; description: string; body: string; anchors: string[] }
+interface PatternSkill { id: string; title: string; description: string; body: string; anchors: string[]; evidence: string[] }
 
 /** Directories whose modules are all wired into one file: the place a new module has to be added too. */
-function patternSkills(atlas: Atlas): PatternSkill[] {
+function patternSkills(atlas: Atlas, digest: (text: string) => string): PatternSkill[] {
   const perDirectory = new Map<string, number>();
   for (const { path } of atlas.all<{ path: string }>("SELECT path FROM files WHERE role IN ('impl', 'entry', 'types') LIMIT 400000"))
     perDirectory.set(posix.dirname(path), (perDirectory.get(posix.dirname(path)) ?? 0) + 1);
@@ -158,22 +164,30 @@ function patternSkills(atlas: Atlas): PatternSkill[] {
     if (!current || members.size > current.members.length) best.set(directory, { registry, members: [...members].sort(), total });
   }
   const skills: PatternSkill[] = [];
+  const slugs = new Set<string>();
   for (const [directory, { registry, members, total }] of [...best.entries()].sort((a, b) => b[1].members.length - a[1].members.length || (a[0] < b[0] ? -1 : 1)).slice(0, maxPatternSkills)) {
     const tests = atlas.all<{ path: string }>(
       `SELECT DISTINCT t.path FROM file_edges e JOIN files t ON t.id = e.src JOIN files s ON s.id = e.dst
        WHERE e.kind = 'test' AND s.path >= ? AND s.path < ? ORDER BY t.path LIMIT 64`, `${directory}/`, `${directory}0`);
     const testDirectory = [...tests.reduce((counts, { path }) => counts.set(posix.dirname(path), (counts.get(posix.dirname(path)) ?? 0) + 1), new Map<string, number>())]
       .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0]?.[0];
+    const examples = members.slice(0, 3);
+    const testEvidence = tests.find(({ path }) => posix.dirname(path) === testDirectory)?.path;
     const body = [
       `# Modules in ${directory}`, "",
       `- ${code(registry)} imports ${members.length} of the ${total} modules in ${code(directory)}.`,
       `- A module added to, renamed in, or removed from ${code(directory)} usually needs a matching change in ${code(registry)}.`,
-      `- Existing modules to model a new one on: ${members.slice(0, 3).map((member) => code(member)).join(", ")}.`,
+      `- Existing modules to model a new one on: ${examples.map((member) => code(member)).join(", ")}.`,
       ...(testDirectory ? [`- Their tests are in ${code(testDirectory)}.`] : []),
     ].join("\n");
+    const base = knowledgeSlug(directory, directory === "." ? "root" : `directory-${digest(directory).slice(0, 12)}`);
+    let slug = base;
+    for (let suffix = 2; slugs.has(slug); suffix++) slug = `${base}-${suffix}`;
+    slugs.add(slug);
     skills.push({
-      id: `skills/wiring-${slugify(directory) || "root"}`, title: `Modules in ${directory} are wired in ${posix.basename(registry)}`,
+      id: `skills/wiring-${slug}`, title: `Modules in ${directory} are wired in ${posix.basename(registry)}`,
       description: `Where a new or renamed module under ${directory} has to be registered.`, body, anchors: [directory, registry],
+      evidence: [registry, ...examples, ...(testEvidence ? [testEvidence] : [])],
     });
   }
   const guides = atlas.all<{ path: string }>(
@@ -187,7 +201,7 @@ function patternSkills(atlas: Atlas): PatternSkill[] {
     }
     skills.push({
       id: "skills/repository-guidance", title: "Where this repository states its own rules",
-      description: "Pointers to the contributor guidance files and their sections.", body: body.join("\n"), anchors: ["."],
+      description: "Pointers to the contributor guidance files and their sections.", body: body.join("\n"), anchors: ["."], evidence: guides.map(({ path }) => path),
     });
   }
   return skills;
@@ -195,8 +209,8 @@ function patternSkills(atlas: Atlas): PatternSkill[] {
 
 /** Keep what a person wrote under the notes heading when the generated part is refreshed. */
 function withNotes(generated: string, existing: string | undefined): string {
-  const start = existing?.indexOf(`\n${notesHeading}`) ?? -1;
-  return start < 0 ? generated : `${generated}\n${existing!.slice(start)}`.trimEnd();
+  const start = /^## Notes[ \t]*\r?$/mu.exec(existing ?? "")?.index ?? -1;
+  return start < 0 ? generated : `${generated}\n\n${existing!.slice(start)}`.trimEnd();
 }
 
 /** Write or refresh the knowledge bundle from the atlas. Needs the import's writable handle. */
@@ -207,7 +221,7 @@ export async function writeKnowledge(atlas: Atlas, digest: (text: string) => str
     DELETE FROM temp.inbound;
     INSERT INTO temp.inbound SELECT dst, count(*) FROM file_edges WHERE kind = 'import' GROUP BY dst;`);
   const packages = atlas.all<PackageRow>("SELECT id, root, name, ecosystem, manifest, description, owners, files, units FROM packages ORDER BY root");
-  const ids = packageIds(packages);
+  const ids = packageIds(packages, digest);
   const names = new Map(packages.map((pkg) => [pkg.id, pkg.name]));
   const saved = new Map(atlas.all<{ id: string; sha256: string }>("SELECT id, sha256 FROM knowledge").map(({ id, sha256 }) => [id, sha256]));
   const report: KnowledgeReport = { directory, packages: 0, skills: 0, written: 0, unchanged: 0, kept: 0, removed: 0 };
@@ -220,38 +234,43 @@ export async function writeKnowledge(atlas: Atlas, digest: (text: string) => str
       extra: { root: pkg.root } });
     report.packages++;
   }
-  for (const skill of patternSkills(atlas)) {
+  for (const skill of patternSkills(atlas, digest)) {
     // A generated skill starts as a draft: it is delivered to a random half of eligible requests until its effect is known.
-    drafts.push({ ...skill, type: skillType, tags: ["code", "skill"], extra: { anchors: skill.anchors }, status: "draft" });
+    drafts.push({ ...skill, type: skillType, tags: ["code", "skill"], extra: { anchors: skill.anchors, evidence_paths: skill.evidence }, status: "draft" });
     report.skills++;
   }
   await writeConceptBatch(directory, async (add) => {
     for (const draft of drafts) {
       current.add(draft.id);
       const hash = digest(JSON.stringify([draft.title, draft.description, draft.body, draft.extra ?? null]));
-      if (saved.get(draft.id) === hash) { report.unchanged++; continue; }
       let existing;
-      try { existing = await readConceptPermissive(directory, draft.id); } catch { existing = undefined; }
-      const author = existing?.parsed ? fmGenerated(existing.doc.frontmatter)?.by : undefined;
+      try { existing = await readConceptPermissive(directory, draft.id); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       // A card someone else last wrote is theirs now. The import leaves it alone.
-      if (existing && (!existing.parsed || (author !== undefined && !author.startsWith("okb-import/")))) { report.kept++; continue; }
-      await add({
+      if (existing && (!existing.parsed || !authoredByImporter(existing.doc.frontmatter))) { report.kept++; continue; }
+      const previousStatus = existing?.doc.frontmatter[removedStatusKey];
+      if (existing && previousStatus === undefined && saved.get(draft.id) === hash) { report.unchanged++; continue; }
+      const restore = previousStatus === "" || previousStatus === "draft" || previousStatus === "stable" || previousStatus === "deprecated";
+      const status = existing && fmStatus(existing.doc.frontmatter) === "deprecated" && restore ? previousStatus : !existing ? draft.status : undefined;
+      const result = await add({
         id: draft.id, type: draft.type, title: draft.title, description: draft.description, tags: draft.tags, actor: importActor,
-        body: withNotes(draft.body, existing?.doc.body), ...(draft.extra ? { extra: draft.extra } : {}),
-        // An existing skill keeps the status measurement or a person gave it.
-        ...(draft.status && !existing ? { status: draft.status } : {}),
-      });
+        body: withNotes(draft.body, existing?.doc.body), extra: { ...draft.extra, [removedStatusKey]: undefined },
+        ...(status !== undefined ? { status } : {}),
+      }, existing ? { expected: existing.raw } : { createOnly: true });
+      if (!existing && !result.created) { report.kept++; continue; }
       atlas.run("INSERT INTO knowledge(id, sha256) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET sha256 = excluded.sha256", draft.id, hash);
-      report.written++;
+      if (result.noop) report.unchanged++; else report.written++;
     }
     // A package or pattern that no longer exists is marked, not deleted: its notes may still matter.
     for (const id of saved.keys()) {
       if (current.has(id)) continue;
       try {
         const existing = await readConceptPermissive(directory, id);
-        if (existing.parsed && fmGenerated(existing.doc.frontmatter)?.by.startsWith("okb-import/"))
-          await add({ id, status: "deprecated", actor: importActor, body: `${existing.doc.body.trimEnd()}\n\nNo longer present in the repository as of the latest import.` });
-      } catch { /* Already removed by hand. */ }
+        const { frontmatter } = existing.doc;
+        if (existing.parsed && authoredByImporter(frontmatter) && frontmatter[removedStatusKey] === undefined)
+          await add({ id, status: "deprecated", metadataOnly: true,
+            extra: { [removedStatusKey]: frontmatter.status === undefined ? "" : fmStatus(frontmatter) } }, { expected: existing.raw });
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       atlas.run("DELETE FROM knowledge WHERE id = ?", id);
       report.removed++;
     }

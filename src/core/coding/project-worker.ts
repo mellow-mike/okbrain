@@ -249,7 +249,9 @@ export function launchProjectWorker({ atlas, ...request }: LaunchRequest, signal
     let worker: ReturnType<typeof launchPipe> | undefined;
     let stopped = false;
     const result = (async () => {
-      const preparedInput = await prepareCodingInput(options, request.workspaceBinding, {
+      const workspace = await canonicalWorkspace(options.workspace);
+      if (workspace !== request.workspaceBinding) throw new CodingError("The authorized workspace path changed since this project was registered.");
+      const preparedInput = await prepareCodingInput(options, workspace, {
         workspaceBinding: request.workspaceBinding, apiKey: request.apiKey, allowEnvKey: false, ...(atlas ? { atlas } : {}),
       });
       if (stopped) throw new ProjectWorkerInterrupted("The coding server stopped before launching the worker.");

@@ -59,6 +59,8 @@ function record(value: unknown): value is Record<string, unknown> {
 /** Validate a routing policy. `providers` names the providers this installation can call. */
 export function validateRoutingPolicy(value: unknown, providers: readonly string[]): RoutingPolicy {
   if (!record(value) || value.version !== 1) throw new RoutingError("Use routing policy version 1.");
+  if (Object.keys(value).some((key) => !["version", "roles", "reviewCost", "learn", "openRouter"].includes(key)))
+    throw new RoutingError("Use only version, roles, reviewCost, learn, and openRouter in a routing policy.");
   if (Buffer.byteLength(JSON.stringify(value)) > maxPolicyBytes) throw new RoutingError(`Keep the routing policy within ${maxPolicyBytes} UTF-8 bytes.`);
   if (!record(value.roles)) throw new RoutingError("List the models each role may use under roles.");
   const roles: RoutingPolicy["roles"] = {};
@@ -69,6 +71,8 @@ export function validateRoutingPolicy(value: unknown, providers: readonly string
     for (const entry of list) {
       if (!record(entry) || typeof entry.provider !== "string" || !providers.includes(entry.provider))
         throw new RoutingError(`Choose a provider from ${providers.join(", ")} for each ${role} model.`);
+      if (Object.keys(entry).some((key) => !["provider", "model", "thinkingLevel"].includes(key)))
+        throw new RoutingError(`Use only provider, model, and thinkingLevel in a ${role} model.`);
       if (typeof entry.model !== "string" || !modelPattern.test(entry.model)) throw new RoutingError(`Enter a model ID from the provider's catalog for each ${role} model.`);
       if (entry.thinkingLevel !== undefined && (typeof entry.thinkingLevel !== "string" || !thinkingLevels.has(entry.thinkingLevel)))
         throw new RoutingError("Choose a reasoning level the model supports.");
@@ -90,6 +94,8 @@ export function validateRoutingPolicy(value: unknown, providers: readonly string
   if (value.openRouter !== undefined) {
     const preferences = value.openRouter;
     if (!record(preferences)) throw new RoutingError("Give the OpenRouter preferences as an object.");
+    if (Object.keys(preferences).some((key) => !["dataCollection", "zdr", "order", "allowFallbacks", "sort"].includes(key)))
+      throw new RoutingError("Use only dataCollection, zdr, order, allowFallbacks, and sort in OpenRouter preferences.");
     const parsed: OpenRouterPreferences = {};
     if (preferences.dataCollection !== undefined) {
       if (preferences.dataCollection !== "deny" && preferences.dataCollection !== "allow") throw new RoutingError("Set openRouter.dataCollection to deny or allow.");
@@ -235,7 +241,7 @@ export function chooseRoute(input: {
     };
   });
   const learned = input.learn !== false && candidates.length > 1;
-  const ordered = learned ? [...options].sort((a, b) => a.drawn - b.drawn || candidates.indexOf(a) - candidates.indexOf(b)) : options;
+  const ordered = learned ? [...options].sort((a, b) => a.drawn - b.drawn) : options;
   const chosen = ordered[0]!;
   const strip = ({ provider, model, thinkingLevel }: RouteCandidate): RouteCandidate => ({ provider, model, ...(thinkingLevel ? { thinkingLevel } : {}) });
   const same = routeKey(chosen) === routeKey(baseline);
@@ -243,35 +249,22 @@ export function chooseRoute(input: {
     role, cell, choice: strip(chosen), baseline: strip(baseline), fallbacks: ordered.slice(1).map(strip),
     options: options.map(({ drawn: _drawn, ...option }) => option),
     reason: !learned ? "Fixed first model for this role."
-      : same ? "The first model also has the lowest expected cost to an accepted result."
-        : `Expected cost to an accepted result is lower than the first model's for ${cell} work.`,
+      : same ? `The routing draw favored the first model for ${cell} work.`
+        : `The routing draw favored a different model for ${cell} work.`,
   };
 }
 
 /** Provider preferences as OpenRouter's request body expects them. */
-export function openRouterRouting(preferences: OpenRouterPreferences | undefined): OpenRouterRouting | undefined {
-  if (!preferences) return undefined;
+export function openRouterRouting(model: Model<Api>, preferences: OpenRouterPreferences | undefined): OpenRouterRouting | undefined {
+  if (!preferences || model.provider !== "openrouter") return undefined;
   const routing: OpenRouterRouting = {};
   if (preferences.dataCollection) routing.data_collection = preferences.dataCollection;
   if (preferences.zdr !== undefined) routing.zdr = preferences.zdr;
   if (preferences.order?.length) routing.order = preferences.order;
   if (preferences.allowFallbacks !== undefined) routing.allow_fallbacks = preferences.allowFallbacks;
   if (preferences.sort) routing.sort = preferences.sort;
-  return Object.keys(routing).length ? routing : undefined;
-}
-
-/**
- * Attach OpenRouter provider preferences to a model. Pi sends them for models
- * it calls through the chat-completions API. A privacy preference that cannot
- * be sent is refused rather than silently dropped.
- */
-export function withOpenRouterPreferences<T extends Model<Api>>(model: T, preferences: OpenRouterPreferences | undefined): T {
-  const routing = openRouterRouting(preferences);
-  if (!routing || model.provider !== "openrouter") return model;
-  if (model.api !== "openai-completions") {
-    if (preferences?.dataCollection === "deny" || preferences?.zdr)
-      throw new RoutingError(`OpenRouter data preferences cannot be sent for ${model.id}, which Pi calls through the ${model.api} API. Choose a model served through chat completions, or remove the preference.`);
-    return model;
-  }
-  return { ...model, compat: { ...(model.compat as object | undefined), openRouterRouting: { ...(model.compat as { openRouterRouting?: OpenRouterRouting } | undefined)?.openRouterRouting, ...routing } } } as T;
+  if (!Object.keys(routing).length) return undefined;
+  if (model.api !== "openai-completions" && model.api !== "anthropic-messages")
+    throw new RoutingError(`OpenRouter preferences cannot be sent for ${model.id}, which Pi calls through the ${model.api} API.`);
+  return routing;
 }

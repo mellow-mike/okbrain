@@ -8,15 +8,12 @@ import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { ensureExtensionCapableSqlite } from "../../engine/custom-sqlite.ts";
-import { fmStatus } from "../../okf/document.ts";
-import { readConceptPermissive } from "../../okf/bundle.ts";
-import { slugify } from "../../okf/paths.ts";
 import { writeConcept } from "../../okf/write.ts";
 import { isActor } from "../../okf/document.ts";
 import { profilePath } from "../project-profile.ts";
 import type { RepositoryContextManifest } from "../repository-context.ts";
 import { applyAliases } from "./aliases.ts";
-import { lessonType } from "./knowledge.ts";
+import { knowledgeSlug, lessonType } from "./knowledge.ts";
 import { Learning, resetLearning, type Outcome, type OutcomeReport, type UsedEvidence } from "./learn.ts";
 import { readAtlas, type AtlasContext, type RankedUnit, type ReadoutOptions } from "./readout.ts";
 import { createSkillSelector, listSkills } from "./skills.ts";
@@ -114,7 +111,6 @@ export async function recordAtlasOutcome(input: OutcomeRequest, location: AtlasL
       skills: manifest.atlas.skills.map(({ id, trial }) => ({ id, ...(trial ? { trial } : {}) })), withheldSkills: manifest.atlas.withheld ?? [],
     });
     if (report.aliases > 0) writeAliases(workspace, learning, location);
-    for (const { id, state } of report.skills) await markSkill(workspace, id, state === "established" ? "stable" : "deprecated", location);
     return report;
   } finally {
     learning.close();
@@ -173,16 +169,6 @@ function writeAliases(workspace: string, learning: Learning, location: AtlasLoca
   }
 }
 
-/** Reflect a measured decision in the bundle, so the file a person reads agrees with what is delivered. */
-async function markSkill(workspace: string, id: string, status: "stable" | "deprecated", location: AtlasLocation): Promise<void> {
-  const directory = knowledgeDirectory(atlasDirectory(workspace, location));
-  try {
-    const existing = await readConceptPermissive(directory, id);
-    if (!existing.parsed || fmStatus(existing.doc.frontmatter) !== "draft") return;
-    await writeConcept(directory, { id, status, metadataOnly: true });
-  } catch { /* Built-in skills and removed notes have no file to mark. */ }
-}
-
 export interface LessonInput {
   workspace: string;
   text: string;
@@ -197,29 +183,32 @@ export interface LessonInput {
  * It starts as a draft and is measured like any other skill before it is
  * delivered to every eligible request.
  */
-export async function addLesson(input: LessonInput, location: AtlasLocation = {}): Promise<{ id: string; path: string }> {
+export async function addLesson(input: LessonInput, location: AtlasLocation = {}): Promise<{ id: string; path: string; created: boolean }> {
   const workspace = await realpath(input.workspace).catch(() => input.workspace);
   if (!Atlas.exists(workspace, location)) throw new AtlasMissingError("Import this repository before recording lessons for it.");
   const text = input.text.replace(/\r\n?/gu, "\n").trim();
   if (!text || Buffer.byteLength(text) > maxLessonBytes || /[\x00-\x08\x0b-\x1f\x7f-\x9f]/u.test(text) || !text.isWellFormed())
     throw new AtlasError(`Write the lesson as 1–${maxLessonBytes} UTF-8 bytes of plain text.`);
   if (!isActor(input.actor)) throw new AtlasError("The lesson's author must follow the actor convention, such as human:<id>.");
-  const anchors: string[] = [];
-  for (const anchor of (input.anchors ?? []).slice(0, 8)) {
+  if ((input.anchors?.length ?? 0) > 8) throw new AtlasError("A lesson can have at most eight anchors.");
+  const uniqueAnchors = new Set<string>();
+  for (const anchor of input.anchors ?? []) {
     const path = typeof anchor === "string" && Buffer.byteLength(anchor) <= 512 ? profilePath(anchor) : undefined;
     if (!path) throw new AtlasError(`Lesson anchor ${JSON.stringify(anchor)} must be a workspace-relative path.`);
-    anchors.push(path);
+    uniqueAnchors.add(path);
   }
+  const anchors = [...uniqueAnchors].sort();
   const sentence = text.split(/(?<=[.!?])\s|\n/u)[0]!.trim();
-  const title = sentence.length > 90 ? `${sentence.slice(0, 89).trimEnd()}…` : sentence;
+  const characters = [...sentence];
+  const title = characters.length > 90 ? `${characters.slice(0, 89).join("").trimEnd()}…` : sentence;
   const digest = createHash("sha256").update(JSON.stringify([text, anchors])).digest("hex").slice(0, 8);
-  const id = `lessons/${slugify(title.split(/\s+/u).slice(0, 6).join(" ")) || "lesson"}-${digest}`;
+  const id = `lessons/${knowledgeSlug(title.split(/\s+/u).slice(0, 6).join(" "), "lesson")}-${digest}`;
   const directory = knowledgeDirectory(atlasDirectory(workspace, location));
   const result = await writeConcept(directory, {
     id, type: lessonType, title, description: `A lesson recorded for future coding requests${anchors.length ? ` touching ${anchors.join(", ")}` : ""}.`,
     tags: ["code", "lesson"], body: text, status: "draft", actor: input.actor, extra: { anchors },
-  });
-  return { id, path: result.path };
+  }, { createOnly: true });
+  return { id, path: result.path, created: result.created };
 }
 
 /** What has been imported and learned for a workspace, for display. */
@@ -248,21 +237,24 @@ export async function atlasStatus(workspaceInput: string, location: AtlasLocatio
   try {
     return {
       workspace, imported: true as const, directory, knowledge: knowledgeDirectory(directory), meta, packages,
-      learning: learning?.summary(), skills: listSkills(workspace, learning?.skillRecords() ?? new Map(), location),
+      learning: learning?.summary(), skills: await listSkills(workspace, learning?.skillRecords() ?? new Map(), location),
     };
   } finally {
     learning?.close();
   }
 }
 
-/** Forget everything learned for a workspace, including aliases already laid over the index. */
+/** Remove one session's learning using its canonical workspace key. */
+export function forgetLearningSession(workspace: string, location: AtlasLocation, session: string): number {
+  const learning = Learning.open(workspace, location);
+  if (!learning) return 0;
+  try { return learning.forgetSession(session); } finally { learning.close(); }
+}
+
+/** Forget one session or reset a workspace's learning, including its aliases. */
 export async function forgetLearning(workspaceInput: string, location: AtlasLocation = {}, session?: string): Promise<{ episodes?: number; reset?: boolean }> {
   const workspace = await realpath(workspaceInput).catch(() => workspaceInput);
-  if (session !== undefined) {
-    const learning = Learning.open(workspace, location);
-    if (!learning) return { episodes: 0 };
-    try { return { episodes: learning.forgetSession(session) }; } finally { learning.close(); }
-  }
+  if (session !== undefined) return { episodes: forgetLearningSession(workspace, location, session) };
   const reset = resetLearning(workspace, location);
   const path = join(atlasDirectory(workspace, location), "atlas.sqlite");
   if (existsSync(path)) {

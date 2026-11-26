@@ -19,6 +19,7 @@ import { fmGenerated, fmSources, parse, serialize } from "../src/core/okf/docume
 import type { AskResult } from "../src/core/retrieval/ask.ts";
 import { usabilityStorePath, type UsabilityExport } from "../src/core/usability.ts";
 import type { VizGraph } from "../src/core/viz/export.ts";
+import { buildMonorepo } from "../tests/fixtures/monorepo.ts";
 import { githubBranchBrowserFixture } from "./github-branch-browser-fixture.ts";
 
 const root = await mkdtemp(join(tmpdir(), "okbrain-browser-smoke-"));
@@ -3637,6 +3638,63 @@ try {
 
   // A facilitated usability session, by keyboard: start, mark a task, save two
   // notes, search, open the second result, end the task as found, and export.
+  {
+    const mapped = await buildMonorepo(join(root, "browser-atlas"), 120);
+    const mapProject = await codingFixture<{ id: string }>("/projects", {
+      title: "Repository map fixture", workspace: mapped.workspace, scopes: ["packages"], provider: "openai", model: "browser-project-fixture",
+    });
+    await page.evaluate((id) => { location.hash = "#coding/" + id; }, mapProject.id);
+    await page.getByText("Project settings", { exact: true }).click();
+    const mapSettings = page.locator("[data-repository-map]");
+    await mapSettings.getByText("Repository map", { exact: true }).click();
+    await mapSettings.getByRole("button", { name: "Import repository map", exact: true }).click();
+    await mapSettings.getByText(/files · .*units · .*packages/).waitFor();
+    await page.getByText("Project settings", { exact: true }).click();
+    const composer = page.locator(".coding-composer");
+    const source = composer.getByRole("combobox", { name: "Source", exact: true });
+    const approval = composer.locator("[data-approve] input");
+    const send = composer.getByRole("button", { name: "Send request", exact: true });
+    const history = page.locator(".coding-activity");
+    const preview = composer.locator("[data-preview-content]");
+    await source.selectOption("atlas");
+    await composer.getByLabel("Task", { exact: true }).fill("Explain refreshSession and its test.");
+    await composer.getByRole("button", { name: "Preview source", exact: true }).click();
+    await preview.getByText("Map sent with the excerpts", { exact: true }).waitFor();
+    assert.equal(await send.isEnabled(), false);
+    projectFaux.setResponses([fauxAssistantMessage("Reviewed packages/auth/src/session.ts:6.")]);
+    await approval.check();
+    await send.click();
+    await history.getByText("Reviewed packages/auth/src/session.ts:6.", { exact: true }).waitFor();
+    await history.getByRole("button", { name: "View saved request source", exact: true }).click();
+    await history.getByText("Saved repository map", { exact: true }).waitFor();
+
+    await source.selectOption("orchestrated");
+    await composer.getByLabel("Task", { exact: true }).fill("Trace refreshSession, endSession and signToken, and computeTax with publishInvoice and InvoiceSchema.");
+    await composer.getByLabel("Workers", { exact: true }).selectOption("2");
+    await composer.getByLabel("Map token budget", { exact: true }).fill("900");
+    const planResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/coding/projects/${mapProject.id}/preview`);
+    await composer.getByRole("button", { name: "Preview plan", exact: true }).click();
+    const { result: plan } = await (await planResponse).json();
+    await preview.getByRole("heading", { name: "packages/auth", exact: true }).waitFor();
+    const calls = projectFaux.state.callCount;
+    await preview.getByRole("button", { name: "Copy source manifest", exact: true }).click();
+    await composer.getByText("Source manifest copied.", { exact: true }).waitFor();
+    const copied = JSON.parse(await page.evaluate(() => navigator.clipboard.readText())) as CodingSourceManifest;
+    assert.equal(copied.source, "orchestrated");
+    assert.equal(copied.id, plan.id);
+    assert.equal(JSON.stringify(copied).includes("AUTH_REFRESH"), false);
+    assert.equal(projectFaux.state.callCount, calls);
+    projectFaux.setResponses([
+      fauxAssistantMessage("Worker report one."), fauxAssistantMessage("Worker report two."), fauxAssistantMessage("Reviewed the combined plan."),
+    ]);
+    await approval.check();
+    await send.click();
+    await history.getByText("Reviewed the combined plan.", { exact: true }).waitFor();
+    await history.getByText(/Combining call · openai\/browser-project-fixture/).waitFor();
+    await history.getByRole("button", { name: "View saved request source", exact: true }).click();
+    await history.getByText("Saved repository facts", { exact: true }).first().waitFor();
+  }
+
   {
     // Everything above was ordinary use, which must not have created the store.
     assert.equal(existsSync(dirname(usabilityStorePath())), false);

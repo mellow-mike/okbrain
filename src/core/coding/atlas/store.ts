@@ -88,6 +88,7 @@ export interface AtlasMeta {
   units: number;
   packages: number;
   historyCommits: number;
+  historyLimit?: number;
   limited: boolean;
 }
 
@@ -244,7 +245,8 @@ export class Atlas {
     return {
       version: number("version"), workspace: text("workspace") ?? "", generation: number("generation"), revision: text("revision"),
       importedAt: text("importedAt"), scopes, files: number("files"), units: number("units"), packages: number("packages"),
-      historyCommits: number("historyCommits"), limited: number("limited") === 1,
+      historyCommits: number("historyCommits"), historyLimit: values.has("historyLimit") ? number("historyLimit") : undefined,
+      limited: number("limited") === 1,
     };
   }
 

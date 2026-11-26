@@ -13,7 +13,7 @@ import { writeKnowledge, type KnowledgeReport } from "./knowledge.ts";
 import { Learning } from "./learn.ts";
 import { detectPackages, internalDependencies, packageOf, type CommandTool, type PackageInfo } from "./packages.ts";
 import { AtlasScanError, listTrackedPaths, mineChangeCoupling, ownersOf, parseCodeOwners } from "./scan.ts";
-import { Atlas, AtlasError, type AtlasLocation } from "./store.ts";
+import { Atlas, AtlasError, type AtlasLocation, type AtlasMeta } from "./store.ts";
 import { analyzeSource, languageOf, roles, type SourceFile } from "./structure.ts";
 import {
   addRow, addTerms, dfBucket, embedBag, embeddingDim, emptyFrequencies, inverseFrequency, normalize, quantize, type DocumentFrequencies,
@@ -298,6 +298,7 @@ class Linker {
 function report(options: ImportOptions, phase: ImportProgress["phase"], done: number, total: number): void {
   options.signal?.throwIfAborted();
   options.progress?.({ phase, done, total });
+  options.signal?.throwIfAborted();
 }
 
 /**
@@ -335,6 +336,7 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
   const workspace = await canonicalWorkspace(options.workspace);
   const scopes = normalizeScopes(options.scopes);
   const full = options.full === true;
+  const historyLimit = options.historyCommits ?? defaultHistoryCommits;
   const atlas = Atlas.create(workspace, location);
   try {
     const previous = atlas.meta();
@@ -458,7 +460,7 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
       report(options, "read", eligible.length, eligible.length);
 
       const linked = await linkFiles(atlas, steps, workspace, packageMap.packages, packageIds, roots, options);
-      const coupling = await linkHistory(atlas, steps, workspace, revision, previous.revision, changedFiles + removedFiles > 0 || full, options);
+      const coupling = await linkHistory(atlas, steps, workspace, revision, previous, changedFiles + removedFiles > 0 || full, historyLimit, options);
       writeTools(atlas, steps, packageMap.tools, packageIds);
       // Learned aliases live outside the derived store and are laid back over it on every import.
       const learning = Learning.open(workspace, location);
@@ -477,14 +479,15 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
       steps.begin();
       const published = publish(atlas, options);
       atlas.setMeta({
-        revision: revision ?? "", importedAt: new Date().toISOString(), scopes, historyCommits: coupling.commits,
+        revision: revision ?? "", importedAt: new Date().toISOString(), scopes, historyCommits: coupling.commits, historyLimit,
         limited: listing.limited || indexable.length > eligible.length || packageMap.limited,
       });
       steps.finish();
       atlas.dropStaleVectors(published.generation);
-      report(options, "knowledge", 0, 1);
+      // The map is committed. Complete the bundle and report the published import even if a stop arrives now.
+      options.progress?.({ phase: "knowledge", done: 0, total: 1 });
       const knowledge = await writeKnowledge(atlas, sha256);
-      report(options, "knowledge", 1, 1);
+      options.progress?.({ phase: "knowledge", done: 1, total: 1 });
       return {
         knowledge,
         workspace, ...(revision ? { revision } : {}), generation: published.generation, scopes, trackedPaths: listing.paths.length,
@@ -601,13 +604,14 @@ async function linkFiles(
 }
 
 async function linkHistory(
-  atlas: Atlas, steps: Steps, workspace: string, revision: string | undefined, previous: string | undefined, filesChanged: boolean, options: ImportOptions,
+  atlas: Atlas, steps: Steps, workspace: string, revision: string | undefined, previous: AtlasMeta, filesChanged: boolean,
+  commits: number, options: ImportOptions,
 ): Promise<{ commits: number; pairs: number }> {
-  const commits = options.historyCommits ?? defaultHistoryCommits;
-  const current = atlas.get<{ count: number }>("SELECT count(*) AS count FROM file_edges WHERE kind = 'cochange'")!.count;
-  const mined = atlas.meta().historyCommits;
-  // History is mined again only when the checkout moved or the file set changed.
-  if (commits > 0 && !filesChanged && revision !== undefined && revision === previous && mined > 0) return { commits: mined, pairs: current };
+  if (!filesChanged && revision !== undefined && revision === previous.revision && commits === previous.historyLimit
+    && (commits === 0 || previous.historyCommits > 0)) {
+    const current = atlas.get<{ count: number }>("SELECT count(*) AS count FROM file_edges WHERE kind = 'cochange'")!.count;
+    return { commits: previous.historyCommits, pairs: current };
+  }
   report(options, "history", 0, 1);
   const ids = new Map(atlas.all<{ id: number; path: string }>("SELECT id, path FROM files").map(({ id, path }) => [path, id]));
   const coupling = commits > 0 ? await mineChangeCoupling(workspace, new Set(ids.keys()), { commits, signal: options.signal }) : { commits: 0, pairs: [] };

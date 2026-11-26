@@ -42,6 +42,8 @@ from Pi session status. Run history shows recorded usage for the selected
 request and the full session, including main and child conversation totals.
 For a saved request, the controller supplies a versioned run report with
 identity, status, usage, and relative references from the admitted source.
+Orchestrated reports include per-call models and usage. Atlas reports include
+approved deferred source ranges.
 Completed opt-in requests report the ranges served by Pi's durable lookup
 results and counts of refused or incomplete calls. The receipt matches the
 request's own conversation and admitted source. It omits tool arguments,
@@ -50,10 +52,12 @@ The app and editor copy that report to the clipboard on request. Task text,
 response text, source bodies, and credentials are outside the report schema.
 Each source preview also returns a versioned source manifest. It repeats the
 preview ID that an approved send must match and lists the selected paths,
-line ranges or sizes, and digests. A repository manifest is the one the CLI
-prints. Selected text, attached file bodies, the task, and profile guidance
-are outside its schema. The apps and editor copy it from the preview they
-already hold, so copying makes no request and leaves the approval unchanged.
+line ranges or sizes, and digests. A plan manifest includes the work orders'
+scopes, model configurations, and provider preferences. Copied map and plan
+manifests omit the search text because the map can use the task as its query.
+A scoped repository manifest is the one the CLI prints. The apps and editor
+copy it from the preview they already hold, so copying makes no request and
+leaves the approval unchanged.
 Run inspection projects Pi Durable's live task graph to bounded counts for
 the selected request and its descendants. The control plane forwards those
 counts through the worker pipe and the authenticated inspection route.
@@ -125,19 +129,23 @@ tracked files under the same exclusions as previews, executes nothing, and
 calls no model. It also writes an OKF bundle of package cards and draft
 skills in application data that a person can read and edit. A request can
 select its source from the map inside one token budget that covers excerpts,
-a short navigation map, and facts. The map decides where to look, and every
-excerpt is read from the current worktree at preview, after Git confirms the
-file is still tracked. Admission saves the
-approved bytes, and recovery reads them. Excerpts that did not fit can be
-approved for lookup and are then served only from the saved selection.
+a short navigation map, and facts. The map decides where to look. Excerpts
+come from the current worktree after Git confirms they are still tracked.
+File-backed facts and map lines use the same scope and tracking rules.
+Admission saves the approved bytes, and recovery reads them. Excerpts that
+did not fit can be approved for lookup and served from the saved selection.
 Reviews update a separate learned state that holds no source, prompt, or
-answer text. It can be forgotten per session, rolled back, or reset.
+answer text. It can be forgotten per session, rolled back, or reset. Skill
+measurements stay in learned state, independently of the operator's Markdown.
+Project transcript deletion keeps its recovery marker until the session's
+learned episodes have been removed.
 An orchestrated request is a previewed plan of scoped work orders. Each runs
 in its own Pi Durable conversation with only its source, and one further call
 combines the reports. The plan, including every model, its reasoning level,
 and any OpenRouter preferences, is approved and saved before the first call.
-A routing policy lists the models a role may use, and the choice is made at
-planning time and bound into the approval. A project
+Work orders inherit the request's selected directories. A routing policy lists
+the models a role may use, and planning binds each choice into the approval.
+Retries of submitted requests resolve by their existing plan ID. A project
 keeps its own map, bundle, and learned state under its project directory,
 imports only its permitted directories, and routes within its own provider.
 The control plane prepares map and plan input, so workers never open the map.
@@ -146,7 +154,8 @@ port and HTTPS origin after a writable server restart from the same catalog.
 The saved port is reserved from the owner listener. Bind failures stay visible
 in Coding until the operator retries or clears the preference.
 Project reviewers can explicitly reopen a selected request's saved task and
-source from Pi admission records, including each package's excerpts.
+source from Pi admission records, including package excerpts, repository map
+facts and deferred excerpts, and orchestrated work orders.
 Evaluation groups count approved source, independently verified citations,
 and recorded usage by strategy and provider origin. An operator can load the
 saved task and rubric for a fresh evaluation session in the app. Each trial

@@ -14,7 +14,8 @@ setDefaultTimeout(60_000);
 const ownerToken = "local-operator-test";
 type Preview = { source: string; manifest: { id: string; files: { path: string }[]; atlas?: { generation: number } }; excerpts: { path: string }[]; map: string[];
   sourceManifest: { source: string; id: string; manifest: { atlas?: object } } };
-type Plan = { source: string; id: string; plan: { mode: string; orders: { scope: string; route: { choice: { model: string }; fallbacks: { model: string }[] } }[]; warnings?: string[] } };
+type Plan = { source: string; id: string; plan: { mode: string; orders: { scope: string; route: { choice: { model: string }; fallbacks: { model: string }[] } }[]; warnings?: string[] };
+  sourceManifest: { source: string; id: string; orders: { scope: string; models: { model: string }[] }[] } };
 type Run = { id: string; status: string; review: string | null };
 type MapState = { status: string; imported: boolean; map?: { files: number; packages: number }; knowledge?: string; learning?: { episodes: number } | null;
   skills?: { id: string; state: string }[]; error?: string };
@@ -83,7 +84,8 @@ test("a project imports its map, previews a selection, runs it, and learns from 
   expect(early.status).toBe(409);
   expect((await early.json() as { error: string }).error).toContain("has not been imported");
   expect((await request(path + "/import", {}, member.token)).status).toBe(403);
-  expect((await call<MapState>(path + "/import", {})).status).toBe("running");
+  const imports = await Promise.all([call<MapState>(path + "/import", {}), call<MapState>(path + "/import", {})]);
+  expect(imports.map(({ status }) => status)).toEqual(["running", "running"]);
   const imported = await waitFor(() => call<MapState>(path + "/import"), ({ status }) => status !== "running");
   expect(imported).toMatchObject({ status: "completed", imported: true, learning: null });
   expect(imported.map!.packages).toBe(11);
@@ -102,6 +104,7 @@ test("a project imports its map, previews a selection, runs it, and learns from 
   expect(preview.map[0]).toContain("packages/auth");
   expect(preview.sourceManifest).toMatchObject({ source: "atlas", id: preview.manifest.id });
   expect(JSON.stringify(preview.sourceManifest)).not.toContain("AUTH_REFRESH");
+  expect(JSON.stringify(preview.sourceManifest)).not.toContain(prompt);
   // The map never reads outside the project's permitted directories.
   expect((await request(path + "/preview", { ...selection, prompt, projects: ["."] })).status).toBe(403);
   expect((await request(path + "/preview", { ...selection, prompt, projects: ["../elsewhere"] })).status).toBe(400);
@@ -109,6 +112,7 @@ test("a project imports its map, previews a selection, runs it, and learns from 
 
   const identity = { session: "main", requestId: "map-1" };
   expect((await request(path + "/run", { ...selection, ...identity, prompt, previewId: preview.manifest.id })).status).toBe(400);
+  expect((await request(path + "/run", { ...selection, ...identity, prompt, previewId: preview.manifest.id, approved: true, approvedSourceLookup: true })).status).toBe(400);
   const run = await call<Run>(path + "/run", { ...selection, ...identity, prompt, previewId: preview.manifest.id, approved: true });
   expect(run.id).toBe("map-1");
   const finished = await waitFor(() => call<{ run: Run }>(path + "/inspect", identity), ({ run: current }) => current.status !== "running");
@@ -126,7 +130,7 @@ test("a project imports its map, previews a selection, runs it, and learns from 
   expect(reviewed.review).toBe("accepted");
   const audit = await call<{ kind: string }[]>(path + "/audit");
   expect(audit.map(({ kind }) => kind)).toContain("review_learned");
-  expect(audit.map(({ kind }) => kind)).toContain("repository_imported");
+  expect(audit.filter(({ kind }) => kind === "repository_imported")).toHaveLength(1);
   const learned = await call<MapState>(path + "/import");
   expect(learned.learning).toMatchObject({ episodes: 1 });
   // The project's map is its own. Nothing was written to the operator's standalone map for this workspace.
@@ -134,7 +138,7 @@ test("a project imports its map, previews a selection, runs it, and learns from 
 
   // Deleting the transcript removes what was recorded from it.
   await call(path + "/delete-session", { session: "main", confirm: "main" });
-  const forgotten = await waitFor(() => call<MapState>(path + "/import"), ({ learning }) => learning?.episodes === 0);
+  const forgotten = await call<MapState>(path + "/import");
   expect(forgotten.learning).toMatchObject({ episodes: 0 });
 });
 
@@ -163,13 +167,19 @@ test("an orchestrated request uses the project's routing policy and one approved
   expect(preview.plan.mode).toBe("fan-out");
   expect(preview.plan.orders.map(({ scope }) => scope).sort()).toEqual(["packages/auth", "packages/billing"]);
   expect(preview.plan.orders.every(({ route }) => route.choice.model === "cheap" && route.fallbacks[0]?.model === "strong")).toBe(true);
+  expect(preview.sourceManifest).toMatchObject({ source: "orchestrated", id: preview.id, orders: expect.arrayContaining([
+    expect.objectContaining({ scope: "packages/auth", models: [{ provider: "openai", model: "cheap" }, { provider: "openai", model: "strong" }] }),
+  ]) });
+  expect(JSON.stringify(preview.sourceManifest)).not.toContain("AUTH_REFRESH");
+  expect(JSON.stringify(preview.sourceManifest)).not.toContain(prompt);
   expect((await request(path + "/preview", { ...selection, prompt, workers: 7 })).status).toBe(400);
   expect((await request(path + "/run", { ...selection, session: "plan", requestId: "plan-1", prompt, previewId: preview.id, approved: true, approvedSourceLookup: true })).status).toBe(400);
 
   const before = seen.length;
   const identity = { session: "plan", requestId: "plan-1" };
   await call<Run>(path + "/run", { ...selection, ...identity, prompt, previewId: preview.id, approved: true }, member.token);
-  const finished = await waitFor(() => call<{ run: Run; pi?: { request?: { receipt?: { text?: string; orchestration?: { orders: { model: string }[] } } } } }>(path + "/inspect", identity),
+  const finished = await waitFor(() => call<{ run: Run; report?: { receipt?: { orchestration?: { orders: { model: string }[] } } };
+    pi?: { request?: { receipt?: { text?: string; orchestration?: { orders: { model: string }[] } } } } }>(path + "/inspect", identity),
     ({ run }) => run.status !== "running");
   expect(finished.run.status).toBe("done");
   const calls = seen.slice(before);
@@ -177,13 +187,21 @@ test("an orchestrated request uses the project's routing policy and one approved
   expect(calls.find(({ request: sent }) => sent.reports)?.model).toBe("strong");
   expect(finished.pi?.request?.receipt?.text).toBe("Combined result.");
   expect(finished.pi?.request?.receipt?.orchestration?.orders.map(({ model }) => model)).toEqual(["openai/cheap", "openai/cheap"]);
+  expect(finished.report?.receipt?.orchestration?.orders.map(({ model }) => model)).toEqual(["openai/cheap", "openai/cheap"]);
 
-  // Changing the policy after approval changes what the approval covered, so the same request ID is refused.
+  // A policy change cannot rebind an approved plan. An identical retry reads its settled run.
   await call(path + "/routing", { policy: null });
-  const rebound = await request(path + "/run", { ...selection, ...identity, prompt, previewId: preview.id, approved: true });
-  expect(rebound.status).toBe(409);
+  const count = seen.length;
+  const replayed = await call<Run>(path + "/run", { ...selection, ...identity, prompt, previewId: preview.id, approved: true });
+  expect(replayed).toMatchObject({ id: identity.requestId, status: "done" });
+  const staleIdentity = { session: "plan", requestId: "plan-stale" };
+  await call<Run>(path + "/run", { ...selection, ...staleIdentity, prompt, previewId: preview.id, approved: true });
+  const stale = await waitFor(() => call<{ run: Run }>(path + "/inspect", staleIdentity), ({ run }) => run.status !== "running");
+  expect(stale.run.status).toBe("failed");
+  expect(seen).toHaveLength(count);
   const lesson = await call<{ id: string }>(path + "/lesson", { text: "Session tokens are rotated on every refresh.", anchors: ["packages/auth"] });
   expect(lesson.id).toStartWith("lessons/session-tokens-are-rotated-on-every-");
+  expect(await call(path + "/lesson", { text: "Session tokens are rotated on every refresh.", anchors: ["packages/auth"] })).toEqual({ id: lesson.id, created: false });
   expect((await request(path + "/lesson", { text: "x", anchors: ["apps"] })).status).toBe(403);
   expect((await request(path + "/lesson", { text: "x" }, member.token)).status).toBe(403);
   expect((await call<MapState>(path + "/import")).skills?.find(({ id }) => id === lesson.id)).toMatchObject({ state: "trial" });
@@ -227,7 +245,7 @@ test("the repository map commands stay local and work from the command line", as
   const brief = await okb(planned);
   expect(brief.stdout).toContain("2 workers.");
   expect(brief.stdout).toContain("openai/gpt-5-mini (low reasoning)");
-  expect(brief.stdout).toContain("OpenRouter preferences for every call: data collection deny.");
+  expect(brief.stdout).toContain("OpenRouter provider preferences: data collection deny.");
   expect(brief.stdout).toMatch(/Map: \d+ lines sent with the excerpts\./u);
   expect(brief.stdout).toContain("Facts delivered: builtin/test-map");
   expect(brief.stdout).not.toContain("--- Map for");
@@ -267,6 +285,8 @@ test("the repository map commands stay local and work from the command line", as
   expect((await okb([...run, "--atlas"])).stderr).toContain("Get the ID from `okb code recall`");
   expect((await okb([...run, "--orchestrate"])).stderr).toContain("Get the ID from `okb code plan`");
   expect((await okb([...run, "--atlas", "--orchestrate"])).code).toBe(2);
+  expect((await okb([...run, "--atlas", "--workers", "2"])).code).toBe(2);
+  expect((await okb([...run, "--orchestrate", "--query", "refreshSession"])).code).toBe(2);
   expect((await okb([...run, "--deferred"])).code).toBe(2);
   // With an ID, the next thing a send needs is the provider credential. Nothing is selected without one.
   expect((await okb([...run, "--atlas", "--context-id", "0".repeat(64)])).stderr).toContain("Set OPENAI_API_KEY");

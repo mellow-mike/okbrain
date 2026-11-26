@@ -249,9 +249,15 @@ export class Learning implements LearningView {
   }
 
   setSkillState(id: string, state: SkillState): void {
-    this.#run(`INSERT INTO skills(id, state, updated) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET state = excluded.state, updated = excluded.updated`,
-      id, state, new Date().toISOString());
-    this.#audit("skill-state", { id, state, by: "operator" });
+    this.#db.transaction(() => {
+      this.#run(`INSERT INTO skills(id, state, updated) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+        state = excluded.state, updated = excluded.updated,
+        shown = CASE WHEN excluded.state = 'trial' THEN 0 ELSE shown END,
+        shown_ok = CASE WHEN excluded.state = 'trial' THEN 0 ELSE shown_ok END,
+        held = CASE WHEN excluded.state = 'trial' THEN 0 ELSE held END,
+        held_ok = CASE WHEN excluded.state = 'trial' THEN 0 ELSE held_ok END`, id, state, new Date().toISOString());
+      this.#audit("skill-state", { id, state, by: "operator" });
+    }).immediate();
   }
 
   /** Aliases that have been confirmed often enough to be searchable, grouped by unit. */
@@ -284,18 +290,22 @@ export class Learning implements LearningView {
 
   /** Remove what was recorded from one session. Aggregates already learned from it stay. */
   forgetSession(session: string): number {
-    const before = this.#all<{ count: number }>("SELECT count(*) AS count FROM episodes WHERE session = ?", session)[0]?.count ?? 0;
-    this.#run("DELETE FROM episodes WHERE session = ?", session);
-    if (before) this.#audit("forget-session", { episodes: before });
-    return before;
+    return this.#db.transaction(() => {
+      const before = this.#all<{ count: number }>("SELECT count(*) AS count FROM episodes WHERE session = ?", session)[0]?.count ?? 0;
+      this.#run("DELETE FROM episodes WHERE session = ?", session);
+      if (before) this.#audit("forget-session", { episodes: before });
+      return before;
+    }).immediate();
   }
 
   /** Return the readout parameters to the best snapshot the replay gate has seen. */
   rollback(): ReadoutParams {
-    const best = this.#loadParams("best");
-    this.params = { ...best, version: this.params.version + 1 };
-    this.#saveState("params", this.params);
-    this.#audit("rollback", { version: this.params.version });
+    this.params = this.#db.transaction(() => {
+      const best = { ...this.#loadParams("best"), version: this.#loadParams("params").version + 1 };
+      this.#saveState("params", best);
+      this.#audit("rollback", { version: best.version });
+      return best;
+    }).immediate();
     return this.params;
   }
 
@@ -320,10 +330,10 @@ export class Learning implements LearningView {
 
     const vector = new Int8Array(embeddingDim);
     quantize(input.queryVector, vector, 0);
-    const prior = this.#all<{ id: number }>("SELECT id FROM episodes WHERE session = ? AND request = ?", input.session, input.requestId)[0];
-    const report: OutcomeReport = { recorded: true, learned: !prior, params: this.params.version, laneUpdate: "skipped", aliases: 0, skills: [], missedPaths };
-    this.#db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.#db.transaction(() => {
+      this.params = this.#loadParams("params");
+      const prior = this.#all<{ id: number }>("SELECT id FROM episodes WHERE session = ? AND request = ?", input.session, input.requestId)[0];
+      const report: OutcomeReport = { recorded: true, learned: !prior, params: this.params.version, laneUpdate: "skipped", aliases: 0, skills: [], missedPaths };
       this.#run(`INSERT INTO episodes(session, request, at, outcome, vector, params, units) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session, request) DO UPDATE SET at = excluded.at, outcome = excluded.outcome, vector = excluded.vector, units = excluded.units`,
         input.session, input.requestId, new Date().toISOString(), input.outcome, new Uint8Array(vector.buffer), this.params.version, JSON.stringify(units));
@@ -340,22 +350,22 @@ export class Learning implements LearningView {
           laneUpdate: report.laneUpdate, ...(report.panel ? { panel: report.panel } : {}), aliases: report.aliases,
         });
       }
-      this.#db.exec("COMMIT");
-    } catch (error) {
-      if (this.#db.inTransaction) this.#db.exec("ROLLBACK");
-      throw error;
-    }
-    report.params = this.params.version;
-    return report;
+      report.params = this.params.version;
+      return report;
+    }).immediate();
   }
 
   #learnAliases(input: OutcomeInput, units: EpisodeUnit[]): number {
-    const terms = input.queryTerms.filter((term) => /^[\p{L}\p{N}_$]{3,48}$/u.test(term)).slice(0, maxAliasTermsPerEpisode);
+    const terms = [...new Set(input.queryTerms.filter((term) => /^[\p{L}\p{N}_$]{3,48}$/u.test(term)))].slice(0, maxAliasTermsPerEpisode);
     if (!terms.length) return 0;
     let admitted = 0;
+    const seen = new Set<string>();
     for (const unit of units) {
       // Only units the answer demonstrably needed. One request is not enough: see the admission threshold.
       if (!unit.u || !unit.n) continue;
+      const key = `${unit.p}\0${unit.n}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       for (const term of terms) {
         this.#run(`INSERT INTO aliases(path, name, term, weight) VALUES (?, ?, ?, 1)
           ON CONFLICT(path, name, term) DO UPDATE SET weight = min(weight + 1, 64)`, unit.p, unit.n, term);

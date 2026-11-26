@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider, type Message, type Model } from "@earendil-works/pi-ai";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -10,12 +11,12 @@ import {
   cancelCodingRequest, CodingError, getCodingSessionStatus, getSavedCodingRequestInput, listCodingModels, listStandaloneCodingRequests, previewAtlasContext,
   previewCodingOrchestration, runCodingSession, type CodingSessionOptions,
 } from "../src/core/coding/durable.ts";
-import { outboundContent } from "../src/core/coding/history.ts";
+import { budgetedModels, codingBudget, outboundContent } from "../src/core/coding/history.ts";
 import { changedPaths, reconcile } from "../src/core/coding/orchestrator.ts";
 import { recordCodingOutcome } from "../src/core/coding/outcomes.ts";
 import { checkProviderModel } from "../src/core/coding/provider-check.ts";
 import {
-  chooseRoute, parseRoutingPolicy, routeCell, RoutingError, validateRoutingPolicy, withOpenRouterPreferences, type RouteCandidate, type RoutingPolicy,
+  chooseRoute, openRouterRouting, parseRoutingPolicy, routeCell, RoutingError, validateRoutingPolicy, type RouteCandidate, type RoutingPolicy,
 } from "../src/core/coding/router.ts";
 import { buildMonorepo, type Fixture } from "./fixtures/monorepo.ts";
 
@@ -41,9 +42,11 @@ afterAll(async () => { await rm(root, { force: true, recursive: true }); });
 type Seen = { model: string; request: Record<string, unknown>; raw: string };
 
 /** A scripted provider that records what each model was sent and answers from that. */
-function scripted(answer: (seen: Seen) => string | { error: string }, modelIds = ["strong", "cheap"]) {
+function scripted(answer: (seen: Seen) => string | { error: string } | { text: string; stopReason: "length" }, modelIds = ["strong", "cheap"]) {
   const models = createModels();
-  const faux = fauxProvider({ provider, models: modelIds.map((id) => ({ id, cost: id === "cheap" ? { input: 0.2, output: 1, cacheRead: 0, cacheWrite: 0 } : { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 } })) });
+  const faux = fauxProvider({ provider, models: modelIds.map((id) => ({ id, reasoning: true,
+    ...(id === "tiny" ? { contextWindow: 256 } : {}),
+    cost: id === "cheap" ? { input: 0.2, output: 1, cacheRead: 0, cacheWrite: 0 } : { input: 5, output: 25, cacheRead: 0, cacheWrite: 0 } })) });
   models.setProvider(faux.provider);
   const seen: Seen[] = [];
   const step = (context: { messages: readonly Message[] }, _options: unknown, _state: unknown, model: Model<string>) => {
@@ -52,7 +55,9 @@ function scripted(answer: (seen: Seen) => string | { error: string }, modelIds =
     const entry = { model: model.id, request: JSON.parse(raw) as Record<string, unknown>, raw };
     seen.push(entry);
     const reply = answer(entry);
-    return typeof reply === "string" ? fauxAssistantMessage(reply) : fauxAssistantMessage("", { stopReason: "error", errorMessage: reply.error });
+    if (typeof reply === "string") return fauxAssistantMessage(reply);
+    if ("error" in reply) return fauxAssistantMessage("", { stopReason: "error", errorMessage: reply.error });
+    return fauxAssistantMessage(reply.text, { stopReason: reply.stopReason });
   };
   faux.setResponses(Array.from({ length: 64 }, () => step));
   return { models, faux, seen };
@@ -73,18 +78,39 @@ test("a routing policy is validated strictly and its preferences fail closed", (
     { version: 1, roles: { worker: [{ provider: "openai", model: "x" }] }, reviewCost: -1 },
     { version: 1, roles: { worker: [{ provider: "openai", model: "x" }] }, openRouter: { dataCollection: "maybe" } },
     { version: 1, roles: { worker: [{ provider: "openai", model: "x" }] }, openRouter: { order: ["ok", "bad\nname"] } },
+    { version: 1, roles: {}, openRouter: { data_collection: "deny" } },
+    { version: 1, roles: { worker: [{ provider: "openai", model: "x", thinking: "high" }] } },
   ]) expect(() => validateRoutingPolicy(bad, providers)).toThrow(RoutingError);
   expect(() => parseRoutingPolicy("{", providers)).toThrow("as JSON");
 
-  const completions = { id: "deepseek/deepseek-v3.2", provider: "openrouter", api: "openai-completions", compat: { supportsStrictMode: true } } as unknown as Model<"openai-completions">;
-  expect(withOpenRouterPreferences(completions, policy.openRouter).compat).toEqual({
-    supportsStrictMode: true, openRouterRouting: { data_collection: "deny", order: ["Fireworks"], sort: "price" } });
-  // Pi cannot send provider preferences on this API, so a privacy preference is refused instead of dropped.
-  const messages = { id: "anthropic/claude-sonnet-5", provider: "openrouter", api: "anthropic-messages" } as unknown as Model<"anthropic-messages">;
-  expect(() => withOpenRouterPreferences(messages, { dataCollection: "deny" })).toThrow("cannot be sent");
-  expect(withOpenRouterPreferences(messages, { sort: "price" })).toBe(messages);
+  const unsupported = { id: "unknown", provider: "openrouter", api: "unknown" } as unknown as Model<string>;
+  expect(() => openRouterRouting(unsupported, { dataCollection: "deny" })).toThrow("cannot be sent");
+  expect(() => openRouterRouting(unsupported, { allowFallbacks: false })).toThrow("cannot be sent");
   const direct = { id: "gpt-5-mini", provider: "openai", api: "openai-completions" } as unknown as Model<"openai-completions">;
-  expect(withOpenRouterPreferences(direct, policy.openRouter)).toBe(direct);
+  expect(openRouterRouting(direct, policy.openRouter)).toBeUndefined();
+});
+
+test("Pi sends approved OpenRouter preferences on both provider request formats", async () => {
+  const models = createModels();
+  models.setProvider(openrouterProvider());
+  const requests: { pathname: string; provider: unknown }[] = [];
+  const fetch = Object.assign(async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+    const request = input instanceof Request ? new Request(input, init) : new Request(String(input), init);
+    requests.push({ pathname: new URL(request.url).pathname, provider: (await request.json() as { provider?: unknown }).provider });
+    return new Response('{"error":{"message":"fixture rejected request"}}', { status: 400, headers: { "content-type": "application/json" } });
+  }, { preconnect: globalThis.fetch.preconnect });
+  for (const id of ["deepseek/deepseek-v3.2", "anthropic/claude-sonnet-4.6"]) {
+    const model = models.getModel("openrouter", id)!;
+    await budgetedModels(models, codingBudget(model), "fixture", {
+      openRouter: { dataCollection: "deny", zdr: true, order: ["OpenRouter"], allowFallbacks: false, sort: "price" },
+    }).streamSimple(model, { messages: [{ role: "user", content: "fixture", timestamp: 0 }] },
+      { apiKey: "sk-or-fixture", fetch, maxRetries: 0 }).result();
+  }
+  const expected = { data_collection: "deny", zdr: true, order: ["OpenRouter"], allow_fallbacks: false, sort: "price" };
+  expect(requests).toEqual([
+    { pathname: "/api/v1/chat/completions", provider: expected },
+    { pathname: "/api/v1/messages", provider: expected },
+  ]);
 });
 
 test("the router weighs price against the cost of a rejected result and keeps a fixed baseline in view", () => {
@@ -130,9 +156,10 @@ test("a deferred excerpt is saved whole and leaves this computer as a pointer", 
 
 test("an OpenRouter key check uses the key lookup and Pi's own catalog", async () => {
   const calls: { url: string; auth: string | null }[] = [];
+  let data: unknown = { label: "sk-or-…", limit: null };
   const transport = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     calls.push({ url: String(input), auth: new Headers(init?.headers).get("authorization") });
-    return new Response(JSON.stringify({ data: { label: "sk-or-…", limit: null } }), { status: 200, headers: { "content-type": "application/json" } });
+    return Response.json({ data });
   }) as typeof fetch;
   const signal = new AbortController().signal;
   expect(await checkProviderModel({ provider: "openrouter", model: "anthropic/claude-sonnet-5", apiKey: "sk-or-test" }, signal, transport)).toEqual({ code: "ready", httpStatus: 200 });
@@ -141,6 +168,9 @@ test("an OpenRouter key check uses the key lookup and Pi's own catalog", async (
   expect(await checkProviderModel({ provider: "openrouter", model: "nobody/not-a-model", apiKey: "sk-or-test" }, signal, transport)).toEqual({ code: "model-unavailable" });
   expect(await checkProviderModel({ provider: "openrouter", model: "../../etc", apiKey: "sk-or-test" }, signal, transport)).toEqual({ code: "model-unavailable" });
   expect(calls.length).toBe(1);
+  data = {};
+  expect(await checkProviderModel({ provider: "openrouter", model: "anthropic/claude-sonnet-5", apiKey: "sk-or-test" }, signal, transport))
+    .toEqual({ code: "invalid-response", httpStatus: 200 });
 });
 
 test("a request sourced from the repository map sends the approved selection and nothing else", async () => {
@@ -164,13 +194,18 @@ test("a request sourced from the repository map sends the approved selection and
   expect(excerpts.filter(({ deferred }) => deferred).every(({ content }) => content === undefined)).toBe(true);
   for (const { content } of preview.deferred) expect(seen[0]!.raw).not.toContain(JSON.stringify(content).slice(1, -1));
   const saved = await getSavedCodingRequestInput(session("map", "map-1"), { models, stateDir, workspaceBinding: workspace });
-  expect(saved?.groups[0]?.files.length).toBe(preview.excerpts.length + preview.deferred.length);
+  expect(saved?.groups[0]?.files.length).toBe(preview.excerpts.length);
+  expect(saved?.groups[0]?.deferred?.map(({ path, text }) => [path, text])).toEqual(preview.deferred.map(({ path, content }) => [path, content]));
+  expect(saved?.groups[0]?.map ?? []).toEqual(preview.map);
+  expect(saved?.groups[0]?.facts ?? []).toEqual(preview.skills.map(({ text }) => text));
 
   // A different budget is a different selection: the approved ID no longer matches.
   await expect(runCodingSession({ ...session("map", "map-2"), prompt, atlas: { tokenBudget: 900, id: preview.manifest.id } }, { models, stateDir }))
     .rejects.toThrow("Preview it again");
   await expect(runCodingSession({ ...session("map", "map-3"), prompt, files: ["README.md"], atlas: { id: preview.manifest.id } }, { models, stateDir }))
     .rejects.toThrow("Choose one source");
+  await expect(runCodingSession({ ...session("map", "map-4"), prompt, approvedSourceLookup: true, atlas: options.atlas }, { models, stateDir }))
+    .rejects.toThrow("Preview deferred excerpts");
   expect(seen.length).toBe(1);
 });
 
@@ -199,6 +234,46 @@ test("a plan is local, reproducible, and splits work only when it should", async
   await expect(previewCodingOrchestration({ ...session("plan", "p"), prompt: "zeppelin ingress annotations", orchestration: {} }, { models })).rejects.toThrow("found no source");
 });
 
+test("work orders stay inside selected subdirectories and enforce the scope of a single worker", async () => {
+  const projects = ["packages/auth/src", "packages/billing/src"];
+  const { models, seen } = scripted(() => "Findings.\n\n--- a/packages/billing/tests/tax.test.ts\n+++ b/packages/billing/tests/tax.test.ts\n");
+  const identity = session("scoped-plan", "p-1");
+  const fanOut = await previewCodingOrchestration({ ...identity, prompt: task, orchestration: { projects, workers: 2, tokenBudget: 900 } }, { models });
+  expect(fanOut.plan.orders.map(({ scope }) => scope).sort()).toEqual(projects);
+  for (const order of fanOut.plan.orders) expect(order.excerpts.every(({ path }) => path.startsWith(`${order.scope}/`))).toBe(true);
+
+  const orchestration = { projects, workers: 1, tokenBudget: 900 };
+  const { plan } = await previewCodingOrchestration({ ...identity, prompt: task, orchestration }, { models });
+  expect(plan.orders[0]?.allowedDirectories).toEqual(projects);
+  const receipt = await runCodingSession({ ...identity, prompt: task, orchestration: { ...orchestration, id: plan.id } }, { models, stateDir });
+  expect(seen[0]?.request.workOrder).toMatchObject({ allowedDirectories: projects });
+  expect(receipt.orchestration?.outOfScope).toEqual([{ order: "w1", path: "packages/billing/tests/tax.test.ts" }]);
+});
+
+test("a cross-scope interface stays within the source selected for the plan", async () => {
+  const projects = ["apps/customer", "packages/billing"];
+  const { models } = scripted(() => "Report.");
+  const options = { ...session("scoped-interfaces", "p-1"), prompt: "start resolveCustomer publishInvoice computeTax InvoiceSchema",
+    orchestration: { projects, workers: 2, tokenBudget: 900 } };
+  const preview = await previewCodingOrchestration(options, { models });
+  expect(preview.plan.orders.flatMap(({ interfaces }) => interfaces)).toHaveLength(2);
+  const git = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: workspace });
+  const linkedFile = "packages/billing/src/publish.ts";
+  expect(git("rm", "--cached", "--", linkedFile).exitCode).toBe(0);
+  try {
+    const after = await previewCodingOrchestration(options, { models });
+    expect(after.plan.orders).toHaveLength(2);
+    expect(JSON.stringify(after.input.orders)).not.toContain(linkedFile);
+  } finally {
+    expect(git("add", "--", linkedFile).exitCode).toBe(0);
+  }
+  const receipt = await runCodingSession({ ...options, orchestration: { ...options.orchestration, id: preview.plan.id } }, { models, stateDir });
+  expect(receipt.status).toBe("done");
+  const saved = await getSavedCodingRequestInput(options, { models, stateDir, workspaceBinding: workspace });
+  expect(saved?.groups.map(({ map, facts, interfaces }) => [map ?? [], facts ?? [], interfaces ?? []])).toEqual(
+    preview.plan.orders.map(({ map, facts, interfaces }) => [map, facts, interfaces]));
+});
+
 test("an approval covers how each call runs: reasoning level and provider preferences as well as the model", async () => {
   const { models } = scripted(() => "unused");
   const orchestration = { workers: 2, tokenBudget: 900 };
@@ -217,6 +292,8 @@ test("an approval covers how each call runs: reasoning level and provider prefer
   expect(plain.openRouter).toBeUndefined();
   expect((await preview({ ...base, openRouter: {} })).id).toBe(plain.id);
   expect(low.orders[0]!.route.choice).toEqual({ provider, model: "cheap", thinkingLevel: "low" });
+  await expect(preview({ ...base, roles: { worker: [{ provider, model: "cheap", thinkingLevel: "xhigh" }] } }))
+    .rejects.toThrow("does not support the xhigh reasoning level");
 
   // A plan approved with data collection denied cannot be admitted once that restriction is gone, or with another reasoning level.
   const run = (requestId: string, id: string, routing: RoutingPolicy) =>
@@ -306,7 +383,10 @@ test("a failed provider falls back to the next approved model with a fresh work 
   expect(receipt.orchestration!.conflicts).toEqual(["packages/contracts/src/index.ts"]);
   expect(receipt.orchestration!.outOfScope.length).toBe(2);
   expect(receipt.text).toContain("More than one worker proposed changes to: packages/contracts/src/index.ts");
-  expect(Object.keys((await getCodingSessionStatus(session("fallback", "f-1"), { models, stateDir })).usage.models).sort()).toEqual(["openai/cheap", "openai/strong"]);
+  const totals = (await getCodingSessionStatus(session("fallback", "f-1"), { models, stateDir })).usage.models;
+  expect(Object.keys(totals).sort()).toEqual(["openai/cheap", "openai/strong"]);
+  expect(receipt.usage.totalTokens).toBe(Object.values(totals).reduce((sum, usage) => sum + usage.totalTokens, 0));
+  expect(byScope["packages/billing"]!.usage!.totalTokens).toBeGreaterThan(byScope["packages/billing"]!.modelUsage!.totalTokens);
 
   // A review of the result teaches the route statistics and the map.
   const learned = await recordCodingOutcome({ workspace, session: "fallback", requestId: "f-1", outcome: "accepted", receipt });
@@ -319,6 +399,50 @@ test("a failed provider falls back to the next approved model with a fresh work 
   } finally { learning.close(); }
   // Recording the same review twice changes nothing.
   expect((await recordCodingOutcome({ workspace, session: "fallback", requestId: "f-1", outcome: "accepted", receipt })).routes).toBe(0);
+});
+
+test("the routed model owns its context budget and the full truncated-provider answer stays reviewable", async () => {
+  const path = "packages/auth/src/session.ts";
+  const report = `${"Source observation. ".repeat(320)}\n--- a/${path}\n+++ b/${path}\n`;
+  const { models, seen } = scripted(({ request }) => request.reports ? "Combined answer." : { text: report, stopReason: "length" }, ["tiny", "strong"]);
+  const identity = session("routed-budget", "budget-1", "tiny");
+  const routing: RoutingPolicy = { version: 1, learn: false, roles: {
+    worker: [{ provider, model: "strong" }], orchestrator: [{ provider, model: "strong" }],
+  } };
+  const orchestration = { workers: 2, tokenBudget: 900, routing };
+  const { plan } = await previewCodingOrchestration({ ...identity, prompt: task, orchestration }, { models });
+  const receipt = await runCodingSession({ ...identity, prompt: task, orchestration: { ...orchestration, id: plan.id } }, { models, stateDir });
+  expect(receipt.status).toBe("done");
+  expect(seen.map(({ model }) => model)).toEqual(["strong", "strong", "strong"]);
+  const combining = seen.find(({ request }) => request.reports)?.request.reports as { report: string; excerpted?: boolean }[];
+  expect(combining.every(({ report, excerpted }) => report.length === 6000 && excerpted)).toBe(true);
+  expect(receipt.orchestration?.orders.map(({ report, stopReason }) => [report, stopReason])).toEqual([[report, "length"], [report, "length"]]);
+  expect(receipt.orchestration?.conflicts).toEqual([path]);
+});
+
+test("a routed request requires credentials for its calls, regardless of the session's provider", async () => {
+  const original = { OPENAI_API_KEY: process.env.OPENAI_API_KEY, OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY };
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  try {
+    const identity = session("route-credentials", "c-1", "gpt-5");
+    const routing: RoutingPolicy = { version: 1, roles: { worker: [{ provider: "openrouter", model: "deepseek/deepseek-v3.2" }] } };
+    const options = { ...identity, prompt: task, orchestration: { workers: 1, tokenBudget: 900, routing } };
+    const { plan } = await previewCodingOrchestration(options);
+    const request = { ...options, orchestration: { ...options.orchestration, id: plan.id } };
+    await expect(runCodingSession(request, { stateDir })).rejects.toThrow("Set an API key for one of the approved providers: openrouter");
+
+    process.env.OPENROUTER_API_KEY = "sk-or-fixture";
+    const cancel = new AbortController();
+    // Withdraw immediately after admission, before any provider request is scheduled.
+    expect(await runCodingSession(request, { stateDir, signal: cancel.signal, admitted: () => cancel.abort() }))
+      .toMatchObject({ status: "unanswered", reason: "Orchestrated request cancelled." });
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test("when the reports cannot be combined they are returned as written, and a cancelled plan stops its workers", async () => {
@@ -395,7 +519,7 @@ test("an orchestrated request killed during generation resumes from its saved pl
 
   // Recovery needs neither the map nor the source: both are gone, and the policy is not passed again.
   expect(removeAtlas(repo.workspace, atlas, true)).toBe(true);
-  await rm(join(repo.workspace, "packages"), { recursive: true });
+  await rm(repo.workspace, { recursive: true });
   const recovered = await runCodingSession(identity, { models, stateDir, atlas });
   expect(recovered.status).toBe("done");
   if (recovered.status !== "done") return;

@@ -85,6 +85,7 @@ export interface SkillRequest {
   /** Package roots the selection touches, most relevant first. */
   packages: string[];
   paths: string[];
+  allowsPath: (path: string) => boolean;
   queryVector: Float32Array;
   query: string;
   budgetBytes: number;
@@ -152,7 +153,8 @@ interface UnitDetail {
   id: number; file: number; name: string; kind: string; start_line: number; end_line: number; role: Role; gist: string;
   path: string; sha256: string; package: number;
 }
-interface PackageDetail { id: number; root: string; name: string; description: string | null; files: number; owners: string }
+interface PackageDetail { id: number; root: string; name: string; manifest: string | null; description: string | null; files: number }
+interface CheckDetail { argv: string; source_path: string }
 
 function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -172,6 +174,21 @@ function scopePaths(values: readonly string[] | undefined, what: string): string
     paths.add(path);
   }
   return [...paths].sort();
+}
+
+function underScope(path: string, directory: string): boolean {
+  return directory === "." || path === directory || path.startsWith(`${directory}/`);
+}
+
+function searchScope(scopes: readonly string[], excluded: readonly string[]) {
+  const params: string[] = [];
+  const within = (directories: readonly string[]) => directories.includes(".") ? "1" : directories.map((directory) => {
+    params.push(`${directory}/`, `${directory}0`);
+    return "(f.path >= ? AND f.path < ?)";
+  }).join(" OR ");
+  const include = scopes.length && !scopes.includes(".") ? ` AND (${within(scopes)})` : "";
+  const exclude = excluded.length ? ` AND NOT (${within(excluded)})` : "";
+  return { sql: `${include}${exclude}`, params };
 }
 
 /** File ids under a directory, using the path index as a range scan. */
@@ -272,6 +289,10 @@ export async function readAtlas(
   if (!workspace || !(await stat(workspace).catch(() => undefined))?.isDirectory()) throw new AtlasError("Choose an existing coding workspace directory.");
   const scopes = scopePaths(options.projects, "project");
   const excluded = scopePaths(options.exclude, "excluded");
+  const scope = searchScope(scopes, excluded);
+  const allowsPath = (path: string) => (!scopes.length || scopes.some((scope) => underScope(path, scope)))
+    && !excluded.some((scope) => underScope(path, scope));
+  const allowsWholePackage = (root: string) => allowsPath(root) && !excluded.some((scope) => underScope(scope, root));
   const params: ReadoutParams = hooks.learning?.params ?? defaultParams();
   const features = queryFeatures(query);
   if (!features.terms.size) throw new AtlasError("Enter search terms such as identifiers, paths, or feature names.");
@@ -285,8 +306,9 @@ export async function readAtlas(
   let queryVector: Float32Array;
   let neighbours: Map<number, { via: string; kind: string }>;
   let tests: Map<number, string[]>;
-  let commands: Map<number, string[]>;
-  let dependencies: Map<number, string[]>;
+  let commands: Map<number, CheckDetail[]>;
+  let dependencies: Map<number, number[]>;
+  let mapPaths: string[];
   let savedFrequencies: ReturnType<Atlas["frequencies"]>;
   try {
     // One read transaction, so the rows and the vector generation belong to the same import.
@@ -309,7 +331,7 @@ export async function readAtlas(
     queryVector = embedBag(features.terms, frequencies);
 
     let allowed: Uint8Array | undefined;
-    if ((scopes.length && !scopes.includes(".")) || excluded.length) {
+    if (scope.sql) {
       allowed = new Uint8Array(rows);
       const mark = (directory: string, value: number) => {
         for (const file of filesUnder(atlas, directory)) {
@@ -355,9 +377,10 @@ export async function readAtlas(
     const totalWeight = termWeights.reduce((total, [, weight]) => total + weight, 0);
     if (text && totalWeight > 0) {
       const prefixes = termWeights.filter(([term]) => /^[\p{L}\p{N}]{5,24}$/u.test(term)).slice(0, 12).map(([term]) => `${term}*`);
+      const scopeJoin = scope.sql ? "JOIN units u ON u.id = unit_text.rowid JOIN files f ON f.id = u.file" : "";
       const hits = atlas.all<{ id: number }>(
-        `SELECT rowid AS id FROM unit_text WHERE unit_text MATCH ? ORDER BY bm25(unit_text, 8.0, 3.0, 6.0, 1.0) LIMIT ?`,
-        [text, ...prefixes].join(" OR "), lexicalLimit * (allowed ? 4 : 1));
+        `SELECT unit_text.rowid AS id FROM unit_text ${scopeJoin} WHERE unit_text MATCH ?${scope.sql}
+         ORDER BY bm25(unit_text, 8.0, 3.0, 6.0, 1.0) LIMIT ?`, [text, ...prefixes].join(" OR "), ...scope.params, lexicalLimit);
       const ids: number[] = [];
       for (const { id } of hits) {
         const row = rowOfUnit.get(id);
@@ -381,14 +404,17 @@ export async function readAtlas(
     // Exact lane: a named symbol or path is the strongest evidence a task can give.
     if (features.identifiers.length) {
       const names = features.identifiers.slice(0, 16);
-      for (const { unit } of atlas.all<{ unit: number }>(`SELECT unit FROM symbols WHERE name IN (${names.map(() => "?").join(",")}) LIMIT 256`, ...names)) {
+      const scopeJoin = scope.sql ? "JOIN files f ON f.id = s.file" : "";
+      for (const { unit } of atlas.all<{ unit: number }>(
+        `SELECT s.unit FROM symbols s ${scopeJoin} WHERE s.name IN (${names.map(() => "?").join(",")})${scope.sql} LIMIT 256`, ...names, ...scope.params)) {
         const row = rowOfUnit.get(unit);
         if (row !== undefined && (!allowed || allowed[row])) exact.set(row, 1);
       }
     }
     for (const path of features.paths) {
       const escaped = path.replace(/[\\%_]/gu, "\\$&");
-      for (const { id } of atlas.all<{ id: number }>("SELECT id FROM files WHERE lower(path) = ? OR lower(path) LIKE ? ESCAPE '\\' LIMIT 8", path, `%/${escaped}`)) {
+      for (const { id } of atlas.all<{ id: number }>(
+        `SELECT f.id FROM files f WHERE (lower(f.path) = ? OR lower(f.path) LIKE ? ESCAPE '\\')${scope.sql} LIMIT 8`, path, `%/${escaped}`, ...scope.params)) {
         const span = fileRows.get(id);
         if (!span) continue;
         for (let row = span[0]; row < span[1]; row++) if (!allowed || allowed[row]) exact.set(row, Math.max(exact.get(row) ?? 0, 0.6));
@@ -514,7 +540,7 @@ export async function readAtlas(
 
     const candidateRows = best > 0 ? topRows(evidence, absoluteFloor * candidateFloor, maxCandidates) : [];
     const details = unitDetails(atlas, candidateRows.map((row) => vectors.index[row * 4]!));
-    packages = new Map(atlas.all<PackageDetail>("SELECT id, root, name, description, files, owners FROM packages").map((pkg) => [pkg.id, pkg]));
+    packages = new Map(atlas.all<PackageDetail>("SELECT id, root, name, manifest, description, files FROM packages").map((pkg) => [pkg.id, pkg]));
     const multiPackage = packages.size > 1;
     scored = [];
     for (const row of candidateRows) {
@@ -540,14 +566,32 @@ export async function readAtlas(
     tests = new Map();
     commands = new Map();
     dependencies = new Map();
+    const factPaths = new Set<string>();
+    const noteManifest = (pkg: PackageDetail | undefined) => {
+      if (pkg?.manifest && allowsPath(pkg.manifest)) factPaths.add(pkg.manifest);
+    };
     for (const id of involved) {
-      const testFiles = atlas.all<{ path: string }>("SELECT path FROM files WHERE package = ? AND role = 'test' ORDER BY path LIMIT 64", id).map(({ path }) => posix.dirname(path));
-      tests.set(id, [...new Set(testFiles)].slice(0, 2));
-      commands.set(id, atlas.all<{ argv: string; kind: string }>("SELECT argv, kind FROM tools WHERE package = ? AND kind IN ('test', 'typecheck') ORDER BY kind, length(argv) LIMIT 2", id)
-        .flatMap(({ argv }) => { try { return [(JSON.parse(argv) as string[]).join(" ")]; } catch { return []; } }));
-      dependencies.set(id, atlas.all<{ name: string }>(
-        "SELECT p.name FROM package_edges e JOIN packages p ON p.id = e.dst WHERE e.src = ? GROUP BY p.id ORDER BY sum(e.weight) DESC LIMIT 4", id).map(({ name }) => name));
+      const testFiles = atlas.all<{ path: string }>("SELECT path FROM files WHERE package = ? AND role = 'test' ORDER BY path LIMIT 64", id)
+        .map(({ path }) => path).filter(allowsPath);
+      tests.set(id, testFiles);
+      for (const path of testFiles) factPaths.add(path);
+      const checks = atlas.all<CheckDetail>("SELECT argv, source_path FROM tools WHERE package = ? AND kind IN ('test', 'typecheck') ORDER BY kind, length(argv), id", id)
+        .filter(({ source_path }) => allowsPath(source_path));
+      commands.set(id, checks);
+      for (const { source_path } of checks) factPaths.add(source_path);
+      const pkg = packages.get(id);
+      noteManifest(pkg);
+      if (!pkg || !allowsWholePackage(pkg.root)) continue;
+      const deps = atlas.all<{ id: number }>(
+        "SELECT dst AS id FROM package_edges WHERE src = ? GROUP BY dst ORDER BY sum(weight) DESC, dst LIMIT 12", id)
+        .map(({ id: target }) => target).filter((target) => {
+          const candidate = packages.get(target);
+          return candidate && allowsWholePackage(candidate.root);
+        });
+      dependencies.set(id, deps);
+      for (const target of deps) noteManifest(packages.get(target));
     }
+    mapPaths = [...factPaths];
 
     const seedBlob = atlas.blob("roleSeeds");
     const seeds = seedBlob && seedBlob.byteLength === roles.length * embeddingDim * 4
@@ -569,20 +613,25 @@ export async function readAtlas(
     Math.max(Math.min(candidates.reduce((max, candidate) => Math.max(max, candidate.evidence), 0), floorReference) * relativeFloor, absoluteFloor);
   const tracking = new Map<string, boolean>();
   let untrackedFiles = 0;
+  let checkedCandidates = 0;
   for (let round = 0; round < 4; round++) {
     const reachable = floorOf(scored) * deferredShare;
     const unknown = [...new Set(scored.filter((candidate) => candidate.evidence >= reachable && !tracking.has(candidate.unit.path)).map(({ unit }) => unit.path))]
-      .slice(0, maxCheckedFiles - tracking.size);
+      .slice(0, maxCheckedFiles - checkedCandidates);
     if (!unknown.length) break;
+    const paths = round === 0
+      ? [...unknown, ...mapPaths, ...[...neighbours.values()].map(({ via }) => via).filter(allowsPath)]
+      : unknown;
     let tracked: Set<string>;
     try {
-      tracked = await trackedAmong(workspace, unknown);
+      tracked = await trackedAmong(workspace, paths);
     } catch (error) {
       if (error instanceof AtlasScanError) throw new AtlasError("Git could not confirm that the selected files are still tracked. Use the repository map from a Git checkout.", { cause: error });
       throw error;
     }
-    for (const path of unknown) tracking.set(path, tracked.has(path));
-    untrackedFiles += unknown.length - tracked.size;
+    for (const path of paths) tracking.set(path, tracked.has(path));
+    checkedCandidates += unknown.length;
+    untrackedFiles += unknown.filter((path) => !tracked.has(path)).length;
     // Removing a candidate can lower the floor and bring others into reach, which the next round checks.
     scored = scored.filter((candidate) => tracking.get(candidate.unit.path) !== false);
   }
@@ -591,7 +640,7 @@ export async function readAtlas(
     const reachable = floorOf(scored) * deferredShare;
     scored = scored.filter((candidate) => candidate.evidence < reachable || tracking.get(candidate.unit.path) === true);
     // A reason never cites a file that is no longer tracked.
-    for (const [unit, link] of neighbours) if (tracking.get(link.via) === false) neighbours.delete(unit);
+    for (const [unit, link] of neighbours) if (tracking.get(link.via) !== true) neighbours.delete(unit);
   }
 
   // ----- Slots -----
@@ -673,14 +722,16 @@ export async function readAtlas(
   const locate = (unit: UnitDetail, source: NonNullable<Awaited<ReturnType<typeof load>>>): [number, number] | undefined => {
     if (!source.stale) return [unit.start_line, unit.end_line];
     const fresh = source.units?.units ?? [];
-    const match = fresh.find((candidate) => candidate.name === unit.name)
-      ?? fresh.reduce<typeof fresh[number] | undefined>((nearest, candidate) =>
+    const named = unit.kind === "symbol" || unit.kind === "section";
+    const match = fresh.filter((candidate) => candidate.kind === unit.kind && (!named || candidate.name === unit.name || candidate.symbols.includes(unit.name)))
+      .reduce<typeof fresh[number] | undefined>((nearest, candidate) =>
         !nearest || Math.abs(candidate.startLine - unit.start_line) < Math.abs(nearest.startLine - unit.start_line) ? candidate : nearest, undefined);
     return match ? [match.startLine, match.endLine] : undefined;
   };
 
   const excerpts: (RepositoryContextExcerpt & { reason: string; slot: string })[] = [];
   const taken = new Set<number>();
+  const unavailable = new Set<number>();
   const selectedFiles = new Set<string>();
   let contextBytes = 2;
   let budgetReached = false;
@@ -699,12 +750,12 @@ export async function readAtlas(
   };
   const take = async (index: number, slot: Slot | undefined): Promise<"taken" | "skip" | "full"> => {
     const candidate = scored[index]!;
-    if (taken.has(index)) return "skip";
+    if (taken.has(index) || unavailable.has(index)) return "skip";
     if (excerpts.length >= maxExcerpts) return "full";
     if (!selectedFiles.has(candidate.unit.path) && selectedFiles.size >= maxSelectedFiles) { filesReached = true; return "skip"; }
     const source = await load(candidate.unit);
     const range = source ? locate(candidate.unit, source) : undefined;
-    if (!source || !range) { taken.add(index); return "skip"; }
+    if (!source || !range) { unavailable.add(index); return "skip"; }
     const remaining = excerptBudget - contextBytes - (excerpts.length ? 1 : 0);
     // A unit of a few lines is hard to read alone, so it brings some of its surroundings.
     const short = Math.max(0, minExcerptLines - (range[1] - range[0] + 1));
@@ -750,7 +801,8 @@ export async function readAtlas(
     if (outcome === "full") { budgetReached = true; break; }
     if (outcome === "exhausted") active.delete(slot);
   }
-  if ([...active].length === 0 && scored.some((candidate, index) => candidate.evidence >= floor && !taken.has(index))) budgetReached ||= contextBytes > excerptBudget * 0.9;
+  if (active.size === 0 && scored.some((candidate, index) => candidate.evidence >= floor && !taken.has(index) && !unavailable.has(index)))
+    budgetReached ||= contextBytes > excerptBudget * 0.9;
 
   // Adjacent ranges of one file read better as a single excerpt.
   const merged = mergeExcerpts(excerpts, sources);
@@ -758,7 +810,9 @@ export async function readAtlas(
 
   // ----- Map, deferred excerpts, skills -----
   const packageOrder = [...new Set(scored.filter((_, index) => taken.has(index)).map(({ unit }) => unit.package))];
-  for (const candidate of scored.slice(0, 64)) if (!packageOrder.includes(candidate.unit.package) && candidate.evidence >= floor) packageOrder.push(candidate.unit.package);
+  for (const [index, candidate] of scored.slice(0, 64).entries()) {
+    if (!unavailable.has(index) && !packageOrder.includes(candidate.unit.package) && candidate.evidence >= floor) packageOrder.push(candidate.unit.package);
+  }
   const map: string[] = [];
   let mapBytes = 0;
   const pushMap = (line: string): boolean => {
@@ -771,22 +825,32 @@ export async function readAtlas(
   for (const id of packageOrder.slice(0, 8)) {
     const pkg = packages.get(id);
     if (!pkg) continue;
-    const symbols = [...new Set(scored.filter(({ unit, evidence: score }) => score >= floor * deferredShare && unit.package === id && unit.kind === "symbol" && unit.role !== "test" && !unit.name.includes(" "))
+    const symbols = [...new Set(scored.filter(({ unit, evidence: score }, index) => !unavailable.has(index) && score >= floor * deferredShare
+      && unit.package === id && unit.kind === "symbol" && unit.role !== "test" && !unit.name.includes(" "))
       .slice(0, 5).map(({ unit }) => unit.name))];
-    const parts = [`${pkg.root === "." ? "(root)" : pkg.root} — ${pkg.name}${pkg.description ? `: ${clip(pkg.description, 90)}` : ""} (${pkg.files} files)`];
+    const visible = (!pkg.manifest || tracking.get(pkg.manifest) === true) && allowsPath(pkg.root);
+    const prefix = pkg.root === "." ? "(root)" : pkg.root;
+    const parts = [visible
+      ? `${prefix} — ${pkg.name}${pkg.description ? `: ${clip(pkg.description, 90)}` : ""}${allowsWholePackage(pkg.root) ? ` (${pkg.files} files)` : ""}`
+      : prefix];
     if (symbols.length) parts.push(`relevant: ${symbols.join(", ")}`);
-    const deps = dependencies.get(id);
+    const deps = visible ? (dependencies.get(id) ?? []).flatMap((target) => {
+      const dependency = packages.get(target);
+      return dependency && (!dependency.manifest || tracking.get(dependency.manifest) === true) ? [dependency.name] : [];
+    }).slice(0, 4) : [];
     if (deps?.length) parts.push(`uses: ${deps.join(", ")}`);
-    const testDirs = tests.get(id);
+    const testDirs = [...new Set((tests.get(id) ?? []).filter((path) => tracking.get(path) === true).map((path) => posix.dirname(path)))].slice(0, 2);
     if (testDirs?.length) parts.push(`tests: ${testDirs.join(", ")}`);
-    const run = commands.get(id);
+    const run = (commands.get(id) ?? []).filter(({ source_path }) => tracking.get(source_path) === true).slice(0, 2)
+      .flatMap(({ argv }) => { try { return [(JSON.parse(argv) as string[]).join(" ")]; } catch { return []; } });
     if (run?.length) parts.push(`checks: ${run.join("; ")}`);
     if (!pushMap(clip(parts.join(" | "), 420))) break;
   }
   const deferred: RepositoryContextExcerpt[] = [];
   if (options.deferred) {
     let deferredBytes = 0;
-    const order = scored.map((candidate, index) => [candidate, index] as const).filter(([candidate, index]) => !taken.has(index) && candidate.evidence >= floor * deferredShare)
+    const order = scored.map((candidate, index) => [candidate, index] as const)
+      .filter(([candidate, index]) => !taken.has(index) && !unavailable.has(index) && candidate.evidence >= floor * deferredShare)
       .sort((a, b) => b[0].evidence - a[0].evidence || a[0].unit.path.localeCompare(b[0].unit.path));
     for (const [candidate] of order) {
       if (deferred.length >= maxDeferred || deferredBytes > excerptBudget) break;
@@ -797,14 +861,15 @@ export async function readAtlas(
       if (merged.some((excerpt) => excerpt.path === candidate.unit.path && range[0] >= excerpt.startLine && range[1] <= excerpt.endLine)) continue;
       const excerpt = excerptWindow(source.lines, range[0], range[1], terms, candidate.unit.path, maxExcerptBytes);
       if (!excerpt) continue;
-      if (!pushMap(`on request: ${excerpt.path}:${excerpt.startLine}-${excerpt.endLine} ${clip(candidate.unit.gist || candidate.unit.name, 80)}`)) break;
+      const gist = source.stale ? "" : clip(candidate.unit.gist || candidate.unit.name, 80);
+      if (!pushMap(`on request: ${excerpt.path}:${excerpt.startLine}-${excerpt.endLine}${gist ? ` ${gist}` : ""}`)) break;
       deferred.push(excerpt);
       deferredBytes += serializedBytes(excerpt);
     }
   }
   const seed = sha256(JSON.stringify([query, merged.map(({ path, startLine, endLine }) => [path, startLine, endLine]), params.version]));
   const delivered = hooks.skills && merged.length ? await hooks.skills({
-    packages: packageOrder.flatMap((id) => packages.get(id)?.root ?? []), paths: [...selectedFiles], queryVector, query, budgetBytes: skillBudget, seed,
+    packages: packageOrder.flatMap((id) => packages.get(id)?.root ?? []), paths: [...selectedFiles], allowsPath, queryVector, query, budgetBytes: skillBudget, seed,
   }) : { skills: [], withheld: [] };
 
   const files = merged.map(({ path, startLine, endLine, content, reason }) => ({ path, startLine, endLine, sha256: sha256(content), reason }));
@@ -821,20 +886,20 @@ export async function readAtlas(
   const projects = scopes.length ? scopes : meta.scopes;
   const manifest: RepositoryContextManifest = {
     // The ID binds exactly what would be sent: the request text, every selected byte, the map, and the skills.
-    id: sha256(JSON.stringify([3, projects, excluded, query, tokenBudget, files, atlasManifest.map.sha256, atlasManifest.skills, atlasManifest.deferred])),
+    id: sha256(JSON.stringify([4, projects, excluded, query, tokenBudget, files, atlasManifest.map.sha256, atlasManifest.skills, options.deferred === true, atlasManifest.deferred])),
     projects, query, tokenBudget,
     estimatedTokens: estimateTokens(totalBytes), contextBytes: totalBytes, trackedPaths: meta.files, candidateFiles: new Set(scored.map(({ unit }) => unit.file)).size,
     scannedFiles: scannedUnits, matchedFiles: scored.filter((candidate) => candidate.evidence >= floor).length,
     limitsReached: { trackedPaths: meta.limited, scannedFiles: false, fileBytes: limitedBytes, selectedFiles: filesReached, tokenBudget: budgetReached },
     files, ...(meta.revision ? { workspaceRevision: meta.revision } : {}), atlas: atlasManifest,
   };
-  const ranked: RankedUnit[] = scored.slice(0, 48).map((candidate, index) => ({
+  const ranked: RankedUnit[] = scored.slice(0, 48).flatMap((candidate, index) => tracking.get(candidate.unit.path) === true ? [{
     path: candidate.unit.path, name: candidate.unit.name, startLine: candidate.unit.start_line, endLine: candidate.unit.end_line, role: candidate.unit.role,
     package: packages.get(candidate.unit.package)?.root ?? ".", region: candidate.region, evidence: Number(candidate.evidence.toFixed(4)),
     lanes: Object.fromEntries(Object.entries(candidate.lanes).map(([lane, value]) => [lane, Number(value.toFixed(4))])) as Record<Lane, number>,
     slot: slots.reduce<Slot | undefined>((top, slot) => !top || slot.attention[index]! > top.attention[index]! ? slot : top, undefined)?.name ?? "",
-    selected: taken.has(index) && merged.some((excerpt) => excerpt.path === candidate.unit.path),
-  }));
+    selected: taken.has(index),
+  }] : []);
   return {
     manifest, excerpts: merged.map(({ path, startLine, endLine, content }) => ({ path, startLine, endLine, content })),
     map, skills: delivered.skills, deferred, ranked,
@@ -934,7 +999,10 @@ function mergeExcerpts(excerpts: Chosen[], sources: Map<string, { lines: string[
       const joined = lines && next.startLine <= current.endLine + 3
         ? { ...current, endLine: Math.max(current.endLine, next.endLine), content: lines.slice(current.startLine - 1, Math.max(current.endLine, next.endLine)).join("\n") }
         : undefined;
-      if (joined && serializedBytes(joined.content) <= maxExcerptBytes * 2) current = joined;
+      const excerptBytes = ({ path, startLine, endLine, content }: Chosen) => serializedBytes({ path, startLine, endLine, content });
+      // Gap lines can contain more bytes than the separate excerpts leave in the budget.
+      if (joined && serializedBytes(joined.content) <= maxExcerptBytes * 2 && excerptBytes(joined) <= excerptBytes(current) + excerptBytes(next) + 1)
+        current = joined;
       else { merged.push(current); current = next; }
     }
     merged.push(current);

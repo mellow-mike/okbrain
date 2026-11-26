@@ -7,10 +7,11 @@ import type { CodingSessionStatusResult } from "./durable.ts";
 const sessionName = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const requestName = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
 const modelName = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$/u;
+const openRouterModelName = /^~?[a-zA-Z0-9][a-zA-Z0-9._-]*\/[a-zA-Z0-9][a-zA-Z0-9._:-]*$/u;
 const projectName = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u;
 const digest = /^[0-9a-f]{64}$/u;
 const revision = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
-const providers = new Set(["openai", "anthropic", "google"]);
+const providers = new Set(["openai", "anthropic", "google", "openrouter"]);
 const runStatuses = new Set(["queued", "placed", "running", "interrupted", "done", "unanswered", "failed", "cancelled"]);
 const requestStatuses = new Set(["queued", "placed", "done", "unanswered"]);
 const stopReasons = new Set<StopReason>(["pending", "stop", "length", "toolUse", "error", "aborted", "deferred"]);
@@ -18,6 +19,8 @@ const contextCounters = ["estimatedTokens", "limitTokens", "modelWindowTokens", 
 const manifestCounters = ["tokenBudget", "estimatedTokens", "contextBytes", "trackedPaths", "candidateFiles", "scannedFiles", "matchedFiles"] as const;
 const manifestLimits = ["trackedPaths", "scannedFiles", "fileBytes", "selectedFiles", "tokenBudget"] as const;
 const maxFiles = 12;
+const maxAtlasExcerpts = 32;
+const maxDeferredExcerpts = 16;
 const maxPackages = 3;
 
 type Counters<K extends readonly string[]> = Partial<Record<K[number], number>>;
@@ -27,6 +30,7 @@ type RepositoryReport = Counters<typeof manifestCounters> & {
   workspaceRevision?: string;
   limitsReached?: Partial<Record<(typeof manifestLimits)[number], boolean>>;
   files: (FileRange & { sha256?: string })[];
+  deferred?: (FileRange & { sha256?: string })[];
   index?: { indexedFiles: number; expandedFiles: number; limited: boolean };
 };
 type PackageReport = {
@@ -35,6 +39,12 @@ type PackageReport = {
   status: "done" | "unanswered";
   usage?: Usage;
   sources?: FileRange[];
+};
+type RoutedCallReport = { model?: string; attempts: number; status: "done" | "unanswered"; usage?: Usage };
+type OrchestrationReport = {
+  mode: "single" | "fan-out";
+  orders: (RoutedCallReport & { scope: string; requestId: string; sources: FileRange[] })[];
+  synthesis?: RoutedCallReport;
 };
 
 export interface CodingRunReport {
@@ -56,7 +66,7 @@ export interface CodingRunReport {
     repositoryContext?: RepositoryReport;
     files?: { path: string }[];
   };
-  receipt?: { status: "done" | "unanswered"; stopReason?: StopReason; usage?: Usage; packageReviews?: PackageReport[] };
+  receipt?: { status: "done" | "unanswered"; stopReason?: StopReason; usage?: Usage; packageReviews?: PackageReport[]; orchestration?: OrchestrationReport };
   usage: UsageState;
   rootUsage: UsageState;
 }
@@ -100,11 +110,24 @@ function usageReport(value: unknown): Usage | undefined {
   };
 }
 
-function ledger(value: UsageState, modelKey: string): UsageState {
-  // Coding binds each root and its package reviews to one model and one known lookup tool.
-  const model = usageReport(value?.models?.[modelKey]);
+function validModel(provider: string, model: unknown): boolean {
+  return providers.has(provider) && (matches(model, modelName)
+    || (provider === "openrouter" && matches(model, openRouterModelName) && model.length <= 256));
+}
+
+function modelKey(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const separator = value.indexOf("/");
+  return separator > 0 && validModel(value.slice(0, separator), value.slice(separator + 1));
+}
+
+function ledger(value: UsageState): UsageState {
+  const models = Object.fromEntries(Object.entries(value?.models ?? {}).flatMap(([key, raw]) => {
+    const usage = modelKey(key) ? usageReport(raw) : undefined;
+    return usage ? [[key, usage]] : [];
+  }));
   const lookup = usageReport(value?.tools?.[approvedSourceToolName]);
-  return { models: model ? { [modelKey]: model } : {}, tools: lookup ? { [approvedSourceToolName]: lookup } : {} };
+  return { models, tools: lookup ? { [approvedSourceToolName]: lookup } : {} };
 }
 
 function safePath(value: unknown): value is string {
@@ -122,11 +145,14 @@ function fileRange(value: unknown): FileRange | undefined {
 
 function repositoryReport(value: unknown): RepositoryReport | undefined {
   if (!record(value) || !matches(value.id, digest)) return;
-  const files = Array.isArray(value.files) ? value.files.slice(0, maxFiles).flatMap((file) => {
+  const atlas = record(value.atlas) ? value.atlas : undefined;
+  const ranges = (input: unknown, limit: number) => Array.isArray(input) ? input.slice(0, limit).flatMap((file) => {
     const range = fileRange(file);
     if (!range || !record(file)) return [];
     return [{ ...range, ...(matches(file.sha256, digest) ? { sha256: file.sha256 } : {}) }];
   }) : [];
+  const files = ranges(value.files, atlas ? maxAtlasExcerpts : maxFiles);
+  const deferred = ranges(atlas?.deferred, maxDeferredExcerpts);
   const limitsReached: NonNullable<RepositoryReport["limitsReached"]> = {};
   if (record(value.limitsReached)) for (const key of manifestLimits) {
     const limit = value.limitsReached[key];
@@ -134,7 +160,7 @@ function repositoryReport(value: unknown): RepositoryReport | undefined {
   }
   const index = value.index;
   return {
-    id: value.id, files, ...counters(value, manifestCounters),
+    id: value.id, files, ...(deferred.length ? { deferred } : {}), ...counters(value, manifestCounters),
     ...(matches(value.workspaceRevision, revision) ? { workspaceRevision: value.workspaceRevision } : {}),
     ...(Object.keys(limitsReached).length ? { limitsReached } : {}),
     ...(record(index) && count(index.indexedFiles) && count(index.expandedFiles) && typeof index.limited === "boolean" ? {
@@ -173,13 +199,31 @@ function packageReports(value: unknown, parentId: string): PackageReport[] | und
   return packages.length ? packages : undefined;
 }
 
+function orchestrationReport(value: unknown, parentId: string): OrchestrationReport | undefined {
+  if (!record(value) || (value.mode !== "single" && value.mode !== "fan-out") || !Array.isArray(value.orders)) return;
+  function call(result: Record<string, unknown>, answer: unknown): RoutedCallReport {
+    const usage = usageReport(result.usage);
+    return {
+      ...(modelKey(result.model) ? { model: result.model } : {}), attempts: count(result.attempts) ? result.attempts : 0,
+      status: typeof answer === "string" && answer.trim() ? "done" : "unanswered", ...(usage ? { usage } : {}),
+    };
+  }
+  const validIds = new Set(value.mode === "single" ? [`${parentId}-work`] : [1, 2, 3, 4].map((part) => `${parentId}-work-${part}`));
+  const orders = value.orders.slice(0, validIds.size).flatMap((order) => {
+    if (!record(order) || (order.scope !== "." && !safePath(order.scope)) || typeof order.requestId !== "string" || !validIds.delete(order.requestId)) return [];
+    const sources = Array.isArray(order.sources) ? order.sources.slice(0, maxAtlasExcerpts).flatMap((file) => fileRange(file) ?? []) : [];
+    return [{ scope: order.scope, requestId: order.requestId, sources, ...call(order, order.report) }];
+  });
+  return orders.length ? { mode: value.mode, orders, ...(record(value.synthesis) ? { synthesis: call(value.synthesis, value.synthesis.text) } : {}) } : undefined;
+}
+
 export function codingRunReport(
   pi: CodingSessionStatusResult | undefined,
   run: { requestId: string; status: string; projectId?: string; review?: string | null },
 ): CodingRunReport | undefined {
   const request = pi?.request;
   if (!pi || !request || run.requestId !== request.requestId || !matches(run.requestId, requestName) || !matches(pi.session, sessionName) ||
-      !providers.has(pi.provider) || !matches(pi.model, modelName) || !runStatuses.has(run.status) || !requestStatuses.has(request.status)) return;
+      !validModel(pi.provider, pi.model) || !runStatuses.has(run.status) || !requestStatuses.has(request.status)) return;
 
   const saved = request.receipt;
   const receipt = saved?.requestId === request.requestId && saved.session === pi.session && saved.status === request.status ? saved : undefined;
@@ -189,11 +233,11 @@ export function codingRunReport(
     : Array.isArray(savedFiles) ? savedFiles.slice(0, maxFiles).flatMap((file) => record(file) ? [file.path] : []) : undefined;
   const files = explicitPaths?.slice(0, maxFiles).filter(safePath).map((path) => ({ path }));
   const sourceLookup = request.status === "done" && request.approvedSourceLookup === true
-    ? sourceLookupReport(request.sourceLookup, manifest?.files, files) : undefined;
+    ? sourceLookupReport(request.sourceLookup, manifest && [...manifest.files, ...manifest.deferred ?? []], files) : undefined;
   const requestUsage = usageReport(request.usage);
   const receiptUsage = usageReport(receipt?.status === "done" ? receipt.usage : undefined);
   const packages = packageReports(receipt?.packageReviews, run.requestId);
-  const modelKey = `${pi.provider}/${pi.model}`;
+  const orchestration = orchestrationReport(receipt?.orchestration, run.requestId);
 
   return {
     version: 1, session: pi.session, provider: pi.provider, model: pi.model, runStatus: run.status,
@@ -218,7 +262,8 @@ export function codingRunReport(
       ...(receipt.status === "done" && stopReasons.has(receipt.stopReason) ? { stopReason: receipt.stopReason } : {}),
       ...(receiptUsage ? { usage: receiptUsage } : {}),
       ...(packages ? { packageReviews: packages } : {}),
+      ...(orchestration ? { orchestration } : {}),
     } } : {}),
-    usage: ledger(pi.usage, modelKey), rootUsage: ledger(pi.rootUsage, modelKey),
+    usage: ledger(pi.usage), rootUsage: ledger(pi.rootUsage),
   };
 }
