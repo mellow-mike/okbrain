@@ -36,7 +36,7 @@
   };
   const taskLabels = {
     model: 'Model response', 'source-lookup': 'Approved source lookup', 'package-review': 'Package review',
-    'package-work': 'Package work', context: 'Context maintenance', work: 'Run work',
+    'package-work': 'Package work', orchestration: 'Orchestration', 'work-order': 'Work orders', context: 'Context maintenance', work: 'Run work',
   };
   const taskStates = [['pending', 'pending'], ['running', 'running'], ['waiting', 'waiting'], ['completing', 'finishing']];
 
@@ -466,7 +466,67 @@
     });
   }
 
+  function listBlock(title, lines) {
+    const block = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = title;
+    const list = document.createElement('ul');
+    list.className = 'coding-map';
+    for (const line of lines) {
+      const item = document.createElement('li');
+      item.textContent = line;
+      list.append(item);
+    }
+    block.append(summary, list);
+    return block;
+  }
+
+  function routeLabel(route) {
+    const name = (model) => model.provider + '/' + model.model;
+    const chosen = name(route.choice);
+    return chosen + (chosen === name(route.baseline) ? '' : ' (first choice ' + name(route.baseline) + ')') +
+      (route.fallbacks.length ? ', then ' + route.fallbacks.map(name).join(', ') + ' if its provider fails' : '');
+  }
+
+  function planContents(el, plan) {
+    const summary = document.createElement('p');
+    summary.textContent = (plan.mode === 'fan-out' ? plan.orders.length + ' workers. ' : 'One worker. ') + plan.reason + ' About ' +
+      plan.estimatedTokens.toLocaleString() + ' estimated input tokens across all planned calls.';
+    const pieces = [summary];
+    for (const warning of plan.warnings || []) {
+      const note = document.createElement('p');
+      note.className = 'muted';
+      note.setAttribute('role', 'note');
+      note.textContent = warning;
+      pieces.push(note);
+    }
+    for (const order of plan.orders) {
+      const section = document.createElement('section');
+      section.className = 'stack';
+      section.dataset.workOrder = order.id;
+      const title = document.createElement('h4');
+      title.textContent = order.scope === '.' ? 'Whole selection' : order.scope;
+      const model = document.createElement('p');
+      model.className = 'muted';
+      model.textContent = 'Model: ' + routeLabel(order.route) + '. ' + order.route.reason;
+      const items = document.createElement('div');
+      items.className = 'stack';
+      previewContents(items, order);
+      section.append(title, model, items);
+      if (order.interfaces.length) section.append(listBlock('Links to other work orders', order.interfaces));
+      pieces.push(section);
+    }
+    if (plan.synthesis) {
+      const combine = document.createElement('p');
+      combine.className = 'muted';
+      combine.textContent = 'The reports are combined by ' + routeLabel(plan.synthesis.route) + '.';
+      pieces.push(combine);
+    }
+    el.replaceChildren(...pieces);
+  }
+
   function previewContents(el, preview) {
+    if (preview.plan) return planContents(el, preview.plan);
     if (preview.packages) {
       const sections = preview.packages.map((entry) => {
         const section = document.createElement('section');
@@ -505,6 +565,19 @@
       const reason = manifest?.files[index]?.reason;
       pieces.push(disclosure(part.path + lines, part.content, reason));
     });
+    // What a repository map selection adds beside the excerpts. All of it is sent with the request.
+    if (preview.map?.length) pieces.push(listBlock('Map sent with the excerpts', preview.map));
+    const facts = preview.facts || preview.skills?.map((skill) => skill.text + (skill.trial ? ' (on trial)' : ''));
+    if (facts?.length) pieces.push(listBlock('Facts from the repository map', facts));
+    for (const part of preview.deferred || [])
+      pieces.push(disclosure('On request · ' + part.path + ':' + part.startLine + '–' + part.endLine, part.content, 'Sent only if the model looks it up'));
+    const stale = manifest?.atlas?.staleFiles;
+    if (stale) {
+      const note = document.createElement('p');
+      note.className = 'muted';
+      note.textContent = stale + ' selected files changed since the repository was imported. These excerpts are their current text. Import again to refresh the map.';
+      pieces.push(note);
+    }
     el.replaceChildren(...pieces);
   }
 
@@ -778,7 +851,8 @@
       '<div class="coding-grid">' + field('Session', 'main', 'text', 'name="session" required pattern="[a-z0-9][a-z0-9_\\-]{0,63}"') +
       field('Request ID', crypto.randomUUID(), 'text', 'name="requestId" required maxlength="128" spellcheck="false"') + '</div>' +
       '<label class="field"><span id="coding-source-label">Source</span><select name="source" aria-labelledby="coding-source-label"><option value="repository">Tracked repository excerpts</option>' +
-      '<option value="files">Explicit files</option><option value="packages">Independent package review</option></select></label>' +
+      '<option value="atlas">Repository map</option><option value="files">Explicit files</option><option value="packages">Independent package review</option>' +
+      '<option value="orchestrated">Orchestrated plan</option></select></label>' +
       '<div class="stack" data-repository>' +
       '<details data-run-presets></details>' +
       field('Search source', '', 'search', 'name="query" maxlength="1024" placeholder="Identifier, path, or terms"') +
@@ -795,6 +869,13 @@
         field('Directory', part === 3 || project.scopes[part - 1] === '.' ? '' : project.scopes[part - 1], 'text', 'data-package-project spellcheck="false"') +
         field('Search source', '', 'search', 'data-package-query maxlength="1024"') +
         field('Estimated excerpt tokens', '', 'number', 'data-package-budget min="1" max="4096" placeholder="2048"') + '</fieldset>').join('') + '</div>' +
+      '<div class="stack" data-atlas hidden><p class="muted" data-atlas-hint>The repository map selects source for the task from an import of this project. Import it under Project settings → Repository map.</p>' +
+      '<div data-atlas-query>' + field('Search source (optional)', '', 'search', 'name="mapQuery" maxlength="2048" placeholder="Defaults to the task"') + '</div>' +
+      '<div class="coding-grid">' + field('Directories', project.scopes.join(', '), 'text', 'name="mapProjects" spellcheck="false"') +
+      field('Estimated tokens', '4096', 'number', 'name="mapBudget" min="1" max="16384"') + '</div>' +
+      '<label class="field" data-atlas-workers><span>Workers</span><select name="mapWorkers"><option value="auto">Decide from the task</option><option value="1">1</option>' +
+      '<option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label>' +
+      '<label class="row" data-atlas-deferred><input type="checkbox" name="mapDeferred"><span>Also approve further excerpts the model may look up by path and line</span></label></div>' +
       '<label class="row" data-source-lookup><input type="checkbox" name="approvedSourceLookup"><span>Let the model look up line numbers within this request’s approved source</span></label>' +
       '<div class="row"><button type="button" data-preview>Preview source</button></div>' +
       '<div class="coding-preview stack" aria-live="polite" data-preview-content></div>' +
@@ -849,6 +930,16 @@
     }
 
     function sourceInput() {
+      if (source.value === 'atlas' || source.value === 'orchestrated') {
+        const { mapQuery, mapProjects, mapBudget, mapWorkers, mapDeferred } = form.elements;
+        const data = { source: source.value, projects: entries(mapProjects.value) };
+        if (mapBudget.value) data.tokenBudget = Number(mapBudget.value);
+        if (source.value === 'atlas') {
+          if (mapQuery.value.trim()) data.query = mapQuery.value.trim();
+          if (mapDeferred.checked) data.deferred = true;
+        } else data.workers = mapWorkers.value === 'auto' ? 'auto' : Number(mapWorkers.value);
+        return data;
+      }
       if (source.value === 'files') return { source: 'files', files: entries(files.value) };
       if (source.value === 'packages') {
         const packages = packageFields.map((row) => {
@@ -895,14 +986,21 @@
 
     prompt.addEventListener('input', () => { evaluationPrompt = undefined; });
     for (const input of [source, projects, tokenBudget, profile, files, requestId, prompt, approvedSourceLookup,
-      form.elements.query, ...form.querySelectorAll('[data-package] input')])
+      form.elements.query, ...form.querySelectorAll('[data-package] input'), ...form.querySelectorAll('[data-atlas] input, [data-atlas] select')])
       input.addEventListener('input', clearPreview);
     function updateSourceFields() {
+      const mapped = source.value === 'atlas' || source.value === 'orchestrated';
       form.querySelector('[data-repository]').hidden = source.value !== 'repository';
       form.querySelector('[data-files]').hidden = source.value !== 'files';
       form.querySelector('[data-packages]').hidden = source.value !== 'packages';
-      form.querySelector('[data-source-lookup]').hidden = source.value === 'packages';
-      if (source.value === 'packages') approvedSourceLookup.checked = false;
+      form.querySelector('[data-atlas]').hidden = !mapped;
+      form.querySelector('[data-atlas-query]').hidden = source.value !== 'atlas';
+      form.querySelector('[data-atlas-deferred]').hidden = source.value !== 'atlas';
+      form.querySelector('[data-atlas-workers]').hidden = source.value !== 'orchestrated';
+      // The map has its own lookup choice, and the other two modes send each part once.
+      form.querySelector('[data-source-lookup]').hidden = source.value === 'packages' || mapped;
+      if (source.value === 'packages' || mapped) approvedSourceLookup.checked = false;
+      previewButton.textContent = source.value === 'orchestrated' ? 'Preview plan' : 'Preview source';
     }
     source.addEventListener('change', updateSourceFields);
     function updateBranchMode() {
@@ -912,8 +1010,8 @@
       branchNotice.textContent = ownerWritable
         ? 'Review the branch’s current context with your new source before sending.'
         : 'The project owner continues alternative review sessions from the local app.';
-      source.querySelector('option[value="packages"]').disabled = branch;
-      if (branch && source.value === 'packages') {
+      for (const mode of ['packages', 'atlas', 'orchestrated']) source.querySelector('option[value="' + mode + '"]').disabled = branch;
+      if (branch && ['packages', 'atlas', 'orchestrated'].includes(source.value)) {
         source.value = 'files';
         files.value = '';
         updateSourceFields();
@@ -944,8 +1042,10 @@
           throw new Error('Choose at least one file to allow approved source lookup.');
         const evaluationCase = evaluation.value();
         const pinned = evaluationCase?.series.startsWith('pinned-vite-');
+        const mapped = selection.source === 'atlas' || selection.source === 'orchestrated';
         const result = await coding(prefix + '/preview', {
-          ...selection, ...(branchSession ? { session: branchSession } : {}), ...(evaluationCase ? { measurePreview: true } : {}),
+          ...selection, ...(mapped ? { prompt: draftPrompt() } : {}),
+          ...(branchSession ? { session: branchSession } : {}), ...(evaluationCase ? { measurePreview: true } : {}),
           ...(pinned ? { evaluation: evaluationCase, prompt: draftPrompt(), ...(lookup ? { approvedSourceLookup: true } : {}) } : {}),
         });
         if (!isCurrent()) return;
@@ -956,13 +1056,18 @@
         previewContents(previewEl, result);
         mountSourceManifest(previewEl, result, feedback);
         if (branchContext) previewEl.append(branchHistory(branchContext, 'Context already in this branch'));
-        if (result.source === 'repository' && !result.excerpts.length) return;
+        if ((result.source === 'repository' || result.source === 'atlas') && !result.excerpts.length) return;
         if (result.source === 'packages' && result.packages.some((part) => !part.excerpts.length)) return;
         preview = { selection, lookup, id: result.manifest?.id || result.id, branchContextId: branchContext?.id };
         const provider = project.providerLabel;
         approveText.textContent = result.source === 'packages'
           ? 'Approve sending the shared task and each package’s selected text to ' + provider + '.'
-          : 'Approve sending the task, selected text, and ' + (branchContext ? 'reviewed branch context' : 'active session history') + ' to ' + provider + '.';
+          : result.source === 'orchestrated'
+            ? 'Approve sending the task and each work order’s selected text to ' + provider + ', using the models shown.'
+            : result.source === 'atlas'
+              ? 'Approve sending the task, the selected text, the map and facts shown, and active session history to ' + provider + '.' +
+                (result.deferred?.length ? ' The excerpts marked “on request” are sent only if the model looks them up.' : '')
+              : 'Approve sending the task, selected text, and ' + (branchContext ? 'reviewed branch context' : 'active session history') + ' to ' + provider + '.';
         if (lookup) approveText.textContent += ' Allow lookups within this request’s selected text.';
         approve.hidden = false;
         approved.focus();
@@ -2152,6 +2257,99 @@
     return refresh;
   }
 
+  function mountRepositoryMap(panel, prefix, readonly, isDetached, feedback) {
+    const importButton = panel.querySelector('[data-import-map]');
+    const progress = panel.querySelector('[data-map-progress]');
+    const summary = panel.querySelector('[data-map-summary]');
+    const skills = panel.querySelector('[data-map-skills]');
+    const lesson = panel.querySelector('[data-lesson]');
+    const routing = panel.querySelector('[data-routing]');
+    const phases = { list: 'Listing tracked files', read: 'Reading files', link: 'Linking imports and tests', history: 'Reading change history',
+      embed: 'Encoding units', publish: 'Publishing the map', knowledge: 'Writing the knowledge bundle' };
+    let timer;
+    let loaded = false;
+
+    function show(state) {
+      const running = state.status === 'running';
+      importButton.disabled = readonly || running;
+      importButton.textContent = state.imported ? 'Import again' : 'Import repository map';
+      progress.textContent = running
+        ? (phases[state.progress?.phase] || 'Importing') + (state.progress?.total > 1 ? ' · ' + state.progress.done.toLocaleString() + ' of ' + state.progress.total.toLocaleString() : '') + '…'
+        : state.status === 'failed' ? state.error : '';
+      const rows = [];
+      if (state.imported) {
+        rows.push(['Imported', state.map.files.toLocaleString() + ' files · ' + state.map.units.toLocaleString() + ' units · ' + state.map.packages + ' packages' +
+          (state.map.importedAt ? ' · ' + time(state.map.importedAt) : '')]);
+        if (state.map.limited) rows.push(['Limits', 'The import reached a size limit. Narrow the project’s permitted directories.']);
+        if (state.knowledge) rows.push(['Knowledge bundle', state.knowledge]);
+        if (state.learning) rows.push(['Learned from', state.learning.episodes + ' reviewed requests · ' + state.learning.aliases + ' aliases · parameters v' + state.learning.params]);
+      } else rows.push(['Imported', 'Not yet']);
+      summary.replaceChildren(...rows.flatMap(([name, value]) => {
+        const term = document.createElement('dt');
+        term.textContent = name;
+        const detail = document.createElement('dd');
+        detail.textContent = value;
+        return [term, detail];
+      }));
+      const measured = (state.skills || []).filter((skill) => skill.kind !== 'built-in');
+      skills.replaceChildren(...(measured.length ? [listBlock('Skills and lessons (' + measured.length + ')', measured.map((skill) =>
+        skill.title + ' · ' + skill.state + (skill.shown + skill.withheld
+          ? ' · accepted ' + skill.shownAccepted + ' of ' + skill.shown + ' when sent, ' + skill.withheldAccepted + ' of ' + skill.withheld + ' when withheld' : '')))] : []));
+      lesson.querySelector('button').disabled = readonly || !state.imported;
+      clearTimeout(timer);
+      if (running && !isDetached()) timer = setTimeout(refresh, 1000);
+    }
+
+    async function refresh() {
+      if (isDetached()) return;
+      try { show(await coding(prefix + '/import')); }
+      catch (error) { report(feedback, error); }
+    }
+
+    panel.addEventListener('toggle', async () => {
+      if (!panel.open || loaded) return;
+      loaded = true;
+      await refresh();
+      try {
+        const saved = await coding(prefix + '/routing');
+        if (!isDetached() && saved.policy) routing.elements.policy.value = JSON.stringify(saved.policy, null, 2);
+      } catch (_) { /* Project members cannot read routing settings. */ }
+    });
+    importButton.addEventListener('click', async () => {
+      report(feedback);
+      importButton.disabled = true;
+      try {
+        await coding(prefix + '/import', {});
+        await refresh();
+      } catch (error) { report(feedback, error); importButton.disabled = readonly; }
+    });
+    lesson.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      report(feedback);
+      try {
+        const anchors = entries(lesson.elements.anchors.value);
+        await coding(prefix + '/lesson', { text: lesson.elements.text.value, ...(anchors.length ? { anchors } : {}) });
+        lesson.reset();
+        feedback.textContent = 'Lesson recorded on trial.';
+        await refresh();
+      } catch (error) { report(feedback, error); }
+    });
+    routing.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      report(feedback);
+      try {
+        const text = routing.elements.policy.value.trim();
+        let policy = null;
+        if (text) {
+          try { policy = JSON.parse(text); }
+          catch (_) { throw new Error('Enter valid JSON for the routing policy.'); }
+        }
+        await coding(prefix + '/routing', { policy });
+        feedback.textContent = policy ? 'Routing policy saved.' : 'Routing policy cleared. Orchestrated requests use the project model.';
+      } catch (error) { report(feedback, error); }
+    });
+  }
+
   function settings(parent, project, readonly, projectChanged, runsChanged, isDetached) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('details');
@@ -2171,6 +2369,16 @@
       field('Type the session name again', '', 'text', 'name="confirm" maxlength="64" required') +
       '<p class="muted" data-branch-transcript hidden>Transcript deletion includes the original session and all of its alternative branches.</p>' +
       '<div class="row"><button type="submit" class="danger">Delete session and transcript</button></div></form>' +
+      '<details data-repository-map><summary>Repository map</summary><div class="stack coding-form">' +
+      '<p class="muted">Importing reads the tracked files in this project’s permitted directories on this computer and builds a map of packages, declarations, links, and tests. It makes no model call. Requests that use the map still show you exactly what they send.</p>' +
+      '<div class="row"><button type="button" data-import-map>Import repository map</button><span class="muted" data-map-progress role="status"></span></div>' +
+      '<dl class="coding-facts" data-map-summary></dl><div class="stack" data-map-skills></div>' +
+      '<form class="stack" data-lesson>' + field('Lesson for future requests', '', 'text', 'name="text" maxlength="600" required placeholder="Something reviewers keep having to say about this code"') +
+      field('Applies to directories (optional)', '', 'text', 'name="anchors" spellcheck="false"') +
+      '<div class="row"><button type="submit">Record lesson</button></div><p class="muted">A lesson starts on trial. It is sent with about half of the matching requests until review outcomes show whether it helps.</p></form>' +
+      '<form class="stack" data-routing><label class="field"><span>Routing policy (optional JSON)</span><textarea name="policy" rows="4" spellcheck="false" placeholder=\'{"version":1,"roles":{"worker":[{"provider":"' + esc(project.provider) + '","model":"…"}]}}\'></textarea></label>' +
+      '<p class="muted">Lists the models an orchestrated request may use for its workers and for combining their reports. Every model must come from this project’s provider. Leave empty to use the project model for everything.</p>' +
+      '<div class="row"><button type="submit">Save routing policy</button></div></form></div></details>' +
       '<details data-deployment-checks></details>' +
       '<details data-audit><summary>Audit events</summary><ol class="coding-audit"></ol></details>' +
       '<div class="coding-feedback" role="status"></div></div>';
@@ -2191,6 +2399,7 @@
     panel.querySelectorAll('button').forEach((button) => button.disabled = readonly);
     saveRetention.disabled = true;
     const refreshDeployment = mountDeploymentChecks(panel.querySelector('[data-deployment-checks]'), prefix, readonly, isDetached);
+    mountRepositoryMap(panel.querySelector('[data-repository-map]'), prefix, readonly, isDetached, feedback);
 
     function setProject(current) {
       project = current;

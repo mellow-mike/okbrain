@@ -7,7 +7,7 @@ import { excludedPath, type RepositoryContextOptions } from "./repository-contex
 
 const tokenFields = ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const;
 type Tokens = Pick<Usage, typeof tokenFields[number]>;
-export type EvaluationStrategy = "files" | "lexical" | "indexed" | "packages";
+export type EvaluationStrategy = "files" | "lexical" | "indexed" | "packages" | "atlas";
 type Origin = "provider" | "injected";
 type Decision = "accepted" | "changes_requested";
 export interface EvidenceTarget {

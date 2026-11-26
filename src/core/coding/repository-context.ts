@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
+import type { AtlasManifest } from "./atlas/manifest.ts";
 import { maxProfileProjects, maxProfileTokens, validateCodingProjectProfile, type CodingProjectProfile } from "./project-profile.ts";
 import { dependencyResolver, fileStructure, indexRepository, type RepositoryFileStructure } from "./repository-index.ts";
 
@@ -27,7 +28,7 @@ const stopWords = new Set([
   "about", "and", "are", "can", "for", "from", "how", "into", "its", "of", "on", "or", "our", "the", "this", "to", "what", "where", "with",
 ]);
 // Keep paths usable across platforms and exclude Windows alternate data stream names.
-const invalidPathCharacters = /[:\\\x00-\x1f\x7f]/u;
+export const invalidPathCharacters = /[:\\\x00-\x1f\x7f]/u;
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 export class RepositoryContextError extends Error {}
@@ -69,6 +70,8 @@ export interface RepositoryContextManifest {
   profile?: Pick<CodingProjectProfile, "name" | "version" | "sharedProjects" | "exclude"> & { id: string };
   workspaceRevision?: string;
   index?: { indexedFiles: number; limited: boolean; expandedFiles: number };
+  /** Present when the selection came from an imported repository atlas. */
+  atlas?: AtlasManifest;
 }
 
 export interface RepositoryContextSelection {
@@ -112,13 +115,13 @@ export function excludedPath(path: string): boolean {
     || /\.(?:min|generated|bundle)\.[^.]+$/u.test(file);
 }
 
-function gitEnvironment() {
+export function gitEnvironment() {
   const env = { ...process.env };
   for (const name of ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX"]) delete env[name];
   return env;
 }
 
-async function readRevision(workspace: string): Promise<string | undefined> {
+export async function readRevision(workspace: string): Promise<string | undefined> {
   const child = Bun.spawn(["git", "rev-parse", "--verify", "--quiet", "HEAD"], {
     cwd: workspace, env: gitEnvironment(), stdout: "pipe", stderr: "ignore",
   });
@@ -244,7 +247,7 @@ function fingerprint(info: BigIntStats): string {
   return [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join(":");
 }
 
-async function worktreeStamp(workspace: string, path: string): Promise<string | undefined> {
+export async function worktreeStamp(workspace: string, path: string): Promise<string | undefined> {
   const candidate = join(workspace, path);
   try {
     if (await realpath(candidate) !== candidate) return;
@@ -253,7 +256,10 @@ async function worktreeStamp(workspace: string, path: string): Promise<string | 
   } catch { /* Vanished, unreadable, or substituted path. */ }
 }
 
-async function readTrackedText(workspace: string, path: string): Promise<{ lines: string[]; limited: boolean; stamp: string } | undefined> {
+/** Read one tracked regular file as text, refusing links, binary data, and files that change mid-read. */
+export async function readTrackedText(
+  workspace: string, path: string, byteLimit = maxFileBytes,
+): Promise<{ lines: string[]; limited: boolean; stamp: string } | undefined> {
   const candidate = join(workspace, path);
   try {
     // Compare the canonical path to exclude both leaf and ancestor symlinks.
@@ -262,7 +268,7 @@ async function readTrackedText(workspace: string, path: string): Promise<{ lines
     try {
       const info = await file.stat({ bigint: true });
       if (!info.isFile()) return;
-      const buffer = Buffer.alloc(Math.min(Number(info.size), maxFileBytes) + 1);
+      const buffer = Buffer.alloc(Math.min(Number(info.size), byteLimit) + 1);
       let offset = 0;
       while (offset < buffer.length) {
         const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset);
@@ -272,9 +278,9 @@ async function readTrackedText(workspace: string, path: string): Promise<{ lines
       if (await realpath(candidate) !== candidate) return;
       const stamp = fingerprint(info);
       if (fingerprint(await stat(candidate, { bigint: true })) !== stamp) return;
-      const limited = offset > maxFileBytes;
+      const limited = offset > byteLimit;
       // Discard any partial line so the line range always identifies complete lines.
-      const end = limited ? buffer.lastIndexOf(10, maxFileBytes - 1) + 1 : offset;
+      const end = limited ? buffer.lastIndexOf(10, byteLimit - 1) + 1 : offset;
       const body = decoder.decode(buffer.subarray(0, end));
       if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/u.test(body)) return;
       const lines = body.split(/\r?\n/u);

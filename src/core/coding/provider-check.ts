@@ -1,9 +1,25 @@
+import { createModels } from "@earendil-works/pi-ai/models";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import type { CodingProvider } from "./durable.ts";
+
+let openRouterCatalog: ReturnType<typeof createModels> | undefined;
+
+/** Whether Pi's bundled catalog lists the model. Reads no credential and makes no request. */
+function listedModel(provider: CodingProvider, model: string): boolean {
+  if (provider !== "openrouter") return true;
+  if (!openRouterCatalog) {
+    openRouterCatalog = createModels({ authContext: { env: async () => undefined, fileExists: async () => false } });
+    openRouterCatalog.setProvider(openrouterProvider());
+  }
+  return openRouterCatalog.getModel(provider, model) !== undefined;
+}
 
 const endpoints = {
   openai: "https://api.openai.com/v1/models/",
   anthropic: "https://api.anthropic.com/v1/models/",
   google: "https://generativelanguage.googleapis.com/v1beta/models/",
+  // OpenRouter's model listing is public, so the credential is checked against its key lookup instead.
+  openrouter: "https://openrouter.ai/api/v1/key",
 } as const satisfies Record<CodingProvider, string>;
 const deadlineMs = 8000;
 const maxResponseBytes = 64 * 1024;
@@ -49,7 +65,7 @@ export function parseProviderCheckOutcome(value: unknown): ProviderCheckOutcome 
 function authHeaders(provider: CodingProvider, key: string): Headers {
   const headers = new Headers({ accept: "application/json" });
   if (provider === "google") headers.set("x-goog-api-key", key);
-  else if (provider === "openai") headers.set("authorization", `Bearer ${key}`);
+  else if (provider === "openai" || provider === "openrouter") headers.set("authorization", `Bearer ${key}`);
   else {
     // Match the pinned Pi Anthropic SDK's API key versus OAuth header selection.
     headers.set("anthropic-version", "2023-06-01");
@@ -94,6 +110,8 @@ function matchesModel(provider: CodingProvider, model: string, value: unknown): 
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const row = value as Record<string, unknown>;
   if (provider === "openai") return row.object === "model" && row.id === model;
+  // The key lookup describes the credential. Which models exist is Pi's catalog, checked before the request.
+  if (provider === "openrouter") return typeof row.data === "object" && row.data !== null && !Array.isArray(row.data);
   if (provider === "google") return row.name === `models/${model}`;
   if (row.type !== "model" || typeof row.id !== "string") return false;
   // Claude 4.5 also has short aliases that resolve to a dated snapshot of the same model.
@@ -131,14 +149,16 @@ export async function checkProviderModel(
   input: ProviderCheckInput, signal: AbortSignal, transport: typeof fetch = fetch,
 ): Promise<ProviderCheckOutcome> {
   const { provider, model } = input;
-  if (!Object.hasOwn(endpoints, provider) || typeof model !== "string" || model.length > 128 ||
-      !/^[a-zA-Z0-9]/u.test(model) || /[^a-zA-Z0-9._:-]/u.test(model)) return { code: "model-unavailable" };
+  const openRouter = provider === "openrouter";
+  if (!Object.hasOwn(endpoints, provider) || typeof model !== "string" || model.length > (openRouter ? 160 : 128) ||
+      !(openRouter ? /^[~a-zA-Z0-9]/u : /^[a-zA-Z0-9]/u).test(model) || (openRouter ? /[^a-zA-Z0-9._:~/-]/u : /[^a-zA-Z0-9._:-]/u).test(model)
+      || (openRouter && !listedModel(provider, model))) return { code: "model-unavailable" };
   const key = typeof input.apiKey === "string" ? input.apiKey.trim() : "";
   if (!key || key.length > 4096 || /[^!-~]/u.test(key)) return { code: "denied" };
   if (signal.aborted) return { code: "unreachable" };
   const deadline = AbortSignal.timeout(deadlineMs);
   const bounded = AbortSignal.any([signal, deadline]);
-  const endpoint = new URL(endpoints[provider] + encodeURIComponent(model));
+  const endpoint = new URL(openRouter ? endpoints[provider] : endpoints[provider] + encodeURIComponent(model));
   const { promise, resolve } = Promise.withResolvers<ProviderCheckOutcome>();
   const cancel = () => resolve({ code: deadline.aborted ? "timed-out" : "unreachable" });
   bounded.addEventListener("abort", cancel, { once: true });

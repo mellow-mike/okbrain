@@ -14,7 +14,7 @@ import {
   cancelCodingRequest, canonicalWorkspace, codingCredential, codingProviderLabel, CodingError, compactCodingContext, createCodingBranch,
   getCodingRunComparison, getCodingSessionStatus, getSavedCodingRequestInput, hasCodingCredential, listCodingModels, parseCodingHandoff,
   previewCodingAttachments, previewCodingBranch, previewCodingBranchContext, previewCodingContextCompaction, previewCodingContextReset, requireNoPendingCodingContextCompaction,
-  resetCodingContext, runCodingSession,
+  codingProviders, previewAtlasContext, previewCodingOrchestration, resetCodingContext, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions, type CodingSessionStatusResult,
 } from "./durable.ts";
 import { CodingEvaluationError, CodingEvaluations, parseEvaluation, pinnedEvaluationBinding, presentEvidence } from "./evaluation.ts";
@@ -38,6 +38,12 @@ import { checkProviderModel, type ProviderCheckOutcome } from "./provider-check.
 import { measurePinnedViteRetrieval, requirePinnedViteRetrievalScope, RetrievalBenchmarkError, type BenchmarkReport } from "./retrieval-benchmark.ts";
 import type { CodingTaskProgress } from "./task-progress.ts";
 import type { TeamStartup } from "./team-listener.ts";
+import { addLesson, AtlasError, atlasStatus, forgetLearning } from "./atlas/context.ts";
+import { importRepository, type ImportProgress, type ImportReport } from "./atlas/import.ts";
+import type { AtlasLocation } from "./atlas/store.ts";
+import { maxWorkers } from "./orchestrator.ts";
+import { recordCodingOutcome } from "./outcomes.ts";
+import { RoutingError, validateRoutingPolicy, type RoutingPolicy } from "./router.ts";
 import { runCodingWorkerCheck } from "./worker-check.ts";
 
 type Json = Record<string, unknown>;
@@ -177,7 +183,36 @@ function profileInProject(project: ProjectRow, input: unknown): CodingProjectPro
   return profile;
 }
 
-function sourceOptions(project: ProjectRow, body: Json) {
+function mapBudget(body: Json): number | undefined {
+  const tokenBudget = body.tokenBudget;
+  if (tokenBudget !== undefined && (typeof tokenBudget !== "number" || !Number.isInteger(tokenBudget)
+    || tokenBudget < 1 || tokenBudget > maxProfileTokens)) throw new ProjectControlError(`Enter a source budget of 1–${maxProfileTokens} tokens.`);
+  return tokenBudget as number | undefined;
+}
+
+type SourceSelection = {
+  files?: string[];
+  packages?: ReturnType<typeof validatePackageReviews>;
+  repository?: { profile?: CodingProjectProfile; projects?: string[]; query: string; tokenBudget?: number };
+  atlas?: { query?: string; projects: string[]; tokenBudget?: number; deferred?: true };
+  orchestration?: { projects: string[]; tokenBudget?: number; workers?: number | "auto" };
+};
+
+function sourceOptions(project: ProjectRow, body: Json): SourceSelection {
+  if (body.source === "atlas" || body.source === "orchestrated") {
+    // The repository map only ever reads inside the project's permitted directories.
+    const projects = pathsInProject(project, body.projects ?? JSON.parse(project.scopes));
+    const tokenBudget = mapBudget(body);
+    if (body.source === "atlas") {
+      const query = body.query === undefined || body.query === "" ? undefined : field(body, "query", 2048);
+      if (body.deferred !== undefined && typeof body.deferred !== "boolean") throw new ProjectControlError("Choose whether to approve excerpts for lookup.");
+      return { atlas: { projects, ...(query ? { query } : {}), ...(tokenBudget !== undefined ? { tokenBudget } : {}), ...(body.deferred === true ? { deferred: true as const } : {}) } };
+    }
+    const workers = body.workers;
+    if (workers !== undefined && workers !== "auto" && (typeof workers !== "number" || !Number.isInteger(workers) || workers < 1 || workers > maxWorkers))
+      throw new ProjectControlError(`Choose auto or between 1 and ${maxWorkers} workers.`);
+    return { orchestration: { projects, ...(tokenBudget !== undefined ? { tokenBudget } : {}), ...(workers !== undefined ? { workers: workers as number | "auto" } : {}) } };
+  }
   if (body.source === "files") return { files: stringList(body.files ?? [], 12) };
   if (body.source === "packages") {
     try {
@@ -189,7 +224,7 @@ function sourceOptions(project: ProjectRow, body: Json) {
       throw error;
     }
   }
-  if (body.source !== "repository") throw new ProjectControlError("Choose repository excerpts, explicit files, or a package review.");
+  if (body.source !== "repository") throw new ProjectControlError("Choose repository excerpts, the repository map, explicit files, a package review, or an orchestrated request.");
   const query = field(body, "query", 1024);
   if (body.profile !== undefined) {
     if (body.projects !== undefined || body.tokenBudget !== undefined)
@@ -223,6 +258,17 @@ type RetrievalBenchmarkState = RetrievalBenchmarkInput & {
   report?: BenchmarkReport;
   error?: string;
 };
+
+type ImportState = {
+  status: "running" | "completed" | "failed";
+  cancel: AbortController;
+  promise: Promise<void>;
+  progress?: ImportProgress;
+  report?: ImportReport;
+  error?: string;
+};
+
+/** Episodes are kept per workspace, so a project's sessions are named apart from another project's on the same checkout. */
 
 type ProviderDiagnosticCode = ProviderCheckOutcome["code"] | "worker-unavailable";
 const providerCheckMessages: Record<ProviderDiagnosticCode, string> = {
@@ -283,6 +329,7 @@ export class CodingProjectControl {
   #providerCheckInFlight: AbortController | undefined;
   #checkoutInFlight: AbortController | undefined;
   readonly #benchmarkStates = new Map<string, RetrievalBenchmarkState>();
+  readonly #imports = new Map<string, ImportState>();
   #activeBenchmark: { project: string; cancel: AbortController; promise: Promise<void> } | undefined;
   readonly #gates = new Map<string, Promise<void>>();
   readonly #requests = new Set<Promise<unknown>>();
@@ -403,6 +450,9 @@ export class CodingProjectControl {
           base_sha TEXT NOT NULL, base_tree TEXT NOT NULL, commit_sha TEXT, created TEXT,
           PRIMARY KEY(project, session, request_id)
         );
+        CREATE TABLE IF NOT EXISTS project_routing(
+          project TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, policy TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS applied_patches(
           project TEXT NOT NULL, session TEXT NOT NULL, request_id TEXT NOT NULL,
           preview_id TEXT NOT NULL, diff_hash TEXT NOT NULL, files TEXT NOT NULL,
@@ -444,9 +494,11 @@ export class CodingProjectControl {
     this.#checkoutInFlight?.abort();
     const benchmark = this.#activeBenchmark;
     benchmark?.cancel.abort();
+    for (const state of this.#imports.values()) state.cancel.abort();
     const active = [...this.#active.values()];
     for (const { stop } of active) stop?.();
-    await Promise.allSettled([...active.map(({ promise }) => promise), ...this.#requests, this.#retentionSweep, benchmark?.promise]);
+    await Promise.allSettled([...active.map(({ promise }) => promise), ...this.#requests, this.#retentionSweep, benchmark?.promise,
+      ...[...this.#imports.values()].map(({ promise }) => promise)]);
     try {
       this.#db.close(true);
     } finally {
@@ -682,11 +734,26 @@ export class CodingProjectControl {
     const binding = pinnedEvaluationBinding(evaluation, typeof body.prompt === "string" ? body.prompt : undefined, source, body.approvedSourceLookup === true);
     if (binding) await verifyPinnedEvaluationWorkspace(workspace);
     const measuredFrom = binding ? performance.now() : started;
+    if (source.atlas || source.orchestration) {
+      if (branchContext || evaluation && source.orchestration)
+        throw new ProjectControlError("Choose an ordinary files or repository review for an alternative branch or an orchestrated evaluation.", 409);
+      const prompt = field(body, "prompt", 16384);
+      if (source.orchestration) {
+        const { plan } = await previewCodingOrchestration({
+          ...this.#session(project, { session: "plan", requestId: "plan" }), prompt,
+          orchestration: { ...source.orchestration, ...this.#routing(project.id) },
+        }, this.#dependencies(project, actor));
+        return { source: "orchestrated" as const, plan, id: plan.id };
+      }
+      const { ranked: _ranked, ...context } = await previewAtlasContext(workspace, prompt, source.atlas, this.#atlas(project.id));
+      if (body.measurePreview === true) this.#evaluations.preview(project.id, actor.id, context.manifest.id, performance.now() - started, undefined);
+      return { source: "atlas" as const, ...context, sourceManifest: codingSourceManifest({ source: "atlas", manifest: context.manifest }) };
+    }
     const result = source.packages
       ? { source: "packages" as const, ...await previewPackageReviews(workspace, source.packages) }
       : source.repository
         ? { source: "repository" as const, ...await selectRepositoryContext({ workspace, ...source.repository }) }
-        : { source: "files" as const, ...await previewCodingAttachments(workspace, source.files, JSON.parse(project.scopes)) };
+        : { source: "files" as const, ...await previewCodingAttachments(workspace, source.files ?? [], JSON.parse(project.scopes)) };
     const milliseconds = performance.now() - measuredFrom;
     if (binding) await verifyPinnedEvaluationWorkspace(workspace);
     if (binding || body.measurePreview === true) {
@@ -820,11 +887,21 @@ export class CodingProjectControl {
     return { ...run, branchSession, created: true, ...(receipt.replayed ? { replayed: true } : {}) };
   }
 
+  /**
+   * Each project keeps its own repository map, knowledge bundle and learned state.
+   * Two projects on one workspace can permit different directories, and what one
+   * learns from its reviews must not steer what the other selects.
+   */
+  #atlas(project: string): AtlasLocation {
+    return { stateDir: join(this.#directory, `project-${project}`, "atlas") };
+  }
+
   #dependencies(project: ProjectRow, actor: Actor): CodingDependencies & { workspaceBinding: string } {
     return {
       stateDir: join(this.#directory, `project-${project.id}`),
       models: this.#models,
       workspaceBinding: project.workspace,
+      atlas: this.#atlas(project.id),
       apiKey: project.api_key ?? undefined,
       allowEnvKey: actor.owner,
     };
@@ -865,7 +942,7 @@ export class CodingProjectControl {
       } else {
         const worker = launchProjectWorker({
           options: run, stateDir: dependencies.stateDir!, workspaceBinding: project.workspace,
-          apiKey: codingCredential(project.provider, dependencies),
+          apiKey: codingCredential(project.provider, dependencies), atlas: this.#atlas(project.id),
         }, cancel.signal, { admitted, liveAnswer, taskProgress }, this.#dockerWorker);
         stop = worker.stop;
         result = worker.result;
@@ -909,18 +986,21 @@ export class CodingProjectControl {
     if (body.approvedSourceLookup !== undefined && typeof body.approvedSourceLookup !== "boolean")
       throw new ProjectControlError("Choose whether to allow lookups in approved source.");
     const approvedSourceLookup = body.approvedSourceLookup === true;
-    if (approvedSourceLookup && (selection.packages || (!selection.repository && !selection.files?.length)))
+    if (approvedSourceLookup && (selection.packages || selection.orchestration || (!selection.repository && !selection.atlas && !selection.files?.length)))
       throw new ProjectControlError("Choose explicit files or repository excerpts to allow approved source lookup.");
     const capabilities = approvedSourceLookup ? { approvedSourceLookup: true as const } : {};
     const evaluation = parseEvaluation(body.evaluation, JSON.parse(project.scopes));
-    if (branch && (evaluation || selection.packages))
+    if (branch && (evaluation || selection.packages || selection.atlas || selection.orchestration))
       throw new ProjectControlError("Choose an ordinary files or repository review for an alternative branch.", 409);
+    if (evaluation && selection.orchestration) throw new ProjectControlError("Evaluate an orchestrated request by reviewing its result. Choose another source for a measured trial.", 409);
+    // The routing policy is part of what the operator approved, so it is bound into the request's signature.
+    const routing = selection.orchestration ? this.#routing(project.id) : {};
     const branchContextId = branch ? field(body, "branchContextId", 64) : undefined;
     if (branchContextId !== undefined && !branchVersionPattern.test(branchContextId))
       throw new ProjectControlError("Preview and approve the current alternative branch context before sending.", 409);
     const binding = pinnedEvaluationBinding(evaluation, prompt, selection, approvedSourceLookup);
     const signature = digest(JSON.stringify({ prompt, previewId, selection, ...(evaluation ? { evaluation } : {}), ...capabilities,
-      ...(branchContextId ? { branchContextId } : {}),
+      ...(branchContextId ? { branchContextId } : {}), ...routing,
     }));
     const workspace = await this.#workspace(project);
     const prior = this.#get<RunRow>("SELECT * FROM runs WHERE project = ? AND session = ? AND id = ?", project.id, run.session, run.requestId);
@@ -955,7 +1035,8 @@ export class CodingProjectControl {
           project.id, run.session, run.requestId, actor.id, "running", signature, time, time);
       }
       if (evaluation || prior) {
-        const strategy = selection.packages ? "packages" : selection.repository?.profile ? "indexed" : selection.repository ? "lexical" : "files";
+        const strategy = selection.atlas || selection.orchestration ? "atlas" : selection.packages ? "packages"
+          : selection.repository?.profile ? "indexed" : selection.repository ? "lexical" : "files";
         this.#evaluations.enroll({ project: project.id, ...run }, actor.id, evaluation, prompt,
           strategy, this.#models ? "injected" : "provider", previewId, binding);
       }
@@ -964,9 +1045,11 @@ export class CodingProjectControl {
     this.#schedule(project, {
       ...identity, prompt, ...capabilities,
       ...(branch ? { branch: { ...branch, contextVersion: branchContextId } } : {}),
-      ...(selection.packages ? { packageReviews: { packages: selection.packages, id: previewId } } : selection.repository
-        ? { repository: { ...selection.repository, id: previewId } }
-        : { files: selection.files, filePreviewId: previewId, allowedAttachmentScopes: JSON.parse(project.scopes) as string[] }),
+      ...(selection.orchestration ? { orchestration: { ...selection.orchestration, ...routing, id: previewId } }
+        : selection.atlas ? { atlas: { ...selection.atlas, id: previewId } }
+          : selection.packages ? { packageReviews: { packages: selection.packages, id: previewId } } : selection.repository
+            ? { repository: { ...selection.repository, id: previewId } }
+            : { files: selection.files, filePreviewId: previewId, allowedAttachmentScopes: JSON.parse(project.scopes) as string[] }),
     }, actor);
     return this.#runView(this.#readRun(project.id, run.session, run.requestId));
   }
@@ -1346,6 +1429,9 @@ export class CodingProjectControl {
       this.#write("DELETE FROM session_deletions WHERE project = ? AND session = ?", project, session);
       this.#audit(project, automatic ? "session_expired" : "session_deleted", actor, session);
     })();
+    // What was recorded from the deleted transcript goes with it. Aggregates already learned stay.
+    const workspace = this.#get<{ workspace: string }>("SELECT workspace FROM projects WHERE id = ?", project)?.workspace;
+    if (workspace) void forgetLearning(workspace, this.#atlas(project), session).catch(() => {});
   }
 
   async #removeSession(project: string, session: string, actor: string, automatic: boolean) {
@@ -2032,6 +2118,132 @@ export class CodingProjectControl {
     return result.finally(() => { if (this.#gates.get(key) === gate) this.#gates.delete(key); });
   }
 
+  #routing(project: string): { routing?: RoutingPolicy } {
+    const saved = this.#get<{ policy: string }>("SELECT policy FROM project_routing WHERE project = ?", project)?.policy;
+    if (!saved) return {};
+    try { return { routing: validateRoutingPolicy(JSON.parse(saved), codingProviders) }; }
+    catch { return {}; }
+  }
+
+  #routingSettings(project: ProjectRow, method: string, body: Json, actor: Actor, canWrite: () => boolean) {
+    this.#requireOwner(actor);
+    if (method === "POST") {
+      if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to change project routing.", 403);
+      if (body.policy === null || body.policy === undefined) {
+        this.#db.transaction(() => {
+          this.#write("DELETE FROM project_routing WHERE project = ?", project.id);
+          this.#audit(project.id, "routing_cleared", actor.id);
+        })();
+      } else {
+        let policy: RoutingPolicy;
+        try { policy = validateRoutingPolicy(body.policy, codingProviders); }
+        catch (error) {
+          if (error instanceof RoutingError) throw new ProjectControlError(error.message);
+          throw error;
+        }
+        // A project holds one credential, so every routed model has to use the project's own provider.
+        const outside = Object.values(policy.roles).flat().find((candidate) => candidate.provider !== project.provider);
+        if (outside) throw new ProjectControlError(`Route within ${codingProviderLabel(project.provider)}, the provider this project holds a key for.`);
+        const catalog = listCodingModels(this.#models).find((entry) => entry.provider === project.provider)?.models ?? [];
+        const unknown = Object.values(policy.roles).flat().find((candidate) => !catalog.some((model) => model.id === candidate.model));
+        if (unknown) throw new ProjectControlError(`Pi does not list model ${unknown.model} for ${codingProviderLabel(project.provider)}.`);
+        this.#db.transaction(() => {
+          this.#write("INSERT INTO project_routing(project, policy) VALUES (?, ?) ON CONFLICT(project) DO UPDATE SET policy = excluded.policy", project.id, JSON.stringify(policy));
+          this.#audit(project.id, "routing_saved", actor.id);
+        })();
+      }
+    }
+    return { policy: this.#routing(project.id).routing ?? null };
+  }
+
+  /** Map the project's permitted directories. Runs in the background and reports progress. */
+  async #importMap(project: ProjectRow, method: string, actor: Actor, canWrite: () => boolean) {
+    const current = this.#imports.get(project.id);
+    if (method === "POST") {
+      this.#requireOwner(actor);
+      if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to import this repository.", 403);
+      if (current?.status === "running") return this.#importView(current);
+      const workspace = await this.#workspace(project);
+      const cancel = new AbortController();
+      const state: ImportState = { status: "running", cancel, promise: Promise.resolve() };
+      state.promise = importRepository({
+        workspace, scopes: JSON.parse(project.scopes) as string[], signal: cancel.signal, progress: (progress) => { state.progress = progress; },
+      }, this.#atlas(project.id)).then((report) => {
+        state.status = "completed";
+        state.report = report;
+        this.#audit(project.id, "repository_imported", actor.id);
+      }, (error: unknown) => {
+        state.status = "failed";
+        state.error = error instanceof AtlasError ? error.message : "The repository import stopped before it finished. Try again.";
+        if (!(error instanceof AtlasError)) log.warn("repository import failed", { error: error instanceof Error ? error.message : "unknown" });
+      });
+      this.#imports.set(project.id, state);
+      return this.#importView(state);
+    }
+    const status = await atlasStatus(project.workspace, this.#atlas(project.id)).catch(() => ({ imported: false as const }));
+    return {
+      ...(current ? this.#importView(current) : { status: "idle" as const }),
+      imported: status.imported,
+      ...(status.imported ? {
+        map: { files: status.meta.files, units: status.meta.units, packages: status.meta.packages, importedAt: status.meta.importedAt ?? null, limited: status.meta.limited },
+        packages: status.packages.slice(0, 12),
+        skills: status.skills.map(({ id, kind, title, state, shown, shownAccepted, withheld, withheldAccepted, ...rest }) =>
+          ({ id, kind, title, state, shown, shownAccepted, withheld, withheldAccepted, ...("confidence" in rest ? { confidence: rest.confidence } : {}) })),
+        // Where the bundle sits and how the readout has adapted is the operator's view.
+        ...(actor.owner ? { knowledge: status.knowledge, learning: status.learning ? {
+          episodes: status.learning.episodes, accepted: status.learning.accepted, aliases: status.learning.aliases,
+          params: status.learning.params.version, lanes: status.learning.params.lanes,
+        } : null } : {}),
+      } : {}),
+    };
+  }
+
+  #importView(state: ImportState) {
+    return {
+      status: state.status, ...(state.progress ? { progress: state.progress } : {}), ...(state.error ? { error: state.error } : {}),
+      ...(state.report ? { report: (({ workspace: _workspace, knowledge: { directory: _directory, ...knowledge }, ...report }) => ({ ...report, knowledge }))(state.report) } : {}),
+    };
+  }
+
+  async #lesson(project: ProjectRow, body: Json, actor: Actor, canWrite: () => boolean) {
+    this.#requireOwner(actor);
+    if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to record a lesson.", 403);
+    const anchors = body.anchors === undefined ? undefined : pathsInProject(project, body.anchors);
+    try {
+      const { id } = await addLesson({ workspace: project.workspace, text: field(body, "text", 600), ...(anchors ? { anchors } : {}), actor: resolveActor() }, this.#atlas(project.id));
+      this.#audit(project.id, "lesson_recorded", actor.id);
+      return { id };
+    } catch (error) {
+      if (error instanceof AtlasError) throw new ProjectControlError(error.message, 409);
+      throw error;
+    }
+  }
+
+  /** Teach the repository map from a review that was just recorded. Never fails the review itself. */
+  async #learnFromReview(project: ProjectRow, body: Json): Promise<void> {
+    try {
+      const run = this.#runParts(body);
+      const row = this.#readRun(project.id, run.session, run.requestId);
+      if (row.status !== "done" || !row.review || this.#branch(project.id, run.session)) return;
+      const status = await getCodingSessionStatus({ ...this.#session(project, run), includeReceipt: true }, {
+        stateDir: join(this.#directory, `project-${project.id}`), models: this.#models, workspaceBinding: project.workspace, allowEnvKey: false,
+      });
+      const receipt = status.request?.receipt;
+      if (receipt?.status !== "done") return;
+      const patch = this.#get<{ files: string }>("SELECT files FROM applied_patches WHERE project = ? AND session = ? AND request_id = ? AND status = 'applied'",
+        project.id, run.session, run.requestId);
+      let appliedPaths: string[] = [];
+      try { appliedPaths = patch ? (JSON.parse(patch.files) as { path?: unknown }[]).flatMap(({ path }) => typeof path === "string" ? [path] : []) : []; }
+      catch { /* A receipt in an older shape names no paths. */ }
+      const report = await recordCodingOutcome({
+        workspace: project.workspace, session: run.session, requestId: run.requestId, outcome: row.review, receipt, appliedPaths,
+      }, this.#atlas(project.id));
+      if (report.learned.some(({ learned }) => learned)) this.#audit(project.id, "review_learned", row.reviewer ?? "system", run.session, run.requestId);
+    } catch (error) {
+      log.warn("learning from a review was skipped", { error: error instanceof Error ? error.message : "unknown" });
+    }
+  }
+
   dispatch(
     method: string, path: string, body: Json, localOwner: boolean, token: string | null, readonly: boolean,
     canWrite: () => boolean = () => !readonly,
@@ -2078,6 +2290,8 @@ export class CodingProjectControl {
     if (action === "provider-check" && method === "POST") return this.#providerCheck(project, body, actor, canWrite);
     if (action === "retention" && (method === "GET" || method === "POST")) return this.#retention(project, method, body, actor);
     if (action === "presets" && (method === "GET" || method === "POST")) return this.#presets(project, method, body, actor);
+    if (action === "import" && (method === "GET" || method === "POST")) return this.#importMap(project, method, actor, canWrite);
+    if (action === "routing" && (method === "GET" || method === "POST")) return this.#routingSettings(project, method, body, actor, canWrite);
     if (action && method === "POST" && (githubPullActions.includes(action) || githubBranchActions.includes(action)))
       return this.#withSession(project, body, () => this.#github(project, action, method, body, actor, canWrite));
     if (action?.startsWith("github-")) return this.#github(project, action, method, body, actor, canWrite);
@@ -2116,8 +2330,11 @@ export class CodingProjectControl {
       if (action === "cancel") return this.#withSession(project, body, () => this.#cancel(project, body, actor));
       if (action === "review") return this.#withSession(project, body, async () => {
         const currentActor = this.#identity(localOwner, token);
-        return this.#review(this.#project(project.id, currentActor), body, currentActor, canWrite);
+        const reviewed = this.#review(this.#project(project.id, currentActor), body, currentActor, canWrite);
+        await this.#learnFromReview(project, body);
+        return reviewed;
       });
+      if (action === "lesson") return this.#lesson(project, body, actor, canWrite);
       if (action === "patch-proposals") return this.#withSession(project, body, () => this.#patchProposals(project, body, actor));
       if (action === "patch-preview" || action === "patch-apply")
         return this.#withSession(project, body, () => this.#patch(project, body, actor, action === "patch-apply", canWrite));

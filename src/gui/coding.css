@@ -80,3 +80,7 @@
 .coding-team > header { padding-bottom: var(--space-3); border-bottom: 1px solid var(--line); }
 .coding-team > #team-entrance { max-width: 520px; }
 .coding-team .coding-project-links a { cursor: default; }
+.coding-map { padding-left: var(--space-5); display: grid; gap: var(--space-1); overflow-wrap: anywhere; }
+.coding-facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-4); margin: 0; }
+.coding-facts dt { color: var(--muted); }
+.coding-facts dd { margin: 0; overflow-wrap: anywhere; }

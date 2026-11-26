@@ -4,10 +4,11 @@ import { createModels, getSupportedThinkingLevels, type Models } from "@earendil
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import {
   AgentDoc, AssistantEntry, CompactionEntry, CompactionTask, createRegistry, Harness, InboxDoc, LiveDoc, ResetEntry, ROOT_CONVERSATION_ID, UsageDoc, UserEntry,
   type Conversation, type Cursor, type HarnessInspection, type LiveState, type SettledSubmissionRecord, type SubmissionId, type SubmissionRecord,
-  type TaskOutcome, type UsageState,
+  type TaskId, type TaskOutcome, type UsageState,
 } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { Database } from "bun:sqlite";
@@ -26,7 +27,7 @@ import {
 } from "./conversation-branch.ts";
 import {
   budgetedModels, codingBudget, codingHistory, compactionPolicy, contextBudgetError, estimateCodingContext, newRequestFits,
-  type CodingBudget,
+  type CodingBudget, type RequestRouting,
 } from "./history.ts";
 import { evaluationInput, type EvaluationInput } from "./evaluation.ts";
 import {
@@ -34,6 +35,16 @@ import {
   packageReviewReceipt, packageReviewTask, packageReviewTaskName, previewPackageReviews, type ChildReview, type PackageReviewScope,
 } from "./package-review.ts";
 import { RepositoryContextError, type RepositoryContextManifest, type RepositoryContextOptions, type RepositoryContextSelection } from "./repository-context.ts";
+import { AtlasError, selectAtlasContext, type AtlasContext } from "./atlas/context.ts";
+import { Learning } from "./atlas/learn.ts";
+import type { ReadoutOptions } from "./atlas/readout.ts";
+import type { AtlasLocation } from "./atlas/store.ts";
+import {
+  atlasRequestContent, createOrchestration, OrchestrationError, orchestrationExtension, orchestrationIds, orchestrationReceipt, orchestrationTask,
+  orchestrationTaskName, planOrchestration, savedOrchestrationOrders,
+  type OrchestrationInput, type OrchestrationOptions, type OrchestrationPlan, type OrchestrationResult,
+} from "./orchestrator.ts";
+import type { OpenRouterPreferences, RouteCandidate, RouteStats, RoutingPolicy } from "./router.ts";
 import { openDurableDatabase } from "./sqlite.ts";
 import { observeCodingTaskProgress, readCodingTaskProgress, type CodingTaskProgress } from "./task-progress.ts";
 
@@ -44,9 +55,11 @@ const providers = {
   openai: { label: "OpenAI", key: "OPENAI_API_KEY", create: openaiProvider },
   anthropic: { label: "Anthropic", key: "ANTHROPIC_API_KEY", create: anthropicProvider },
   google: { label: "Google Gemini", key: "GEMINI_API_KEY", create: googleProvider },
+  openrouter: { label: "OpenRouter", key: "OPENROUTER_API_KEY", create: openrouterProvider },
 } as const;
 export type CodingProvider = keyof typeof providers;
 const isCodingProvider = (provider: string): provider is CodingProvider => Object.hasOwn(providers, provider);
+export const codingProviders = Object.keys(providers) as CodingProvider[];
 export const codingProviderLabel = (provider: CodingProvider): string => providers[provider].label;
 const maxPromptBytes = 16 * 1024;
 const maxFileBytes = 32 * 1024;
@@ -84,6 +97,10 @@ export interface CodingSessionOptions {
   allowedAttachmentScopes?: string[];
   approvedSourceLookup?: true;
   repository?: Omit<RepositoryContextOptions, "workspace"> & { id: string };
+  /** Source selected from the imported repository map. The query defaults to the task. */
+  atlas?: AtlasSelection & { id: string };
+  /** An orchestrated request: a previewed plan of scoped work orders. */
+  orchestration?: OrchestrationOptions & { routing?: RoutingPolicy; id: string };
   packageReviews?: { packages: PackageReviewScope[]; id: string };
   provider: string;
   model: string;
@@ -92,7 +109,12 @@ export interface CodingSessionOptions {
   branch?: { parentSession: string; id: string; contextVersion?: string };
 }
 
-export type CodingSessionResult = { session: string; requestId: string; repositoryContext?: RepositoryContextManifest; packageReviews?: ChildReview[] } & (
+export type AtlasSelection = Pick<ReadoutOptions, "tokenBudget" | "projects" | "exclude" | "deferred"> & { query?: string };
+
+export type CodingSessionResult = {
+  session: string; requestId: string; repositoryContext?: RepositoryContextManifest; packageReviews?: ChildReview[];
+  orchestration?: OrchestrationResult;
+} & (
   | { status: "done"; text: string; usage: Usage; stopReason: AssistantMessage["stopReason"] }
   | { status: "unanswered"; reason: string }
 );
@@ -150,6 +172,8 @@ export type CodingDependencies = {
   models?: Models;
   workspaceBinding?: string;
   preparedInput?: PreparedCodingInput;
+  /** Where this caller keeps its repository map. A project keeps its own, apart from other projects on the same workspace. */
+  atlas?: AtlasLocation;
   apiKey?: string;
   allowEnvKey?: boolean;
   /** Browser submission expects a new ID. Legacy CLI calls can replay saved IDs. */
@@ -191,7 +215,7 @@ function validateOptions(options: CodingSessionStatusOptions): CodingProvider {
   if (!options.workspace.trim()) throw new CodingError("A coding workspace directory is required.");
   if (!options.model.trim()) throw new CodingError("A Pi model ID is required.");
   if (!isCodingProvider(options.provider)) {
-    throw new CodingError("Choose openai, anthropic, or google as the Pi Durable provider.");
+    throw new CodingError("Choose openai, anthropic, google, or openrouter as the Pi Durable provider.");
   }
   return options.provider;
 }
@@ -261,9 +285,21 @@ async function requestContent(
   filePreviewId?: string,
   allowedAttachmentScopes?: string[],
   approvedSourceLookup?: true,
+  atlas?: CodingSessionOptions["atlas"],
+  location: AtlasLocation = {},
 ): Promise<string> {
   if (!prompt.trim() || Buffer.byteLength(prompt) > maxPromptBytes) {
     throw new CodingError("Enter a coding prompt of 1–16384 UTF-8 bytes.");
+  }
+  if (atlas) {
+    if (paths.length || repository) throw new CodingError("Choose one source for this request: explicit files, previewed excerpts, or the repository map.");
+    const { id, ...selection } = atlas;
+    const context = await previewAtlasContext(workspace, prompt, selection, location);
+    if (context.manifest.id !== id) {
+      throw new CodingError("The repository map selection changed or the options differ. Preview it again and use its context ID.");
+    }
+    if (!context.excerpts.length) throw new CodingError("The repository map selected no source for this task. Name a path or identifier, or attach files explicitly.");
+    return atlasRequestContent(prompt, context, Boolean(selection.deferred) || approvedSourceLookup === true);
   }
   const capabilities = approvedSourceLookup ? { approvedSourceLookup } : {};
   if (repository) {
@@ -291,16 +327,78 @@ async function requestContent(
 
 export type PreparedCodingInput =
   | { kind: "request"; content: string }
-  | { kind: "package-review"; parts: ReturnType<typeof confirmedPackageReviewParts> };
+  | { kind: "package-review"; parts: ReturnType<typeof confirmedPackageReviewParts> }
+  | { kind: "orchestration"; input: OrchestrationInput & { openRouter?: OpenRouterPreferences } };
+
+/** Select source from the imported repository map for a task. Makes no model call. */
+export async function previewAtlasContext(workspace: string, prompt: string, selection: AtlasSelection = {}, location: AtlasLocation = {}): Promise<AtlasContext> {
+  try {
+    const { query, ...options } = selection;
+    return await selectAtlasContext({ ...options, workspace, query: query?.trim() || prompt }, location);
+  } catch (error) {
+    if (error instanceof AtlasError) throw new CodingError(error.message, { cause: error });
+    throw error;
+  }
+}
+
+function routeStats(workspace: string, location: AtlasLocation): { stats: RouteStats; close: () => void } {
+  let learning: Learning | undefined;
+  try { learning = Learning.open(workspace, location); } catch { learning = undefined; }
+  const rows = new Map((learning?.routeRows() ?? []).map((row) => [`${row.role}\0${row.cell}\0${row.model}`, row]));
+  return { stats: (role, cell, key) => rows.get(`${role}\0${cell}\0${key}`), close: () => learning?.close() };
+}
+
+/** Plan an orchestrated request for preview or admission. Deterministic, local, and free of model calls. */
+export async function previewCodingOrchestration(
+  options: Pick<CodingSessionOptions, "workspace" | "requestId" | "provider" | "model" | "thinkingLevel"> & { prompt: string; orchestration: OrchestrationOptions & { routing?: RoutingPolicy } },
+  dependencies: CodingDependencies = {},
+): Promise<{ plan: OrchestrationPlan; input: OrchestrationInput & { openRouter?: OpenRouterPreferences } }> {
+  const provider = options.provider;
+  if (!isCodingProvider(provider)) throw new CodingError("Choose openai, anthropic, google, or openrouter as the Pi Durable provider.");
+  if (!options.prompt.trim() || Buffer.byteLength(options.prompt) > maxPromptBytes) throw new CodingError("Enter a coding prompt of 1–16384 UTF-8 bytes.");
+  const workspace = dependencies.workspaceBinding ?? await canonicalWorkspace(options.workspace);
+  const catalog = dependencies.models ?? apiKeyModels(provider);
+  const session: RouteCandidate = { provider, model: options.model, ...(options.thinkingLevel !== undefined ? { thinkingLevel: options.thinkingLevel } : {}) };
+  const { routing, ...scope } = options.orchestration;
+  const learned = routeStats(workspace, dependencies.atlas ?? {});
+  try {
+    const { plan, input } = await planOrchestration(workspace, options.prompt, options.requestId, scope, {
+      session, ...(routing ? { policy: routing } : {}), stats: learned.stats,
+      prices: ({ provider: name, model }) => {
+        const cost = catalog.getModel(name, model)?.cost;
+        return cost ? { input: cost.input, output: cost.output } : undefined;
+      },
+      credentialed: (name) => dependencies.models !== undefined
+        || (isCodingProvider(name) && (name === provider ? hasCodingCredential(provider, dependencies) : otherProviderKey(name, dependencies) !== undefined)),
+    }, dependencies.atlas);
+    for (const model of [...input.orders.flatMap(({ models }) => models), ...(input.synthesis?.models ?? [])]) {
+      if (!catalog.getModel(model.provider, model.model)) throw new CodingError(`Pi 1.0 does not list model ${model.model} for ${model.provider}.`);
+    }
+    return { plan, input: { ...input, ...(routing?.openRouter ? { openRouter: routing.openRouter } : {}) } };
+  } catch (error) {
+    if (error instanceof OrchestrationError || error instanceof AtlasError) throw new CodingError(error.message, { cause: error });
+    throw error;
+  } finally {
+    learned.close();
+  }
+}
 
 /** Verify the preview against live source before giving the captured input to a worker. */
-export async function prepareCodingInput(options: CodingSessionOptions, workspace: string): Promise<PreparedCodingInput> {
-  const { prompt, packageReviews } = options;
+export async function prepareCodingInput(options: CodingSessionOptions, workspace: string, dependencies: CodingDependencies = {}): Promise<PreparedCodingInput> {
+  const { prompt, packageReviews, orchestration } = options;
   if (prompt === undefined) throw new CodingError("Enter a coding prompt before preparing source.");
+  if (orchestration) {
+    if (options.approvedSourceLookup || options.files || options.repository || options.atlas || packageReviews)
+      throw new CodingError("An orchestrated request selects its own source. Remove the other source options.");
+    const { id, ...planOptions } = orchestration;
+    const { plan, input } = await previewCodingOrchestration({ ...options, prompt, orchestration: planOptions }, { ...dependencies, workspaceBinding: workspace });
+    if (plan.id !== id) throw new CodingError("The plan changed or its options differ. Preview the plan again before sending.");
+    return { kind: "orchestration", input };
+  }
   if (!packageReviews) {
     return { kind: "request", content: await requestContent(
       workspace, prompt, options.files ?? [], options.repository, options.filePreviewId, options.allowedAttachmentScopes,
-      options.approvedSourceLookup,
+      options.approvedSourceLookup, options.atlas, dependencies.atlas,
     ) };
   }
 
@@ -354,15 +452,28 @@ export function codingCredential(provider: CodingProvider, dependencies: CodingD
   return (dependencies.apiKey ?? (dependencies.allowEnvKey !== false ? process.env[providers[provider].key] : undefined))?.trim() || undefined;
 }
 
-function apiKeyModels(provider: CodingProvider, key?: string): Models {
-  const settings = providers[provider];
+/** A local run may route work to another provider when that provider's own environment key is set. */
+function otherProviderKey(provider: CodingProvider, dependencies: CodingDependencies): string | undefined {
+  return dependencies.allowEnvKey !== false ? process.env[providers[provider].key]?.trim() || undefined : undefined;
+}
+
+/**
+ * Every coding provider's catalog, with credentials resolved narrowly: the
+ * session's provider uses the given key, and any other provider only its own
+ * environment variable, and only when environment keys are allowed at all.
+ */
+function apiKeyModels(provider: CodingProvider, key?: string, dependencies?: CodingDependencies): Models {
   const models = createModels({
     authContext: {
-      env: async (name) => name === settings.key ? key : undefined,
+      env: async (name) => {
+        if (name === providers[provider].key) return key;
+        const other = dependencies && codingProviders.find((candidate) => providers[candidate].key === name);
+        return other ? otherProviderKey(other, dependencies) : undefined;
+      },
       fileExists: async () => false,
     },
   });
-  models.setProvider(settings.create());
+  for (const settings of Object.values(providers)) models.setProvider(settings.create());
   return models;
 }
 
@@ -480,6 +591,7 @@ async function withCodingSession<T>(
     budget: CodingBudget | undefined; history: ReturnType<typeof codingHistory>;
     sourceTool: ReturnType<typeof approvedSourceTool>;
     parent?: CodingBranchSession;
+    routing: RequestRouting;
   }) => Promise<T>,
   leasedStorage?: SqliteStorage,
 ): Promise<T> {
@@ -489,7 +601,8 @@ async function withCodingSession<T>(
     ? options.workspace : await canonicalWorkspace(options.workspace);
   if (dependencies.workspaceBinding !== undefined && workspace !== dependencies.workspaceBinding)
     throw new CodingError("The authorized workspace path changed since this project was registered.");
-  const models = dependencies.models ?? apiKeyModels(provider, codingCredential(provider, dependencies));
+  const models = dependencies.models ?? apiKeyModels(provider, codingCredential(provider, dependencies), dependencies);
+  const routing: RequestRouting = {};
   const model = models.getModel(provider, options.model);
   if (options.thinkingLevel !== undefined && model && !getSupportedThinkingLevels(model).includes(options.thinkingLevel))
     throw new CodingError("The selected model does not support this reasoning level.");
@@ -512,9 +625,10 @@ async function withCodingSession<T>(
       });
       registry.install(history);
       registry.install(packageReviewExtension);
+      registry.install(orchestrationExtension);
       registry.install(sourceTool.extension);
       harness = await Harness.open(storage, {
-        models: budget ? budgetedModels(models, budget, affinity) : models,
+        models: budget ? budgetedModels(models, budget, affinity, routing) : models,
         registry,
         settings: { compaction: budget ? compactionPolicy(budget) : { backgroundTokens: 0 } },
       }, context);
@@ -530,7 +644,7 @@ async function withCodingSession<T>(
         if (!root) throw new CodingError("No saved alternative branch conversation exists.");
       }
       if (root) await requireCodingAgentBinding(options, root, workspace, provider);
-      return await use({ harness, storage, root, workspace, provider, budget, history, sourceTool, parent });
+      return await use({ harness, storage, root, workspace, provider, budget, history, sourceTool, parent, routing });
     } finally {
       if (harness) await harness.close(context);
     }
@@ -1076,23 +1190,58 @@ async function codingReceipt(
   };
 }
 
+/** A request that runs as a durable task of its own: an independent package review or an orchestrated request. */
+type RequestTask = { id: TaskId<unknown>; orchestrated: boolean };
+
+async function findRequestTask(harness: Harness, requestId: string): Promise<RequestTask | undefined> {
+  const review = await packageReviewTask(harness, requestId, context);
+  if (review !== undefined) return { id: review, orchestrated: false };
+  const orchestration = await orchestrationTask(harness, requestId, context);
+  if (orchestration !== undefined) return { id: orchestration, orchestrated: true };
+}
+
+function requestTaskReceipt(task: RequestTask, outcome: TaskOutcome<unknown>) {
+  return task.orchestrated ? orchestrationReceipt(outcome as TaskOutcome<OrchestrationResult>) : packageReviewReceipt(outcome as TaskOutcome<ChildReview[]>);
+}
+
+const requestTaskIds = (inspection: HarnessInspection): string[] => [...packageReviewIds(inspection), ...orchestrationIds(inspection)];
+
+function savedOpenRouter(input: unknown): OpenRouterPreferences | undefined {
+  const saved = input && typeof input === "object" && "openRouter" in input ? input.openRouter : undefined;
+  return saved && typeof saved === "object" && !Array.isArray(saved) ? saved as OpenRouterPreferences : undefined;
+}
+
+function savedOrchestrationSource(input: unknown, requestId: string): SavedCodingRequestInput | null {
+  const saved = savedOrchestrationOrders(input, requestId);
+  if (!saved) return null;
+  const groups: SavedSourceGroup[] = [];
+  for (const { scope, content } of saved.orders) {
+    const { savedSource: source } = savedSource(content);
+    if (!source) return null;
+    groups.push({ label: scope, files: sourceFiles(source) });
+  }
+  return { prompt: saved.task, groups };
+}
+
 /** Run or resume one explicit, user-directed coding request against a private local transcript. */
 export async function runCodingSession(
   options: CodingSessionOptions,
   dependencies: CodingDependencies = {},
 ): Promise<CodingSessionResult> {
   const hasNewInput = options.prompt !== undefined || dependencies.preparedInput !== undefined;
-  return withCodingSession(options, dependencies, hasNewInput, async ({ harness, storage, root, workspace, provider, budget, history, sourceTool, parent }) => {
+  return withCodingSession(options, dependencies, hasNewInput, async ({ harness, storage, root, workspace, provider, budget, history, sourceTool, parent, routing }) => {
     const identity = { session: options.session, requestId: options.requestId };
     const target = root?.id ?? ROOT_CONVERSATION_ID;
     const existing = await storage.submissionByRequest(target, options.requestId, context);
-    const packageTask = options.branch ? undefined : await packageReviewTask(harness, options.requestId, context);
+    const packageTask = options.branch ? undefined : await findRequestTask(harness, options.requestId);
     if (dependencies.requireNewRequest && (existing || packageTask)) {
       throw new CodingError("This request ID is already saved. Choose it in Run history to inspect or resume it.");
     }
     if (packageTask) {
-      const task = await harness.getTask(packageTask, context);
-      if (task?.state.status === "terminal") return { ...identity, ...packageReviewReceipt(task.state.outcome) };
+      const task = await harness.getTask(packageTask.id, context);
+      if (task?.state.status === "terminal") return { ...identity, ...requestTaskReceipt(packageTask, task.state.outcome) };
+      // A resumed orchestrated request sends under the preferences it was admitted with.
+      routing.openRouter = savedOpenRouter(task?.input);
     }
     if (!existing && !packageTask && !hasNewInput) {
       throw new CodingError(`No saved request ${options.requestId} exists in coding session ${options.session}.`);
@@ -1116,8 +1265,9 @@ export async function runCodingSession(
     let content: string | undefined;
     dependencies.signal?.throwIfAborted();
     let packageParts: ReturnType<typeof confirmedPackageReviewParts> | undefined;
+    let orchestration: (OrchestrationInput & { openRouter?: OpenRouterPreferences }) | undefined;
     if (!existing && !packageTask && hasNewInput) {
-      const pending = packageReviewIds(inspection)[0] ?? inspection.submissions.find(({ conversationId }) => conversationId === target)?.requestId;
+      const pending = requestTaskIds(inspection)[0] ?? inspection.submissions.find(({ conversationId }) => conversationId === target)?.requestId;
       if (pending) throw new CodingError(`Resume pending request ${pending} before starting another request in this session.`);
       if (options.branch) {
         const { id, contextVersion } = options.branch;
@@ -1125,13 +1275,17 @@ export async function runCodingSession(
           throw new CodingError("Preview and approve the current alternative branch context before sending.");
         await verifyConversationBranchAdmission(parent, id, contextVersion);
       }
-      const input = dependencies.preparedInput ?? await prepareCodingInput(options, workspace);
+      const input = dependencies.preparedInput ?? await prepareCodingInput(options, workspace, dependencies);
       if (input.kind === "package-review") {
         if (options.branch) throw new CodingError("Choose files or repository excerpts for an alternative branch request.");
         packageParts = input.parts;
+      } else if (input.kind === "orchestration") {
+        if (options.branch) throw new CodingError("Choose files or repository excerpts for an alternative branch request.");
+        orchestration = input.input;
+        routing.openRouter = orchestration.openRouter;
       }
       else content = input.content;
-      if ([...(content === undefined ? [] : [content]), ...(packageParts?.map((part) => part.content) ?? [])]
+      if ([...(content === undefined ? [] : [content]), ...(packageParts?.map((part) => part.content) ?? []), ...(orchestration?.orders.map((order) => order.content) ?? [])]
         .some((input) => !newRequestFits(input, instructions, budget))) {
         throw new CodingError(`The new coding request exceeds the ${budget.limitTokens}-token input budget. Use fewer lines, files, or prompt tokens.`);
       }
@@ -1157,8 +1311,11 @@ export async function runCodingSession(
       }
     }
     dependencies.signal?.throwIfAborted();
-    if (packageTask || packageParts) {
-      const task = packageTask ?? await createPackageReview(conversation, options.requestId, packageParts!, context);
+    if (packageTask || packageParts || orchestration) {
+      const started: RequestTask = packageTask ?? (orchestration
+        ? { id: await createOrchestration(conversation, orchestration, context), orchestrated: true }
+        : { id: await createPackageReview(conversation, options.requestId, packageParts!, context), orchestrated: false });
+      const task = started.id;
       dependencies.admitted?.();
       let cancellation: Promise<unknown> | undefined;
       const cancel = () => {
@@ -1175,7 +1332,7 @@ export async function runCodingSession(
         }
         if (cancellation) await cancellation;
         const settled = await harness.waitForTask(task, context);
-        return { ...identity, ...packageReviewReceipt(settled.state.outcome) };
+        return { ...identity, ...requestTaskReceipt(started, settled.state.outcome) };
       } finally {
         signal?.removeEventListener("abort", cancel);
         await stopProgress?.();
@@ -1232,14 +1389,14 @@ export async function cancelCodingRequest(
 ): Promise<CodingSessionResult> {
   return withCodingSession(options, dependencies, false, async ({ harness, storage, root }) => {
     const identity = { session: options.session, requestId: options.requestId };
-    const packageTask = options.branch ? undefined : await packageReviewTask(harness, options.requestId, context);
+    const packageTask = options.branch ? undefined : await findRequestTask(harness, options.requestId);
     if (packageTask) {
-      const task = await harness.getTask(packageTask, context);
-      if (task?.state.status === "terminal") return { ...identity, ...packageReviewReceipt(task.state.outcome) };
+      const task = await harness.getTask(packageTask.id, context);
+      if (task?.state.status === "terminal") return { ...identity, ...requestTaskReceipt(packageTask, task.state.outcome) };
       requireNoPendingCompaction(await harness.inspect(context));
-      await harness.abortTask(packageTask, context);
-      const settled = await harness.waitForTask(packageTask, context);
-      return { ...identity, ...packageReviewReceipt(settled.state.outcome) };
+      await harness.abortTask(packageTask.id, context);
+      const settled = await harness.waitForTask(packageTask.id, context);
+      return { ...identity, ...requestTaskReceipt(packageTask, settled.state.outcome) };
     }
     const saved = root && await storage.submissionByRequest(root.id, options.requestId, context);
     if (!root || !saved) throw new CodingError(`No saved request ${options.requestId} exists in coding session ${options.session}.`);
@@ -1261,8 +1418,11 @@ export async function getSavedCodingRequestInput(
   try {
     return await withCodingSession(options, dependencies, false, async ({ harness, storage, root }) => {
       if (!root) return null;
-      const taskId = options.branch ? undefined : await packageReviewTask(harness, options.requestId, context);
-      if (taskId) return savedPackageSource((await harness.getTask(taskId, context))?.input, options.requestId);
+      const requestTask = options.branch ? undefined : await findRequestTask(harness, options.requestId);
+      if (requestTask) {
+        const input = (await harness.getTask(requestTask.id, context))?.input;
+        return requestTask.orchestrated ? savedOrchestrationSource(input, options.requestId) : savedPackageSource(input, options.requestId);
+      }
       const submission = await storage.submissionByRequest(root.id, options.requestId, context);
       if (!submission || submission.type !== "input") return null;
       const content = await savedUserContent(storage, submission) ?? await queuedUserContent(harness, submission);
@@ -1298,7 +1458,7 @@ async function readCodingSessionStatus(
     model: options.model,
     pendingRequestIds: [...inspection.submissions.flatMap((submission) =>
       submission.conversationId === root.id && submission.type === "input" && submission.requestId ? [submission.requestId] : []),
-      ...(options.branch ? [] : packageReviewIds(inspection))],
+      ...(options.branch ? [] : requestTaskIds(inspection))],
     usage: combined,
     rootUsage: own,
     context: {
@@ -1309,13 +1469,14 @@ async function readCodingSessionStatus(
     },
   };
   if (options.requestId !== undefined) {
-    const taskId = options.branch ? undefined : await packageReviewTask(harness, options.requestId, context);
-    if (taskId) {
+    const requestTask = options.branch ? undefined : await findRequestTask(harness, options.requestId);
+    if (requestTask) {
+      const taskId = requestTask.id;
       if (comparison) throw new CodingError("Compare completed ordinary coding requests.");
       const task = await harness.getTask(taskId, context);
       const identity = { session: options.session, requestId: options.requestId };
-      const receipt = task?.state.status === "terminal" ? { ...identity, ...packageReviewReceipt(task.state.outcome) } : undefined;
-      const saved = options.includeEvaluationInput ? evaluatedPackages(task?.input) : undefined;
+      const receipt = task?.state.status === "terminal" ? { ...identity, ...requestTaskReceipt(requestTask, task.state.outcome) } : undefined;
+      const saved = options.includeEvaluationInput && !requestTask.orchestrated ? evaluatedPackages(task?.input) : undefined;
       const progress = task && !receipt
         ? await readCodingTaskProgress(harness, { task: taskId }, context).catch(() => undefined)
         : undefined;
@@ -1431,7 +1592,7 @@ export type StandaloneCodingSessionSummary = ({ state: "ready" } & StandaloneCod
 
 export interface StandaloneCodingRequestSummary {
   requestId: string;
-  kind: "request" | "package-review";
+  kind: "request" | "package-review" | "orchestration";
   status: SubmissionRecord["status"];
 }
 
@@ -1552,6 +1713,17 @@ export function listStandaloneCodingRequests(session: string, dependencies: Stan
           status = hasSummary ? "done" : "unanswered";
         }
         rows.push({ id, summary: { requestId: input.requestId, kind: "package-review", status } });
+      }
+      cursor = page.next;
+    } while (cursor);
+    do {
+      const page = await storage.scanTasks({ conversationId: ROOT_CONVERSATION_ID, kind: orchestrationTaskName }, 16, cursor, context);
+      for (const { id, input, state } of page.items) {
+        if (!input || typeof input !== "object" || Array.isArray(input) ||
+            typeof input.requestId !== "string" || !requestIdPattern.test(input.requestId)) continue;
+        const status: StandaloneCodingRequestSummary["status"] = state.status !== "terminal" ? "placed"
+          : orchestrationReceipt(state.outcome as TaskOutcome<OrchestrationResult>).status;
+        rows.push({ id, summary: { requestId: input.requestId, kind: "orchestration", status } });
       }
       cursor = page.next;
     } while (cursor);

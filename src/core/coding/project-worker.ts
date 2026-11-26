@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
+import type { AtlasLocation } from "./atlas/store.ts";
 import { dockerWorkerStateDir, planDockerWorker, type DockerWorkerConfig } from "./docker-worker.ts";
 import {
   canonicalWorkspace, CodingError, maxLiveAnswerLength, prepareCodingInput, runCodingSession,
@@ -13,6 +14,8 @@ import { checkProviderModel, parseProviderCheckOutcome, type ProviderCheckInput,
 import { parseCodingTaskProgress, type CodingTaskProgress } from "./task-progress.ts";
 
 type Request = { stateDir: string; workspaceBinding: string; options: CodingSessionOptions; apiKey?: string };
+/** What the server knows and the worker is never told: where the project's repository map is kept. */
+type LaunchRequest = Request & { atlas?: AtlasLocation };
 type WorkerRequest = Request & { type?: undefined; stateBinding?: string; preparedInput?: PreparedCodingInput };
 type ProviderCheckRequest = ProviderCheckInput & { type: "provider-check" };
 type Event = { type: "admitted" } | { type: "answer"; answer: CodingLiveAnswer | null }
@@ -235,10 +238,26 @@ export async function launchProjectProviderCheck(
   }
 }
 
-export function launchProjectWorker(request: Request, signal: AbortSignal, callbacks: WorkerCallbacks, docker?: DockerWorkerConfig) {
+export function launchProjectWorker({ atlas, ...request }: LaunchRequest, signal: AbortSignal, callbacks: WorkerCallbacks, docker?: DockerWorkerConfig) {
   if (!docker) {
     mkdirSync(request.stateDir, { recursive: true, mode: 0o700 });
-    return launchPipe(request, signal, callbacks);
+    const { options } = request;
+    if (options.prompt === undefined || (!options.atlas && !options.orchestration)) return launchPipe(request, signal, callbacks);
+    // The repository map lives in this server's application data, which the
+    // worker's reduced environment does not locate. Select here and hand the
+    // worker the approved input, as the Docker launcher does for every source.
+    let worker: ReturnType<typeof launchPipe> | undefined;
+    let stopped = false;
+    const result = (async () => {
+      const preparedInput = await prepareCodingInput(options, request.workspaceBinding, {
+        workspaceBinding: request.workspaceBinding, apiKey: request.apiKey, allowEnvKey: false, ...(atlas ? { atlas } : {}),
+      });
+      if (stopped) throw new ProjectWorkerInterrupted("The coding server stopped before launching the worker.");
+      if (signal.aborted) throw new CodingError("The coding request was cancelled before admission.");
+      worker = launchPipe({ ...request, preparedInput }, signal, callbacks);
+      return worker.result;
+    })();
+    return { stop() { stopped = true; worker?.stop(); }, result };
   }
 
   let worker: ReturnType<typeof launchPipe> | undefined;
@@ -249,7 +268,7 @@ export function launchProjectWorker(request: Request, signal: AbortSignal, callb
     if (options.prompt !== undefined) {
       const workspace = await canonicalWorkspace(options.workspace);
       if (workspace !== workspaceBinding) throw new CodingError("The authorized workspace path changed since this project was registered.");
-      preparedInput = await prepareCodingInput(options, workspace);
+      preparedInput = await prepareCodingInput(options, workspace, { workspaceBinding, apiKey, allowEnvKey: false, ...(atlas ? { atlas } : {}) });
     }
     if (stopped) throw new ProjectWorkerInterrupted("The coding server stopped before launching the worker.");
     if (signal.aborted) throw new CodingError("The coding request was cancelled before admission.");

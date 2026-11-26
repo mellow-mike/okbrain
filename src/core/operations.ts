@@ -20,6 +20,10 @@ import { changeBrainMount, restoreBrainMount } from "./brain-mounts.ts";
 import type { CodingSessionResult, CodingSessionStatusResult } from "./coding/durable.ts";
 import { CodingProjectProfileError, parseCodingProjectProfile } from "./coding/project-profile.ts";
 import type { RepositoryContextManifest, RepositoryContextSelection, RepositoryContextOptions } from "./coding/repository-context.ts";
+import type { AtlasContext } from "./coding/atlas/context.ts";
+import type { ImportReport } from "./coding/atlas/import.ts";
+import type { OrchestrationPlan } from "./coding/orchestrator.ts";
+import type { CodingOutcomeReport } from "./coding/outcomes.ts";
 import { brainAiDefaults, listBrains, loadConfig, resolveBrain, saveConfig, type AiSettings, type OkbConfig } from "./config.ts";
 import { calibration, CLAIM_TYPE, isClaimDeadline, overdueClaimDates, scanClaims, type CalibrationReport, type Outcome } from "./claims.ts";
 import { watchBundleInForeground, type BundleWatchStatus } from "./engine/bundle-watch.ts";
@@ -204,7 +208,7 @@ const codingWorkspace = { name: "workspace", type: "string", required: true, des
 const codingSessionParams: ParamSpec[] = [
   codingWorkspace,
   { name: "session", type: "string", required: true, description: "persistent session name" },
-  { name: "provider", type: "string", required: true, description: "Pi provider: openai, anthropic, or google" },
+  { name: "provider", type: "string", required: true, description: "Pi provider: openai, anthropic, google, or openrouter" },
   { name: "model", type: "string", required: true, description: "model ID in Pi's provider catalog" },
 ];
 const repositorySelectionParams: ParamSpec[] = [
@@ -245,13 +249,75 @@ function renderRepositoryContext(manifest: RepositoryContextManifest, excerpts?:
     ...(manifest.profile ? [`Profile ${manifest.profile.name} (v${manifest.profile.version})`] : []),
     ...(manifest.profile?.sharedProjects?.length ? [`Permitted dependencies ${manifest.profile.sharedProjects.join(", ")}`] : []),
     ...(manifest.index ? [`Indexed ${manifest.index.indexedFiles} files, with ${manifest.index.expandedFiles} candidate imports${manifest.index.limited ? " (index cap reached)" : ""}.`] : []),
-    `${manifest.estimatedTokens}/${manifest.tokenBudget} estimated excerpt tokens. Scanned ${manifest.scannedFiles} of ${manifest.candidateFiles} eligible files.`,
+    manifest.atlas
+      ? `${manifest.estimatedTokens}/${manifest.tokenBudget} estimated tokens. Scored ${manifest.scannedFiles} units; ${manifest.matchedFiles} had enough evidence to send.`
+      : `${manifest.estimatedTokens}/${manifest.tokenBudget} estimated excerpt tokens. Scanned ${manifest.scannedFiles} of ${manifest.candidateFiles} eligible files.`,
     ...manifest.files.map(({ path, startLine, endLine, reason }) => `${path}:${startLine}-${endLine}${reason ? ` (${reason})` : ""}`),
   ];
   if (!manifest.files.length) lines.push("No excerpts selected.");
   if (limits.length) lines.push(`Limits reached: ${limits.join(", ")}. Narrow the scope or query to improve coverage.`);
   if (guidance) lines.push("\n--- Profile guidance ---", guidance);
   for (const excerpt of excerpts ?? []) lines.push(`\n--- ${excerpt.path}:${excerpt.startLine}-${excerpt.endLine} ---`, excerpt.content);
+  return stripVTControlCharacters(lines.join("\n"));
+}
+
+const pathList = (value: unknown): string[] | undefined =>
+  typeof value === "string" ? value.split(",").map((part) => part.trim()).filter(Boolean) : undefined;
+
+const atlasSelectionParams: ParamSpec[] = [
+  { name: "projects", type: "string", description: "comma-separated workspace-relative directories to read from (default: everything imported)" },
+  { name: "exclude", type: "string", description: "comma-separated workspace-relative directories to leave out" },
+  { name: "context-tokens", type: "int", description: "estimated token budget for the whole selection (default 4096)" },
+  { name: "deferred", type: "boolean", description: "also approve further excerpts the model may look up by path and line" },
+];
+
+function atlasSelectionFrom(p: Record<string, unknown>) {
+  return {
+    ...(pathList(p.projects) ? { projects: pathList(p.projects) } : {}),
+    ...(pathList(p.exclude) ? { exclude: pathList(p.exclude) } : {}),
+    ...(p["context-tokens"] !== undefined ? { tokenBudget: p["context-tokens"] as number } : {}),
+    ...(p.deferred === true ? { deferred: true } : {}),
+  };
+}
+
+function workersFrom(value: unknown): number | "auto" | undefined {
+  if (value === undefined || value === "auto") return value as undefined | "auto";
+  const count = Number(value);
+  if (!Number.isInteger(count) || count < 1) throw new OpError("Use --workers auto or a whole number of workers.", "bad_params");
+  return count;
+}
+
+async function routingFrom(value: unknown) {
+  if (value === undefined) return undefined;
+  const [{ parseRoutingPolicy, RoutingError }, { codingProviders }] = await Promise.all([import("./coding/router.ts"), import("./coding/durable.ts")]);
+  try { return parseRoutingPolicy(value as string, codingProviders); }
+  catch (error) {
+    if (error instanceof RoutingError) throw new OpError(error.message, "bad_params");
+    throw error;
+  }
+}
+
+function renderAtlasContext(context: Pick<AtlasContext, "manifest"> & Partial<AtlasContext>, explain = false): string {
+  const { manifest } = context;
+  const atlas = manifest.atlas;
+  const lines = [renderRepositoryContext(manifest, context.excerpts)];
+  if (atlas) {
+    lines.splice(1, 0, `Repository map generation ${atlas.generation}${atlas.importedAt ? `, imported ${atlas.importedAt}` : ""}. Learned parameters v${atlas.params}.`);
+    if (atlas.slots.length) lines.push(`Slots: ${atlas.slots.map(({ name, units, tokens }) => `${name} (${units} units, ${tokens} tokens)`).join("; ")}.`);
+    if (atlas.staleFiles) lines.push(`${atlas.staleFiles} selected files changed since the import. Their excerpts come from the current worktree. Run \`okb code import\` to refresh the map.`);
+    if (atlas.skills.length) lines.push(`Facts delivered: ${atlas.skills.map(({ id, trial }) => trial ? `${id} (on trial)` : id).join(", ")}.`);
+    if (atlas.withheld?.length) lines.push(`Withheld for measurement: ${atlas.withheld.join(", ")}.`);
+    if (atlas.deferred.length) lines.push(`On request: ${atlas.deferred.map(({ path, startLine, endLine }) => `${path}:${startLine}-${endLine}`).join(", ")}.`);
+  }
+  if (context.map?.length) lines.push("\n--- Map ---", ...context.map);
+  if (context.skills?.length) lines.push("\n--- Facts ---", ...context.skills.map(({ text }) => text));
+  if (explain && context.ranked?.length) {
+    lines.push("\n--- Ranking ---");
+    for (const unit of context.ranked.slice(0, 20)) {
+      const lanes = Object.entries(unit.lanes).filter(([, score]) => score > 0).map(([lane, score]) => `${lane} ${score}`).join(", ");
+      lines.push(`${unit.selected ? "*" : " "} ${unit.evidence.toFixed(2)} ${unit.path}:${unit.startLine} ${unit.name} [${unit.slot}] ${lanes}`);
+    }
+  }
   return stripVTControlCharacters(lines.join("\n"));
 }
 
@@ -1207,9 +1273,44 @@ export const operations: readonly Operation[] = [
       { name: "prompt", type: "string", description: "coding task (omit when resuming a saved request)" },
       { name: "files", type: "string", description: "comma-separated workspace-relative text files to attach" },
       ...repositorySelectionParams,
-      { name: "context-id", type: "string", description: "ID issued by `okb code context` for the same selection" },
+      { name: "context-id", type: "string", description: "ID issued by `okb code context` or `okb code recall` for the same selection" },
+      { name: "atlas", type: "boolean", description: "select source from the imported repository map (see `okb code recall`)" },
+      { name: "exclude", type: "string", description: "with --atlas: comma-separated directories to leave out" },
+      { name: "deferred", type: "boolean", description: "with --atlas: also approve excerpts the model may look up by path and line" },
+      { name: "orchestrate", type: "boolean", description: "run a previewed plan of scoped work orders (see `okb code plan`)" },
+      { name: "plan-id", type: "string", description: "with --orchestrate: ID issued by `okb code plan` for the same options" },
+      { name: "workers", type: "string", description: "with --orchestrate: auto, or the number of workers (1–4)" },
+      { name: "routing-json", type: "string", description: "with --orchestrate: versioned routing policy as JSON" },
     ],
     handler: async (_ctx, p) => {
+      const mapped = p.atlas === true || p.orchestrate === true;
+      if (p.atlas === true && p.orchestrate === true) throw new OpError("Choose either --atlas or --orchestrate.", "bad_params");
+      if (!mapped && (p.exclude !== undefined || p.deferred !== undefined || p["plan-id"] !== undefined || p.workers !== undefined || p["routing-json"] !== undefined))
+        throw new OpError("Use --exclude and --deferred with --atlas, and --plan-id, --workers and --routing-json with --orchestrate.", "bad_params");
+      if (mapped) {
+        if (p.prompt === undefined) throw new OpError("Use --atlas or --orchestrate with a new request prompt.", "bad_params");
+        if (p.files !== undefined || p["profile-json"] !== undefined) throw new OpError("The repository map selects its own source. Remove --files and --profile-json.", "bad_params");
+        const id = p.atlas === true ? p["context-id"] : p["plan-id"];
+        if (id === undefined) throw new OpError(p.atlas === true
+          ? "Use --atlas with --context-id. Get the ID from `okb code recall`." : "Use --orchestrate with --plan-id. Get the ID from `okb code plan`.", "bad_params");
+        const { CodingError, runCodingSession } = await import("./coding/durable.ts");
+        const routing = await routingFrom(p["routing-json"]);
+        const workers = workersFrom(p.workers);
+        try {
+          return await runCodingSession({
+            ...codingSessionParamsFrom(p), requestId: p["request-id"] as string, prompt: p.prompt as string,
+            ...(p.atlas === true
+              ? { atlas: { ...atlasSelectionFrom(p), ...(p.query !== undefined ? { query: p.query as string } : {}), id: id as string } }
+              : { orchestration: {
+                  ...(pathList(p.projects) ? { projects: pathList(p.projects) } : {}), ...(p["context-tokens"] !== undefined ? { tokenBudget: p["context-tokens"] as number } : {}),
+                  ...(workers !== undefined ? { workers } : {}), ...(routing ? { routing } : {}), id: id as string,
+                } }),
+          });
+        } catch (error) {
+          if (error instanceof CodingError) throw new OpError(error.message, "refused");
+          throw error;
+        }
+      }
       const usesRepository = p.projects !== undefined || p["profile-json"] !== undefined || p.query !== undefined || p["context-tokens"] !== undefined || p["context-id"] !== undefined;
       if (p.prompt === undefined && (p.files !== undefined || usesRepository))
         throw new OpError("Use source selection flags with a new request prompt.", "bad_params");
@@ -1285,6 +1386,290 @@ export const operations: readonly Operation[] = [
         if (request.repositoryContext) lines.push(renderRepositoryContext(request.repositoryContext));
       }
       return stripVTControlCharacters(lines.join("\n"));
+    },
+  },
+  {
+    name: "code_import",
+    cliName: "code import",
+    summary: "Map a repository for coding: packages, symbols, links, and a readable knowledge bundle. Makes no model call",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [
+      codingWorkspace,
+      { name: "projects", type: "string", description: "comma-separated workspace-relative directories to import (default: the whole workspace)" },
+      { name: "history-commits", type: "int", description: "commits of history to read for files that change together (default 2000, 0 to skip)" },
+      { name: "full", type: "boolean", description: "read every file again and rebuild term statistics" },
+    ],
+    handler: async (_ctx, p) => {
+      const [{ importRepository }, { AtlasError }] = await Promise.all([import("./coding/atlas/import.ts"), import("./coding/atlas/store.ts")]);
+      try {
+        return await importRepository({
+          workspace: p.workspace as string, ...(pathList(p.projects) ? { scopes: pathList(p.projects) } : {}),
+          ...(p["history-commits"] !== undefined ? { historyCommits: p["history-commits"] as number } : {}), full: p.full === true,
+        });
+      } catch (error) {
+        if (error instanceof AtlasError) throw new OpError(error.message, "refused");
+        throw error;
+      }
+    },
+    render: (r) => {
+      const report = r as ImportReport;
+      const limits = Object.entries(report.limitsReached).filter(([, reached]) => reached).map(([name, value]) => name === "fileBytes" ? `${value} files read in part` : `${name} cap`);
+      return stripVTControlCharacters([
+        `Imported ${report.files} files as ${report.units} units in ${report.packages} packages (${report.durationMs} ms).`,
+        `${report.changedFiles} read, ${report.unchangedFiles} unchanged, ${report.removedFiles} removed, ${report.skippedFiles} skipped. ${report.trackedPaths} tracked paths.`,
+        `Links: ${report.importEdges} imports, ${report.testEdges} test links, ${report.couplingEdges} change couplings from ${report.historyCommits} commits. ${report.tools} commands found.`,
+        `Knowledge bundle: ${report.knowledge.directory} (${report.knowledge.packages} package cards, ${report.knowledge.skills} skills; ${report.knowledge.written} written, ${report.knowledge.kept} kept as edited).`,
+        ...(limits.length ? [`Limits reached: ${limits.join(", ")}. Import narrower directories with --projects.`] : []),
+        "Preview a selection with `okb code recall --workspace <path> --query <task>`.",
+      ].join("\n"));
+    },
+  },
+  {
+    name: "code_map",
+    cliName: "code map",
+    summary: "Show what has been imported and learned for a repository",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [codingWorkspace],
+    handler: async (_ctx, p) => (await import("./coding/atlas/context.ts")).atlasStatus(p.workspace as string),
+    render: (r) => {
+      const status = r as Awaited<ReturnType<typeof import("./coding/atlas/context.ts")["atlasStatus"]>>;
+      if (!status.imported) return "This repository has not been imported. Run `okb code import --workspace <path>`.";
+      const { meta, packages, learning, skills } = status;
+      const lines = [
+        `Imported ${meta.files} files as ${meta.units} units in ${meta.packages} packages${meta.importedAt ? ` on ${meta.importedAt}` : ""}${meta.revision ? ` at ${meta.revision.slice(0, 12)}` : ""}.`,
+        `Knowledge bundle: ${status.knowledge}`,
+        ...packages.slice(0, 12).map(({ root, name, ecosystem, files }) => `  ${root} (${name}, ${ecosystem}): ${files} files`),
+      ];
+      if (learning) {
+        lines.push(`Learned from ${learning.episodes} reviewed requests (${learning.accepted} accepted). Parameters v${learning.params.version}. ${learning.aliases} aliases in use, ${learning.pendingAliases} awaiting a second confirmation.`,
+          `Lane weights: ${Object.entries(learning.params.lanes).map(([lane, weight]) => `${lane} ${weight.toFixed(2)}`).join(", ")}.`);
+      } else lines.push("Nothing learned yet. Record a review with `okb code learn`.");
+      const measured = skills.filter(({ kind }) => kind !== "built-in");
+      if (measured.length) lines.push(`Skills and lessons: ${measured.map(({ id, state }) => `${id} (${state})`).join(", ")}.`);
+      return stripVTControlCharacters(lines.join("\n"));
+    },
+  },
+  {
+    name: "code_recall",
+    cliName: "code recall",
+    summary: "Preview the source the repository map selects for a task within a fixed budget, without calling a model",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [
+      codingWorkspace,
+      { name: "query", type: "string", required: true, description: "the task, or a narrower search text" },
+      ...atlasSelectionParams,
+      { name: "show-content", type: "boolean", description: "include the selected text, the map, and the facts" },
+      { name: "explain", type: "boolean", description: "show the strongest candidates and their lane scores" },
+    ],
+    handler: async (_ctx, p) => {
+      const { selectAtlasContext, AtlasError } = await import("./coding/atlas/context.ts");
+      try {
+        const context = await selectAtlasContext({ workspace: p.workspace as string, query: p.query as string, ...atlasSelectionFrom(p) });
+        const { ranked, ...selection } = context;
+        return { ...(p["show-content"] ? selection : { manifest: context.manifest }), ...(p.explain ? { ranked } : {}) };
+      } catch (error) {
+        if (error instanceof AtlasError) throw new OpError(error.message, "refused");
+        throw error;
+      }
+    },
+    render: (r) => {
+      const context = r as Pick<AtlasContext, "manifest"> & Partial<AtlasContext>;
+      return renderAtlasContext(context, context.ranked !== undefined);
+    },
+  },
+  {
+    name: "code_plan",
+    cliName: "code plan",
+    summary: "Preview an orchestrated request: its work orders, their source, and the model each will use. Makes no model call",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [
+      codingWorkspace,
+      { name: "provider", type: "string", required: true, description: "Pi provider: openai, anthropic, google, or openrouter" },
+      { name: "model", type: "string", required: true, description: "the session's model, used for every role unless a routing policy says otherwise" },
+      { name: "prompt", type: "string", required: true, description: "coding task" },
+      { name: "workers", type: "string", description: "auto (default), or the number of workers (1–4)" },
+      { name: "projects", type: "string", description: "comma-separated workspace-relative directories to read from" },
+      { name: "context-tokens", type: "int", description: "estimated token budget for each worker's source (default 4096)" },
+      { name: "routing-json", type: "string", description: "versioned routing policy as JSON" },
+      { name: "show-content", type: "boolean", description: "include each work order's selected text" },
+    ],
+    handler: async (_ctx, p) => {
+      const { CodingError, previewCodingOrchestration } = await import("./coding/durable.ts");
+      const routing = await routingFrom(p["routing-json"]);
+      const workers = workersFrom(p.workers);
+      try {
+        const { plan } = await previewCodingOrchestration({
+          workspace: p.workspace as string, provider: p.provider as string, model: p.model as string, requestId: "plan", prompt: p.prompt as string,
+          orchestration: {
+            ...(pathList(p.projects) ? { projects: pathList(p.projects) } : {}), ...(p["context-tokens"] !== undefined ? { tokenBudget: p["context-tokens"] as number } : {}),
+            ...(workers !== undefined ? { workers } : {}), ...(routing ? { routing } : {}),
+          },
+        });
+        return p["show-content"] ? plan : { ...plan, orders: plan.orders.map(({ excerpts: _excerpts, ...order }) => order) };
+      } catch (error) {
+        if (error instanceof CodingError) throw new OpError(error.message, "refused");
+        throw error;
+      }
+    },
+    render: (r) => {
+      const plan = r as OrchestrationPlan;
+      const model = ({ provider, model }: { provider: string; model: string }) => `${provider}/${model}`;
+      const lines = [`Plan ID ${plan.id}`, `${plan.mode === "fan-out" ? `${plan.orders.length} workers` : "One worker"}. ${plan.reason}`,
+        `About ${plan.estimatedTokens} estimated input tokens across all planned calls.`];
+      for (const order of plan.orders) {
+        lines.push(`\n${order.id} — ${order.scope} — ${model(order.route.choice)}${model(order.route.choice) === model(order.route.baseline) ? "" : ` (baseline ${model(order.route.baseline)})`}`,
+          `  ${order.route.reason}${order.route.fallbacks.length ? ` Falls back to ${order.route.fallbacks.map(model).join(", ")}.` : ""}`,
+          ...order.manifest.files.map(({ path, startLine, endLine, reason }) => `  ${path}:${startLine}-${endLine}${reason ? ` (${reason})` : ""}`),
+          ...order.interfaces.map((line) => `  interface: ${line}`));
+        for (const excerpt of order.excerpts ?? []) lines.push(`\n--- ${excerpt.path}:${excerpt.startLine}-${excerpt.endLine} ---`, excerpt.content);
+      }
+      if (plan.synthesis) lines.push(`\nCombining step — ${model(plan.synthesis.route.choice)}. ${plan.synthesis.route.reason}`);
+      for (const warning of plan.warnings ?? []) lines.push(`\nNote: ${warning}`);
+      return stripVTControlCharacters(lines.join("\n"));
+    },
+  },
+  {
+    name: "code_learn",
+    cliName: "code learn",
+    summary: "Record your review of a finished request, so later requests in this repository select better source",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [
+      ...codingSessionParams,
+      { name: "request-id", type: "string", required: true, description: "the finished request you reviewed" },
+      { name: "outcome", type: "string", required: true, description: "accepted or changes-requested" },
+      { name: "used", type: "string", description: "comma-separated files your accepted change touched, beyond those the answer names" },
+    ],
+    handler: async (_ctx, p) => {
+      const outcome = p.outcome === "accepted" ? "accepted" as const : p.outcome === "changes-requested" ? "changes_requested" as const : undefined;
+      if (!outcome) throw new OpError("Use --outcome accepted or --outcome changes-requested.", "bad_params");
+      const [{ CodingError, getCodingSessionStatus }, { recordCodingOutcome }] = await Promise.all([import("./coding/durable.ts"), import("./coding/outcomes.ts")]);
+      try {
+        const status = await getCodingSessionStatus({ ...codingSessionParamsFrom(p), requestId: p["request-id"] as string, includeReceipt: true });
+        const receipt = status.request?.receipt;
+        if (receipt?.status !== "done") throw new OpError("Only a finished request with an answer can be reviewed.", "refused");
+        return await recordCodingOutcome({
+          workspace: p.workspace as string, session: p.session as string, requestId: p["request-id"] as string, outcome, receipt,
+          ...(pathList(p.used) ? { appliedPaths: pathList(p.used) } : {}),
+        });
+      } catch (error) {
+        if (error instanceof CodingError) throw new OpError(error.message, "refused");
+        throw error;
+      }
+    },
+    render: (r) => {
+      const report = r as CodingOutcomeReport;
+      if (!report.learned.length) return "Nothing to learn from: this request's source did not come from the repository map, or the map is no longer imported.";
+      const lines = report.learned.map((entry) => entry.learned
+        ? `${entry.requestId}: recorded. Lane weights ${entry.laneUpdate}${entry.panel ? ` (replay ${entry.panel.before} → ${entry.panel.after} over ${entry.panel.episodes} past requests)` : ""}. ${entry.aliases} aliases admitted.${entry.missedPaths.length ? ` Needed but not ranked: ${entry.missedPaths.join(", ")}.` : ""}${entry.skills.length ? ` Skills decided: ${entry.skills.map(({ id, state }) => `${id} ${state}`).join(", ")}.` : ""}`
+        : `${entry.requestId}: already learned from. The record now shows this decision.`);
+      if (report.routes) lines.push(`Updated route statistics for ${report.routes} model calls.`);
+      return stripVTControlCharacters(lines.join("\n"));
+    },
+  },
+  {
+    name: "code_lesson",
+    cliName: "code lesson",
+    summary: "Record something future coding requests in this repository should know",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [
+      codingWorkspace,
+      { name: "text", type: "string", required: true, stdinFallback: true, description: "the lesson, up to 600 bytes" },
+      { name: "anchors", type: "string", description: "comma-separated directories or files it applies to (default: matched by meaning)" },
+    ],
+    handler: async (ctx, p) => {
+      const { addLesson, AtlasError } = await import("./coding/atlas/context.ts");
+      try {
+        return await addLesson({ workspace: p.workspace as string, text: p.text as string, ...(pathList(p.anchors) ? { anchors: pathList(p.anchors) } : {}), actor: ctx.actor() });
+      } catch (error) {
+        if (error instanceof AtlasError) throw new OpError(error.message, "refused");
+        throw error;
+      }
+    },
+    render: (r) => {
+      const { id, path } = r as { id: string; path: string };
+      return stripVTControlCharacters(`Saved ${id} as a draft at ${path}. It is delivered to about half of the matching requests until review outcomes show whether it helps.`);
+    },
+  },
+  {
+    name: "code_skills",
+    cliName: "code skills",
+    summary: "List the facts, skills, and lessons delivered with repository selections, with their measured effect",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [
+      codingWorkspace,
+      { name: "disable", type: "string", description: "stop delivering this skill ID" },
+      { name: "enable", type: "string", description: "deliver this skill ID again, on trial" },
+    ],
+    handler: async (_ctx, p) => {
+      const [{ realpath }, { Learning }, { listSkills }, { Atlas, AtlasError }] = await Promise.all([
+        import("node:fs/promises"), import("./coding/atlas/learn.ts"), import("./coding/atlas/skills.ts"), import("./coding/atlas/store.ts")]);
+      const workspace = await realpath(p.workspace as string).catch(() => p.workspace as string);
+      if (!Atlas.exists(workspace)) throw new OpError("This repository has not been imported. Run `okb code import` first.", "refused");
+      const change = p.disable !== undefined || p.enable !== undefined;
+      const learning = Learning.open(workspace, {}, change);
+      try {
+        for (const [flag, state] of [["disable", "disabled"], ["enable", "trial"]] as const) {
+          const id = p[flag];
+          if (id === undefined) continue;
+          if (typeof id !== "string" || !/^[\w./-]{1,200}$/u.test(id)) throw new OpError("Enter a skill ID as `okb code skills` lists it.", "bad_params");
+          learning!.setSkillState(id, state);
+        }
+        return listSkills(workspace, learning?.skillRecords() ?? new Map());
+      } catch (error) {
+        if (error instanceof AtlasError) throw new OpError(error.message, "refused");
+        throw error;
+      } finally {
+        learning?.close();
+      }
+    },
+    render: (r) => stripVTControlCharacters((r as { id: string; kind: string; title: string; state: string; shown: number; shownAccepted: number; withheld: number; withheldAccepted: number; confidence?: number }[])
+      .map((skill) => `${skill.id} [${skill.kind}, ${skill.state}] ${skill.title}` + (skill.shown + skill.withheld
+        ? ` — delivered ${skill.shownAccepted}/${skill.shown} accepted, withheld ${skill.withheldAccepted}/${skill.withheld}${skill.confidence !== undefined ? `, ${Math.round(skill.confidence * 100)}% likely to help` : ""}` : ""))
+      .join("\n") || "No skills yet."),
+  },
+  {
+    name: "code_forget",
+    cliName: "code forget",
+    summary: "Remove what was learned for a repository: one session's episodes, a parameter rollback, or everything",
+    scope: "read",
+    localOnly: true,
+    bundleIndependent: true,
+    params: [
+      codingWorkspace,
+      { name: "session", type: "string", description: "forget the episodes recorded from this session" },
+      { name: "rollback", type: "boolean", description: "return the readout parameters to the best snapshot the replay check has seen" },
+      { name: "everything", type: "boolean", description: "delete all learned state for this repository" },
+    ],
+    handler: async (_ctx, p) => {
+      const chosen = [p.session !== undefined, p.rollback === true, p.everything === true].filter(Boolean).length;
+      if (chosen !== 1) throw new OpError("Choose one of --session, --rollback, or --everything.", "bad_params");
+      const [{ forgetLearning }, { Learning }, { realpath }] = await Promise.all([import("./coding/atlas/context.ts"), import("./coding/atlas/learn.ts"), import("node:fs/promises")]);
+      if (p.rollback === true) {
+        const learning = Learning.open(await realpath(p.workspace as string).catch(() => p.workspace as string));
+        if (!learning) return { rollback: false };
+        try { return { rollback: true, params: learning.rollback().version }; } finally { learning.close(); }
+      }
+      return forgetLearning(p.workspace as string, {}, p.session as string | undefined);
+    },
+    render: (r) => {
+      const result = r as { episodes?: number; reset?: boolean; rollback?: boolean; params?: number };
+      if (result.rollback !== undefined) return result.rollback ? `Readout parameters restored from the best snapshot as v${result.params}.` : "Nothing has been learned for this repository.";
+      if (result.episodes !== undefined) return `Forgot ${result.episodes} recorded episodes. Parameters already learned from them are unchanged.`;
+      return result.reset ? "Deleted all learned state for this repository. The map and the knowledge bundle are kept." : "Nothing had been learned for this repository.";
     },
   },
   {

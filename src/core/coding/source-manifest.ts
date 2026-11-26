@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { RepositoryContextManifest } from "./repository-context.ts";
 
 type FilesPreview = { source: "files"; id: string; files: { path: string; content: string }[] };
-type RepositoryPreview = { source: "repository"; manifest: RepositoryContextManifest };
+type RepositoryPreview = { source: "repository" | "atlas"; manifest: RepositoryContextManifest };
 type PackagesPreview = { source: "packages"; id: string; packages: { project: string; manifest: RepositoryContextManifest }[] };
 
 /** A source preview as the project and standalone Coding routes return it. */
@@ -16,7 +16,7 @@ export type CodingSourcePreview = FilesPreview | RepositoryPreview | PackagesPre
  */
 export type CodingSourceManifest =
   | { version: 1; source: "files"; id: string; files: { path: string; bytes: number; sha256: string }[] }
-  | { version: 1; source: "repository"; id: string; manifest: RepositoryContextManifest }
+  | { version: 1; source: "repository" | "atlas"; id: string; manifest: RepositoryContextManifest }
   | { version: 1; source: "packages"; id: string; packages: { project: string; manifest: RepositoryContextManifest }[] };
 
 /** Copy the known manifest fields so a later preview field never reaches the clipboard by default. */
@@ -38,6 +38,19 @@ function repositoryManifest(manifest: RepositoryContextManifest): RepositoryCont
     } } : {}),
     ...(manifest.workspaceRevision === undefined ? {} : { workspaceRevision: manifest.workspaceRevision }),
     ...(index ? { index: { indexedFiles: index.indexedFiles, limited: index.limited, expandedFiles: index.expandedFiles } } : {}),
+    ...(manifest.atlas ? { atlas: atlasManifest(manifest.atlas) } : {}),
+  };
+}
+
+/** Names, hashes and counts only: nothing here is selected text. */
+function atlasManifest(atlas: NonNullable<RepositoryContextManifest["atlas"]>): NonNullable<RepositoryContextManifest["atlas"]> {
+  return {
+    version: atlas.version, generation: atlas.generation, ...(atlas.importedAt === undefined ? {} : { importedAt: atlas.importedAt }),
+    slots: atlas.slots.map(({ name, units, tokens }) => ({ name, units, tokens })), staleFiles: atlas.staleFiles,
+    map: { sha256: atlas.map.sha256, lines: atlas.map.lines },
+    skills: atlas.skills.map(({ id, sha256, trial }) => ({ id, sha256, ...(trial ? { trial } : {}) })),
+    ...(atlas.withheld?.length ? { withheld: [...atlas.withheld] } : {}),
+    deferred: atlas.deferred.map(({ path, startLine, endLine, sha256 }) => ({ path, startLine, endLine, sha256 })), params: atlas.params,
   };
 }
 
@@ -52,5 +65,5 @@ export function codingSourceManifest(preview: CodingSourcePreview): CodingSource
       project, manifest: repositoryManifest(manifest),
     })) };
   }
-  return { version: 1, source: "repository", id: preview.manifest.id, manifest: repositoryManifest(preview.manifest) };
+  return { version: 1, source: preview.source, id: preview.manifest.id, manifest: repositoryManifest(preview.manifest) };
 }
