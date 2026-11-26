@@ -19,8 +19,11 @@ When using a ChatGPT plan, review the excerpts in **Ask with ChatGPT** before
 sending them.
 
 Open **Coding** to register a permitted workspace, preview source excerpts,
-send a Pi Durable request, and inspect, resume, or review its result. Save
-project request presets for recurring work. The VS Code and Cursor extension
+send a Pi Durable request, and inspect, resume, or review its result. For a
+large monorepo, import the repository once. Each request then selects its
+source from the repository map inside a fixed token budget, a task that
+spans packages can be split into scoped work orders, and your reviews
+improve later selections. Save project request presets for recurring work. The VS Code and Cursor extension
 previews source and opens run results from a local project or an HTTPS team
 workspace. Connect a GitHub remote from Coding to review repository activity,
 start a draft from an issue, or hand off accepted work.
@@ -223,7 +226,7 @@ Global flags: `--json`, `--bundle <path>`, `--brain <name>`, `--version`.
 | claims | `take` · `resolve` · `calibrate` |
 | maintain | `index` · `rebuild` · `embed` · `doctor` · `upgrade` · `stats` · `jobs` · `sync` |
 | serve | `serve` · `bookmarklet` · `mcp` |
-| coding | `code context` · `code run` · `code status` |
+| coding | `code context` · `code run` · `code status` · `code import` · `code map` · `code recall` · `code plan` · `code learn` · `code lesson` · `code skills` · `code forget` |
 | setup | `init` · `brains` · `version` |
 | usability study | `usability` · `usability task` · `usability export` |
 
@@ -368,6 +371,8 @@ flowchart TD
     OPS --> AI["AI gateway<br/>local or hosted"]
     OPS --> PLAN["ChatGPT plan<br/>local sign-in"]
     OPS --> PI["Pi Durable<br/>coding sessions and transcripts"]
+    OPS --> MAP[("Repository map<br/>derived index + learned state")]
+    MAP --> PI
     BUNDLE -.->|okb rebuild| ENGINE
 ```
 
@@ -385,7 +390,7 @@ ever living behind it.
 | [AGENTS.md](AGENTS.md) | Architecture and working rules for contributors |
 | [Product plan](docs/PRODUCT-PLAN.md) | Personal and enterprise direction |
 | [Personal guide](docs/PERSONAL.md) | Subscription accounts, conversation imports, and data sharing |
-| [Coding guide](docs/CODING.md) | Run and recover local Pi Durable requests |
+| [Coding guide](docs/CODING.md) | Run and recover Pi Durable requests, import a large repository, orchestrate work across packages, and route models |
 | [Usability protocol](docs/USABILITY.md) | Run an opt-in, local-only usability session and read its export |
 | [skills/](skills/) | Agent skills: capture, ingest, enrich, query, daily-note, link-suggest |
 | [bundles/](bundles/README.md) | The example bundle and the vendored OKF v0.2 sample |

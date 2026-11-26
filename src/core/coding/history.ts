@@ -5,6 +5,7 @@ import { estimateContextTokens, estimateMessageTokens, estimateTextTokens } from
 import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { CompactionTask, defineExtension, hook, type CompactionPolicy } from "@earendil-works/pi-durable";
 import { approvedSourceToolName } from "./approved-source-tool.ts";
+import { openRouterRouting, type OpenRouterPreferences } from "./router.ts";
 
 export const contextBudgetError = "The saved coding context exceeds the active token budget. Start a new session or submit a smaller request.";
 
@@ -47,7 +48,7 @@ export function estimateCodingContext(messages: readonly Message[]): number {
 export function newRequestFits(content: string, instructions: string, budget: CodingBudget): boolean {
   // Leave room for the system message, compacted history, and provider message framing.
   const overhead = Math.min(1024, Math.floor(budget.limitTokens / 4));
-  return estimateTextTokens(content) + estimateTextTokens(instructions) + overhead <= budget.limitTokens;
+  return estimateTextTokens(outboundContent(content)) + estimateTextTokens(instructions) + overhead <= budget.limitTokens;
 }
 
 function requestPreview(message: Message): string | undefined {
@@ -86,15 +87,31 @@ export function codingHistory(budget: CodingBudget | undefined) {
   });
 }
 
+/**
+ * A saved request as the provider receives it. The local manifest stays here,
+ * and an approved excerpt marked `deferred` is sent as a pointer: its text
+ * leaves this computer only if the model looks it up.
+ */
+export function outboundContent(content: string): string {
+  if (!content.includes('"repositoryContext":')) return content;
+  try {
+    const { repositoryContext, ...request } = JSON.parse(content);
+    if (!repositoryContext) return content;
+    if (Array.isArray(request.excerpts)) {
+      request.excerpts = request.excerpts.map((excerpt: { deferred?: unknown; path?: unknown; startLine?: unknown; endLine?: unknown }) =>
+        excerpt?.deferred === true ? { path: excerpt.path, startLine: excerpt.startLine, endLine: excerpt.endLine, deferred: true } : excerpt);
+    }
+    return JSON.stringify(request);
+  } catch {
+    return content;
+  }
+}
+
 export function outboundCodingMessages(messages: readonly Message[]): Message[] {
   return messages.map((message) => {
-    if (message.role !== "user" || typeof message.content !== "string" || !message.content.includes('"repositoryContext":')) return message;
-    try {
-      const { repositoryContext, ...content } = JSON.parse(message.content);
-      return repositoryContext ? { ...message, content: JSON.stringify(content) } : message;
-    } catch {
-      return message;
-    }
+    if (message.role !== "user" || typeof message.content !== "string") return message;
+    const content = outboundContent(message.content);
+    return content === message.content ? message : { ...message, content };
   });
 }
 
@@ -112,8 +129,16 @@ function blockedRequest(model: Model<Api>, errorMessage: string) {
   return stream;
 }
 
-export function budgetedModels(models: Models, budget: CodingBudget, sessionId: string): Models {
+/** Settings that apply to every provider request of the run in progress. Set before the run is scheduled. */
+export interface RequestRouting { openRouter?: OpenRouterPreferences }
+
+export function budgetedModels(models: Models, sessionBudget: CodingBudget, sessionId: string, routing: RequestRouting = {}): Models {
   const streamSimple: Models["streamSimple"] = (model, context, options) => {
+    let provider;
+    try { provider = openRouterRouting(model, routing.openRouter); }
+    catch (error) { return blockedRequest(model, (error as Error).message); }
+    // A routed child conversation may use a model with a different window than the session's.
+    const budget = model.contextWindow > 0 ? codingBudget(model) : sessionBudget;
     const messages = outboundCodingMessages(context.messages);
     const toolRounds = getCurrentTools(messages).some(({ name }) => name === approvedSourceToolName)
       ? messages.slice(messages.findLastIndex(({ role }) => role === "user") + 1).filter((message) =>
@@ -126,6 +151,16 @@ export function budgetedModels(models: Models, budget: CodingBudget, sessionId: 
     if (estimateOutboundTokens(messages) <= budget.limitTokens) {
       return models.streamSimple(model, { ...context, messages }, {
         ...options,
+        ...(provider ? { onPayload: async (original, requestModel) => {
+          // Pi calls the hook just before sending either OpenRouter request format.
+          const updated = await options?.onPayload?.(original, requestModel);
+          const payload = updated === undefined ? original : updated;
+          if (typeof payload !== "object" || payload === null || Array.isArray(payload))
+            throw new Error("Could not attach the approved OpenRouter preferences.");
+          const existing = "provider" in payload ? payload.provider : undefined;
+          const defaults = typeof existing === "object" && existing !== null && !Array.isArray(existing) ? existing : {};
+          return { ...payload, provider: { ...defaults, ...provider } };
+        } } : {}),
         ...(toolRounds ? { toolChoice: "none" } : {}),
         // Preserve provider affinity across harness openings, scoped to this transcript.
         sessionId,

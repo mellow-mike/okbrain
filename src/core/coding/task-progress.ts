@@ -4,9 +4,10 @@ import {
   type TaskGraph, type TaskGraphNode, type TaskId,
 } from "@earendil-works/pi-durable";
 import { approvedSourceToolName } from "./approved-source-tool.ts";
+import { orchestrationTaskName, routedCallTaskName } from "./orchestrator.ts";
 import { packageReviewTaskName } from "./package-review.ts";
 
-const kinds = ["package-review", "package-work", "context", "model", "source-lookup", "work"] as const;
+const kinds = ["orchestration", "work-order", "package-review", "package-work", "context", "model", "source-lookup", "work"] as const;
 const maxCount = 64;
 
 type ProgressKind = typeof kinds[number];
@@ -29,6 +30,8 @@ const emptyProgress = (): CodingTaskProgress => ({ stages: [] });
 
 function stageKind(task: TaskGraphNode, lookups: ReadonlySet<TaskId>): ProgressKind {
   switch (task.kind) {
+    case orchestrationTaskName: return "orchestration";
+    case routedCallTaskName: return "work-order";
     case packageReviewTaskName: return "package-review";
     case "okbrain.review-package": return "package-work";
     case "pi.compaction": return "context";

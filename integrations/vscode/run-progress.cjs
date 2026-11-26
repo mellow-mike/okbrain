@@ -2,7 +2,7 @@
 
 const stageLabels = {
   model: 'Model response', 'source-lookup': 'Approved source lookup', 'package-review': 'Package review',
-  'package-work': 'Package work', context: 'Context maintenance', work: 'Run work',
+  'package-work': 'Package work', orchestration: 'Orchestration', 'work-order': 'Work orders', context: 'Context maintenance', work: 'Run work',
 };
 const states = [['pending', 'pending'], ['running', 'running'], ['waiting', 'waiting'], ['completing', 'finishing']];
 

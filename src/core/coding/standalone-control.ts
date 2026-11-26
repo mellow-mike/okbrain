@@ -30,8 +30,8 @@ interface ActiveRun extends SessionRequest {
   taskProgress?: CodingTaskProgress;
 }
 
-const providerKey = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY", google: "GEMINI_API_KEY" };
-const personalKeyProvider = { openai: "openai", anthropic: "anthropic", google: "gemini" };
+const providerKey = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY", google: "GEMINI_API_KEY", openrouter: "OPENROUTER_API_KEY" };
+const personalKeyProvider = { openai: "openai", anthropic: "anthropic", google: "gemini", openrouter: "openrouter" };
 const sessionName = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const requestName = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
 
