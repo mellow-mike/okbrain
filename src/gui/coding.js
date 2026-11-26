@@ -870,9 +870,9 @@
         field('Search source', '', 'search', 'data-package-query maxlength="1024"') +
         field('Estimated excerpt tokens', '', 'number', 'data-package-budget min="1" max="4096" placeholder="2048"') + '</fieldset>').join('') + '</div>' +
       '<div class="stack" data-atlas hidden><p class="muted" data-atlas-hint>The repository map selects source for the task from an import of this project. Import it under Project settings → Repository map.</p>' +
-      '<div data-atlas-query>' + field('Search source (optional)', '', 'search', 'name="mapQuery" maxlength="2048" placeholder="Defaults to the task"') + '</div>' +
-      '<div class="coding-grid">' + field('Directories', project.scopes.join(', '), 'text', 'name="mapProjects" spellcheck="false"') +
-      field('Estimated tokens', '4096', 'number', 'name="mapBudget" min="1" max="16384"') + '</div>' +
+      '<div data-atlas-query>' + field('Map search text (optional)', '', 'search', 'name="mapQuery" maxlength="2048" placeholder="Defaults to the task"') + '</div>' +
+      '<div class="coding-grid">' + field('Map directories', project.scopes.join(', '), 'text', 'name="mapProjects" spellcheck="false"') +
+      field('Map token budget', '4096', 'number', 'name="mapBudget" min="1" max="16384"') + '</div>' +
       '<label class="field" data-atlas-workers><span>Workers</span><select name="mapWorkers"><option value="auto">Decide from the task</option><option value="1">1</option>' +
       '<option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label>' +
       '<label class="row" data-atlas-deferred><input type="checkbox" name="mapDeferred"><span>Also approve further excerpts the model may look up by path and line</span></label></div>' +
