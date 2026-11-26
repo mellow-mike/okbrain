@@ -2,9 +2,10 @@ import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider, type Message, type Model } from "@earendil-works/pi-ai";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { importRepository } from "../src/core/coding/atlas/import.ts";
 import { Learning } from "../src/core/coding/atlas/learn.ts";
+import { removeAtlas } from "../src/core/coding/atlas/store.ts";
 import {
   cancelCodingRequest, CodingError, getCodingSessionStatus, getSavedCodingRequestInput, listCodingModels, listStandaloneCodingRequests, previewAtlasContext,
   previewCodingOrchestration, runCodingSession, type CodingSessionOptions,
@@ -308,4 +309,75 @@ test("when the reports cannot be combined they are returned as written, and a ca
     { models: slow.models, stateDir, signal: controller.signal });
   expect(stopped).toMatchObject({ status: "unanswered", reason: "Orchestrated request cancelled." });
   expect((await cancelCodingRequest(session("cancelled", "c-1"), { models: slow.models, stateDir })).status).toBe("unanswered");
+});
+
+test("an orchestrated request killed during generation resumes from its saved plan, without the map or the checkout", async () => {
+  const repo = await buildMonorepo(join(root, "crash"), 96);
+  const atlas = { stateDir: join(root, "crash-atlas") };
+  await importRepository({ workspace: repo.workspace }, atlas);
+  const routing: RoutingPolicy = { version: 1, learn: false, roles: { worker: [{ provider, model: "cheap" }, { provider, model: "strong" }] } };
+  const identity = { workspace: repo.workspace, session: "crash", requestId: "c-1", provider, model: "strong" };
+  const { models, seen, faux } = scripted(({ request }) => request.reports ? "Combined after the restart." : `Resumed ${(request.workOrder as { scope: string }).scope}.`);
+  const { plan } = await previewCodingOrchestration({ ...identity, prompt: task, orchestration: { workers: 2, tokenBudget: 900, routing } }, { models, atlas });
+  expect(plan.orders.map(({ route }) => route.choice.model)).toEqual(["cheap", "cheap"]);
+  const options = { ...identity, prompt: task, orchestration: { workers: 2, tokenBudget: 900, routing, id: plan.id } };
+
+  // Another process admits the plan, starts both workers, and dies while the provider is still answering.
+  const script = `
+    import { createModels, fauxProvider } from "@earendil-works/pi-ai";
+    import { runCodingSession } from "./src/core/coding/durable.ts";
+    const { options, stateDir, atlas } = JSON.parse(process.argv.at(-1));
+    const models = createModels();
+    const faux = fauxProvider({ provider: options.provider, models: [{ id: "strong" }, { id: "cheap" }] });
+    models.setProvider(faux.provider);
+    faux.setResponses(Array.from({ length: 4 }, () => (input, _options, _state, model) => {
+      const message = input.messages.findLast(({ role }) => role === "user");
+      console.log(model.id + " " + JSON.parse(message.content).workOrder.scope);
+      return new Promise(() => {});
+    }));
+    const keepAlive = setInterval(() => {}, 1000);
+    try { await runCodingSession(options, { models, stateDir, atlas }); }
+    finally { clearInterval(keepAlive); }
+  `;
+  const child = Bun.spawn([process.execPath, "-e", script, "--", JSON.stringify({ options, stateDir, atlas })], {
+    cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "inherit",
+  });
+  const timeout = setTimeout(() => child.kill("SIGKILL"), 20_000);
+  const reader = child.stdout.getReader();
+  let output = "";
+  try {
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      output += decoder.decode(value, { stream: true });
+      if (output.trim().split("\n").length >= 2) break;
+    }
+  } finally {
+    clearTimeout(timeout);
+    reader.releaseLock();
+    child.kill("SIGKILL");
+    await child.exited;
+  }
+  expect(output.trim().split("\n").sort()).toEqual(["cheap packages/auth", "cheap packages/billing"]);
+  const pending = await getCodingSessionStatus(identity, { models, stateDir });
+  expect(pending.pendingRequestIds).toEqual(["c-1"]);
+
+  // Recovery needs neither the map nor the source: both are gone, and the policy is not passed again.
+  expect(removeAtlas(repo.workspace, atlas, true)).toBe(true);
+  await rm(join(repo.workspace, "packages"), { recursive: true });
+  const recovered = await runCodingSession(identity, { models, stateDir, atlas });
+  expect(recovered.status).toBe("done");
+  if (recovered.status !== "done") return;
+  expect(recovered.text).toBe("Combined after the restart.");
+  const workers = seen.filter(({ request }) => request.workOrder);
+  // Each interrupted work order is answered once, by the model the approved plan chose, from the approved bytes.
+  expect(workers.map(({ model, request }) => `${model} ${(request.workOrder as { scope: string }).scope}`).sort()).toEqual(["cheap packages/auth", "cheap packages/billing"]);
+  expect(workers.find(({ request }) => (request.workOrder as { scope: string }).scope === "packages/auth")!.raw).toContain("AUTH_REFRESH");
+  expect(seen.find(({ request }) => request.reports)?.model).toBe("strong");
+  expect(recovered.orchestration!.orders.map(({ requestId, attempts, model }) => [requestId, attempts, model]).sort())
+    .toEqual([["c-1-work-1", 1, "openai/cheap"], ["c-1-work-2", 1, "openai/cheap"]]);
+  expect(faux.state.callCount).toBe(3);
+  expect(await runCodingSession(identity, { models, stateDir, atlas })).toEqual(recovered);
+  expect(faux.state.callCount).toBe(3);
 });

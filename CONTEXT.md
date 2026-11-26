@@ -35,7 +35,8 @@ file and line ranges, an estimated excerpt budget, scan limits, and a digest
 of the selected bytes. Admission checks the digest and saves the exact
 selection. Recovery reads the saved input. When the operator opts in, Pi can
 look up bounded line ranges in the current request's saved selection. OpenAI,
-Anthropic, and Google Gemini use Pi's model catalogs and explicit credentials.
+Anthropic, Google Gemini, and OpenRouter use Pi's model catalogs and explicit
+credentials.
 The app, editor, and CLI report the active context estimate and model limits
 from Pi session status. Run history shows recorded usage for the selected
 request and the full session, including main and child conversation totals.
@@ -117,6 +118,27 @@ one-off scoped repository request for an open local project. Its repository
 and active-file approvals render in read-only documents and remain bound to
 the reviewed project and source. Independent package review uses Pi Durable
 child conversations with explicit package previews and combined usage.
+A repository can be imported once into a repository map: a derived SQLite
+index of packages, units, declarations, import and test links, change
+coupling, and the check commands the project declares. The import reads
+tracked files under the same exclusions as previews, executes nothing, and
+calls no model. It also writes an OKF bundle of package cards and draft
+skills in application data that a person can read and edit. A request can
+select its source from the map inside one token budget that covers excerpts,
+a short navigation map, and facts. The map decides where to look, and every
+excerpt is read from the current worktree at preview. Admission saves the
+approved bytes, and recovery reads them. Excerpts that did not fit can be
+approved for lookup and are then served only from the saved selection.
+Reviews update a separate learned state that holds no source, prompt, or
+answer text. It can be forgotten per session, rolled back, or reset.
+An orchestrated request is a previewed plan of scoped work orders. Each runs
+in its own Pi Durable conversation with only its source, and one further call
+combines the reports. The plan, including every model, is approved and saved
+before the first call. A routing policy lists the models a role may use, and
+the choice is made at planning time and bound into the approval. A project
+keeps its own map, bundle, and learned state under its project directory,
+imports only its permitted directories, and routes within its own provider.
+The control plane prepares map and plan input, so workers never open the map.
 An explicit owner preference can restore the team loopback listener's fixed
 port and HTTPS origin after a writable server restart from the same catalog.
 The saved port is reserved from the owner listener. Bind failures stay visible
@@ -232,6 +254,7 @@ Five layers, each with one responsibility:
  AI gateway:          embed | chat | rerank   (local | API)
  ChatGPT plan:        per-user sign-in + reviewed source excerpts + Responses API
  Coding:              Pi Durable 1.0 + private SQLite + editor integrations
+ Repository map:      derived SQLite + FTS5 index, OKF knowledge bundle, learned state
  Skills + jobs:       fat markdown + thin resolver + cron worker
 ```
 
@@ -1005,6 +1028,10 @@ commands that operate independently of a selected brain.
 | `okb code context` | read (localOnly) | Preview scoped Git excerpts and estimate the context budget |
 | `okb code run` | read (localOnly) | Start or resume a Pi Durable coding request |
 | `okb code status` | read (localOnly) | Inspect request state, active context, and persisted usage |
+| `okb code import` / `code map` | read (localOnly) | Map a repository for coding and show what was imported and learned |
+| `okb code recall` | read (localOnly) | Preview the source the repository map selects for a task within a budget |
+| `okb code plan` | read (localOnly) | Preview an orchestrated request: work orders, their source, and their models |
+| `okb code learn` / `code lesson` / `code skills` / `code forget` | read (localOnly) | Record a review, add a lesson, list measured skills, and remove learned state |
 | `okb read <id>` | read | Frontmatter, body, and derived signals (status/trust/stale) |
 | `okb list [--detail] [--type] [--tag] [--status]` | read | Concept ids, or a browse listing with signals |
 | `okb graph <id> [--depth N]` | read | Neighborhood with `→`/`←`/`↔` direction tags (incl. provenance edges) |
@@ -1270,6 +1297,8 @@ the app opens the served folder and rebuilds the picker.
   API providers), and an explicit ChatGPT plan integration using OpenAI OAuth
   and streamed Responses.
 - **Coding:** Pi Durable, Pi AI, and Chord at 1.0.0 over a Bun SQLite adapter.
+  The repository map uses Bun SQLite with FTS5 and flat vector files, and
+  needs no extension or embedding model.
   See the [coding guide](docs/CODING.md) for session semantics and operations.
 - **GUI build:** none — vanilla JS/CSS/HTML served as-is and embedded via Bun
   text imports; Bun's compiler is the only "bundler" (decided at 3.2).
@@ -1332,6 +1361,10 @@ okbrain/
 │   │   ├── engine/              # interface, sqlite (schema v4), index-build
 │   │   ├── graph/               # links (+ path fields, provenance), typed-edges, queries
 │   │   ├── ai/                  # gateway, recipes
+│   │   ├── coding/              # Pi Durable sessions, project control plane, workers,
+│   │   │   │                    #   previews, router, orchestrator, review outcomes
+│   │   │   └── atlas/           # repository map: scan, structure, packages, store,
+│   │   │                        #   import, readout, knowledge, learn, skills
 │   │   ├── retrieval/           # chunk, hybrid (rrf), relational, rerank, profiles
 │   │   ├── ingest/              # import, capture, clip, rss, web (crawler pass)
 │   │   ├── viz/                 # export (viz.html), vendor/; shared with the GUI:
@@ -1419,6 +1452,67 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-11-26 — **Large repositories are read through an imported map with a
+  fixed-budget readout.** The scoped preview reads at most 256 files per
+  request, so a monorepo had to be scoped by hand. The repository map adapts
+  Memorilla's persistent store and fixed set of query-conditioned slots to
+  text for hosted models: the store is built once, and each request reads it
+  into role and directory slots that share one token budget. The slots emit
+  real source from the current worktree, never a summary, because the paper
+  reports that latent memory loses fine detail and that its union with
+  retrieval answers more than either alone. Longer input lowers model
+  accuracy even with perfect retrieval, so the budget is fixed and never
+  padded. Sources are in [the reference registry](docs/context/REFERENCES.md).
+- 2026-11-26 — **The import is deterministic and needs no model or parser
+  dependency.** Declarations come from line patterns per language, and
+  vectors from a hashed term sketch with corpus term statistics. An import is
+  offline, reproducible across the three CI platforms, and gives a preview ID
+  that a later run can reproduce. The cost is weak recall for a task that
+  shares no words with its answer. Reviews repair that case by attaching task
+  vocabulary to declarations, which the benchmark measures.
+- 2026-11-26 — **The harness delivers facts, and measures everything else.**
+  Test links and check commands are sent as facts with the file and line that
+  declares them, and the import never runs a command. Published results show
+  procedural instructions can raise regressions, that agents rarely use
+  memory tools on their own, and that most skills add nothing. A draft skill
+  or lesson is therefore sent on a fixed draw for about half of the requests
+  it applies to and is kept or retired on review outcomes, not on its own
+  claims.
+- 2026-11-26 — **Learned state is small, separate, and gated.** Reviews
+  update bounded numeric parameters, per-declaration vocabulary, slot
+  budgets, and counters in `learning.sqlite`, apart from the derived index
+  and free of source, prompt, and answer text. No model writes memory. A
+  parameter update is kept only if a replay of earlier accepted requests
+  ranks no worse, vocabulary needs a second accepted request, and one session
+  can be forgotten. The design follows work on incremental context updates,
+  validation-gated changes, and lessons that carry chance.
+- 2026-11-26 — **Orchestration is planned by the harness and approved as one
+  plan.** Multi-agent variants degrade sequential tasks and multiply tokens
+  in published measurements, so a plan uses one worker unless the task's
+  evidence falls in separate areas and one selection cannot hold it. Workers
+  are separate Pi Durable conversations that see only their own source and
+  exchange nothing. One coordinator combines written reports, and the harness
+  reports overlapping and out-of-scope changes. Planning is local and
+  deterministic, so the plan, its source, and its models are previewed,
+  bound to one ID, saved at admission, and replayed on recovery.
+- 2026-11-26 — **Models are chosen before generation, beside a fixed
+  baseline.** A routing policy lists a role's models, and the router picks at
+  planning time on price and learned acceptance. The other models are tried
+  only when a provider fails. Published benchmarks show routers often fail to
+  beat the best single model, so every choice records the fixed first model
+  next to it and learning is one setting. OpenRouter is a Pi provider like
+  the others. Its data preferences fail closed, and a project routes only
+  within the provider it holds a key for.
+- 2026-11-26 — **Each project keeps its own map, and a later import applies
+  as a whole.** Two projects on one checkout can permit different
+  directories, and one project's reviews must not steer another's
+  selections, so the map, bundle, and learned state live under the project
+  directory. A first import commits as it goes and resumes after an
+  interruption. Once a map is published, an import commits in one transaction
+  with its new vector generation, so a reader sees the previous map or the
+  new one. An interrupted import that had already replaced a changed file's
+  units otherwise left that file invisible to selection until the next
+  import finished.
 - 2026-11-23 — **v0.1.0 waits for the usability sessions.** The maintainer chose
   to tag `v0.1.0` only after both the signed release workflow and the opt-in,
   local-only usability sessions have landed and a signed dry run has passed.

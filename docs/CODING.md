@@ -1,12 +1,12 @@
 # Coding sessions
 
-Use the **Coding** workspace in the Mac app or local web app to review source files, discuss an implementation, or draft a patch in a recoverable Pi Durable session. Git enables scoped source previews. Coding sessions have their own storage.
+Use the **Coding** workspace in the Mac app or local web app to review source files, discuss an implementation, or draft a patch in a recoverable Pi Durable session. Git enables scoped source previews. For a large repository, [import it once](#work-in-a-large-repository) and let each request select its source from the repository map within a fixed budget. Coding sessions have their own storage.
 
 ## Work in the app
 
 1. Open **Coding** and choose **Add a project**. Enter the repository's absolute path on this computer, set the permitted directories, and choose a Pi provider, model, and optional reasoning level.
-2. Save a provider key for that project or use an existing environment key for local runs. Projects can use OpenAI, Anthropic, or Google Gemini. The app shows which credential source the project uses.
-3. Describe the task and select tracked excerpts or explicit files. Choose **Preview source**, inspect the actual text, and approve sending it with the task and active conversation history. Sending with a changed file selection requires a fresh preview.
+2. Save a provider key for that project or use an existing environment key for local runs. Projects can use OpenAI, Anthropic, Google Gemini, or [OpenRouter](#use-openrouter). The app shows which credential source the project uses.
+3. Describe the task and select tracked excerpts, explicit files, or the [repository map](#work-in-a-large-repository). Choose **Preview source**, inspect the actual text, and approve sending it with the task and active conversation history. Sending with a changed file selection requires a fresh preview.
 4. Select the request in **Run history**. Ordinary requests can show a short preview of the answer as it arrives. When the run finishes, inspect the full result and its recorded provider usage before choosing **Accept result** or **Request changes**. An interrupted run can resume with its stored input, or be cancelled. A follow-up uses the same session and a new request ID.
 
 If you are starting from a GitHub link, expand **Prepare GitHub checkout** under **Add a project**. Enter the GitHub.com HTTPS repository and exact branch, then approve preparing a shallow checkout in private app data. For a private repository, supply your GitHub login and a fine-grained token restricted to that repository with **Contents** read access. The checkout uses the token for its fetch and keeps only the worktree and import receipt. Repeating the selected repository and branch reopens the saved copy and preserves local edits. The form fills the workspace path so you can set its permitted directories, model, and credentials before choosing **Add project**. [Git fetch](https://git-scm.com/docs/git-fetch), [Git checkout](https://git-scm.com/docs/git-checkout), [GitHub checkout setup](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository)
@@ -71,7 +71,7 @@ For a local registered project, choose **okbrain: Preview Repository Coding Requ
 
 ## Start a request in the CLI
 
-Set `OPENAI_API_KEY` in your environment and choose an exact model ID from Pi 1.0's OpenAI catalog. For Anthropic, set `ANTHROPIC_API_KEY` and use `--provider anthropic --model claude-sonnet-4-6`. For Gemini, set `GEMINI_API_KEY` and use `--provider google --model gemini-3.5-flash-lite`. Coding sessions use provider API keys and their billing accounts. [Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key), [Gemini 3.5 Flash-Lite](https://aistudio.google.com/docs/models/gemini-3.5-flash-lite)
+Set `OPENAI_API_KEY` in your environment and choose an exact model ID from Pi 1.0's OpenAI catalog. For Anthropic, set `ANTHROPIC_API_KEY` and use `--provider anthropic --model claude-sonnet-4-6`. For Gemini, set `GEMINI_API_KEY` and use `--provider google --model gemini-3.5-flash-lite`. For OpenRouter, set `OPENROUTER_API_KEY` and use `--provider openrouter` with a model ID such as `anthropic/claude-sonnet-4.6`. Coding sessions use provider API keys and their billing accounts. [Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key), [Gemini 3.5 Flash-Lite](https://aistudio.google.com/docs/models/gemini-3.5-flash-lite)
 
 ```sh
 okb code run --workspace ./my-project --session app-review --request-id review-1 \
@@ -84,7 +84,7 @@ okb code run --workspace ./my-project --session app-review --request-id review-1
 
 ## Scope context in a monorepo
 
-Choose the owning package and the shared packages the task actually needs. Query for a function name, path, or distinctive term. The preview runs locally and needs no model or credentials.
+Choose the owning package and the shared packages the task actually needs. Query for a function name, path, or distinctive term. The preview runs locally and needs no model or credentials. This preview scans the directories you name on each request. When the repository is too large to scope by hand, use the [repository map](#work-in-a-large-repository).
 
 ```sh
 okb code context --workspace ./my-project --projects apps/web,packages/auth \
@@ -181,11 +181,209 @@ The app-prepared public checkout completed source previews for all 36 trial comb
 
 ### Review independent packages
 
-In the Coding workspace, choose **Independent package review** for a task spanning two or three separate directories. Enter a search query and optional excerpt budget for each directory. **Preview source** shows each package separately. Approve the shared task and selected text before sending.
+In the Coding workspace, choose **Independent package review** for a task spanning two or three separate directories that you name yourself. To let okbrain find the directories from the task, use an [orchestrated plan](#split-a-task-across-packages). Enter a search query and optional excerpt budget for each directory. **Preview source** shows each package separately. Approve the shared task and selected text before sending.
 
 Each Pi Durable child conversation receives the task and only its own package's selected excerpts. It starts without the parent session history and has no workspace tools. The run shows a bounded summary, source references, stable request ID, and recorded usage for each package. Review the combined result and record your decision. A resumed review uses the saved source selection and recovers any unfinished package conversations. Aborting the run cancels its outstanding package reviews.
 
 While a request runs, **Run history** shows the current Pi Durable tasks for that request. It counts tasks per stage, including package coordination and child work. The app also shows saved pending tasks when inspecting an interrupted request. These counts reflect the work Pi has recorded, and can change as tasks start or finish. [Pi Durable task graph](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md)
+
+## Work in a large repository
+
+Import a repository once and okbrain keeps a map of it: packages, declarations, imports, test links, files that change together, and the commands the project uses to check a change. Each request then reads from that map inside a fixed budget, so the source sent for a task stays the same size as the repository grows. Importing, previewing a selection, and planning make no model call.
+
+Use the repository map from the CLI, a registered project in the Mac or web app, or the team workspace. VS Code and Cursor show the progress and results of these requests.
+
+### Import a repository
+
+```sh
+okb code import --workspace ./my-monorepo
+okb code map --workspace ./my-monorepo
+```
+
+In a registered project, the local owner opens **Project settings → Repository map** and chooses **Import repository map**. The panel shows progress and, when the import finishes, the number of files, units, and packages.
+
+The import lists tracked regular files from the Git index and reads their current working-tree contents. It applies the same exclusions as repository previews: symlinks, binary files, common generated and credential paths, and `db_only/`. It maps up to 400,000 files from up to 1,000,000 tracked paths, reads up to 512 KiB of each file, and analyzes the first 6,000 lines. `--projects` limits the import to as many as 32 directories. A project imports its permitted directories.
+
+A later import reads only the files whose contents changed. `--full` reads every file again and rebuilds the term statistics. `--history-commits` sets how many commits to read for files that change together. The default is 2,000, and `0` skips history. Commits that touch more than 40 files are ignored.
+
+A first import that is interrupted resumes where it stopped. A later import applies as a whole: until it finishes, requests keep reading the map from the last finished import, and an interrupted one changes nothing. One import runs per map at a time.
+
+The import produces three things.
+
+- **The map.** A private SQLite index of packages, files, units, declarations, and links, with a compact vector for each unit. A unit is a function, class, section, or run of declarations, at most 120 lines. Declarations are recognized by line patterns for TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, C#, Scala, Swift, Dart, C, C++, Objective-C, Ruby, PHP, shell, SQL, Protocol Buffers, GraphQL, Prisma, Elixir, Lua, Terraform, Makefiles, and Markdown headings. The map is derived. Remove its directory and import again to rebuild it.
+- **A knowledge bundle.** Open Knowledge Format Markdown that you can read and edit in any editor: one card per package under `packages/`, and draft skills under `skills/` that describe where each directory's modules are registered and where the repository states its own rules. Text you add under a card's `## Notes` heading stays through later imports. To take over a card completely, change its `generated.by` field, and the importer leaves that card alone. `okb doctor --bundle <path>` checks the bundle. `okb code map` prints its path.
+- **The project's own check commands.** Package scripts, Makefile and justfile targets, and single-command CI steps, each stored as an argument list with the file and line that declares it. okbrain never runs them. They are sent as facts with a selection, so an answer can say how to check a change with the project's real commands.
+
+### Preview what a task would send
+
+```sh
+okb code recall --workspace ./my-monorepo \
+  --query 'refreshSession rotates the token twice' --context-tokens 2500 --show-content
+```
+
+The preview prints a context ID, each excerpt's path, lines, and the reason it was chosen, and how much of the budget the selection uses. `--show-content` adds the text, the navigation map, and the facts. `--explain` lists the strongest candidates with their scores. `--projects` and `--exclude` narrow the selection to, or away from, up to eight directories each.
+
+The budget defaults to 4,096 estimated tokens and accepts 1–16,384. It covers everything the selection sends: excerpts, a short navigation map of the packages involved (up to 15% of the budget), and facts (up to 10%). A selection holds at most 32 excerpts from 24 files.
+
+The map only decides where to look. Every excerpt is read from the current working tree when you preview, so you approve current text. If a selected file changed since the import, the preview says how many did.
+
+Each candidate unit collects evidence from five sources:
+
+| Source | What counts |
+|---|---|
+| Words | The task's distinctive terms in the unit's names, path, and body, with rare terms weighted higher |
+| Exact names | An identifier or path written in the task |
+| Links | Units that define, use, or test what the strongest matches name, and files that change with them |
+| Similarity | A hashed vector comparison, counted only above the level chance produces at this repository's size |
+| Experience | Units that reviewers accepted for similar earlier tasks |
+
+The budget is then divided among sixteen slots. Eight stand for roles such as implementation, tests, types, configuration, and documentation. The others stand for the directories where the evidence concentrates. Units compete for a slot, and each slot receives a share of the budget in proportion to the evidence it attracted. A task that names a function therefore receives its implementation, its tests, and the contract it depends on, and a broad task receives a few excerpts from each area it touches. Named identifiers and paths are placed first.
+
+### Send a request from the map
+
+```sh
+okb code run --workspace ./my-monorepo --session auth --request-id auth-1 \
+  --provider openai --model gpt-5-mini --atlas --context-tokens 2500 \
+  --query 'refreshSession rotates the token twice' --context-id '<ID from the preview>' \
+  --prompt 'refreshSession rotates the token twice. Find the cause and propose a fix.'
+```
+
+Pass the same selection options to both commands. Without `--query`, the selection uses the prompt. If the selected text, the map, or the options changed since the preview, the send stops and asks for a fresh preview.
+
+In the app, choose **Repository map** as the request's source, set the directories and budget, and choose **Preview source**. The preview shows the excerpts, the map lines, and the facts that accompany them. Approve it to send.
+
+The provider receives the task, the excerpts, the map lines, and the facts. The transcript saves those bytes, and a resumed request uses the saved copy.
+
+Add `--deferred`, or select **Also approve further excerpts the model may look up by path and line**, to approve up to 16 more excerpts that did not fit. They are saved with the request. The provider first receives only their paths and line ranges, and the model can read them through [approved source lookup](#work-in-the-app). The preview shows their text, because approving the request approves sending them.
+
+### Let reviews improve the selection
+
+In a project, recording **Accept result** or **Request changes** teaches the project's map, and the audit log records a `review_learned` event. For a CLI session, record your review:
+
+```sh
+okb code learn --workspace ./my-monorepo --session auth --request-id auth-1 \
+  --provider openai --model gpt-5-mini --outcome accepted --used packages/auth/src/token.ts
+```
+
+okbrain reads which excerpts the answer cited by path and line, which files its diff changes, and which files an applied patch or `--used` names. That shows which of the selected units the accepted work needed and which needed file was missing. Five things follow.
+
+- **Similar tasks recall what worked.** A later task that resembles an accepted one ranks the units that task used higher. The preview gives the reason *Used in similar accepted requests*.
+- **The map learns your vocabulary.** Words from a task become search terms for a declaration after two accepted requests used that declaration for those words. A single acceptance is noted and changes nothing.
+- **The balance between evidence sources shifts in small steps.** Each update is replayed against up to 200 earlier accepted requests and is kept only if it ranks their evidence at least as well. The best parameters seen are kept as a snapshot.
+- **Slot budgets follow use.** Slots whose excerpts are cited and changed receive a larger share of later budgets.
+- **Skills and lessons are measured.** A draft skill or a new lesson is sent with about half of the requests it applies to, chosen by a fixed draw per request. Once each group has at least four reviewed requests and the reviews give a 90% probability that requests with it are accepted more often, it is established. At a 90% probability that they are accepted less often, it is retired. Built-in facts are always sent.
+
+The first decision recorded for a request is the one these counts use. If a reviewer later changes the decision on the same request, the request's record is updated, and the skill and model counts stay as they were.
+
+Record what reviewers keep having to say as a lesson. It starts on trial like a draft skill:
+
+```sh
+okb code lesson --workspace ./my-monorepo --anchors packages/auth \
+  --text 'Session tokens are rotated on every refresh. Never cache one across requests.'
+okb code skills --workspace ./my-monorepo
+```
+
+`okb code skills` lists each fact, skill, and lesson with its state and its acceptance counts when sent and when withheld. `--disable <id>` stops delivery, and `--enable <id>` starts a new trial. Setting `status: stable` or `status: deprecated` in a skill's file overrides the measurement. In a project, the owner records lessons under **Project settings → Repository map**, which also lists the measured skills.
+
+Learned state is a separate `learning.sqlite` beside the map. For each of the most recent 2,000 reviewed requests it keeps the session name, request ID, outcome, a 256-number hashed sketch of the task's words, and the paths, names, and scores of up to 96 candidate units. Vocabulary is stored as single words attached to a declaration, up to six per accepted request. It holds no source text, no prompts, and no answers. Because it contains words from your tasks and the names of your files and declarations, protect it like a transcript.
+
+```sh
+okb code forget --workspace ./my-monorepo --session auth   # what was recorded from one session
+okb code forget --workspace ./my-monorepo --rollback       # return to the best parameter snapshot
+okb code forget --workspace ./my-monorepo --everything     # all learned state for this repository
+```
+
+Deleting a project session, or letting it expire, removes what was recorded from it. Parameter changes and vocabulary already learned from that session remain until you roll back or reset.
+
+### Split a task across packages
+
+For a task that spans several packages, preview a plan. Planning is local and makes no model call.
+
+```sh
+okb code plan --workspace ./my-monorepo --provider openai --model gpt-5 \
+  --prompt 'Add a currency field to the invoice payload and update every publisher.'
+```
+
+The plan lists its work orders. Each has a scope, its own selection within the budget, the model it will use, and the links between its code and the other scopes. `--show-content` prints each order's source. With `--workers auto`, the default, the plan uses one worker unless the task's evidence falls in at least two separate areas and a single selection could not hold it. `--workers 2` to `--workers 4` asks for that many when the evidence supports them. `--context-tokens` applies to each worker.
+
+```sh
+okb code run --workspace ./my-monorepo --session invoices --request-id inv-1 \
+  --provider openai --model gpt-5 --orchestrate --plan-id '<ID from the plan>' \
+  --prompt 'Add a currency field to the invoice payload and update every publisher.'
+```
+
+In the app, choose **Orchestrated plan** as the source. The preview shows every work order with its source and model. Approving the plan approves all of them.
+
+Each worker runs in its own Pi Durable conversation with its work order and source. It receives no session history, no other worker's source, and no workspace tools. It proposes changes only inside its scope and lists what it needs from other scopes. Workers exchange nothing with each other while they run. One further call combines their reports and is instructed to add no findings of its own. If that call fails, the result shows the reports as the workers wrote them. With one worker there is no combining call.
+
+The result names every file that more than one worker proposed to change and every proposed change outside its worker's scope. Resolve those in review. The reviewer decides on the combined result, and patches are applied by the operator as for any other request.
+
+Work orders use request IDs derived from yours, such as `inv-1-work-2` and `inv-1-synthesis`. The plan, including every model choice, is saved before the first call. A resumed request continues from the saved plan, keeps finished work orders, and selects nothing again. Cancelling stops the outstanding work orders. **Run history** counts work orders by stage while the request runs. Usage is reported per work order and in total.
+
+The work orders and the combined result are saved with the request. They are kept apart from the session's conversation, so a follow-up request in the same session does not carry them. A request that fans out uses more tokens in total than a single request, in exchange for smaller individual contexts. Use it when the task really spans packages.
+
+### Choose models by role
+
+Without a routing policy, every call uses the session's model. A policy lists up to four models for each role. The first model is the role's baseline.
+
+```json
+{
+  "version": 1,
+  "roles": {
+    "worker": [
+      { "provider": "openrouter", "model": "deepseek/deepseek-v3.2" },
+      { "provider": "openrouter", "model": "anthropic/claude-sonnet-4.6" }
+    ],
+    "orchestrator": [{ "provider": "openrouter", "model": "anthropic/claude-sonnet-4.6" }]
+  },
+  "reviewCost": 0.5,
+  "openRouter": { "dataCollection": "deny" }
+}
+```
+
+Pass the policy with `--routing-json` to `okb code plan` and `okb code run --orchestrate`. In a project, the owner saves it under **Project settings → Repository map → Routing policy**.
+
+The model for each work order is chosen when the plan is built and is shown in the preview. The router estimates each candidate's cost of reaching an accepted result: Pi's listed price for the expected tokens, plus the chance of a rejected result multiplied by `reviewCost` and a retry on the baseline. `reviewCost` is what a rejected result costs you in review time, in US dollars. The default is 0.5, and higher values favour stronger models.
+
+The chance of acceptance starts from the order of your list, with earlier models assumed somewhat more likely to be accepted. Your reviews then update it separately for each role and request size. Each plan draws the chance from what is known so far, so a model with little history is still tried now and then. The draw is fixed by the plan, so a preview and its send agree. Set `"learn": false` to always use the first model. The other listed models are tried in order only when the chosen model's provider fails or returns no text. The plan records the baseline next to each choice so you can compare them.
+
+A plan's models are part of what you approve. If the policy or the learned statistics change between preview and send, the send asks for a fresh preview.
+
+### Use OpenRouter
+
+Set `OPENROUTER_API_KEY` and use `--provider openrouter` with a model ID from Pi 1.0's OpenRouter catalog, such as `anthropic/claude-sonnet-4.6`. A project can choose OpenRouter as its provider and hold its own key. OpenRouter requests use the same budgets, previews, and recovery as the other providers.
+
+The `openRouter` section of a routing policy sets OpenRouter's provider preferences for every call in the request: `dataCollection` (`deny` excludes upstream providers that may store or train on prompts), `zdr` (zero-data-retention endpoints only), `order` (upstream providers to try, by name), `allowFallbacks`, and `sort` (`price`, `throughput`, or `latency`). The request fails closed when `dataCollection: "deny"` or `zdr` cannot be applied to a model. [OpenRouter provider selection](https://openrouter.ai/docs/guides/routing/provider-selection.md)
+
+In the CLI a policy can name models from several providers, and each provider's key comes from its own environment variable. A project holds one provider's key, so every model in its policy must use the project's provider. Choose OpenRouter as the project's provider to route across vendors with one key.
+
+### Measure the repository map
+
+`bun run scripts/benchmark-coding-atlas.ts` generates TypeScript monorepos of increasing size and reports import time, the time and size of one request's selection, and whether the selection holds each task's evidence. `--scales 400,4000,20000` sets the background file counts, `--budget` the token budget, and `--json` prints the full result. It is local and deterministic and calls no model.
+
+The fixture has eleven packages whose background modules share each package's vocabulary, and six tasks with known evidence: a named function, a cross-package contract, a function that exists in two apps, a description in ordinary words, a function with its tests, and a request that shares no words with the code that answers it. The run below used Linux x64, Bun 1.4.4, and four cores of an Intel Xeon at 2.1 GHz.
+
+| Files | Units | Full import | Import with nothing changed | Import after 10 edits | On disk |
+|---:|---:|---:|---:|---:|---:|
+| 435 | 1,239 | 0.43 s | 0.06 s | 0.09 s | 2.2 MB |
+| 4,035 | 12,039 | 2.4 s | 0.20 s | 0.23 s | 17.9 MB |
+| 20,035 | 60,039 | 10.6 s | 0.88 s | 0.90 s | 88.8 MB |
+| 100,035 | 300,039 | 52.8 s | 4.6 s | 4.9 s | 447.6 MB |
+
+With a 2,000-token budget, the selection stays the same size while the repository grows 230 times. The lexical preview from [Scope context in a monorepo](#scope-context-in-a-monorepo), pointed at the whole workspace, reads 256 files per request and loses evidence as the repository outgrows that.
+
+| Files | Map p50 / p95 | Map tokens, mean / max | Map evidence recall | Lexical preview p50 | Lexical evidence recall |
+|---:|---:|---:|---:|---:|---:|
+| 435 | 7 / 13 ms | 805 / 1,712 | 83% | 113 ms | 100% |
+| 4,035 | 16 / 28 ms | 799 / 1,712 | 83% | 128 ms | 42% |
+| 20,035 | 31 / 59 ms | 833 / 1,712 | 83% | 207 ms | 42% |
+| 100,035 | 75 / 106 ms | 927 / 1,712 | 83% | 200 ms | 17% |
+
+The map finds all the evidence for five of the six tasks at every size. Of the files it selects, 54% hold task evidence at 435 files and 41% at 100,035. The rest are linked context such as a function's test or the definition it calls. For the lexical preview that share falls from 38% to 2%.
+
+The sixth task is the one that shares no words with its answer, and the map misses it at every size before any review. After two accepted reviews that used the right file, a third request worded differently from both finds it at every size, and the other five tasks keep full recall. Recording a review takes 12 to 69 ms.
+
+These numbers describe selection on a generated fixture. They do not measure answer quality, and recall on your repository will differ. Use [independent evaluation](#evaluate-provider-runs-with-independent-review) with the **Repository map** source to measure reviewed outcomes.
 
 ## Resume or follow up
 
@@ -256,11 +454,13 @@ Sessions live under `$XDG_DATA_HOME/okbrain/coding` on Linux and macOS, defaulti
 
 The transcript stores prompts, selected source, and responses as local SQLite data. The chosen provider receives the prompt, selected source text, and active conversation history. The source manifest stays local. Protect session directories and backups with the same controls as the source files. Standalone transcript deletion keeps the local SQLite ownership file as the lock anchor for future sessions with that name.
 
-Browser, Mac and IDE projects use a separate `coding-projects` directory within the same per-user application data. Each project has its own transcript directory. The project database holds the run index, review state, metadata-only audit, hashed team tokens, and any provider credentials the operator saved. Workers receive one scoped request and the selected provider credential over their private input pipe. They report admission and completion separately. A server restart leaves unsettled work available by the same request ID. An interrupted provider attempt can still have incurred upstream charges.
+A repository map imported with `okb code import` lives in `coding/atlas/<id>/` within the same per-user application data. The directory holds the derived index (`atlas.sqlite` and its vector files), the learned state (`learning.sqlite`), and the `knowledge/` bundle. For each unit the index stores its path, line range, declaration names, declaration line, first comment sentence, and distinctive words. It does not store whole files, and excerpts are always read from the checkout. Protect the directory like the source it describes. Removing the index files and importing again rebuilds the index. The learned state and the notes you wrote in the bundle exist only there, so include them in backups you rely on.
+
+Browser, Mac and IDE projects use a separate `coding-projects` directory within the same per-user application data. Each project has its own transcript directory and its own repository map under `project-<id>/atlas/`. Two projects on one checkout share nothing: each imports its own permitted directories and learns only from its own reviews. The project database holds the run index, review state, metadata-only audit, hashed team tokens, and any provider credentials the operator saved. Workers receive one scoped request and the selected provider credential over their private input pipe. They report admission and completion separately. A server restart leaves unsettled work available by the same request ID. An interrupted provider attempt can still have incurred upstream charges.
 
 ### Run isolated workers on Linux
 
-The regular launcher uses a process under the server's operating-system account. A Linux deployment can start each request in a Docker container with a read-only root, a non-root identity, and a private bind mount of the selected session directory. The control plane checks the preview digest against current source before sending the approved snapshot. The worker can then admit it without opening the host workspace. It receives no Docker socket, checkout, personal bundles, other sessions, or project catalog. Resume reads from persisted Pi state and also works when the original checkout has moved or been removed.
+The regular launcher uses a process under the server's operating-system account. A Linux deployment can start each request in a Docker container with a read-only root, a non-root identity, and a private bind mount of the selected session directory. The control plane checks the preview digest against current source before sending the approved snapshot. The worker can then admit it without opening the host workspace. Repository map selections and orchestrated plans are always prepared by the control plane, for process workers as well, so a worker never opens the map or its learned state. It receives no Docker socket, checkout, personal bundles, other sessions, or project catalog. Resume reads from persisted Pi state and also works when the original checkout has moved or been removed.
 
 Build the image from the same checkout as the host application and set the pinned local image ID in the environment of the okbrain service account. That non-root account must have access to the local Docker socket at `/var/run/docker.sock`. The Coding view shows whether the server uses Docker. If the configured image is unavailable, the run enters an interrupted state and reports the launch error.
 
@@ -281,7 +481,7 @@ In the Mac or local web app, open **Coding → Project settings → Deployment c
 
 With a writable brain selected on a server using Linux Docker workers, choose **Run offline worker check**. The check looks up the pinned image in local Docker, inspects the configured network, and launches a disposable container with Docker's `none` network. The result lists the observed session mount, filesystem and process controls, and network isolation. Use the passing, failing, or skipped checks to see which controls ran. The probe uses synthetic files and requires no provider account. [Docker `none` network](https://docs.docker.com/engine/network/drivers/none/)
 
-To check provider egress from the intended host, select **Test provider connection**, review the selected model and credential source, then choose **Run provider check**. Reopen Deployment checks and confirm again if the settings or key change. The configured process or Docker worker makes one model metadata request to the provider. The Docker worker uses the configured network and a disposable mount. The request carries only the model identifier and the credential needed for lookup. The panel shows the outcome and, when available, the HTTP status. A passing result verifies outbound HTTPS and model metadata access for that credential. Use a normally approved Coding run to verify generation access. [OpenAI model retrieval](https://developers.openai.com/api/reference/resources/models/methods/retrieve), [Claude model retrieval](https://platform.claude.com/docs/en/api/models/retrieve), [Gemini model retrieval](https://aistudio.google.com/api-reference/models/get-model)
+To check provider egress from the intended host, select **Test provider connection**, review the selected model and credential source, then choose **Run provider check**. Reopen Deployment checks and confirm again if the settings or key change. The configured process or Docker worker makes one model metadata request to the provider. The Docker worker uses the configured network and a disposable mount. The request carries only the model identifier and the credential needed for lookup. The panel shows the outcome and, when available, the HTTP status. A passing result verifies outbound HTTPS and model metadata access for that credential. For OpenRouter, whose model list is public, the check confirms the model is in Pi's catalog and asks OpenRouter to describe the key. Use a normally approved Coding run to verify generation access. [OpenAI model retrieval](https://developers.openai.com/api/reference/resources/models/methods/retrieve), [Claude model retrieval](https://platform.claude.com/docs/en/api/models/retrieve), [Gemini model retrieval](https://aistudio.google.com/api-reference/models/get-model), [OpenRouter current key](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key.md)
 
 Verify provider access, team access through the deployed HTTPS endpoint, and backup restoration on your actual enterprise host before inviting the team.
 
@@ -325,4 +525,6 @@ The preview includes a Markdown comment that links GitHub's receipt to the local
 
 ## Validation status
 
-The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, retention, review and approved patch replay. A local HTTPS reverse proxy was exercised in Chromium with a project token. The Linux Docker drill exercises offline Pi admission, the worker boundary, fail-closed launch, and a backup and restore using disposable local state. Live provider evaluation needs an independently reviewed set of tasks and an approved provider account. The intended enterprise host, its provider egress, backup policy and access controls still need verification. [Roadmap](../ROADMAP.md)
+The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, retention, review and approved patch replay. For the repository map they also cover import and re-import, interrupted imports, stale approvals, separate maps for projects that share a checkout, learning from a review and forgetting it with the transcript, and orchestrated requests with a scripted provider: fan-out, provider fallback, a failed combining call, cancellation, and recovery after the process is killed during generation, with the map and the checkout's source removed before the resume. A headless Chromium run drove import, map preview, send, review, an orchestrated plan, lessons, and routing through the app, and the compiled binary's commands and embedded app were driven separately.
+
+No live provider was called for the repository map, orchestration, or routing. OpenRouter requests, its provider preferences, and its key lookup follow Pi's adapter and OpenRouter's documentation and still need a run with a real key. Selection quality is measured on a generated fixture only. Whether orchestration, learned routing, or measured skills improve accepted results is unknown until reviewed live runs exist. A local HTTPS reverse proxy was exercised in Chromium with a project token. The Linux Docker drill exercises offline Pi admission, the worker boundary, fail-closed launch, and a backup and restore using disposable local state. Live provider evaluation needs an independently reviewed set of tasks and an approved provider account. The intended enterprise host, its provider egress, backup policy and access controls still need verification. [Roadmap](../ROADMAP.md)

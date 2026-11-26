@@ -205,6 +205,35 @@ are in [the open items handoff](docs/plans/2026-11-23-open-items.md).
   for approved repository requests, saved source inspection, and review.
 - [x] Restore an owner-approved team listener across server restarts, report
   occupied ports, and keep the saved team port separate from the owner app.
+- [x] Import a repository into a derived map of packages, units, declarations,
+  import and test links, change coupling, and declared check commands, with a
+  readable OKF bundle of package cards and draft skills. Resume a first import
+  and apply later imports atomically.
+- [x] Select a request's source from the map inside one fixed token budget,
+  with role and directory slots, reasons for each excerpt, current-worktree
+  text, and excerpts approved for lookup.
+- [x] Learn from reviews: recall what similar accepted tasks used, attach task
+  vocabulary after a second confirmation, gate parameter updates on a replay
+  of past requests, and measure skills and lessons by randomized withholding.
+  Forget one session, roll back, or reset.
+- [x] Preview and run an orchestrated plan of scoped work orders as Pi Durable
+  child conversations, with a combining call, provider fallback, conflict and
+  out-of-scope reports, cancellation, and recovery from the saved plan.
+- [x] Add OpenRouter as a Pi provider and a routing policy that chooses each
+  role's model before generation and records the fixed baseline beside it.
+- [x] Give each project its own map, bundle, and learned state, and add
+  import, map and plan sources, lessons, and routing to the Mac and web apps.
+- [ ] Run the repository map, orchestration, and routing against live
+  providers, including an OpenRouter key, and record reviewed outcomes with
+  the independent evaluation workflow. Compare the map with the lexical and
+  indexed previews on the pinned Vite cases.
+- [ ] Measure selection on real monorepos in several languages, and decide
+  from that whether line-pattern declarations need a parser for any language.
+- [ ] Offer the repository map and orchestrated plans in VS Code and Cursor
+  and in standalone app sessions. Both show the runs today and start them
+  from the project app or the CLI.
+- [ ] Record how often a routed choice beats its baseline once reviews exist,
+  and show it beside the policy.
 
 Stages 0–6 and the logs below are historical records.
 
@@ -868,6 +897,9 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B25 | 2026-11-23 | med | mcp | `import` takes any path on the computer and has scope `write`, so `okb mcp --trusted` listed it. A trusted agent, or text that steers one, could import every Markdown file under a folder such as the home directory into the brain, read it there, and have Git share it. The other host-path commands were already `localOnly` | `import` predates the MCP surface and was never marked | fixed | new `ownerOnly` flag keeps `import` off MCP while the CLI and the local app keep it, and the handler refuses an agent's context; test in `tests/mcp.test.ts` |
 | B26 | 2026-11-23 | low | gui | Below 860 px wide the graph view was sized as the window height minus 120 px, but the top bar is 163 to 271 px tall. The view ran 43 to 151 px past the bottom of the window: the page gained a second scrollbar, the end of the detail panel could not be reached, and the hint that tells you to pick a node never showed, because a `40vh` margin meant for the side panel pushed it out of its box. Measured in Chromium at 375×780, 375×560, 700×500, and 844×390 | a fixed number stood in for the height of the top bar | fixed | the view now fills exactly what the bar leaves (`#view.bare` is a flex column and `#gwrap` takes the rest), the stacked panels share it 3 to 2, and the hint has a small margin there; the browser smoke asserts at 375 px that the view and the hint end inside the window and that the page does not scroll |
 | B27 | 2026-11-23 | low | usability | A usability session past its 30 days stopped recording but stayed in `usability/sessions.db` until someone ran a session command again (status, start, stop, clear, a task marker, or an export). A person who finished a study and went back to ordinary use kept the timeline indefinitely, against the stated retention. Raised by the automated review of the pull request and confirmed by ageing a stopped session by 31 days and searching: the session and its event were still in the file | expired rows were deleted only inside the session commands' transaction | fixed | the recorder and the app's status check now drop expired sessions whenever the store exists, reading first and taking the write lock only when something has expired. MCP activity still never opens the store. Test in `tests/usability.test.ts` covers the app, the CLI, a read-only brain's status check, and an MCP caller |
+| B28 | 2026-11-26 | high | coding | Found while testing the repository map before release. An import that re-read a changed file and then stopped (a cancel, a crash, or a closed app) left that file invisible to selection until the next import finished. Reproduced by editing `packages/auth/src/session.ts`, stopping the next import after its read phase, and asking for `refreshSession`: evidence recall fell from 1 to 0. | The import committed file batches as it went, replacing a changed file's units under new ids, while readers used the vector files of the last published generation, which still named the old ids | fixed | Once a map is published, every import step joins one transaction that commits together with the new generation, and older vector files are removed only after that commit. A first import still commits in batches and resumes. A reader whose snapshot names removed vector files takes a fresh snapshot. Regression test in `tests/coding.atlas.test.ts` |
+| B29 | 2026-11-26 | med | coding | Found while writing the project API tests. Two projects registered on the same checkout shared one repository map and one learned state. Importing from the project with narrower permitted directories dropped the other project's files from its map, and one project's reviews steered the other's selections. | The map location was derived from the workspace path alone | fixed | Each project keeps its map, knowledge bundle, and learned state under its own project directory, and the control plane passes that location to previews, runs, lessons, and review learning. Regression test in `tests/api.coding-atlas.test.ts` |
+| B30 | 2026-11-26 | low | coding | Found by profiling the benchmark. Selecting source took 0.5 s at 100,000 files, growing with the repository. Each request ran several full scans of the files table to list a package's tests, and compared every unit against every vector coordinate. | No index on `files(package, role, path)`, and a dense dot product for a sparse query | fixed | Added the index and a sparse query scan. At 100,000 files the p50 is 75 ms, and an import with nothing changed takes 4.6 s, down from 7.1 s. Measured by `scripts/benchmark-coding-atlas.ts` |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -935,6 +967,18 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 ## Progress Log
 
 Newest first. One line per session: what changed + what's next.
+- 2026-11-26 — Added the repository map for large monorepos. `okb code import`
+  builds a derived index and an OKF knowledge bundle without a model, and
+  `okb code recall` selects a request's source inside one fixed budget. On
+  generated monorepos of 435 to 100,035 files the selection stays near 800 to
+  930 estimated tokens and holds the evidence for five of six tasks, where
+  the lexical preview falls from 100% to 17%. Reviews teach the map, and two
+  accepted reviews fix the sixth task. Added orchestrated plans on Pi Durable
+  child conversations, OpenRouter, and a routing policy with a recorded
+  baseline. Projects get their own maps and the same flows in the app. The
+  method starts from Memorilla and 22 further papers checked with Scite.
+  Fixed B28 to B30 on the way. Next: live provider runs with reviewed
+  outcomes, an OpenRouter key check, and measurement on real monorepos.
 - 2026-11-23 — Landed WP2 of the open items handoff: opt-in, local-only
   usability sessions. `core/usability.ts` keeps event kinds, timings, counts,
   ranks, and task labels in per-user application data, behind `CHECK`
