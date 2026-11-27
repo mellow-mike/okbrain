@@ -7,28 +7,39 @@
 <link rel="stylesheet" href="/gui/tokens.css">
 <link rel="stylesheet" href="/gui/style.css">
 <link rel="stylesheet" href="/gui/coding.css">
+<link rel="stylesheet" href="/gui/knowledge.css">
 <script src="/gui/okb.js"></script>
 <script>Okb.theme.restore();</script>
 </head>
 <body class="app">
 <a class="skip-link" href="#view">Skip to content</a>
+<nav class="workspace-rail" aria-label="Workspaces">
+  <a class="workspace-mark" href="#home" aria-label="okbrain home">ok</a>
+  <a href="#home" data-workspace="knowledge" aria-label="Knowledge" title="Knowledge"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></a>
+  <a href="#coding" data-workspace="work" aria-label="Work" title="Work"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 7 5 5-5 5m8 0h8"/></svg></a>
+  <div class="workspace-utilities">
+    <a href="#stats" data-workspace="activity" aria-label="Activity" title="Activity"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13h4l3-7 4 12 3-5h4"/></svg></a>
+    <a href="#settings" data-workspace="settings" aria-label="Workspace settings" title="Settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="10" cy="18" r="2"/></svg></a>
+    <button id="workspace-menu" type="button" aria-label="Expand navigation" aria-controls="workspace-links" aria-expanded="false" title="Navigation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  </div>
+</nav>
 <nav id="nav" aria-label="okbrain">
   <div class="brand"><a href="#home"><strong>okbrain</strong></a><span id="nav-brain"></span></div>
   <select id="brain" title="brain mount" hidden></select>
   <form id="qs" class="qs" role="search"><input id="qs-in" type="search" placeholder="Search…  ( / )" aria-label="search the brain"></form>
-  <div class="links">
+  <div id="workspace-links" class="links">
     <div class="group">Knowledge</div>
     <a href="#home">Home</a>
-    <a href="#browse">Browse</a>
-    <a href="#graph">Graph</a>
-    <a href="#search">Search</a>
     <a href="#ask">Ask</a>
+    <a href="#browse">Library</a>
+    <a href="#sources">Sources</a>
+    <a href="#search">Search</a>
+    <a href="#graph">Graph</a>
     <a href="#map">Focused map</a>
-    <div class="group">Work</div>
+    <div class="group">Notes</div>
     <a href="#review">Review</a>
     <a href="#inbox">Inbox</a>
     <a href="#add">Add</a>
-    <a href="#sources">Sources</a>
     <a href="#edit" data-nav="edit">New concept</a>
     <a href="#claims">Claims</a>
     <a href="#coding">Coding</a>
@@ -51,6 +62,7 @@
 <script src="/gui/graph-view.js"></script>
 <script src="/gui/github.js"></script>
 <script src="/gui/notion.js"></script>
+<script src="/gui/live-sources.js"></script>
 <script src="/gui/coding.js"></script>
 <script src="/gui/coding-standalone.js"></script>
 <script src="/gui/coding-evaluation.js"></script>
@@ -58,6 +70,8 @@
 <script src="/gui/focused-map.js"></script>
 <script src="/gui/mcp-settings.js"></script>
 <script src="/gui/computation.js"></script>
+<script src="/gui/advanced-settings.js"></script>
+<script src="/gui/knowledge.js"></script>
 <script src="/gui/app.js"></script>
 </body>
 </html>

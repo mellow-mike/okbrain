@@ -387,7 +387,7 @@ final class Okbrain: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
             if (!await save({ id: 'notes/smoke-private', type: 'note', title: 'Smoke private draft',
                 description: 'A private packaging fixture.', body: 'Private packaging text.', private: true }))
                 return 'The smoke brain could not save a private draft.';
-            location.hash = 'settings';
+            location.hash = 'settings/exports';
             if (!await ready('#graph-json-export button')) return 'Settings did not offer the graph JSON export.';
             document.querySelector('#graph-json-export button').click();
             return true;

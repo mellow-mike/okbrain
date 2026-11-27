@@ -1,15 +1,18 @@
 # Packaging & release
 
 The compiled runtime loads `vec0.{so,dylib,dll}` from its executable directory,
-the development dependency, or the path set in `OKB_SQLITE_VEC`.
+the development dependency, or the path set in `OKB_SQLITE_VEC`. The
+macOS app bundles extension-capable SQLite. If you run the standalone CLI
+with vector search on macOS, install Homebrew SQLite with `brew install sqlite`
+or set `OKB_SQLITE_LIB` to an extension-capable `libsqlite3.dylib`.
 
 ## macOS and editor builds
 
-On a macOS CI job for your architecture, download the corresponding `okbrain-macos-*` artifact. Unzip the app archive, move **okbrain.app** to Applications, and open it. The app includes okbrain, its interface, and the SQLite libraries it needs. **File → Open in Browser** uses the same running server. Download `okbrain-editor-extension` from CI and install the `.vsix` in VS Code or Cursor. [Editor setup](../integrations/vscode/README.md)
+On a macOS CI job for your architecture, download the corresponding `okbrain-macos-15` or `okbrain-macos-15-intel` artifact. Unzip the app archive, move **okbrain.app** to Applications, and open it. The app includes okbrain, the Knowledge and Work workspaces, and the SQLite libraries it needs. **File → Open in Browser** uses the same running server. Download `okbrain-editor-extension` from CI and install the `.vsix` in VS Code or Cursor. [Editor setup](../integrations/vscode/README.md)
 
 Run `bun run package:mac --smoke` on macOS with Xcode command-line tools to build and launch the app. The packager checks the upstream SQLite amalgamation hash before building the embedded library. Run `bun run package:ide` with Node.js 22 and Bun to build the VSIX.
 
-The Linux browser smoke test uses the bundled app assets at a 375 px viewport with outbound requests blocked. After `bunx --bun playwright install --only-shell chromium`, run `bun run smoke:browser` to repeat the keyboard flow.
+The Linux browser smoke test uses the bundled app assets with outbound requests blocked and includes a 375 px keyboard workflow. After `bunx --bun playwright install --only-shell chromium`, run `bun run smoke:browser` to repeat the keyboard flow.
 
 ## Release flow
 
@@ -44,7 +47,7 @@ The macOS CI artifacts use ad hoc signatures and may require approval under **Sy
 
 For a distribution build, install the organization's **Developer ID Application** certificate and its private key in the macOS build user's Keychain. Create a notarytool profile using Apple's credential setup. Set `OKB_MAC_SIGN_IDENTITY` to the full certificate name or fingerprint and `OKB_MAC_NOTARY_PROFILE` to the existing profile name. Both values select credentials already in Keychain. [Developer ID signing](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac) · [Notarytool setup](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
 
-Run `bun run package:mac --sign --smoke` on each supported Mac architecture. The command signs the bundled libraries and runtime before signing the app. The smoke test opens the app, indexes a temporary brain, loads sqlite-vec, and opens the Coding workspace locally. It then saves the graph JSON export through the app's own save handling and reads the files back: the default export must leave a private draft out, and the complete export must follow the in-app approval. The packager submits a temporary ZIP to Apple, waits for acceptance, and validates the stapled ticket before writing `dist/okbrain-<version>-macos-<arch>-notarized.zip`. Check the extracted app on a Mac outside the signing environment before publishing it. [Stapling and distribution](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow#Staple-the-ticket-to-your-distribution)
+Run `bun run package:mac --sign --smoke` on each supported Mac architecture. The command signs the bundled libraries and runtime before signing the app. The smoke test opens the app, indexes a temporary brain, loads sqlite-vec, and opens the Work workspace locally. It then saves the graph JSON export through the app's own save handling and reads the files back: the default export must leave a private draft out, and the complete export must follow the in-app approval. The packager submits a temporary ZIP to Apple, waits for acceptance, and validates the stapled ticket before writing `dist/okbrain-<version>-macos-<arch>-notarized.zip`. Check the extracted app on a Mac outside the signing environment before publishing it. [Stapling and distribution](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow#Staple-the-ticket-to-your-distribution)
 
 To build a signed Windows archive, install the Windows SDK and open a shell with `signtool.exe` on `PATH`. The signing certificate and its accessible private key must be in the build user's **Personal** certificate store. Set `OKB_WINDOWS_SIGN_THUMBPRINT` to the certificate's 40-digit hexadecimal thumbprint and `OKB_WINDOWS_TIMESTAMP_URL` to your publisher's HTTPS RFC 3161 timestamp endpoint. Run `bun run package --sign` on Windows x64. SignTool signs and timestamp-verifies both `okb.exe` and `vec0.dll` before the packager writes `dist/okb-<version>-windows-x64-signed.zip` and `dist/SHA256SUMS-windows-signed.txt`. [Microsoft SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)
 

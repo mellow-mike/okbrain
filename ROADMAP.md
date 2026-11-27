@@ -29,6 +29,16 @@ are in [the open items handoff](docs/plans/2026-11-23-open-items.md).
 
 ### Stage 7 — Personal second brain
 
+- [x] Bring the Figma workspace navigation to the local app, with Knowledge,
+  Library, Sources, Ask, and access to existing note and brain controls.
+- [x] Group Settings into bookmarkable sections with local status on the
+  overview. Advanced operations exposes CLI parameters, and dedicated host
+  actions retain owner authorization and their existing approval steps.
+- [x] Keep Ask conversations per brain and reveal the exact optional previous
+  exchange before sending a follow-up. Add a source inspector for citations.
+- [x] Preview selected Google Drive, Slack, and Linear items locally before
+  saving exact snapshots as private drafts.
+
 - [x] Import ChatGPT and Claude conversation text as private drafts with
   provenance, preview, and create-only deduplication.
 - [x] Add explicit local ChatGPT sign-in and cited questions through
@@ -83,6 +93,14 @@ are in [the open items handoff](docs/plans/2026-11-23-open-items.md).
   requests blocked.
 
 ### Stage 8 — Enterprise coding
+
+- [x] Use the Figma Work shell for project and standalone requests, and for
+  the project-scoped team workspace. Keep the composer and request timeline
+  in view and open project switching and registration in a dialog. Inspect
+  proposed diffs before accepting and record author-attributed check results
+  on completed requests.
+- [x] Add repository map import, cancellation and refresh controls, map-backed
+  requests, orchestration, learning controls, and routing to standalone sessions.
 
 - [x] Pin Pi Durable and Pi AI 1.0 and exercise crash recovery on real Pi
   SQLite persistence with a deterministic test provider.
@@ -229,9 +247,8 @@ are in [the open items handoff](docs/plans/2026-11-23-open-items.md).
   indexed previews on the pinned Vite cases.
 - [ ] Measure selection on real monorepos in several languages, and decide
   from that whether line-pattern declarations need a parser for any language.
-- [ ] Offer the repository map and orchestrated plans in VS Code and Cursor
-  and in standalone app sessions. Both show the runs today and start them
-  from the project app or the CLI.
+- [ ] Add repository-map and orchestrated-plan submission to VS Code and
+  Cursor. The extensions can inspect saved runs. Use Work or the CLI to submit.
 - [ ] Record how often a routed choice beats its baseline once reviews exist,
   and show it beside the policy.
 
@@ -352,7 +369,7 @@ Goal: a real PKM you can write to, conformant on every save, versioned in git.
 
 ## Feature: Resurface — review queue (F-B, after Stage 1)
 Deterministic daily "worth another look" queue with stated reasons; zero AI
-providers required. Design: `docs/features/FEATURE-RESURFACE.md` + CONTEXT
+providers required. Design: [personal guide](docs/PERSONAL.md#revisit-notes-with-the-review-queue) and CONTEXT
 §Resurface. Scope guard: GUI card stack → 3.2, cron recompute → 4.5,
 daily-note section → 4.6, AI garnish → 2.3 (items live at those stages).
 - [x] F-B.1 `core/review/score.ts` — signals + weighted score + reason strings
@@ -379,7 +396,7 @@ daily-note section → 4.6, AI garnish → 2.3 (items live at those stages).
 
 ## Feature: Clip — web clipper & reading inbox (F-A, after F-B)
 URL → conformant `references/` concept in seconds; feeds search/graph/review.
-Design: `docs/features/FEATURE-CLIP.md` + CONTEXT §Clip. Scope guard:
+Design: [personal guide](docs/PERSONAL.md#clip-web-pages-and-manage-the-reading-inbox) and CONTEXT §Clip. Scope guard:
 bookmarklet + token endpoint → 3.1, GUI inbox view → 3.2; embed hook → 2.2,
 link-suggest hook → 4.4, autoTag → 2.3 (clip runs zero-AI by construction).
 - [x] F-A.1 `core/ingest/fetch-guard.ts` — http/https only, SSRF guard (DNS
@@ -910,6 +927,7 @@ regression test; then mark `fixed` with the commit/PR ref.
 | B38 | 2026-11-26 | med | coding | Atlas lookup could be enabled independently of its preview. Saved inspection omitted map facts and deferred text, orchestrated requests lacked source manifests, and OpenRouter runs could not copy reports. | New source modes were incompletely wired into approval and inspection | fixed | Bind lookup opt-in to the preview, preserve approved context in saved inspection, and include orchestrated and OpenRouter metadata in reports. Regression tests cover CLI and project API, browser, and editor entry points |
 | B39 | 2026-11-26 | high | coding | Routed calls could reject source that fit the selected model, undercount failed attempts, or trim a worker's saved report. Configured OpenRouter preferences could be ignored or rejected for models using the Messages API. | Orchestration mixed model budgets and synthesis limits, and set preferences through an adapter-specific path | fixed | Validate models and preferences at preview and use Pi's payload hook for both supported OpenRouter adapters. Use each routed model's budget, retain full worker reports, and count failed attempts in total usage. Regression tests in `tests/coding.orchestration.test.ts` |
 | B40 | 2026-11-26 | med | coding | Reimport could retain an earlier history setting, and cancellation at publication could leave incomplete generated knowledge. Merging disjoint source ranges could exceed the budget. | Cache reuse and excerpt merging skipped some inputs and limits | fixed | Refresh history when its bound changes, finish publishing knowledge after the index commits, and bound merged excerpts. Regression tests in `tests/coding.atlas.test.ts` |
+| B41 | 2026-11-27 | med | coding | A scoped monorepo import could lose the package layout inferred from tracked root markers. | Package discovery treated the scoped file list as the entire workspace. | fixed | Check known root markers in Git for layout only. Keep their source outside the import scope. |
 | _(example)_ | _2026-06-28_ | _med_ | _engine_ | _`okb index` doubles edges on re-run_ | _upsert not keyed on (src,dst,rel)_ | _open_ | _—_ |
 
 Severity: `crit` (data loss / corruption / non-conformant write) · `high`
@@ -976,7 +994,12 @@ Capture anything not yet placed in a stage; promote into a stage when picked up.
 
 ## Progress Log
 
-Newest first. One line per session: what changed + what's next.
+Newest first. Each entry records changes and the next work.
+- 2026-11-27 — Applied the supplied Figma design to the Knowledge and Work
+  workspaces, exposed typed operation options in Settings, added standalone
+  map and orchestration workflows, and updated the user and architecture
+  guides. The roadmap still tracks independent provider evaluation and
+  deployment verification.
 - 2026-11-26 — Reviewed PR #27, fixed the source scope, approval, retry, and
   learning issues in B34–B40, completed saved-source and report inspection,
   and exercised the map and orchestrated plan in the browser smoke. The

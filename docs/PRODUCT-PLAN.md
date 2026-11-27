@@ -1,35 +1,82 @@
 # Product plan
 
-okbrain serves two workflows. In the personal workflow, people bring their own knowledge and AI accounts, connect sources deliberately, and build a map they can inspect and edit. In the coding workflow, teams give Pi scoped project context, keep run history recoverable, and review proposed changes before applying them.
+okbrain has two workspaces. **Knowledge** helps people capture, find, and share
+portable notes with the sources and AI accounts they choose. **Work** helps
+engineers give Pi scoped project context, recover requests, and review
+proposed changes before applying them.
 
-## Starting point
+## Current foundation
 
-The Bun application already has a portable Markdown and YAML store, keyword and optional vector retrieval, a typed knowledge graph, a local web app, a CLI, and MCP. The first product release can build on all of those. OKF v0.2 is the current interchange baseline. Product extensions may add portable metadata and concepts as needed. Google’s reference implementation remains a compatibility fixture and design reference.
+- The Markdown and YAML bundle is the source of truth for knowledge. OKF v0.2
+  is the interchange baseline. Keyword, vector, and graph data are derived.
+  The read-only Acme bundle checks compatibility with upstream tooling.
+- The app and CLI share operations and settings. Task-specific views explain
+  consequential choices and show previews before approval. Host administration
+  belongs to the local operator. Team and MCP access retain their own scopes.
+- The app uses the supplied Figma design for its workspace structure. Knowledge
+  centers browsing, Ask, and Sources. Work centers the request, its repository
+  and session navigation, and the review inspector. Both show real state and
+  support keyboard and narrow-window use.
 
-## First implementation pass
+## Knowledge
 
-1. **Personal context.** Import text conversations from local ChatGPT and Claude exports with stable identities, provenance, preview, and duplicate handling. Use the canonical writer so conversation content is searchable and editable as Markdown. Keep external files and tokens out of the bundle.
-2. **Subscription inference.** Add an explicit ChatGPT plan route using OpenAI’s documented local open-source sign-in and plan usage permissions. Keep existing API-key and local model routes. Prove a clean failure path for disconnected accounts and avoid switching billing routes on failure. Start with cited questions from the CLI. [OpenAI’s integration guide](https://developers.openai.com/siwc/token-sharing-open-source)
-3. **Knowledge mapping.** Reduce database work per link suggestion and per concept refresh. Preserve results and provenance resolution. Cover the changed behaviors against actual SQLite.
-4. **Coding sessions.** Add a local, supervised coding workflow built on Pi’s 1.x Durable APIs. Accept an explicit workspace and file context, use named persisted sessions and request IDs, and return a reviewable response. Keep coding run state outside the brain. [Pi documentation](https://docs.pi.dev/latest), [Pi Durable](https://earendil.com/posts/pi-durable/)
-5. **Integration and documentation.** Verify normal entry points and feature boundaries. Update setup, operations, architecture and contributor instructions before opening the PR.
+Optimize for the first useful result. A new user can start with a note or an
+existing source, find it again, and understand where it came from. Local
+capture, search, mapping, and review work without a model. [Personal guide](PERSONAL.md)
 
-## Personal product
+1. **First use and return.** Route an empty brain to capture or import and
+   then to the saved note, search, or review. Recheck keyboard and narrow
+   viewport flows after navigation changes. Measure time to a first saved
+   note and successful re-finding with opt-in, local usability sessions.
+   [Usability protocol](USABILITY.md), [Jones et al.](https://doi.org/10.1145/502585.502607)
+2. **Deliberate source access.** Build on local ChatGPT and Claude exports,
+   bookmarks, Markdown, Notion exports and selected live pages, email, and
+   calendar imports. Show skipped items, preserve provenance, and make
+   repeated imports distinguish saved items from changes. Preserve local
+   edits and require review for connecting or importing a source.
+   [Source workflows](PERSONAL.md#import-conversations)
+3. **Deliberate inference.** Keep the local and API-key routes and the
+   explicitly selected ChatGPT plan route. Show the selected account and
+   source visibility before sending a plan request. Store credentials in
+   per-user application data. Keep plan failures on the selected billing
+   route. [ChatGPT plan workflow](PERSONAL.md#ask-questions-with-your-chatgpt-plan)
+4. **Inspectable relationships.** Let a user reopen the notes behind a
+   question or project, filter by source, privacy, and recency, and see why
+   each relationship appears. Keep the representation editable as Markdown.
+   [Focused maps](PERSONAL.md#start-on-macos-or-in-a-browser)
 
-Optimize for the first useful result. A new user can start with a note or an existing source, find it again, and understand where it came from. Keep model access optional until the person asks for an answer that needs it. The local browser experience leads with source selection, preview, and an explicit import into private drafts. Keep ChatGPT plan setup deliberate and keep account credentials in per-user application data.
+## Work
 
-1. **First-run experience.** Route users from an empty brain to capture or import, then directly to the saved note, search, or review. Test create, resume, and recovery flows with keyboard navigation and a narrow viewport. Measure time to first saved item and successful re-finding in usability sessions, with locally collected performance data and no automatic source-content telemetry. Observational work on personal information management found that people used several keeping methods and valued reminders and context explaining why something mattered. [Jones, Bruce, and Dumais (2001)](https://doi.org/10.1145/502585.502607)
-2. **Useful integrations.** Make the browser clipper and ChatGPT/Claude exports easy to discover and verify. Next, prioritize browser bookmarks and improvements to Markdown and Notion-export import. Preserve folder or topic hints and originals as provenance, show duplicate and unsupported items, and let people choose what to keep. Evaluate read-only live connectors after file import, using provider-supported scopes and explicit connection and disconnect controls. [Firefox bookmark export](https://support.mozilla.org/en-US/kb/export-firefox-bookmarks-to-backup-or-transfer), [Notion export formats](https://www.notion.com/help/export-your-content)
-3. **Source and account management.** Show import history and per-source controls. Preview the changes in a repeated import and preserve local edits. Add a browser account flow only after loopback consent, account selection, model selection, and sign-out can be demonstrated without exposing credentials through generic operations. Before a hosted answer, make the selected account and source visibility clear. Indent’s optional connection steps inform how to explain the capability and permission each connection adds. [Indent onboarding](https://docs.indent.com/)
-4. **Return to knowledge.** Start from a question or project, reopen the relevant notes in a focused map, and explain each displayed relationship. Put privacy, source, and recency filters beside the result. Keep the underlying representation editable and portable. [Meta Muse](https://about.fb.com/news/2026/09/introducing-muse-personal-ai-agent/)
+The primary workflow is **scope → preview → submit → inspect → review**. A
+request binds the task and the selected workspace source to its approval.
+Show estimated context separately from recorded provider input, output, and
+cache usage. [Coding guide](CODING.md)
 
-## Enterprise coding product
+1. **Bounded repository context.** Build on explicit files, scoped lexical
+   retrieval, indexed profiles, and the imported repository map. The map is
+   derived and rebuildable. It directs selection to current tracked source
+   under one fixed budget. Show file and line references, omissions, map
+   facts, and any approved source for deferred lookup. Imports record
+   project-declared checks without running them.
+   [Repository map](CODING.md#work-in-a-large-repository)
+2. **Durable, reviewed requests.** Bind a request to its workspace, ID, source,
+   and model. Store the exact approved input and reuse it on recovery. Keep
+   application and publication approvals separate from generation. Keep the
+   alternative review, context reset, and compaction receipts inspectable.
+   [Pi Durable v1.0.0](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md)
+3. **Scoped orchestration and routing.** Split work across packages when the
+   evidence calls for it. Show each work order, its source, model, reasoning,
+   and provider preferences before submission. Publish the fixed baseline
+   beside each routed choice. Use separate project learned state, tie updates
+   to accepted reviews, and measure skills before making delivery routine.
+   [Orchestration](CODING.md#split-a-task-across-packages), [Model routing](CODING.md#choose-models-by-role)
+4. **Evaluation and deployment.** Compare retrieval on pinned and representative
+   repositories before adding complexity. Track evidence recall, preview and
+   import latency, context size, provider usage, and independent review
+   outcomes. Use real provider runs to measure tokens per accepted result and
+   verify the configured enterprise host’s isolation, egress, and retention.
+   [Evaluation workflow](CODING.md#evaluate-provider-runs-with-independent-review), [Roadmap](../ROADMAP.md#stage-8--enterprise-coding)
 
-The primary workflow is **scope → preview → submit → inspect → review**. For a large repository, the operator selects the relevant packages or directories and searches for identifiers or paths. The preview reports exactly which excerpts fit the context budget and binds their contents to an ID for submission. Pi Durable saves the admitted request and its context in the transcript. Report estimated context and provider-reported input, output, and cache usage separately so users can tell where a long session is spending tokens.
-
-1. **Bounded local context.** Use scoped Git paths and deterministic text retrieval with explicit caps. Report capped scans, show file and line citations, and let the caller narrow scope or use explicit attachments. Keep model-window reserve and transcript growth under control. Preserve archived turns and original input for recovery and review. [Pi sessions and context](https://docs.pi.dev/latest/sessions), [Pi Durable v1.0.0](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md)
-2. **Repository context at scale.** Add a versioned project profile for package roots, permitted shared dependencies, exclusions, owner-approved short guidance, and default budgets. Build a local, rebuildable path and symbol index keyed by repository revision with worktree invalidation. Rank exact paths and identifiers first, add bounded import and package dependency expansion, and disclose why each excerpt was selected. Reuse a stable project prefix where the provider supports prompt caching and measure actual cache reads. Keep repo guidance small and optional. [Replicas environments](https://replicas.dev/blog/replicas-v1), [Indent environments](https://docs.indent.com/getting-started/environments/), [Gloaguen et al. (2026)](https://doi.org/10.48550/arXiv.2602.11988)
-3. **Evaluate before expanding.** Compare explicit files, scoped lexical excerpts, and dependency or symbol expansion on pinned local fixtures and representative monorepo tasks. Include cross-package changes, similarly named services, stale worktree data, and long follow-up chains. Report relevant-file recall, reviewer acceptance of cited evidence, p50/p95 preview latency, context size, provider input/output/cache tokens, and tokens per accepted result. Choose defaults against task quality and latency as well as token use. RepoCoder and RepoBench distinguish repository retrieval from generation. Long-context experiments motivate varying distractor volume and placement. [Zhang et al. (2023)](https://doi.org/10.18653/v1/2023.emnlp-main.151), [Liu et al. (2023)](https://doi.org/10.48550/arXiv.2306.03091), [Liu et al. (2024)](https://doi.org/10.1162/tacl_a_00638)
-4. **Durable team runs.** Carry tenant/project, workspace revision, context ID, provider/model, and approving identity on admitted work. Use an authenticated control plane, per-project credentials, isolated workers, short-lived repository access, metadata-only audit events, and transcript retention and deletion. Define cancellation and resume behavior for each run state. Fault-inject at admission, model streaming, checkpoint, and commit boundaries. Verify repeated requests reuse settled results and document provider calls that can repeat after a crash. [Replicas isolation and retention](https://replicas.dev/security), [Pi Durable execution model](https://earendil.com/posts/pi-durable/)
-5. **Reviewed execution and handoff.** Add approved changes and repository integration only after worker tests and audit controls pass. Evaluate Pi Durable child conversations for independent package reviews with their own whitelisted scope and budget. A coordinator can receive a bounded evidence summary and request-ID references. Report combined usage and preserve the initiating operator’s authority over sends, source scope, and side effects. Require separate approval for applying changes or opening a pull request. [Pi Durable task ownership and replay](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md), [Indent agent swarms](https://docs.indent.com/working-with-indent/agent-swarms/)
-6. **Large monorepos.** Make a repository usable without hand scoping. Import it once into a derived, rebuildable map with a readable knowledge bundle, then read each request's source from the map inside one fixed budget, so cost per request does not grow with the repository. Send real source for evidence and keep the map for navigation. Let reviews improve selection through a small, separate learned state with a replay check, and measure skills before delivering them. Split a task across packages only when its evidence spans them, as one previewed plan of scoped work orders, and choose each role's model before generation beside a fixed baseline. Evaluate against the scoped previews on generated and pinned fixtures first, then on reviewed live runs. [Fallahpour et al. (2026)](https://doi.org/10.48550/arxiv.2610.21375), [Kim et al. (2025)](https://doi.org/10.48550/arxiv.2512.08296), [Li et al. (2026)](https://doi.org/10.48550/arxiv.2601.07206), [coding guide](CODING.md#work-in-a-large-repository)
+The [reference registry](context/REFERENCES.md) records the research and source
+material behind these principles. [CONTEXT.md](../CONTEXT.md) describes the
+implementation and its decision history.

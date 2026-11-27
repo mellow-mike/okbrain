@@ -7,7 +7,7 @@
 // the repository grows, whether the selection holds each task's evidence, and
 // what two accepted reviews change. It does not measure answer quality.
 
-import { mkdtemp, readdir, rm, stat, appendFile } from "node:fs/promises";
+import { mkdtemp, readdir, realpath, rm, stat, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordAtlasOutcome, selectAtlasContext } from "../src/core/coding/atlas/context.ts";
@@ -59,7 +59,7 @@ function precision(task: FixtureTask, excerpts: readonly { path: string }[]): { 
 }
 
 async function measure(backgroundFiles: number) {
-  const root = await mkdtemp(join(tmpdir(), "okb-atlas-bench-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "okb-atlas-bench-")));
   try {
     const fixture = await buildMonorepo(join(root, "repo"), backgroundFiles);
     const location = { stateDir: join(root, "atlas") };

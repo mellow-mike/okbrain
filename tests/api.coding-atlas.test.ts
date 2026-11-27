@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApiServer, type ApiServer } from "../src/api.ts";
 import { atlasStatus } from "../src/core/coding/atlas/context.ts";
+import { Atlas } from "../src/core/coding/atlas/store.ts";
 import { operations } from "../src/core/operations.ts";
 import { buildMonorepo, type Fixture } from "./fixtures/monorepo.ts";
 import { okb } from "./helpers.ts";
@@ -17,8 +18,9 @@ type Preview = { source: string; manifest: { id: string; files: { path: string }
 type Plan = { source: string; id: string; plan: { mode: string; orders: { scope: string; route: { choice: { model: string }; fallbacks: { model: string }[] } }[]; warnings?: string[] };
   sourceManifest: { source: string; id: string; orders: { scope: string; models: { model: string }[] }[] } };
 type Run = { id: string; status: string; review: string | null };
-type MapState = { status: string; imported: boolean; map?: { files: number; packages: number }; knowledge?: string; learning?: { episodes: number } | null;
+type MapState = { status: string; imported: boolean; map?: { files: number; packages: number }; meta?: { historyCommits: number; scopes: string[] }; knowledge?: string; learning?: { episodes: number } | null;
   skills?: { id: string; state: string }[]; error?: string };
+type RepositoryFiles = { paths: string[]; limited: boolean; branch?: string; revision?: string; commands: { argv: string[]; source: { path: string } }[] };
 
 let root: string;
 let fixture: Fixture;
@@ -64,7 +66,8 @@ beforeAll(async () => {
     const first = (request.excerpts as { path: string; startLine: number }[])[0]!;
     return fauxAssistantMessage(`Reviewed ${first.path}:${first.startLine}.`);
   }));
-  api = createApiServer({ bundle: fixture.workspace, port: 0, token: ownerToken, coding: { stateDir: join(root, "projects"), models } });
+  api = createApiServer({ bundle: fixture.workspace, port: 0, token: ownerToken,
+    coding: { stateDir: join(root, "projects"), models }, standaloneCoding: { stateDir: join(root, "standalone"), models } });
 });
 
 afterAll(async () => {
@@ -84,6 +87,15 @@ test("a project imports its map, previews a selection, runs it, and learns from 
   expect(early.status).toBe(409);
   expect((await early.json() as { error: string }).error).toContain("has not been imported");
   expect((await request(path + "/import", {}, member.token)).status).toBe(403);
+  expect((await request(path + "/import", { cancel: true }, member.token)).status).toBe(403);
+  expect((await request(path + "/import", { historyCommits: -1 })).status).toBe(400);
+  expect((await request(path + "/files-preview", { projects: ["."] }, member.token)).status).toBe(403);
+  const files = await call<RepositoryFiles>(path + "/files-preview", { projects: ["packages/auth"] }, member.token);
+  expect(files.paths).toContain("packages/auth/src/session.ts");
+  expect(files.paths.every((entry) => entry.startsWith("packages/auth/"))).toBe(true);
+  expect(files.commands).toEqual([]);
+  expect(files.branch).toBeTruthy();
+  expect(files.revision).toMatch(/^[a-f0-9]{12}$/u);
   const imports = await Promise.all([call<MapState>(path + "/import", {}), call<MapState>(path + "/import", {})]);
   expect(imports.map(({ status }) => status)).toEqual(["running", "running"]);
   const imported = await waitFor(() => call<MapState>(path + "/import"), ({ status }) => status !== "running");
@@ -95,6 +107,9 @@ test("a project imports its map, previews a selection, runs it, and learns from 
   expect(forMember).toMatchObject({ imported: true });
   expect(forMember).not.toHaveProperty("knowledge");
   expect(forMember).not.toHaveProperty("learning");
+  const withCommands = await call<RepositoryFiles>(path + "/files-preview", { projects: ["packages/auth"] }, member.token);
+  expect(withCommands.commands).toContainEqual(expect.objectContaining({ argv: ["bun", "run", "test"], source: expect.objectContaining({ path: "packages/auth/package.json" }) }));
+  expect(withCommands.commands.every(({ source }) => source.path.startsWith("packages/auth/"))).toBe(true);
 
   const prompt = "Explain refreshSession and its test.";
   const selection = { source: "atlas", tokenBudget: 1200 };
@@ -140,6 +155,58 @@ test("a project imports its map, previews a selection, runs it, and learns from 
   await call(path + "/delete-session", { session: "main", confirm: "main" });
   const forgotten = await call<MapState>(path + "/import");
   expect(forgotten.learning).toMatchObject({ episodes: 0 });
+});
+
+test("local standalone browser sessions preview, admit, and review repository-map work from the owner store", async () => {
+  const { request, call } = client(api.url);
+  const workspace = fixture.workspace;
+  const repository = <T>(action: string, input?: Record<string, unknown>) => call<T>("/standalone/repository", { workspace, action, ...input });
+  const project = await call<{ id: string }>("/projects", { title: "Standalone boundary", workspace, scopes: ["packages"], provider: "openai", model: "strong" });
+  const member = await call<{ token: string }>(`/projects/${project.id}/members`, { name: "member" });
+  expect((await request("/standalone/repository", { action: "files", workspace }, member.token)).status).toBe(403);
+  expect(await repository<MapState>("status")).toMatchObject({ status: "idle", imported: false });
+  await repository<MapState>("import", { projects: ["packages"], historyCommits: 0, full: true });
+  const status = await waitFor(() => repository<MapState>("status"), ({ status }) => status !== "running");
+  expect(status).toMatchObject({ status: "completed", imported: true, meta: { historyCommits: 0, scopes: ["packages"] } });
+  expect(await call<MapState>(`/projects/${project.id}/import`)).toMatchObject({ imported: false });
+  const mapFiles = await repository<RepositoryFiles>("files", { projects: ["packages/auth"] });
+  expect(mapFiles.paths).toContain("packages/auth/src/session.ts");
+
+  const mapPreview = await call<Preview & { id: string; ranked: unknown[] }>("/standalone/preview", { workspace, source: "atlas", query: "refreshSession", exclude: ["packages/billing"] });
+  expect(mapPreview.sourceManifest).toMatchObject({ source: "atlas", id: mapPreview.id });
+  expect(mapPreview.ranked.length).toBeGreaterThan(0);
+  expect(mapPreview.excerpts.some(({ path }) => path === "packages/auth/src/session.ts")).toBe(true);
+  const selection = { workspace, source: "orchestrated", session: "standalone-atlas", requestId: "orchestrated-1", provider: "openai", model: "strong",
+    prompt: "Trace refreshSession, endSession and signToken, and computeTax with publishInvoice and InvoiceSchema.", workers: 2, contextTokens: 900,
+    routing: { version: 1, learn: false, roles: { worker: [{ provider: "openai", model: "cheap" }] } } };
+  const before = seen.length;
+  const preview = await call<Plan>("/standalone/preview", selection);
+  expect(preview.plan.mode).toBe("fan-out");
+  expect(preview.sourceManifest).toMatchObject({ source: "orchestrated", id: preview.id });
+  const run = { ...selection, previewId: preview.id, approved: true };
+  expect((await request("/standalone/run", { ...run, approved: false })).status).toBe(400);
+  expect((await request("/standalone/run", { ...run, routing: undefined })).status).toBe(409);
+  expect(seen).toHaveLength(before);
+  await call("/standalone/run", run);
+  const archived = await waitFor(() => call<{ active?: { status: string }; savedInput?: { prompt: string; groups: { label: string }[] } }>("/standalone/inspect", selection),
+    ({ active }) => active?.status === "done");
+  expect(archived.savedInput).toMatchObject({ prompt: selection.prompt, groups: [{ label: "packages/auth" }, { label: "packages/billing" }] });
+  expect(seen.slice(before).filter(({ request }) => request.workOrder).map(({ model }) => model)).toEqual(["cheap", "cheap"]);
+
+  const lesson = await repository<{ id: string; created: boolean }>("lesson", { text: "Inspect session source before changing tokens.", anchors: ["packages/auth"] });
+  expect(lesson.created).toBe(true);
+  const skills = await repository<{ id: string; state: string }[]>("skills", { id: lesson.id, state: "disabled" });
+  expect(skills.find(({ id }) => id === lesson.id)).toMatchObject({ state: "disabled" });
+  await repository("learn", { session: selection.session, requestId: selection.requestId, outcome: "accepted" });
+  expect((await repository<MapState>("status")).learning?.episodes).toBeGreaterThan(0);
+  const importing = Atlas.create(workspace, { stateDir: join(root, "standalone", "atlas") });
+  try {
+    const conflict = await request("/standalone/repository", { workspace, action: "forget", everything: true, confirm: true });
+    expect(conflict.status).toBe(409);
+    expect((await repository<MapState>("status")).learning?.episodes).toBeGreaterThan(0);
+  } finally { importing.close(); }
+  expect(await repository("forget", { everything: true, confirm: true })).toEqual({ reset: true });
+  expect(await repository<MapState>("status")).toMatchObject({ imported: true });
 });
 
 test("an orchestrated request uses the project's routing policy and one approved plan", async () => {
@@ -273,6 +340,12 @@ test("the repository map commands stay local and work from the command line", as
   const map = await okb(["code", "map", "--workspace", workspace]);
   expect(map.stdout).toContain("in 12 packages");
   expect((await okb(["code", "map", "--workspace", root])).stdout).toContain("has not been imported");
+  const importing = Atlas.create(workspace);
+  try {
+    const conflict = await okb(["code", "forget", "--workspace", workspace, "--everything"]);
+    expect(conflict.code).toBe(1);
+    expect(conflict.stderr).toContain("Retry after the update finishes");
+  } finally { importing.close(); }
   const lesson = await okb(["code", "lesson", "--workspace", workspace, "--text", "Contracts are versioned. Bump the version with every field change.", "--anchors", "packages/contracts"]);
   expect(lesson.stdout).toContain("as a draft");
   const skills = await okb(["code", "skills", "--workspace", workspace, "--disable", "builtin/change-coupling"]);

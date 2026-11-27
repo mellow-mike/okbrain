@@ -206,6 +206,30 @@ describe("ChatGPT plan", () => {
       await writeConcept(root, { id: "notes/published", metadataOnly: true, extra: { db_only: true } });
       await expect(call("answer", { id: next.id })).rejects.toThrow(/Preview sources again/);
       expect(provider.requests.filter(({ path }) => path === "/v1/responses")).toHaveLength(1);
+
+      await writeConcept(root, { id: "notes/published", metadataOnly: true, extra: { db_only: false } });
+      const id = crypto.randomUUID();
+      const firstTurn = crypto.randomUUID();
+      provider.inspectAnswer((body) => {
+        expect(JSON.stringify(body)).not.toContain("Previous exchange");
+      });
+      const firstConversation = await call("preview", { ...input, conversation: { id, turn: firstTurn, previous: null, includePrevious: false } });
+      await call("answer", { id: firstConversation.id });
+      const followUp = { ...input, question: "What can they do?" };
+      const conversation = { id, turn: crypto.randomUUID(), previous: firstTurn, includePrevious: true };
+      const followPreview = await call("preview", { ...followUp, conversation });
+      expect(followPreview.history).toEqual({ question: input.question, answer: "An answer [notes/published]." });
+      const stale = await call("preview", { ...followUp, conversation: { ...conversation, turn: crypto.randomUUID() } });
+      expect(provider.requests.filter(({ path }) => path === "/v1/responses")).toHaveLength(2);
+      provider.inspectAnswer((body) => {
+        const submitted = JSON.stringify(body);
+        expect(submitted).toContain("Previous exchange for orientation");
+        expect(submitted).toContain("An answer [notes/published].");
+        expect(submitted).not.toContain("secret-snapshot");
+      });
+      await call("answer", { id: followPreview.id });
+      await expect(call("answer", { id: stale.id })).rejects.toThrow(/conversation changed/);
+      expect(provider.requests.filter(({ path }) => path === "/v1/responses")).toHaveLength(3);
       expect(await call("disconnect", { account: "personal" })).toEqual({ revoked: true });
       expect((await call("status")).connected).toBe(false);
     } finally {

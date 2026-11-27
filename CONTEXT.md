@@ -14,6 +14,12 @@ configurable retrieval, and inspectable links.
 Both Ask routes can copy a completed answer as Markdown with the submitted
 question and a separate list of verified bundle-root citation links.
 Clipboard fallback keeps the copy visible and selectable in the current app.
+The Knowledge sidebar lists saved Ask conversations for the active brain.
+Completed exchanges for writable brains live in `knowledge/conversations.sqlite`
+under per-user application data. The browser can include a bounded previous
+exchange only after showing its contents and receiving explicit approval.
+The plan route binds that choice into its source preview. Stable conversation
+and turn IDs support retry and keep concurrent edits from replacing history.
 The local app can explicitly save a completed result as a canonical private
 Markdown draft. A short-lived server signature binds the exact question,
 answer, provider, model, verified citations, and mounted brain. Successful
@@ -122,12 +128,14 @@ one-off scoped repository request for an open local project. Its repository
 and active-file approvals render in read-only documents and remain bound to
 the reviewed project and source. Independent package review uses Pi Durable
 child conversations with explicit package previews and combined usage.
-A repository can be imported once into a repository map: a derived SQLite
+A repository can be imported once into a repository map, a derived SQLite
 index of packages, units, declarations, import and test links, change
 coupling, and the check commands the project declares. The import reads
 tracked files under the same exclusions as previews, executes nothing, and
-calls no model. It also writes an OKF bundle of package cards and draft
-skills in application data that a person can read and edit. A request can
+calls no model. Scoped package discovery may check for known tracked root
+markers while keeping their contents outside the import scope. It also writes
+an OKF bundle of package cards and draft skills in application data that a
+person can read and edit. A request can
 select its source from the map inside one token budget that covers excerpts,
 a short navigation map, and facts. The map decides where to look. Excerpts
 come from the current worktree after Git confirms they are still tracked.
@@ -149,6 +157,8 @@ Retries of submitted requests resolve by their existing plan ID. A project
 keeps its own map, bundle, and learned state under its project directory,
 imports only its permitted directories, and routes within its own provider.
 The control plane prepares map and plan input, so workers never open the map.
+The local app’s standalone sessions use the same map location as the CLI,
+with any other routed provider limited to its own available credential.
 An explicit owner preference can restore the team loopback listener's fixed
 port and HTTPS origin after a writable server restart from the same catalog.
 The saved port is reserved from the owner listener. Bind failures stay visible
@@ -253,7 +263,7 @@ The result contains a normalized outcome and optional HTTP status.
 
 ## Architecture
 
-Five layers, each with one responsibility:
+The entry points share operations and dedicated local controllers:
 
 ```
  Surfaces (thin):   CLI        macOS and web          MCP server
@@ -261,7 +271,7 @@ Five layers, each with one responsibility:
  Ops contract:        core/operations.ts  (read/write/admin + trust)
                       ┌──────────┬──────────────┬──────────────┐
  Store (canonical):   OKF-compatible bundle (Markdown + YAML) │
- Engine (derived):    SQLite + sqlite-vec + FTS5 + graph  ◄────┘ rebuildable
+ Engine (derived):    SQLite or local PostgreSQL + pgvector  ◄─┘ rebuildable
  AI gateway:          embed | chat | rerank   (local | API)
  ChatGPT plan:        per-user sign-in + reviewed source excerpts + Responses API
  Coding:              Pi Durable 1.0 + private SQLite + editor integrations
@@ -269,8 +279,10 @@ Five layers, each with one responsibility:
  Skills + jobs:       fat markdown + thin resolver + cron worker
 ```
 
-Rules of flow: surfaces only call ops; ops read/write the store and update the
-engine; the engine is always rebuildable from the store (`okb rebuild`).
+The CLI and the generic API use the same operations. Dedicated local
+controllers handle account consent, selected file uploads, and coding
+admission. Knowledge writes update the portable store and any active cache.
+`okb rebuild` can reconstruct the local search and graph data from the bundle.
 
 ---
 
@@ -628,8 +640,8 @@ ring, and hovering a node dims everything outside its neighbourhood.
   and marked are vendored minified builds (`core/viz/vendor/`), inlined into
   the page together with okbrain's own `safe-markdown.js` + `render.js` +
   `tokens.css` + `okb.js` and embedded in the compiled binary via Bun text
-  imports. The web fonts stay out of `viz.html` (they would roughly double
-  it); its families fall back through their stacks. Internal
+  imports. By default the viewer uses local system font fallbacks. Pass
+  `--fonts` to embed its Recursive and Literata faces. Internal
   `.md` links in bodies are rewired to `#concept:<encoded-id>` anchors the
   viewer intercepts to focus the target node; external/broken links pass
   through untouched (external ones open in a new tab). The op is scope `read`
@@ -1019,60 +1031,13 @@ takes a host path stays off MCP). The registry also marks account and coding
 commands that operate independently of a selected brain.
 
 ### CLI surface
-| Command | Scope | Purpose |
-|---|---|---|
-| `okb brain-templates` | read | List optional starter guides and their tag vocabularies |
-| `okb init [--actor …] [--template …]` | admin | Set up the bundle and AI providers. Optionally add a starter guide to an empty brain |
-| `okb export-markdown <destination>` | admin | Copy notes and frontmatter to a new Markdown vault with relative concept links, with optional `--include-private` |
-| `okb new <type> <title> <description>` | write | Create a conformant concept at `<type>s/<slug>` |
-| `okb capture [text]` | write | Quick-capture text/stdin → `inbox/` concept |
-| `okb import <path>` | write | Map existing markdown (file/tree) → concepts; dedupe by id |
-| `okb import-conversations <path> --provider <provider>` | write (localOnly) | Import ChatGPT or Claude text as private drafts |
-| `okb write <id> [--status …] [--stale-after …] [--sources …]` | write | Create/update through the conformance writer |
-| `okb keep-private <id>` | admin | Set the `db_only` flag on an existing unpublished note without rewriting Git history |
-| `okb rm <id>` | write | Delete a concept (indexes, log, caches follow) |
-| `okb enrich [--web-seed …]` | write | Run the enrichment agent (guardrailed, sources-cited) |
-| `okb search <query>` | read | Hybrid + graph retrieval (`--json` for agents) |
-| `okb ask <question>` | read | Retrieval-augmented answer with citations |
-| `okb ask-plan <question>` | read (localOnly) | Cited answer using ChatGPT plan usage and local retrieval |
-| `okb chatgpt connect` / `status` / `use` / `models` / `disconnect` | read (localOnly) | Per-user ChatGPT account and consent management |
-| `okb code context` | read (localOnly) | Preview scoped Git excerpts and estimate the context budget |
-| `okb code run` | read (localOnly) | Start or resume a Pi Durable coding request |
-| `okb code status` | read (localOnly) | Inspect request state, active context, and persisted usage |
-| `okb code import` / `code map` | read (localOnly) | Map a repository for coding and show what was imported and learned |
-| `okb code recall` | read (localOnly) | Preview the source the repository map selects for a task within a budget |
-| `okb code plan` | read (localOnly) | Preview an orchestrated request: work orders, their source, and their models |
-| `okb code learn` / `code lesson` / `code skills` / `code forget` | read (localOnly) | Record a review, add a lesson, list measured skills, and remove learned state |
-| `okb read <id>` | read | Frontmatter, body, and derived signals (status/trust/stale) |
-| `okb list [--detail] [--type] [--tag] [--status]` | read | Concept ids, or a browse listing with signals |
-| `okb graph <id> [--depth N]` | read | Neighborhood with `→`/`←`/`↔` direction tags (incl. provenance edges) |
-| `okb path <from> <to>` | read | Shortest link chain between two concepts |
-| `okb orphans` | read | Concepts with no links in or out |
-| `okb stats` | read | Counts by type/tag/status/trust, links, orphans, freshness, past `stale_after` |
-| `okb links suggest <id>` | read | Propose cross-links (deterministic, with reasons) |
-| `okb links accept <id> <target>` | write | Accept one: normalized link under `# Related` |
-| `okb review` / `review done` / `review snooze` | read/write | The Resurface queue; done = a `verified` event by you |
-| `okb inbox` / `inbox read` | read/write | Unread clips and notes |
-| `okb inbox file <id> <destination>` | admin | Preview a capture's new path. With `--confirm <preview-id>`, save the note and leave a forwarding link at its old ID |
-| `okb clip` / `okb rss` | write | Web page / feed → cited `references/` concepts |
-| `okb index` / `okb embed` | admin | (Re)build FTS / vectors incrementally |
-| `okb watch` | admin (localOnly) | Refresh keyword search and graph links after external Markdown changes |
-| `okb rebuild --confirm-destructive` | admin | Wipe + regenerate index from bundle |
-| `okb doctor` | read | OKF v0.2 conformance + health report (signals) |
-| `okb upgrade [--dry-run] [--by …]` | write | Migrate v0.1 conventions to v0.2 |
-| `okb jobs [--only …]` | admin | One maintenance pass under a lock |
-| `okb sync` | write | git commit/push/pull |
-| `okb take` / `resolve` / `calibrate` | write/read | Claims and calibration |
-| `okb brains` | read (localOnly) | List configured brain mounts |
-| `okb serve [--open]` / `okb mcp` / `okb bookmarklet` | admin (localOnly) | Local GUI+API, MCP server, clip bookmarklet |
-| `okb export-viz` | read | Self-contained graph HTML with optional embedded fonts and explicit consent for private notes |
-| `okb export-graph` | read | Graph nodes and edges as portable JSON, with explicit consent for private notes |
-| `okb cache-settings [sqlite\|postgres]` | admin | Choose per-brain SQLite or local PostgreSQL and pgvector caches |
-| `okb usability [start\|stop\|clear]` / `usability task` / `usability export` | admin | Run an opt-in, local-only usability session for this brain, mark facilitator tasks, and print the sessions and summaries as JSON |
-| `okb version` / `--version` | — | okbrain's version |
 
-Global flags: `--json` everywhere, `--bundle <path>`, `--brain <name>`
-(named mount; also `$OKB_BRAIN`), `--version`.
+`okb help` lists commands generated from the registry. `okb help <command>`
+shows parameters, types, and any defaults described in those declarations. `--brain`
+selects a named mount and `--bundle` selects a path. Use one selector per
+invocation. `--json` selects serialized results, and `--version` reports the
+installed build. See the [personal guide](docs/PERSONAL.md) and [coding guide](docs/CODING.md)
+for CLI and app walkthroughs.
 
 ### Local API (`src/api.ts`, started by `okb serve`)
 The GUI's backend and the bookmarklet's target — a thin adapter generated
@@ -1087,8 +1052,8 @@ over the registry, trusted like the CLI but defended like a network surface:
   (version, OKF version, active bundle path, brain, read-only, default folder status,
   retrieval profile, index/vector presence, actor, port, and whether a
   usability session is recording), `GET /api/brains`
-  (mount names, policy, retrieval preference, and provider/model defaults), `GET /api/bookmarklet`, and
-  `POST /api/conversations/upload`. The upload accepts browser-selected JSON
+  (mount names, policy, retrieval preference, and provider/model defaults), `GET /api/local/commands` for CLI-named operation descriptors in Advanced
+  operations, `GET /api/bookmarklet`, and `POST /api/conversations/upload`. The upload accepts browser-selected JSON
   bytes, checks the write policy, and binds confirmation to the bytes,
   provider, and active brain. Additional source routes accept file and folder
   selections, and account, provider key, and coding routes keep sensitive
@@ -1117,125 +1082,63 @@ over the registry, trusted like the CLI but defended like a network surface:
   server never holds the index hostage from a concurrent CLI.
 
 ### GUI (local web app, `okb serve`)
-A vanilla single-page app (`src/gui/`: index.html + app.js + style.css +
-fonts/) — no framework, no build step; api.ts serves the files and Bun text
-imports embed them into the compiled binary (the viz-vendor pattern; the
-fonts via `file` imports). Presentation only: every data access is a
-`/api/op/*` call or one of the dedicated local routes above. Hash routing, each route
-a page turn; look, type and motion from the design system (Look & feel,
-below); responsive down to phone widths (the sidebar becomes a top bar, and
-at 480 px or less its links become one row that scrolls sideways and keeps
-the current link in view, so the bar takes about a fifth of a phone screen).
-Under the top bar the graph view fills exactly what the bar leaves, with the
-detail panel below the graph. Each route names the tab
-(`Settings · okbrain`), and the reader uses the note's own title.
-Every non-`localOnly` op has a home
-on one of the views below — a registry-derived test enforces it — and the
-`localOnly` ones surface as a brain switcher, a status footer, the
-bookmarklet, and MCP setup instructions. Rendered markdown goes through the
-shared `render.js` over `safe-markdown.js` (raw HTML escaped, schemes gated,
-footnotes, link routing), so a clipped page cannot exfiltrate the API token.
-Views:
-- **Home** — the habit-forming front page: tiles (`stats`), quick `capture`,
-  today's review queue with Reviewed/Snooze, inbox preview, recently
-  changed (`list_concepts --detail`), one-click `doctor` with the v0.2
-  signal summary, and an import and search setup panel when there is no index.
-- **Browse** — every concept (`list_concepts --detail`) with type, status,
-  trust tier, staleness, tags; client-side filter and sort.
-- **Concept** — the reader: title and description (the lead) over the
-  rendered body with footnote attribution and routed internal links,
-  a collapsible Markdown source view with an exact copy action,
-  badges, provenance (`generated`, `verified`, `sources` with credibility
-  signals and links to notes within the bundle), Attested Computation contracts
-  and CSV preview/receipt/attestation
-  controls when applicable, links to / cited by (`graph_neighbors`), and actions:
-  Edit, Reviewed ✓ (`review_done`), Mark read, Suggest links (accept =
-  `link_accept`), Graph, Deprecate/Restore (`write_concept --status`),
-  Delete (`delete_concept`, confirm-gated).
-- **Edit / New** — scaffold fields, status, `stale_after`, a sources editor
-  (id / resource / title / author rows), a clearable top-level resource URI,
-  and a Markdown body with a concept-id
-  link picker and insert-only link suggestions; saves via `write_concept`,
-  or `new_concept` when no id is given (derived from type + title).
-- **Graph** — live Cytoscape fed by `graph_data`; type legend with toggles
-  and counts, search and hover-neighbourhood dimming, stale/deprecated
-  styling, detail panel with badges, provenance links to included notes, and Open/Edit.
-- **Search** — offline or hybrid `search` with a configurable result maximum,
-  retrieval profile, per-hit recall-source chips, and snippets. A writable
-  brain can build its first local index and run the submitted query in place.
-  **Ask** — SSE streaming: context chips before the answer;
-  verified citations link to the reader.
-- **Add** — quick `capture`, `clip` (with auto-tag opt-in), `rss` (one URL
-  or every configured feed), and the bookmarklet. Markdown file selection
-  opens the reviewed Sources import. A direct server-path `import` links to
-  the saved notes.
-- **Sources** — preview browser-selected ChatGPT and Claude exports, import
-  private drafts, and find web capture and AI-account setup.
-- **Review** / **Inbox** — card stacks with reasons / unread items;
-  Reviewed ✓, Snooze, Mark read, Suggest links, Open, Graph.
-- **Claims** — `calibrate` dashboard, `take` form, per-claim `resolve`.
-- **Stats** — tiles incl. status and trust tiers and past-`stale_after`,
-  by type, top tags, `graph_path` finder, `orphans`.
-- **Settings** — server status, your actor (`init --actor`), AI providers +
-  retrieval profile (`init`), git `sync`, `enrich` guardrails, maintenance
-  (`index`, `embed`, `doctor`, `export_viz`, `export_graph` saved as a JSON
-  file, confirm-gated `rebuild`, `jobs` with a job subset, `upgrade` preview
-  + run), MCP setup snippets, the bookmarklet. A **Usability session** card
-  states what a session records, starts and stops it (`usability_session`),
-  marks facilitator tasks (`usability_task`), saves `usability_export` as a
-  JSON file, and clears stored sessions.
 
-While a usability session records, the status footer shows a link to its
-controls on every view. The footer refreshes when the window regains focus,
-so a session started from the CLI appears there too. Lists mark the kind of
-list (`data-via`) and each row's position (`data-rank`). Following a note
-link passes those two values to `read_concept` and nothing else.
-The bundle remains plain Markdown and external editors can edit it directly.
-The AppKit macOS app embeds the same interface from its bundled loopback
-runtime. Native menus open brain or coding workspace folders and pass external
-links to the system browser. A file the local page generates, such as a graph
-export, opens a native save panel. The VS Code and Cursor extension uses the
-loopback coding API to display previews and run reviews in editor tabs.
+The bundled single-page app is HTML, CSS, and browser JavaScript in `src/gui/`.
+Bun text and file imports embed the assets in the compiled runtime. The Mac
+app embeds the local runtime in AppKit and WebKit. Native menus open brain or
+workspace folders, open external links in the system browser, and save app
+downloads through a native panel. The team listener serves the Work interface
+with a project-scoped token.
 
-### Look & feel (the design system)
-The okbrain design system (`docs/context/REFERENCES.md` R5) is the source of
-truth for how both browser surfaces look and move: ink on a ground, no
-brand hue. The code carries it in three files:
-- **`core/viz/tokens.css`** — every colour for both themes (`accent` is an
-  alias of `ink`, never a hue), the three families, the 4px spacing scale,
-  radii, the two shadows, durations and easings (zeroed under
-  `prefers-reduced-motion`), three fixed opacities, shell measures. Served
-  to the GUI as `/gui/tokens.css`, inlined into `viz.html`. A test holds
-  both themes to the same token set and resolves every `var(--…)` /
-  `Okb.token()` the surfaces read.
-- **`gui/style.css`** — the system's stylesheet over those tokens (it kept
-  the GUI's selectors), plus the four `@font-face` rules.
-- **`core/viz/okb.js`** — the system's `window.Okb` helpers, one per moment
-  that explains a change: theme restore before first paint and the ink-flood
-  toggle; the page turn (every route, the clicked title carried into the
-  reader's title); file-away for reviewed / snoozed / read / resolved cards;
-  list enter, answer settle, tile flash, trust-tier stamp; the working line
-  ("scoring…"); the wordmark wave while app-level work runs (index, embed,
-  sync, enrich, jobs, ask…); the graph palette. Each degrades to an instant
-  change without the browser API or under reduced motion.
+- **Knowledge** opens the brain and its capture, search, and review entry
+  points. The workspace navigation opens Ask, Library, Sources, Search,
+  Graph, Focused map, Review, Inbox, Add, and Claims. Ask includes saved
+  conversations and a citations inspector. Library and links in answers or
+  maps open the shared note reader. Notes show saved Markdown,
+  provenance, status, graph links, and the permitted edit and review actions.
+- **Work** opens registered projects and standalone Pi Durable sessions. It
+  ties the task and source composer to repository and session navigation and
+  run inspection. The docked composer opens context selection and approval
+  before sending. The inspector shows proposed diffs, author-attributed check
+  results, and approved context. Repository commands are references. Project
+  tools hold credentials, repository map controls, deployment, retention,
+  and team access.
+- **Activity** opens the brain’s statistics and path checks. **Settings**
+  opens local status and routes to brain folders, AI providers, Git sync,
+  search and cache, maintenance, exports, connections, privacy and usage,
+  and advanced operations. Only the active section mounts its forms and
+  subscriptions. Advanced operations uses owner-authenticated command
+  descriptors and the existing operations API. Dedicated host controls
+  keep their existing authorization and approvals. Terminal process and
+  output controls belong to the CLI adapter.
 
-Rules the views follow: colour only means something — `ok`/`warn`/`danger`
-beside a word, graph slots for concept types (nodes, legend, type chips);
-the bundle's words (titles, descriptions, bodies) are Literata, everything
-okbrain says is Recursive Sans, identifiers Recursive Mono; borders, not
-shadows (only floating layers take `shadow`); at most one inverted
-(primary) button per view; no emoji and no icon font (a few Unicode glyphs;
-an inline Lucide SVG if a view ever needs a pictogram). Layout rules the
-stylesheet holds once, so views do not restate them: an element marked
-`hidden` never paints, whatever `display` its selector sets; a checkbox sits
-beside the first line of its label, 6 px from the words, and stays there
-when the words wrap; in a row with a labelled field, a button or checkbox
-lines up with the field's control, not with its label. State is never
-colour alone: the footer's index and vector dots are filled or hollow and
-carry `built` / `not built` for a screen reader. The faces —
-Recursive Sans/Mono and Literata roman/italic, subset woff2, 366 KB,
-OFL-1.1 (`gui/fonts/README.md`) — are embedded in the binary and served at
-`/gui/fonts/`; nothing is fetched from a network.
+Hash routes retain existing note, project, run, review, and usability deep
+links. On a narrow window the compact rail gives access to navigation and the work panels
+can be opened from the selected workspace. The active route sets the title and
+remains keyboard-reachable. The graph fills the available app area.
+
+Rendered Markdown passes through the shared `render.js` and
+`safe-markdown.js`, which escape raw HTML, gate URLs, and route local note links.
+While a usability session records, the app status links back to its controls.
+The app refreshes that state on focus. Lists label the kind of list and row
+position for local observation. Neither notes nor queries are copied to the
+usability store.
+
+### Look & feel (the design systems)
+
+The maintainer-supplied Figma Make export (R30) defines the live app’s
+workspace rail, compact panels, graphite surfaces, blue selection and focus,
+and context inspector. Inter and JetBrains Mono are served locally for the
+interface. Notes retain Literata, with Recursive and system fallbacks
+available where specified. The app also offers a light theme. Use text or an
+icon with color for meaningful state, preserve keyboard focus as panels
+change, and respect reduced motion. See the [reference registry](docs/context/REFERENCES.md).
+
+The original ink-based system (R5) remains the design reference for static
+HTML exports. Its shared `core/viz/tokens.css`, `core/viz/okb.js`, and graph
+palette are also available to the app. The token tests cover variable
+resolution and both viewer themes. Vendored font licenses are recorded
+in [the font directory](src/gui/fonts/README.md).
 
 ### Trust boundary
 Each op call carries a trust flag and an actor. CLI + local GUI are trusted
@@ -1274,7 +1177,7 @@ The gbrain "brains" axis: config `brains` maps a name to a bundle path
 (string form) or `{ path, readonly }` (policy form) — `~` expands, paths
 must otherwise be absolute (a config file resolving against cwd would be a
 footgun). Selection is `okb --brain <name>` / `$OKB_BRAIN` (mutually
-exclusive with `--bundle`), the GUI's sidebar switcher (per-request
+exclusive with `--bundle`), the app's brain picker (per-request
 `x-okb-brain`), and `okb brains` lists mounts (`localOnly` — mount paths are
 host filesystem topology and never belong on a network surface; the GUI
 route returns names and policy only). The **read-only policy is a third gate
@@ -1294,11 +1197,11 @@ the app opens the served folder and rebuilds the picker.
 
 ## Tech stack
 
-- **Runtime/language:** TypeScript on Bun. One language for CLI + web GUI + MCP;
-  `bun build --compile` for per-OS single binaries.
+- **Runtime:** TypeScript on Bun for the CLI, backend, and MCP. The GUI uses
+  browser JavaScript, HTML, and CSS. Bun compiles native CLI binaries.
 - **Engine (default):** SQLite + `sqlite-vec` (vectors) + FTS5 (keyword) —
   embedded, file-based, zero-config, cross-platform.
-- **Graph:** SQLite tables + recursive CTEs.
+- **Graph:** Derived edge tables with engine-independent graph queries.
 - **Viewer:** Cytoscape.js + marked.js (from OKF's viewer), rendered through
   okbrain's `safe-markdown.js` (escape raw HTML, gate URL schemes) and one
   shared `render.js`, bundled into the static export and reused live in the
@@ -1463,6 +1366,11 @@ the agent handles it:
 Append-only record of decisions and resolved questions (newest first). Keep the
 sections above as current truth; this log says *why/when*.
 
+- 2026-11-27 — **Knowledge and Work share the Figma workspace shell.**
+  The maintainer’s design export informs both live workspaces. Knowledge
+  keeps portable notes and source controls. Work puts durable task activity
+  and approved source together. Existing deep links and operation boundaries
+  carry forward. Static exports keep their independent offline viewer.
 - 2026-11-26 — **Large repositories are read through an imported map with a
   fixed-budget readout.** The scoped preview reads at most 256 files per
   request, so a monorepo had to be scoped by hand. The repository map adapts

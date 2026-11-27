@@ -30,6 +30,7 @@ type Project = { id: string; workspace: string; credential: string };
 type Presets = { presets: { id: string; name: string; prompt: string; query: string; profile: CodingProjectProfile }[] };
 type Run = { id: string; status: string; actor: string; admitted: boolean; error: string | null; review: string | null };
 type Inspection = { run: Run; liveAnswer?: CodingLiveAnswer; taskProgress?: CodingTaskProgress; report?: CodingRunReport;
+  prompt?: string; checks?: Array<{ title: string; status: string; durationMs: number | null; actor: string }>;
   pi?: { request?: { receipt?: { text?: string }; sourceLookup?: CodingSourceLookupReceipt } } };
 
 async function fixture(prefix: string) {
@@ -319,6 +320,7 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     const result = await waitFor(inspect, (value) => value.run.status === "done");
     expect(result).toMatchObject({
       run: { id: "review-1", status: "done", admitted: true },
+      prompt: task.prompt,
       pi: {
         request: { receipt: { text: "Keep this change for review." } },
         usage: { models: { "openai/preview-test": { totalTokens: expect.any(Number) } } },
@@ -328,6 +330,15 @@ test("browser and IDE share approved, project-scoped Pi runs and authenticated r
     expect((await request("/projects/" + other.id + "/inspect", identity, member.token)).status).toBe(403);
     expect((await request(path + "/inspect", identity, null)).status).toBe(401);
     expect((await request(path + "/inspect", identity, member.token)).headers.get("cache-control")).toBe("no-store");
+    const check = { ...identity, title: "Typecheck", status: "passed", durationMs: 1050 };
+    expect((await request(path + "/record-check", check, member.token)).status).toBe(403);
+    expect((await request(path + "/record-check", { ...check, status: "maybe" })).status).toBe(400);
+    expect(await call(path + "/record-check", check)).toMatchObject([{ title: "Typecheck", status: "passed", durationMs: 1050 }]);
+    expect((await inspect()).checks).toMatchObject([{ title: "Typecheck", status: "passed", durationMs: 1050, actor: expect.any(String) }]);
+    expect(await call(path + "/record-check", { ...check, title: "typecheck", status: "failed" })).toMatchObject([
+      { title: "Typecheck", status: "failed" },
+    ]);
+    expect(await call(path + "/review-diff", identity, member.token)).toEqual({ proposals: [] });
     expect(result.report).toMatchObject({ version: 1, projectId: project.id, session: identity.session, provider: "openai", model: "preview-test",
       runStatus: "done", request: { requestId: identity.requestId, status: "done", files: [{ path: "src/example.ts" }] },
       receipt: { status: "done" }, context: { estimatedTokens: expect.any(Number) },

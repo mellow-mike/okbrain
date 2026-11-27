@@ -43,7 +43,7 @@ describe("design tokens", () => {
 
   test("every font face the stylesheet declares ships in src/gui/fonts", () => {
     const faces = [...hostedFontCss.matchAll(/url\("\/gui\/fonts\/([^"]+)"\)/g)].map((m) => m[1]!);
-    expect(faces).toHaveLength(4);
+    expect(faces).toHaveLength(6);
     for (const f of faces) expect(existsSync(join(SRC, "gui", "fonts", f))).toBe(true);
     expect(fontAssets.map(([path]) => path)).toEqual(faces.map((face) => `/gui/fonts/${face}`));
   });

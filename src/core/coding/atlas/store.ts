@@ -14,7 +14,9 @@ import { dfBuckets, embeddingDim, type DocumentFrequencies } from "./text.ts";
 export const atlasVersion = 1;
 export class AtlasError extends Error {}
 export class AtlasMissingError extends AtlasError {}
-export class AtlasBusyError extends AtlasError {}
+export class AtlasBusyError extends AtlasError {
+  constructor(cause: unknown) { super("This repository map is already being updated. Retry after the update finishes.", { cause }); }
+}
 
 export interface AtlasLocation { stateDir?: string }
 
@@ -34,6 +36,23 @@ function privateDirectory(path: string): void {
   const info = lstatSync(path);
   if (!info.isDirectory()) throw new AtlasError("Repository atlas state must be a local directory.");
   if (process.platform !== "win32" && (info.mode & 0o077) !== 0) chmodSync(path, 0o700);
+}
+
+/** Serialize operations that replace the map or clear its learned aliases. */
+export function acquireAtlasLease(workspace: string, location: AtlasLocation = {}): Database {
+  const directory = atlasDirectory(workspace, location);
+  privateDirectory(atlasRoot(location));
+  privateDirectory(directory);
+  ensureExtensionCapableSqlite();
+  const lease = new Database(join(directory, "owner.sqlite"));
+  try {
+    lease.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
+    return lease;
+  } catch (error) {
+    lease.close();
+    if ((error as { code?: string }).code === "SQLITE_BUSY") throw new AtlasBusyError(error);
+    throw error;
+  }
 }
 
 const schema = `
@@ -121,17 +140,7 @@ export class Atlas {
    */
   static create(workspace: string, location: AtlasLocation = {}): Atlas {
     const directory = atlasDirectory(workspace, location);
-    privateDirectory(atlasRoot(location));
-    privateDirectory(directory);
-    ensureExtensionCapableSqlite();
-    const lease = new Database(join(directory, "owner.sqlite"));
-    try {
-      lease.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
-    } catch (error) {
-      lease.close();
-      if ((error as { code?: string }).code === "SQLITE_BUSY") throw new AtlasBusyError("This repository is already being imported by another okbrain process.");
-      throw error;
-    }
+    const lease = acquireAtlasLease(workspace, location);
     let db: Database | undefined;
     try {
       db = new Database(join(directory, "atlas.sqlite"), { strict: true, create: true, readwrite: true });

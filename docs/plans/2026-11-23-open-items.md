@@ -1,10 +1,10 @@
 # Open items handoff (2026-11-23)
 
-This plan covers every open roadmap item after the 2026-11-23 project review.
-It follows the maintainer's answers recorded in the
-[CONTEXT.md Decisions Log](../../CONTEXT.md#decisions-log). Read
-[AGENTS.md](../../AGENTS.md), the [product plan](../PRODUCT-PLAN.md), and the
-[roadmap](../../ROADMAP.md) first.
+This is the record of decisions and proposed work from the 2026-11-23
+review. Usability sessions (WP2) have shipped. The release-signing work and
+external validation still have their own prerequisites. See the
+[current roadmap](../../ROADMAP.md#current-focus) for delivery status and the
+[Decisions Log](../../CONTEXT.md#decisions-log) for the design history.
 
 ## State at review
 

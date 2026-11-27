@@ -12,17 +12,19 @@ const root = join(import.meta.dir, "..");
 const dist = join(root, "dist");
 const { version } = await Bun.file(join(root, "package.json")).json();
 const appName = `okbrain-${version}-macos-${process.arch}`;
-const app = join(dist, "okbrain.app");
-const contents = join(app, "Contents");
-const executables = join(contents, "MacOS");
-const resources = join(contents, "Resources");
 const signing = macSigningOptions(process.argv.slice(2), process.env);
 const identity = signing ? await findDeveloperIdApplication(signing.identity) : null;
 const output = join(dist, `${appName}${signing ? "-notarized" : ""}.zip`);
 const pendingOutput = join(dist, `.${appName}-${randomUUID()}.zip`);
 const staging = await mkdtemp(join(tmpdir(), "okbrain-macos-"));
+// Build and sign on the system volume. External volumes can create AppleDouble
+// files inside a bundle during compilation, which invalidates the signature.
+const app = join(staging, "okbrain.app");
+const contents = join(app, "Contents");
+const executables = join(contents, "MacOS");
+const resources = join(contents, "Resources");
 try {
-  await rm(app, { recursive: true, force: true });
+  await mkdir(dist, { recursive: true });
   await mkdir(executables, { recursive: true });
   await mkdir(resources);
   await copyFile(join(root, "packaging", "OFFLINE-IMPORT-NOTICES.md"), join(resources, "OFFLINE-IMPORT-NOTICES.md"));

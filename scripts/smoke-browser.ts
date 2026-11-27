@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -43,10 +43,19 @@ projectModels.setProvider(googleProvider());
 const branchBefore = "export const sourceMarker = 'approved browser source';\n";
 const branchAfter = "export const sourceMarker = \"<script>branch preview stays text</script>\";\n";
 const githubFixture = githubBranchBrowserFixture("browser.ts", branchBefore, branchAfter);
+const driveId = "smoke_DriveDoc123";
+const driveToken = "local.drive-browser-fixture-credential";
 const server = createApiServer({
   bundle, port: 0,
   coding: { stateDir: join(root, "coding-projects"), models: projectModels, githubFetch: githubFixture.fetch },
   standaloneCoding: { stateDir: standaloneState, models: standaloneModels },
+  liveSources: { directory: join(root, "source-credentials"), fetch: async (url, request) => {
+    assert.equal(url.origin, "https://www.googleapis.com");
+    assert.equal(new Headers(request.headers).get("Authorization"), `Bearer ${driveToken}`);
+    if (url.pathname === `/drive/v3/files/${driveId}/export`) return new Response("Exact source text from the selected Drive document.");
+    assert.equal(url.pathname, `/drive/v3/files/${driveId}`);
+    return Response.json({ id: driveId, name: "Browser Drive document", mimeType: "application/vnd.google-apps.document", capabilities: { canDownload: true } });
+  } },
 });
 const finishAnswer = Promise.withResolvers<void>();
 const finishStandalone = Promise.withResolvers<void>();
@@ -88,6 +97,51 @@ async function selectGraphNote(page: Page, id: string) {
     const { cy } = window as unknown as { cy: { getElementById(id: string): { emit(event: string): void } } };
     cy.getElementById(note).emit("tap");
   }, { note: id });
+}
+
+async function openSettingsSection(page: Page, name: string) {
+  const section = page.getByRole("navigation", { name: "Settings sections", exact: true });
+  const link = section.getByRole("link", { name, exact: true });
+  await link.click();
+  await link.and(section.locator('[aria-current="page"]')).waitFor();
+}
+
+async function smokeAdvancedOperations(page: Page) {
+  await openSettingsSection(page, "Advanced operations");
+  const advanced = page.locator("#advanced-operations");
+  await advanced.getByRole("combobox", { name: "Operation", exact: true }).selectOption("list_concepts");
+  await advanced.getByLabel(/^--limit ·/u).fill("1");
+  await advanced.getByRole("checkbox", { name: /^--detail ·/u }).check();
+  const sent = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/list_concepts" &&
+    response.request().postDataJSON().limit === 1);
+  await advanced.getByRole("button", { name: "Run operation", exact: true }).click();
+  const response = await sent;
+  assert.ok(response.ok());
+  assert.deepEqual(response.request().postDataJSON(), { detail: true, limit: 1 });
+  await advanced.getByRole("status").getByText("Operation finished.", { exact: true }).waitFor();
+  assert.equal(JSON.parse(await advanced.locator("[data-result]").innerText()).length, 1);
+  await advanced.getByRole("combobox", { name: "Operation", exact: true }).selectOption("graph_data");
+  assert.equal(await advanced.getByRole("checkbox", { name: /including private notes/u }).isChecked(), false);
+  assert.equal(await advanced.getByRole("button", { name: "Save JSON", exact: true }).isVisible(), false);
+  await openSettingsSection(page, "Connections");
+  assert.equal(await advanced.count(), 0);
+
+  const stdio = page.locator("#mcp-stdio");
+  await stdio.getByText("MCP stdio client configuration", { exact: true }).click();
+  const trusted = stdio.getByRole("checkbox", { name: /Allow this trusted client/u });
+  assert.doesNotMatch(await stdio.locator("pre").innerText(), /--trusted/u);
+  await trusted.check();
+  assert.match(await stdio.locator("pre").innerText(), /--trusted/u);
+  await trusted.uncheck();
+
+  const bookmarklet = page.locator("#bm-out");
+  const port = bookmarklet.getByRole("spinbutton", { name: "Local server port", exact: true });
+  await port.fill("6377");
+  await bookmarklet.getByRole("button", { name: "Update bookmarklet", exact: true }).click();
+  await bookmarklet.getByRole("status").getByText(/running on port 6377/u).waitFor();
+  const bookmark = await bookmarklet.getByRole("link", { name: "Clip to okbrain", exact: true }).getAttribute("href");
+  assert.match(bookmark ?? "", /:6377\/clip\?token=/u);
+  assert.ok(!bookmark?.includes(server.token));
 }
 
 try {
@@ -295,6 +349,10 @@ try {
     finishAnswer.resolve();
     await page.locator("#askout strong", { hasText: "Local answer" }).waitFor();
     await page.locator("#asksrc").getByRole("link", { name: "Offline orchid propagation", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Open source 1, Offline orchid propagation", exact: true }).click();
+    const sourceDrawer = page.getByRole("dialog", { name: "Answer sources", exact: true });
+    await sourceDrawer.locator(".answer-source details[open]").waitFor();
+    await sourceDrawer.getByRole("button", { name: "Close answer sources", exact: true }).click();
     const modelCallsAfterAnswer = modelFixtureCalls;
     await verifyAskCopy("## Question\n\n> orchid\n\n## Verified citations\n\n- [Offline orchid propagation](/" + answerSource + ".md)\n\n" +
       "## Answer\n\n**Local answer**" + localAnswerTail(), [answerSource]);
@@ -339,6 +397,39 @@ try {
     assert.ok(removedDraft.ok, await removedDraft.text());
     assert.equal(modelFixtureCalls, modelCallsAfterAnswer);
   } finally { await page.unroute(askDraftRoute); }
+
+  await nav.getByRole("link", { name: "Ask", exact: true }).click();
+  await page.getByRole("button", { name: "Conversations", exact: true }).click();
+  const threadDrawer = page.getByRole("dialog", { name: "Conversations", exact: true });
+  await threadDrawer.getByRole("searchbox", { name: "Filter conversations", exact: true }).fill("orchid");
+  await threadDrawer.getByRole("link", { name: /^orchid/u }).click();
+  await page.getByRole("heading", { name: "orchid", exact: true }).waitFor();
+  assert.match(new URL(page.url()).hash, /^#ask\/[0-9a-f-]{36}$/u);
+  await page.getByText("Previous exchange", { exact: true }).click();
+  await page.getByRole("checkbox", { name: "Include this exchange in the follow-up" }).check();
+  await page.getByRole("textbox", { name: "Question", exact: true }).fill("What about drainage?");
+  const askFollowUpRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/ask/stream" &&
+    request.postDataJSON().question === "What about drainage?");
+  await page.getByRole("button", { name: "Ask", exact: true }).click();
+  assert.equal((await askFollowUpRequest).postDataJSON().conversation.includePrevious, true);
+  await page.locator("#askout strong", { hasText: "Local answer" }).waitFor();
+  await page.getByText("Conversation options", { exact: true }).click();
+  await page.getByRole("textbox", { name: "Conversation title", exact: true }).fill("Orchid research");
+  await page.getByRole("button", { name: "Rename", exact: true }).click();
+  await page.getByRole("heading", { name: "Orchid research", exact: true }).waitFor();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const knowledgeSidebar = nav.locator(".knowledge-navigation");
+  await knowledgeSidebar.getByRole("link", { name: /^Orchid research/u }).waitFor();
+  const knowledgeColumns = await page.evaluate(() => Array.from(document.querySelectorAll("#nav, .knowledge-main, .answer-inspector"), (panel) => {
+    const { x, width } = panel.getBoundingClientRect();
+    return { x, width };
+  }));
+  assert.equal(knowledgeColumns.length, 3);
+  assert.equal(knowledgeColumns[0]!.width, 252);
+  assert.ok(knowledgeColumns[1]!.width >= 480 && knowledgeColumns[2]!.width >= 310);
+  assert.ok(knowledgeColumns.every((panel, index) => index === 0 || panel.x > knowledgeColumns[index - 1]!.x));
+  await page.setViewportSize({ width: 375, height: 700 });
+
   await nav.getByRole("link", { name: "Review", exact: true }).click();
   await page.getByRole("button", { name: /Reviewed/ }).first().waitFor();
   // A checkbox keeps its place beside the first line of its label when the words wrap at this width.
@@ -550,6 +641,10 @@ try {
     await rm(planNote, { force: true });
   }
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
+  await page.getByRole("heading", { name: "This server", exact: true }).waitFor();
+  assert.equal(await page.locator("#cache-settings, #brain-mount-settings, #advanced-operations").count(), 0);
+  await smokeAdvancedOperations(page);
+  await openSettingsSection(page, "Search and cache");
   const cacheSettings = page.locator("#cache-settings");
   await cacheSettings.getByText("SQLite", { exact: true }).waitFor();
   await cacheSettings.getByText("Change cache backend", { exact: true }).click();
@@ -565,6 +660,7 @@ try {
     await cacheSettings.getByRole("button", { name: "Connect and use PostgreSQL" }).click();
     await cacheSettings.getByText("PostgreSQL with pgvector", { exact: true }).waitFor();
     assert.equal(await cacheConnection.inputValue(), "");
+    await openSettingsSection(page, "Maintenance");
     const indexed = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/index");
     await page.getByRole("button", { name: "Re-index", exact: true }).click();
     assert.equal((await indexed).status(), 200);
@@ -573,6 +669,7 @@ try {
     await page.getByRole("searchbox", { name: "Search notes", exact: true }).press("Enter");
     await page.locator("#sout mark", { hasText: "orchid" }).first().waitFor();
     await nav.getByRole("link", { name: "Settings", exact: true }).click();
+    await openSettingsSection(page, "Search and cache");
     await cacheSettings.getByText("Change cache backend", { exact: true }).click();
     await cacheSettings.getByRole("button", { name: "Use SQLite", exact: true }).click();
     await cacheSettings.getByText("SQLite", { exact: true }).waitFor();
@@ -580,6 +677,7 @@ try {
   await cacheSettings.getByText("Change cache backend", { exact: true }).click();
   // A control that does not apply stays hidden, whatever its class displays as (B21).
   assert.equal(await cacheSettings.getByRole("button", { name: "Use SQLite", exact: true }).isVisible(), false);
+  await openSettingsSection(page, "Privacy and usage");
   await page.getByText("Local counts are off.", { exact: true }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Turn off and clear counts" }).isVisible(), false);
   await page.getByRole("button", { name: "Turn on local counts" }).click();
@@ -588,8 +686,10 @@ try {
   await page.evaluate((id) => { location.hash = "#concept/" + encodeURIComponent(id); }, answerSource);
   await page.getByText("1 open · 0 Ask citations").waitFor();
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
+  await openSettingsSection(page, "Privacy and usage");
   await page.getByRole("button", { name: "Turn off and clear counts" }).click();
   await page.getByText("Local counts are off.", { exact: true }).waitFor();
+  await openSettingsSection(page, "Brain folders");
   await page.getByLabel("Folder path in this brain", { exact: true }).fill("inbox");
   await page.getByRole("button", { name: "Enable folder log" }).click();
   await page.getByText("inbox/log.md created.", { exact: true }).waitFor();
@@ -608,6 +708,7 @@ try {
   const orchidMarkdown = await Bun.file(orchidPath).text();
   assert.equal(parse(orchidMarkdown).frontmatter.sources, undefined);
   await writeFile(orchidPath, orchidMarkdown.replace(/^---\n/u, "---\nsources:\n" + policyYaml));
+  await openSettingsSection(page, "Exports");
   assert.equal(await page.getByRole("checkbox", { name: "Include private drafts in graph export" }).isChecked(), false);
   await page.getByRole("checkbox", { name: "Embed app fonts in graph export" }).check();
   const exported = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/export_viz");
@@ -700,6 +801,7 @@ try {
   await markdownExport.getByRole("button", { name: "Export Markdown" }).click();
   await markdownExport.getByRole("status").getByText(/^Exported [1-9]\d* notes? to /).waitFor();
   assert.match(await Bun.file(join(vault, `${answerSource}.md`)).text(), /Offline orchid propagation/);
+  await openSettingsSection(page, "AI providers");
   const keys = page.locator("#provider-keys");
   await keys.getByRole("combobox", { name: "API provider" }).selectOption("openai");
   await keys.getByLabel("API key", { exact: true }).fill("fixture-key-for-browser-smoke");
@@ -709,10 +811,12 @@ try {
   await keys.getByText("No saved key.", { exact: false }).waitFor();
 
   const previousAi = loadConfig().ai;
+  await openSettingsSection(page, "Brain folders");
   await page.getByRole("button", { name: "Use as default brain" }).click();
   await page.getByText("This folder is the default.", { exact: true }).waitFor();
   assert.equal(loadConfig().defaultBundle, bundle);
   assert.deepEqual(loadConfig().ai, previousAi);
+  await openSettingsSection(page, "AI providers");
   const providerForm = page.locator("#setf");
   await providerForm.getByLabel("Chat endpoint (optional)", { exact: true }).fill("http://127.0.0.1:21234/v1");
   await providerForm.getByLabel("Embedding endpoint (optional)", { exact: true }).fill("http://127.0.0.1:21235/v1");
@@ -727,6 +831,7 @@ try {
   assert.equal(loadConfig().ai?.baseUrl, undefined);
   assert.equal(loadConfig().ai?.embedBaseUrl, undefined);
 
+  await openSettingsSection(page, "Brain folders");
   const mounts = page.locator("#brain-mount-settings");
   await mounts.getByText("Add a brain folder", { exact: true }).click();
   await mounts.getByLabel("Mount name").fill("field-notes");
@@ -751,6 +856,7 @@ try {
   assert.match(await Bun.file(join(root, "field-notes", "start-here.md")).text(), /starter_template: projects/);
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
 
+  await openSettingsSection(page, "Git sync");
   const privateSync = page.getByRole("region", { name: "Git sync", exact: true });
   const privateGitHub = privateSync.locator("[data-sync-github]");
   assert.equal(await privateGitHub.isVisible(), false);
@@ -909,6 +1015,7 @@ try {
   await privateGitHub.getByText("GitHub credential removed.", { exact: true }).waitFor();
   assert.equal(await privateGitHub.getByRole("button", { name: "Remove GitHub credential", exact: true }).isVisible(), false);
 
+  await openSettingsSection(page, "Brain folders");
   const restorePanel = mounts.locator("[data-mount-restore-panel]");
   const restoreName = restorePanel.getByLabel("Restored brain name", { exact: true });
   const restoreToken = restorePanel.getByLabel("GitHub personal access token", { exact: true });
@@ -993,7 +1100,7 @@ try {
     await page.unroute(restoreRoute);
   }
   await mounts.getByRole("button", { name: "Open restored brain", exact: true }).click();
-  await page.waitForFunction((name) => document.querySelector("#brain")?.value === name && document.querySelector("dl.kv")?.textContent?.includes(name),
+  await page.waitForFunction((name) => document.querySelector("#brain")?.value === name && document.querySelector("[data-settings-brain]")?.textContent === name,
     "restored-notes");
   const restoredCard = mounts.locator("[data-mount]").filter({ hasText: "restored-notes" });
   await restoredCard.getByText("restored-notes", { exact: true }).click();
@@ -1001,14 +1108,16 @@ try {
   await mounts.getByText("Mount removed. Its files are still in the folder.", { exact: true }).waitFor();
   assert.match(await Bun.file(join(restoredPath, "restored-note.md")).text(), /Restored source/);
   await page.locator("#brain").selectOption("field-notes");
-  await page.waitForFunction(() => document.querySelector("dl.kv")?.textContent?.includes("field-notes"));
+  await page.waitForFunction(() => document.querySelector("[data-settings-brain]")?.textContent === "field-notes");
 
+  await openSettingsSection(page, "Connections");
   await page.getByLabel("Local port", { exact: true }).fill("0");
   await page.getByRole("button", { name: "Start MCP HTTP" }).click();
   await page.getByText("MCP HTTP started.", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Stop MCP HTTP" }).click();
   await page.getByText("MCP HTTP stopped.", { exact: true }).waitFor();
 
+  await openSettingsSection(page, "Brain folders");
   await mounts.getByText("field-notes", { exact: true }).click();
   const savedMount = mounts.locator("[data-mount-edit]");
   await savedMount.getByText("AI defaults for this brain", { exact: true }).click();
@@ -1020,6 +1129,7 @@ try {
   await mounts.getByText("Mount removed. Its files are still in the folder.", { exact: true }).waitFor();
   assert.equal(await page.locator("#brain").inputValue(), "");
 
+  await openSettingsSection(page, "Search and cache");
   const watcher = page.locator("#bundle-watch");
   await watcher.getByRole("button", { name: "Start watching" }).click();
   await watcher.getByText(/^Watching\. Last refresh/).waitFor();
@@ -1126,6 +1236,8 @@ try {
   await page.locator("#p-out").getByRole("link", { name: "Graph destination", exact: true }).waitFor();
 
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
+  await openSettingsSection(page, "Advanced operations");
+  await page.getByText("Enrichment (guardrailed web pass)", { exact: true }).click();
   const enrichment = page.locator("#enrf");
   await page.route("**/api/op/enrich", async (route) => {
     assert.deepEqual(route.request().postDataJSON(), {
@@ -1142,6 +1254,7 @@ try {
 
   const legacyFile = join(bundle, "legacy-field-note.md");
   await writeFile(legacyFile, "---\ntype: note\ntitle: Legacy field note\ndescription: An earlier capture\ntimestamp: 2026-01-01T00:00:00Z\n---\nRecord the date.\n");
+  await openSettingsSection(page, "Maintenance");
   const migration = page.locator("#mx-upgrade-form");
   await migration.getByLabel("Actor to credit (optional)").fill("human:field-editor");
   const previewUpgrade = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/upgrade");
@@ -1154,6 +1267,7 @@ try {
   await page.locator("#mx-out").getByText(/upgraded legacy-field-note/).waitFor();
   assert.match(await Bun.file(legacyFile).text(), /^  by: human:field-editor$/m);
 
+  await openSettingsSection(page, "Search and cache");
   const embed = page.locator("#embedf");
   await embed.getByLabel("Provider override").fill("local");
   await embed.getByLabel("Model override").fill("fixture-embedding-model");
@@ -1167,6 +1281,7 @@ try {
   assert.equal(stats.embedded, 1);
   assert.ok(stats.pending > 0);
 
+  await openSettingsSection(page, "Maintenance");
   const scheduler = page.locator("#maintenance-schedule");
   await scheduler.getByText("Schedule maintenance", { exact: true }).click();
   await scheduler.getByText("No maintenance schedule.", { exact: true }).waitFor();
@@ -1238,6 +1353,7 @@ try {
   await changeSchedule("Remove schedule");
   await setScheduledFeeds("");
 
+  await openSettingsSection(page, "Git sync");
   const gitSync = page.getByRole("region", { name: "Git sync", exact: true });
   const git = (...args: string[]) => {
     const result = Bun.spawnSync(["git", "-C", bundle, ...args]);
@@ -1290,14 +1406,23 @@ try {
   git("commit", "-m", "Clarify the local date");
   const startRebase = Bun.spawnSync(["git", "-C", bundle, "rebase", "browser-upstream"]);
   assert.equal(startRebase.exitCode, 1, startRebase.stderr.toString());
+  const finishGitRefresh = Promise.withResolvers<void>();
+  await page.route("**/api/op/sync", async (route) => {
+    await finishGitRefresh.promise;
+    await route.continue();
+  }, { times: 1 });
   const conflictStatus = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/sync_recovery" &&
     response.request().postDataJSON().action === "status");
-  await gitSync.getByRole("button", { name: "Refresh Git status", exact: true }).click();
-  assert.deepEqual((await (await conflictStatus).json()).result?.conflicts, ["legacy-field-note.md"]);
-  await gitSync.getByRole("heading", { name: "Resolve sync conflicts", exact: true }).waitFor();
+  const previewConflict = gitSync.getByRole("button", { name: "Preview conflict", exact: true });
+  try {
+    await gitSync.getByRole("button", { name: "Refresh Git status", exact: true }).click();
+    assert.deepEqual((await (await conflictStatus).json()).result?.conflicts, ["legacy-field-note.md"]);
+    await gitSync.getByRole("heading", { name: "Resolve sync conflicts", exact: true }).waitFor();
+    assert.equal(await previewConflict.isEnabled(), false);
+  } finally { finishGitRefresh.resolve(); }
   assert.equal(await gitSync.getByRole("button", { name: "Sync now", exact: true }).isEnabled(), false);
   assert.equal(await gitSync.getByLabel("Conflicting file", { exact: true }).inputValue(), "legacy-field-note.md");
-  await gitSync.getByRole("button", { name: "Preview conflict", exact: true }).click();
+  await previewConflict.click();
   const conflictPreview = gitSync.locator("[data-conflict-preview]");
   await conflictPreview.getByText("Upstream changes", { exact: true }).waitFor();
   assert.equal(await conflictPreview.locator("details[open] pre").nth(0).textContent(), localText);
@@ -1340,6 +1465,17 @@ try {
   assert.deepEqual(feedRequests, [{ limit: 2 }]);
 
   await nav.getByRole("link", { name: "Sources", exact: true }).click();
+  const driveConnection = page.locator("#source-connections > details").filter({ has: page.getByText("Google Drive", { exact: true }) });
+  await driveConnection.locator("summary").first().click();
+  await driveConnection.getByLabel("OAuth access token", { exact: true }).fill(driveToken);
+  await driveConnection.getByLabel("Allow okbrain to read items I select.", { exact: true }).check();
+  await driveConnection.getByRole("button", { name: "Connect Google Drive", exact: true }).click();
+  await driveConnection.getByLabel("Google Doc or text file link or ID", { exact: true }).fill(driveId);
+  await driveConnection.getByRole("button", { name: "Preview item", exact: true }).click();
+  await driveConnection.locator("pre").filter({ hasText: "Exact source text from the selected Drive document." }).waitFor();
+  await driveConnection.getByRole("button", { name: "Save private draft", exact: true }).waitFor();
+  await driveConnection.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await driveConnection.getByText("Google Drive disconnected.", { exact: true }).waitFor();
   const conversations = page.locator("#source-form");
   const conversationRows = Array.from({ length: 52 }, (_, i) => ({
     uuid: `browser-conversation-${i + 1}`,
@@ -1702,7 +1838,9 @@ try {
       await page.unroute(checkoutRoute);
     }
   }
-  const teamAccess = page.locator(".coding-projects details").filter({
+  const management = page.getByText("Manage projects and team access", { exact: true });
+  if (await management.isVisible()) await management.click();
+  const teamAccess = page.locator(".coding-projects details.coding-panel").filter({
     has: page.getByText("Team browser access", { exact: true }),
   });
   await teamAccess.getByText("Team browser access", { exact: true }).click();
@@ -1791,7 +1929,7 @@ try {
     await budget.getByText(expectedLimits, { exact: true }).waitFor();
     assert.equal(await budget.getByText(/^Request usage ·/).count(), 0);
     assert.equal(await page.locator(".coding-result").getByText(/^Request usage ·/).isVisible(), true);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), page.viewportSize()?.width);
   }
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin });
   async function copyRunReport(view: Page, session: string, requestId: string, privateText: string[]) {
@@ -1806,7 +1944,7 @@ try {
     assert.equal(report.session, session);
     assert.equal(report.request.requestId, requestId);
     assert.equal(report.provider, "openai");
-    assert.equal(await view.evaluate(() => document.documentElement.scrollWidth), 375);
+    assert.equal(await view.evaluate(() => document.documentElement.scrollWidth), view.viewportSize()?.width);
     return { report, json };
   }
   async function verifyClipboardFallback(view: Page, action: string, message: string, label: string, json: string) {
@@ -1822,7 +1960,7 @@ try {
       assert.deepEqual(await fallback.evaluate((element: HTMLTextAreaElement) => [
         element.readOnly, element === document.activeElement, element.selectionStart, element.selectionEnd,
       ]), [true, true, 0, json.length]);
-      assert.equal(await view.evaluate(() => document.documentElement.scrollWidth), 375);
+      assert.equal(await view.evaluate(() => document.documentElement.scrollWidth), view.viewportSize()?.width);
     } finally {
       await view.evaluate(() => Reflect.deleteProperty(navigator.clipboard, "writeText"));
     }
@@ -1850,7 +1988,7 @@ try {
     const manifest = JSON.parse(json) as CodingSourceManifest;
     assert.equal(manifest.version, 1);
     assert.match(manifest.id, /^[a-f0-9]{64}$/u);
-    assert.equal(await view.evaluate(() => document.documentElement.scrollWidth), 375);
+    assert.equal(await view.evaluate(() => document.documentElement.scrollWidth), view.viewportSize()?.width);
     return { manifest, json };
   }
   const manifestFallback = ["Copy source manifest", "Copy the selected JSON using your browser or system Copy command.", "Source manifest JSON"] as const;
@@ -1911,7 +2049,7 @@ try {
     const apply = contextReset.getByRole("button", { name: recovering ? "Finish compaction" : "Compact context", exact: true });
     assert.equal(await approveCompaction.isChecked(), false);
     assert.equal(await apply.isEnabled(), false);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), page.viewportSize()?.width);
     await approveCompaction.check();
     const confirm = page.waitForResponse((response) => new URL(response.url()).pathname === prefix + "/compact-context");
     await apply.click();
@@ -1940,7 +2078,7 @@ try {
     assert.equal(await notePreview.isVisible(), expectedHandoff !== undefined);
     if (expectedHandoff !== undefined) {
       assert.equal(await notePreview.textContent(), expectedHandoff);
-      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), page.viewportSize()?.width);
       await contextReset.getByText("The note will accompany the next request in this session to OpenAI.", { exact: true }).waitFor();
     }
     assert.equal(await approveFresh.isChecked(), false);
@@ -2119,7 +2257,7 @@ try {
   assert.equal(await page.getByRole("heading", { name: "Current Pi tasks", exact: true }).count(), 0);
   assert.equal(await page.getByRole("combobox", { name: "Saved session" }).inputValue(), "from-browser");
   assert.equal(standaloneFaux.state.callCount, 3);
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), page.viewportSize()?.width);
   const repositoryReport = await copyRunReport(page, "from-browser", await page.getByRole("combobox", { name: "Saved request" }).inputValue(),
     ["Review only the approved browser source.", "Reviewed browser source.", newFile.trim(), "sourceMarker"]);
   const manifest = repositoryReport.report.request.repositoryContext;
@@ -2130,6 +2268,49 @@ try {
   assert.deepEqual(manifest.files.map(({ path, startLine, endLine }) =>
     ({ path, startLine, endLine })), [{ path: "browser.ts", startLine: 1, endLine: 1 }]);
   assert.match(manifest.files[0]?.sha256 ?? "", /^[a-f0-9]{64}$/u);
+
+  const standaloneMap = page.locator("[data-standalone-map]");
+  await standaloneMap.getByText("Repository map settings", { exact: true }).click();
+  await standaloneMap.getByLabel("History commits", { exact: true }).fill("0");
+  const importedMap = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding/standalone/repository" &&
+    response.request().postDataJSON().action === "import");
+  await standaloneMap.getByRole("button", { name: "Import repository map", exact: true }).click();
+  assert.deepEqual((await importedMap).request().postDataJSON(), { workspace: await realpath(workspace), action: "import", historyCommits: 0 });
+  await standaloneMap.getByRole("status").getByText("Repository map imported.", { exact: true }).waitFor();
+  const attachBrowserSource = page.getByRole("button", { name: "Attach browser.ts", exact: true });
+  await attachBrowserSource.click();
+  assert.equal(await page.getByRole("button", { name: "Remove browser.ts", exact: true }).getAttribute("aria-pressed"), "true");
+  assert.equal(await page.getByRole("combobox", { name: "Source", exact: true }).inputValue(), "files");
+  await page.getByRole("combobox", { name: "Source", exact: true }).selectOption("atlas");
+  await page.getByLabel("Task", { exact: true }).fill("");
+  await page.getByLabel("Map search text", { exact: true }).fill("sourceMarker");
+  await previewStandalone.click();
+  await page.getByText("Ranked source candidates", { exact: true }).click();
+  await page.getByText(/lexical /u).first().waitFor();
+  assert.equal(await sendStandalone.isEnabled(), false);
+  assert.equal(standaloneFaux.state.callCount, 3);
+
+  await page.getByRole("combobox", { name: "Source", exact: true }).selectOption("orchestrated");
+  await page.getByLabel("Task", { exact: true }).fill("Review sourceMarker in browser.ts.");
+  await page.getByRole("combobox", { name: "Workers", exact: true }).selectOption("1");
+  await page.getByRole("button", { name: "Preview plan", exact: true }).click();
+  const approvePlan = page.getByRole("checkbox", { name: /Approve sending the task and selected source under this plan/u });
+  await approvePlan.waitFor();
+  assert.equal(standaloneFaux.state.callCount, 3);
+  await approvePlan.check();
+  standaloneFaux.setResponses([async (input) => {
+    assert.match(JSON.stringify(input.messages), /approved browser source/u);
+    return fauxAssistantMessage("Reviewed browser.ts with the repository plan.");
+  }]);
+  await sendStandalone.click();
+  await page.getByText("Reviewed browser.ts with the repository plan.", { exact: true }).waitFor();
+  await page.getByText("Saved task and source", { exact: true }).click();
+  await page.getByText("Review sourceMarker in browser.ts.", { exact: true }).waitFor();
+  await page.getByText("Teach the repository map from this review", { exact: true }).click();
+  await page.getByLabel("Additional files used (optional)", { exact: true }).fill("browser.ts");
+  await page.getByRole("button", { name: "Record review for the repository map", exact: true }).click();
+  await page.getByRole("status").getByText(/recorded · lane weights/u).waitFor();
+
   await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
   await page.getByRole("combobox", { name: "Saved session" }).selectOption("existing-cli");
   await page.getByRole("combobox", { name: "Saved request" }).selectOption("cli-complete");
@@ -2204,7 +2385,57 @@ try {
     ...projectSource, previewId: projectPreview.id, approved: true, session: "project-browser", requestId: "project-task-progress",
     prompt: projectPrompt,
   });
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.evaluate((id) => { location.hash = "#coding/" + id; }, project.id);
+
+  const workLayout = await browser.newPage({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
+  const workOutbound: string[] = [];
+  await workLayout.route("**/*", async (route) => {
+    if (new URL(route.request().url()).origin === origin) await route.continue();
+    else { workOutbound.push(route.request().url()); await route.abort(); }
+  });
+  try {
+    await workLayout.goto(new URL("#coding/" + project.id, server.url).toString());
+    const workRail = workLayout.getByRole("navigation", { name: "Workspaces" });
+    const repository = workLayout.getByRole("complementary", { name: "Repository and sessions", exact: true });
+    const inspector = workLayout.getByRole("complementary", { name: "Request inspector", exact: true });
+    await workRail.getByRole("link", { name: "Work", exact: true }).waitFor();
+    assert.equal(await workRail.getByRole("link", { name: "Work", exact: true }).getAttribute("aria-current"), "true");
+    await repository.getByRole("button", { name: "Attach browser.ts", exact: true }).click();
+    assert.equal(await workLayout.locator(".coding-composer select[name=source]").inputValue(), "files");
+    assert.equal(await repository.getByRole("button", { name: "Remove browser.ts", exact: true }).getAttribute("aria-pressed"), "true");
+    await workLayout.getByRole("button", { name: "Remove browser.ts from this request", exact: true }).click();
+    assert.equal(await workLayout.getByRole("button", { name: "Add context", exact: true }).getAttribute("aria-expanded"), "false");
+    await workLayout.getByRole("combobox", { name: "Task mode", exact: true }).selectOption("plan");
+    await workLayout.getByLabel("Task", { exact: true }).fill("Split the retry work into reviewable changes.");
+    await workLayout.getByRole("button", { name: "Preview source", exact: true }).click();
+    await workLayout.getByText("Task mode instructions", { exact: true }).click();
+    await workLayout.getByText(/Return an implementation plan based on the approved context/).waitFor();
+    const context = inspector.getByRole("tab", { name: "Context", exact: true });
+    await inspector.getByRole("tab", { name: "Changes", exact: true }).focus();
+    await workLayout.keyboard.press("End");
+    assert.equal(await context.getAttribute("aria-selected"), "true");
+    await inspector.getByText("No saved source ranges for this request.", { exact: true }).waitFor();
+    for (const width of [1000, 375]) {
+      await workLayout.setViewportSize({ width, height: 760 });
+      const open = workLayout.getByRole("button", { name: "Inspector", exact: true });
+      await open.focus();
+      await workLayout.keyboard.press("Enter");
+      const drawer = workLayout.getByRole("dialog", { name: "Inspector", exact: true });
+      await drawer.getByRole("tab", { name: "Context", exact: true }).waitFor();
+      await workLayout.keyboard.press("Escape");
+      await drawer.waitFor({ state: "hidden" });
+      assert.equal(await open.evaluate((button) => document.activeElement === button), true);
+      assert.equal(await workLayout.evaluate(() => document.documentElement.scrollWidth), width);
+    }
+    assert.equal(await workLayout.getByRole("navigation", { name: "okbrain", exact: true }).isVisible(), false);
+    const navigation = workRail.getByRole("button", { name: "Expand navigation", exact: true });
+    await navigation.press("Enter");
+    await workLayout.getByRole("navigation", { name: "okbrain", exact: true }).waitFor();
+    await workLayout.keyboard.press("Escape");
+    assert.equal(await navigation.evaluate((button) => document.activeElement === button), true);
+    assert.deepEqual(workOutbound, []);
+  } finally { await workLayout.close(); }
 
   const deploymentPath = "/api/coding" + projectPath + "/deployment-check";
   const providerCheckPath = "/api/coding" + projectPath + "/provider-check";
@@ -2288,7 +2519,7 @@ try {
     await provider.getByText(/Provider metadata lookup succeeded\. · Checked/).waitFor();
     assert.deepEqual(providerAttempts, [originalProviderBinding, refreshedProviderBinding, refreshedProviderBinding]);
     assert.equal(providerChecks, 2);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), page.viewportSize()?.width);
     await deployment.getByText("Deployment checks", { exact: true }).click();
     await page.getByText("Project settings", { exact: true }).click();
   } finally {
@@ -2348,7 +2579,7 @@ try {
     await deployment.getByRole("button", { name: "Run provider check", exact: true }).click();
     await deployment.getByText(/Docker provider metadata lookup succeeded\. · Checked/).waitFor();
     assert.equal(dockerProviderChecks, 1);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), page.viewportSize()?.width);
     await page.getByText("Project settings", { exact: true }).click();
   } finally {
     await page.unroute(deploymentRoute);
@@ -2401,6 +2632,11 @@ try {
     assert.ok(removedReadonlyDeployment.ok, await removedReadonlyDeployment.text());
   }
   const projectComposer = page.locator(".coding-composer");
+  const openContext = async (view: Page) => {
+    const button = view.getByRole("button", { name: "Add context", exact: true });
+    if (await button.getAttribute("aria-expanded") === "false") await button.click();
+  };
+  await openContext(page);
   const presets = projectComposer.locator("[data-run-presets]");
   const presetSelector = presets.getByRole("combobox", { name: "Saved preset", exact: true });
   const presetName = presets.getByLabel("Preset name", { exact: true });
@@ -2508,6 +2744,17 @@ try {
   const projectResponse = page.locator(".coding-activity [data-answer]");
   await projectResponse.waitFor();
   assert.equal(await projectResponse.textContent(), projectAnswer);
+  const reviewInspector = page.getByRole("complementary", { name: "Request inspector", exact: true });
+  await reviewInspector.getByRole("button", { name: /browser\.ts/u }).first().waitFor();
+  await reviewInspector.getByRole("button", { name: "Review changes", exact: true }).click();
+  await reviewInspector.getByRole("tab", { name: "Checks", exact: true }).click();
+  await reviewInspector.getByText("Record check result", { exact: true }).click();
+  await reviewInspector.getByLabel("Check name", { exact: true }).fill("Typecheck");
+  await reviewInspector.getByLabel("Duration in seconds (optional)", { exact: true }).fill("1.25");
+  await reviewInspector.getByRole("button", { name: "Save check result", exact: true }).click();
+  await reviewInspector.getByText("Typecheck", { exact: true }).waitFor();
+  await reviewInspector.getByText("✓ Passed", { exact: true }).waitFor();
+  await reviewInspector.getByRole("tab", { name: "Changes", exact: true }).click();
   const projectBudget = waitForBudgetInspection(projectPath, "project-task-progress");
   await page.locator(".coding-activity").getByRole("button", { name: "Refresh", exact: true }).click();
   const projectContext = (await (await projectBudget).json()).result.pi.context;
@@ -2563,7 +2810,7 @@ try {
   assert.equal(await savedReviewNote.textContent(), changeNote);
   assert.equal(await reviewHistory.locator("li").count(), 1);
   assert.equal(await reviewHistory.locator("script").count(), 0);
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), page.viewportSize()?.width);
 
   const followUp = projectReview.getByRole("button", { name: "Use review note in follow-up", exact: true });
   await previewProject.click();
@@ -2631,7 +2878,7 @@ try {
   const teamBrowser = browser;
   const teamPages: Page[] = [];
   async function openTeam(token: string) {
-    const view = await teamBrowser.newPage({ viewport: { width: 375, height: 700 }, reducedMotion: "reduce", locale: "en-US" });
+    const view = await teamBrowser.newPage({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce", locale: "en-US" });
     teamPages.push(view);
     await view.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: teamOrigin });
     view.setDefaultTimeout(8000);
@@ -2694,6 +2941,7 @@ try {
     const caseAnswer = "The approved marker is in sourceMarker (browser.ts:1).";
     const evalSession = "browser-evaluation";
     const authorComposer = authorPage.locator(".coding-composer");
+    await openContext(authorPage);
     const approvalName = "Approve sending the task, selected text, and active session history to OpenAI.";
     const authorSend = authorComposer.getByRole("button", { name: "Send request", exact: true });
     const authorPosts: string[] = [];
@@ -2823,7 +3071,7 @@ try {
       await authorFilter.selectOption("reviewed");
       await authorCase.getByText("Accepted", { exact: true }).waitFor();
       await reviewerPage.bringToFront();
-      assert.equal(await reviewerPage.evaluate(() => document.documentElement.scrollWidth), 375);
+      assert.equal(await reviewerPage.evaluate(() => document.documentElement.scrollWidth), 1280);
       const metrics = results.locator("[data-groups] article");
       await metrics.getByText("Injected provider measurements", { exact: true }).waitFor();
       await metrics.getByText("1 attempt · 1 reviewed · 1 accepted", { exact: true }).waitFor();
@@ -2849,6 +3097,7 @@ try {
         "Evaluation metrics JSON", metricsJson);
 
       const reviewerComposer = reviewerPage.locator(".coding-composer");
+      await openContext(reviewerPage);
       const reviewerSend = reviewerComposer.getByRole("button", { name: "Send request", exact: true });
       const reviewerPreview = reviewerComposer.getByRole("button", { name: "Preview source", exact: true });
       const reviewerApproval = reviewerComposer.getByRole("checkbox", { name: approvalName, exact: true });
@@ -2915,6 +3164,7 @@ try {
 
   {
     // Give the disposable repository a real HEAD so the refusal identifies the required revision.
+    await openContext(page);
     const hooks = join(root, "browser-fixture-no-hooks");
     await mkdir(hooks);
     const commit = Bun.spawnSync(["git", "-c", `core.hooksPath=${hooks}`, "-c", "user.name=okbrain browser fixture",
@@ -3087,6 +3337,7 @@ try {
   await savedBranches.getByText(branchPreview.branchSession, { exact: true }).waitFor();
   await savedBranches.getByRole("button", { name: "Use branch session", exact: true }).click();
   assert.equal(await projectComposer.getByLabel("Session", { exact: true }).inputValue(), branchPreview.branchSession);
+  await openContext(page);
   await projectComposer.getByRole("combobox", { name: "Source", exact: true }).selectOption("files");
   const branchPrompt = "Compare <em>a separate alternative</em> against the accepted original.";
   await projectComposer.getByLabel("Task", { exact: true }).fill(branchPrompt);
@@ -3101,7 +3352,7 @@ try {
   assert.ok((await branchHistory.textContent())?.includes("Project response ready for review."));
   const branchSend = projectComposer.getByRole("button", { name: "Send request", exact: true });
   assert.equal(await branchSend.isEnabled(), false);
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), page.viewportSize()?.width);
   const branchAnswer = "Alternative review response on the separate session.\n\n```diff\n" + alternatePatch + "```";
   projectFaux.setResponses([(input) => {
     assert.match(JSON.stringify(input.messages), /Project response ready for review/);
@@ -3138,12 +3389,13 @@ try {
   await alternative.getByText("No saved source references.", { exact: true }).waitFor();
   assert.match(await alternative.locator("[data-comparison-usage]").textContent() ?? "", /^Request usage · [\d,]+ input · /);
   const comparisonGrid = comparison.locator("[data-comparison-results]");
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+  await page.setViewportSize({ width: 375, height: 700 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), page.viewportSize()?.width);
   assert.equal(await comparisonGrid.evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length), 1);
   await page.setViewportSize({ width: 1200, height: 800 });
   try {
     assert.equal(await comparisonGrid.evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length), 2);
-  } finally { await page.setViewportSize({ width: 375, height: 700 }); }
+  } finally { await page.setViewportSize({ width: 1440, height: 900 }); }
   await comparison.getByRole("button", { name: "Open original run", exact: true }).click();
   await comparison.waitFor({ state: "hidden" });
   await projectResponse.filter({ hasText: "Project response ready for review." }).waitFor();
@@ -3362,6 +3614,7 @@ try {
   {
     const { issue, issueReads } = githubFixture;
     const unsentTask = "Keep this approved request until I replace it.";
+    await openContext(page);
     const session = projectComposer.getByLabel("Session", { exact: true });
     const requestID = projectComposer.getByLabel("Request ID", { exact: true });
     const sourcePreview = projectComposer.locator("[data-preview-content]");
@@ -3628,7 +3881,7 @@ try {
       assert.deepEqual(requests, [start, start, { action: "cancel", id: staleId }, { action: "cancel", id: cancelId }]);
       assert.deepEqual(projectPosts, Array(4).fill(retrievalBenchmarkPath));
       assert.equal(projectFaux.state.callCount, modelCalls);
-      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 375);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), page.viewportSize()?.width);
       await summary.click();
     } finally {
       page.off("request", recordRetrievalPost);
@@ -3651,6 +3904,7 @@ try {
     await mapSettings.getByText(/files · .*units · .*packages/).waitFor();
     await page.getByText("Project settings", { exact: true }).click();
     const composer = page.locator(".coding-composer");
+    await openContext(page);
     const source = composer.getByRole("combobox", { name: "Source", exact: true });
     const approval = composer.locator("[data-approve] input");
     const send = composer.getByRole("button", { name: "Send request", exact: true });
@@ -3668,6 +3922,7 @@ try {
     await history.getByRole("button", { name: "View saved request source", exact: true }).click();
     await history.getByText("Saved repository map", { exact: true }).waitFor();
 
+    await openContext(page);
     await source.selectOption("orchestrated");
     await composer.getByLabel("Task", { exact: true }).fill("Trace refreshSession, endSession and signToken, and computeTax with publishInvoice and InvoiceSchema.");
     await composer.getByLabel("Workers", { exact: true }).selectOption("2");
@@ -3696,6 +3951,7 @@ try {
   }
 
   {
+    await page.setViewportSize({ width: 375, height: 700 });
     // Everything above was ordinary use, which must not have created the store.
     assert.equal(existsSync(dirname(usabilityStorePath())), false);
     const marker = "zqxsmokeword";
@@ -3707,7 +3963,7 @@ try {
       const element = document.activeElement;
       return element?.getAttribute("name") ?? element?.textContent ?? "";
     });
-    await page.evaluate(() => { location.hash = "#settings"; });
+    await page.evaluate(() => { location.hash = "#settings/usability"; });
     const card = page.locator("#usability-session");
     await card.getByText("Not recording.", { exact: true }).waitFor();
     // Each view names the tab, and on a phone the row of links scrolls to keep the current one in sight.

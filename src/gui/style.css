@@ -1,9 +1,5 @@
-/* okbrain GUI — the design system's stylesheet (R5), written over
-   core/viz/tokens.css (served as /gui/tokens.css): colours, families,
-   spacing, radii, shadows, durations, easings. Ink on a ground; colour only
-   for state and concept types; borders, not shadows. The two-column shell
-   needs <body class="app">. Motion is the last section. No framework, no
-   build step. */
+/* Workspace styles build on the shared viewer's typography and spacing tokens.
+   Browser and Mac load the same local assets. */
 
 /* ---- theme-scoped weights -------------------------------------------------
    Light type on a dark ground reads heavier, so the dark theme sets running
@@ -19,11 +15,25 @@
 html { color-scheme: dark; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 [data-theme="light"] { color-scheme: light; }
 body {
+  --font-sans: Inter, "Recursive Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Recursive Mono", ui-monospace, monospace;
   font-family: var(--font-sans); font-size: 14px; line-height: 20px; font-weight: var(--wght-text);
   color: var(--ink); background: var(--surface);
   -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; font-synthesis: none;
 }
-body.app { height: 100vh; height: 100dvh; display: grid; grid-template-columns: var(--nav-width) minmax(0, 1fr); }
+body.app { height: 100vh; height: 100dvh; display: grid; grid-template-columns: 52px 252px minmax(0, 1fr); }
+[data-theme="dark"] body {
+  --surface: #0b0d10; --plane: #0e1115; --raised: #171c22; --code-bg: #12161b;
+  --ink: #e4e7eb; --ink-2: #a8b0bb; --muted: #929daa;
+  --line: #242a32; --line-strong: #485361;
+  --accent: #8ab0ff; --accent-ink: #0b162b; --focus: #8ab0ff;
+  --ok: #64c88a; --warn: #d8a753; --danger: #f0888d;
+  --chip-bg: #1a2027; --workspace-selection: #172b4f;
+  --focus-ring: 0 0 0 2px #0b0d10, 0 0 0 4px #8ab0ff;
+}
+[data-theme="light"] body {
+  --accent: #244e9b; --accent-ink: #fff; --focus: #244e9b; --workspace-selection: #dfeaff;
+}
 .skip-link { position: fixed; z-index: 3; inset: var(--space-2) auto auto var(--space-2); padding: var(--space-2); background: var(--surface); transform: translateY(-200%); }
 .skip-link:focus { transform: none; }
 ::selection { background: var(--accent); color: var(--accent-ink); }
@@ -286,6 +296,24 @@ ul.plain a { font-family: var(--font-read); font-size: 14px; }
 .concept-side h3 { margin: var(--space-4) 0 var(--space-2); }
 
 /* ---- shell: sidebar and view ----------------------------------------------------- */
+.workspace-rail { display: flex; flex-direction: column; align-items: center; gap: 10px;
+  min-width: 0; padding: 12px 7px; border-right: 1px solid var(--line); background: var(--surface); }
+.workspace-rail a, .workspace-rail button { display: inline-grid; place-items: center; width: 36px; height: 36px;
+  padding: 0; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--muted); text-decoration: none; }
+.workspace-rail a:hover, .workspace-rail button:hover { background: var(--chip-bg); color: var(--ink); }
+.workspace-rail a[aria-current], .workspace-rail button[aria-expanded="true"] { background: var(--workspace-selection); color: var(--accent); }
+.workspace-rail .workspace-mark { background: var(--ink); color: var(--surface); font-weight: 750; letter-spacing: -0.09em; margin-bottom: 4px; }
+.workspace-rail .workspace-mark:hover { background: var(--accent); color: var(--accent-ink); }
+.workspace-rail svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.workspace-rail circle { fill: var(--surface); }
+.workspace-utilities { margin-top: auto; display: flex; flex-direction: column; gap: 7px; }
+#workspace-menu { display: none; }
+@media (min-width: 861px) {
+  body.app[data-workspace="work"] { grid-template-columns: 52px minmax(0, 1fr); }
+  [data-workspace="work"] #nav { display: none; }
+  [data-workspace="work"].navigation-expanded #nav { display: flex; position: fixed; z-index: 4; inset: 0 auto 0 52px; width: 252px; box-shadow: var(--shadow); }
+  [data-workspace="work"] #workspace-menu { display: inline-grid; }
+}
 #nav { position: sticky; top: 0; height: 100vh; height: 100dvh; overflow-y: auto; display: flex; flex-direction: column; gap: var(--space-half);
        padding: var(--space-4) var(--space-3); background: var(--plane); border-right: 1px solid var(--line); }
 #nav .brand { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; padding: 0 var(--space-2) var(--space-3); }
@@ -302,7 +330,7 @@ ul.plain a { font-family: var(--font-read); font-size: 14px; }
          color: var(--ink-2); text-decoration: none;
          transition: color var(--dur-quick) var(--ease-out), background-color var(--dur-quick) var(--ease-out), font-weight var(--dur-quick) var(--ease-out); }
 #nav a:hover { color: var(--ink); background: var(--chip-bg); font-weight: 560; }
-#nav a.active { color: var(--ink); font-weight: 720; }
+#nav a.active { color: var(--accent); background: var(--workspace-selection); font-weight: 680; }
 #nav a.active::before { content: ""; position: absolute; left: 3px; top: 7px; bottom: 7px; width: 2px; border-radius: var(--radius-xs);
                         background: var(--accent); animation: okb-tick var(--dur-base) var(--ease-spring) both; }
 /* The links' wrapper only matters on a phone, where it becomes one scrolling row. */
@@ -325,6 +353,25 @@ ul.plain a { font-family: var(--font-read); font-size: 14px; }
 
 #view { min-width: 0; overflow-y: auto; padding: var(--space-6) var(--space-8) var(--space-12); outline: none; view-transition-name: view; }
 #view.bare { padding: 0; overflow: hidden; height: 100vh; height: 100dvh; }
+#view.workspace-view { padding: 0; }
+#b-limit { width: 7rem; }
+.answer-workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(248px, 32%); gap: var(--space-6); min-height: 100%; }
+.answer-main { min-width: 0; }
+.answer-main h2 { margin-bottom: 0; }
+.answer-main > form { padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--plane); }
+#askf { margin-top: auto; }
+#askf [aria-label="Question"] { min-width: min(100%, 14rem); }
+.answer-inspector { min-width: 0; border-left: 1px solid var(--line); padding-left: var(--space-4); }
+[data-answer-drawer] { display: none; }
+.answer-inspector > details > summary { font-weight: 680; margin-bottom: var(--space-4); }
+.answer-source { padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--plane); overflow-wrap: anywhere; }
+.answer-source > details { margin-top: var(--space-2); }
+.answer-source [data-source-text] { white-space: pre-wrap; margin-top: var(--space-2); }
+@media (max-width: 1100px) {
+  .answer-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: 1fr auto; }
+  .answer-inspector { border-left: 0; border-top: 1px solid var(--line); padding: var(--space-3) 0 0; }
+  [data-answer-drawer] { display: inline-flex; }
+}
 
 /* ---- graph ----------------------------------------------------------------------- */
 #gwrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(var(--detail-width), 30%); height: 100%; }
@@ -397,12 +444,21 @@ html.flooding::view-transition-old(root), html.flooding::view-transition-new(roo
 
 /* ---- narrow: the sidebar becomes a top bar ------------------------------------------ */
 @media (max-width: 860px) {
-  body.app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  body.app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr); }
+  body.app[data-workspace="work"]:not(.navigation-expanded) { grid-template-rows: auto minmax(0, 1fr); }
+  [data-workspace="work"]:not(.navigation-expanded) #nav { display: none; }
+  .workspace-rail { flex-direction: row; padding: 4px 8px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .workspace-rail .workspace-mark { margin-bottom: 0; }
+  .workspace-utilities { margin: 0 0 0 auto; flex-direction: row; }
+  #workspace-menu { display: inline-grid; }
   #nav { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: var(--space-1);
          padding: var(--space-3); border-right: none; border-bottom: 1px solid var(--line); }
   #nav .brand { width: 100%; padding-bottom: var(--space-2); }
   #nav .qs { flex: 1; min-width: 160px; padding-bottom: 0; }
   #nav .group { display: none; }
+  #nav .links { display: flex; flex-basis: 100%; gap: var(--space-1); overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
+  #nav .links > a { flex: none; white-space: nowrap; }
+  .navigation-expanded #nav .links { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); max-height: 45dvh; overflow-y: auto; }
   #nav a.active::before { top: auto; bottom: 1px; left: var(--space-2); right: var(--space-2); width: auto; height: 2px; }
   #nav .foot { width: 100%; margin-top: 0; padding: 0; flex-direction: row; align-items: center; border-top: none; }
   #view { padding: var(--space-4); }
@@ -424,4 +480,31 @@ html.flooding::view-transition-old(root), html.flooding::view-transition-new(roo
   #nav .links { display: flex; flex-wrap: nowrap; gap: var(--space-1); width: 100%; padding: 3px 1px; overflow-x: auto;
                 overscroll-behavior-x: contain; scrollbar-width: thin; }
   #nav .links a { flex: none; white-space: nowrap; }
+}
+
+/* Settings routes share the workspace navigation and mount only their own tools. */
+.settings-workspace { max-width: 1080px; margin: 0 auto; }
+.settings-workspace > h2 { margin-bottom: var(--space-5); }
+.settings-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); align-items: start; gap: var(--space-6); }
+.settings-nav { display: grid; gap: var(--space-1); position: sticky; top: 0; min-width: 0; padding: 2px var(--space-3) 2px 2px; border-right: 1px solid var(--line); }
+.settings-nav a { display: block; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); color: var(--ink-2); text-decoration: none; }
+.settings-nav a:hover { background: var(--chip-bg); color: var(--ink); }
+.settings-nav a[aria-current] { background: var(--workspace-selection); color: var(--accent); font-weight: 640; }
+.settings-layout .settings-content { min-width: 0; max-width: none; gap: var(--space-4); }
+.settings-content > header { gap: var(--space-1); padding-bottom: var(--space-3); border-bottom: 1px solid var(--line); }
+.settings-content > header h3 { margin: 0; color: var(--ink); font-size: 18px; line-height: 24px; letter-spacing: 0; text-transform: none; }
+.settings-content > header h3:focus { outline: none; animation: none; }
+.settings-content > section:not(.card) > h3:first-child { margin: 0; }
+.settings-content > h3 { margin: var(--space-2) 0 0; }
+.settings-panel { padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--plane); }
+.settings-panel h3 { margin: 0; }
+.settings-content [data-settings-brain] { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.settings-server { min-width: 0; }
+.settings-server dd, .settings-content .notice { overflow-wrap: anywhere; }
+.settings-related { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+@media (max-width: 1080px) {
+  .settings-layout { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-4); }
+  .settings-nav { position: static; display: flex; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin;
+                  max-width: 100%; padding: 2px 2px var(--space-2); border-right: 0; border-bottom: 1px solid var(--line); }
+  .settings-nav a { flex: none; white-space: nowrap; }
 }

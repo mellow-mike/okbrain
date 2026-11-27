@@ -8,6 +8,10 @@ declare module "*/app.js" {
   const text: string;
   export default text;
 }
+declare module "*/advanced-settings.js" {
+  const text: string;
+  export default text;
+}
 declare module "*/graph-view.js" {
   const text: string;
   export default text;
@@ -36,11 +40,19 @@ declare module "*/notion.js" {
   const text: string;
   export default text;
 }
+declare module "*/live-sources.js" {
+  const text: string;
+  export default text;
+}
 declare module "*/accounts.js" {
   const text: string;
   export default text;
 }
 declare module "*/focused-map.js" {
+  const text: string;
+  export default text;
+}
+declare module "*/knowledge.js" {
   const text: string;
   export default text;
 }

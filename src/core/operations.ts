@@ -54,9 +54,8 @@ import {
 } from "./ingest/conversations.ts";
 import { FetchGuardError } from "./ingest/fetch-guard.ts";
 import { importPath, type ImportResult } from "./ingest/import.ts";
-import type { NotionSource } from "./ingest/notion-source.ts";
 import {
-  importPersonalSource, isOfflineSourceKind, isSourceKind, MAX_SOURCE_ROWS, readOfflineSourcePath, sourceHistory,
+  importPersonalSource, isConnectedSourceProvider, isOfflineSourceKind, isSourceKind, MAX_SOURCE_ROWS, readOfflineSourcePath, sourceHistory,
   type SourceUploadFile, type SourceUploadResult,
 } from "./ingest/personal-sources.ts";
 import { FeedError, pullFeed, type RssPullResult } from "./ingest/rss.ts";
@@ -94,7 +93,7 @@ import {
 } from "./okf/computation.ts";
 import { TOOL_ACTOR } from "./version.ts";
 import { saveAskDraft, type AskDraftInput, type AskDraftResult } from "./retrieval/ask-draft.ts";
-import { askBrain, publicHits, type AskResult } from "./retrieval/ask.ts";
+import { askBrain, publicHits, type AskExchange, type AskResult } from "./retrieval/ask.ts";
 import { embedBundle, embedConcept, gatewayEmbedder, type EmbedStats } from "./retrieval/embed.ts";
 import { hybridRetrieve, type HybridArms, type HybridHit } from "./retrieval/hybrid.ts";
 import { PROFILES, ProfileError, resolveProfile, type RetrievalProfile } from "./retrieval/profiles.ts";
@@ -122,6 +121,8 @@ export interface OpContext {
   localUsage?: boolean;
   /** The adapter serving this call. Only the local app and the CLI add to a usability session. */
   surface?: "gui" | "cli" | "mcp";
+  /** Bounded saved history explicitly included by a browser Ask request. */
+  askExchange?: AskExchange;
   /** Direct local owner requests may use the brain’s saved GitHub credential. */
   allowSavedSyncCredential?: boolean;
   /** Recheck the selected mount's write policy while publishing Git settings. */
@@ -650,6 +651,7 @@ async function runAsk(
       synthesize: emit && ((messages) => gw.chat(messages, undefined, { signal, onDelta: (text) => emit("delta", { text }) })),
       signal,
       includePrivate: p["include-private"] === true,
+      history: ctx.askExchange,
       rerank: (q, hits) => maybeRerank(ctx, q, hits, profile),
       onContext: emit && ((context) => emit("context", context)),
     },
@@ -861,7 +863,7 @@ export function runPersonalSourceUpload(
 ): Promise<SourceUploadResult> {
   return observeActivity(ctx, "save", async () => {
     checkOpScope({ name: "personal source import", scope: "write" }, ctx);
-    if (!isSourceKind(kind) || kind === "notion-live")
+    if (!isSourceKind(kind) || kind === "notion-live" || isConnectedSourceProvider(kind))
       throw new OpError("Choose a bookmarks, Markdown, Notion, email, or calendar export.", "bad_params");
     const { name, files, selected } = await read();
     const result = await writing(() => importPersonalSource(
@@ -872,21 +874,30 @@ export function runPersonalSourceUpload(
   }, importedDrafts);
 }
 
-/** The connector is available only to the trusted local browser adapter. */
-export async function runNotionSource(ctx: OpContext, connector: NotionSource, action: string, input: Record<string, unknown>) {
-  if (!ctx.trusted) throw new OpError("Notion connections require the local browser.", "untrusted");
-  checkOpScope({ name: "Notion connection", scope: action === "status" ? "read" : "write" }, ctx);
+type LiveSourceConnector = {
+  status(): Promise<unknown>;
+  connect(input: Record<string, unknown>, authorize?: () => void): Promise<unknown>;
+  disconnect(authorize?: () => void): Promise<unknown>;
+  preview(bundle: string, input: Record<string, unknown>): Promise<unknown>;
+  commit(bundle: string, id: unknown, authorize?: () => void): Promise<SourceUploadResult>;
+};
+
+/** Live connectors are available to the trusted local browser adapter. */
+export async function runLiveSource(ctx: OpContext, connector: LiveSourceConnector, action: string, input: Record<string, unknown>, authorize?: () => void) {
+  if (!ctx.trusted) throw new OpError("Source connections require the local browser.", "untrusted");
+  checkOpScope({ name: "Live source connection", scope: action === "status" ? "read" : "write" }, ctx);
+  if (action !== "status") authorize?.();
   switch (action) {
     case "status": return connector.status();
-    case "connect": return connector.connect(input);
-    case "disconnect": return connector.disconnect();
+    case "connect": return connector.connect(input, authorize);
+    case "disconnect": return connector.disconnect(authorize);
     case "preview": return writing(() => connector.preview(ctx.bundle, input));
     case "import": return observeActivity(ctx, "save", async () => {
-      const outcome = await writing(() => connector.commit(ctx.bundle, input.previewId));
+      const outcome = await writing(() => connector.commit(ctx.bundle, input.previewId, authorize));
       await refreshPrivateImportIndex(ctx, outcome.imported);
       return outcome;
     }, importedDrafts);
-    default: throw new OpError("Notion action not found.", "not_found");
+    default: throw new OpError("Source action not found.", "not_found");
   }
 }
 
@@ -1685,13 +1696,17 @@ export const operations: readonly Operation[] = [
     handler: async (_ctx, p) => {
       const chosen = [p.session !== undefined, p.rollback === true, p.everything === true].filter(Boolean).length;
       if (chosen !== 1) throw new OpError("Choose one of --session, --rollback, or --everything.", "bad_params");
-      const [{ forgetLearning }, { Learning }, { realpath }] = await Promise.all([import("./coding/atlas/context.ts"), import("./coding/atlas/learn.ts"), import("node:fs/promises")]);
+      const [{ AtlasError, forgetLearning }, { Learning }, { realpath }] = await Promise.all([import("./coding/atlas/context.ts"), import("./coding/atlas/learn.ts"), import("node:fs/promises")]);
       if (p.rollback === true) {
         const learning = Learning.open(await realpath(p.workspace as string).catch(() => p.workspace as string));
         if (!learning) return { rollback: false };
         try { return { rollback: true, params: learning.rollback().version }; } finally { learning.close(); }
       }
-      return forgetLearning(p.workspace as string, {}, p.session as string | undefined);
+      try { return await forgetLearning(p.workspace as string, {}, p.session as string | undefined); }
+      catch (error) {
+        if (error instanceof AtlasError) throw new OpError(error.message, "refused");
+        throw error;
+      }
     },
     render: (r) => {
       const result = r as { episodes?: number; reset?: boolean; rollback?: boolean; params?: number };
@@ -3476,6 +3491,7 @@ export const operations: readonly Operation[] = [
     ],
     handler: async (_ctx, p) => {
       const port = (p.port as number | undefined) ?? DEFAULT_PORT;
+      if (port < 1 || port > 65_535) throw new OpError("Choose a bookmarklet port from 1 to 65535.", "bad_params");
       return { port, bookmarklet: bookmarkletJs(port, ensureServeToken()) };
     },
     render: (r) => {
