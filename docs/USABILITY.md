@@ -2,7 +2,7 @@
 
 This protocol measures two things from the [product plan](PRODUCT-PLAN.md): how long a new person takes to save a first note, and how often they find a saved note again. okbrain records the timeline locally while a session runs. The facilitator adds written observations and exports one JSON file per participant.
 
-The same steps work in the Mac app and the web app, which share one interface.
+Run these tasks in **Knowledge**. The Mac app and the web app share the same interface.
 
 ## What a session records
 
@@ -24,8 +24,8 @@ A task label is 1 to 16 letters, digits, hyphens, or underscores. Use codes such
 
 1. Create a new, empty brain for each participant. In **Settings → Brain folders → Add a brain folder**, choose **Create a new brain folder**. An empty brain is the starting point for the first task, and it keeps one participant's notes away from the next.
 2. Decide the variant and note it on the observation sheet: standard, keyboard-only, or narrow.
-   - **Keyboard-only.** Put the pointer away. Tab moves between controls, Enter activates them, and `/` moves to the sidebar search.
-   - **Narrow.** Use the web app in a browser window 375 px wide. The sidebar becomes a top bar.
+   - **Keyboard-only.** Put the pointer away. Tab moves between controls, Enter activates them, and `/` moves to the workspace search.
+   - **Narrow.** Use the web app in a browser window 375 px wide. Use the navigation button in the workspace rail to reveal the available views.
 3. The session works offline. Capture, import, search, browse, and review need no provider. Skip Ask unless a local model is already configured.
 4. Download [`docs/usability/chatgpt-export/conversations.json`](usability/chatgpt-export/conversations.json) to the participant's device for the import task. It is an invented export of five short conversations and contains no real data.
 5. Read the consent wording aloud and wait for a clear yes.
@@ -40,7 +40,7 @@ A task label is 1 to 16 letters, digits, hyphens, or underscores. Use codes such
 
 ### Start recording
 
-Open **Settings → Usability session** in the participant's brain and choose **Start session**. The footer shows **Recording usability session** on every view until the session stops. Selecting it returns to these controls.
+Open **Settings → Usability session** in the participant's brain and choose **Start session**. The workspace status shows **Recording usability session** on every view until the session stops. Selecting it returns to these controls.
 
 From a terminal, `okb usability start` does the same. Pass `--brain <name>` or `--bundle <path>` to choose the participant's brain.
 
@@ -60,7 +60,7 @@ Mark only the tasks that end with a found or not found result: T3 to T6. Enter t
 | T5 Re-find by content | "One of the chats compared a river path with a main road. Find it." | The note is open, or the participant gives up |
 | T6 Resume | "Close okbrain completely. Now open it again and get back to the note you just had open." | The note from T5 is open again, or the participant gives up |
 
-Recording continues across T6. A session belongs to the brain, so it is still recording when the app reopens, and the footer shows it again.
+Recording continues across T6. A session belongs to the brain, so it is still recording when the app reopens, and the workspace status shows it again.
 
 End a task as **found** when the right note is open, **not found** when the participant says they are done without it, and **abandoned** when they stop trying or you run out of time. A task that is still open when the session stops is recorded as abandoned.
 

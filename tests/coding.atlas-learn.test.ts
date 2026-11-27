@@ -9,7 +9,7 @@ import { importRepository } from "../src/core/coding/atlas/import.ts";
 import { Learning, learningPath, type OutcomeInput } from "../src/core/coding/atlas/learn.ts";
 import { defaultParams, parseParams } from "../src/core/coding/atlas/params.ts";
 import type { RankedUnit } from "../src/core/coding/atlas/readout.ts";
-import { Atlas } from "../src/core/coding/atlas/store.ts";
+import { Atlas, AtlasBusyError } from "../src/core/coding/atlas/store.ts";
 import { embedBag, terms } from "../src/core/coding/atlas/text.ts";
 import { parse } from "../src/core/okf/document.ts";
 import { buildMonorepo, evidenceRecall, type Fixture, type FixtureTask } from "./fixtures/monorepo.ts";
@@ -245,6 +245,13 @@ test("forgetting removes what was learned and leaves the map and the bundle", as
   expect((await forgetLearning(workspace, {}, "reviews")).episodes).toBe(2);
   // The episodes are gone. What was already learned from them is not undone by this alone.
   expect(evidenceRecall(paraphrased, (await selectAtlasContext({ workspace, query: unrelated, tokenBudget: 1500 })).excerpts)).toBe(1);
+  const importing = Atlas.create(workspace);
+  try {
+    await expect(forgetLearning(workspace)).rejects.toBeInstanceOf(AtlasBusyError);
+    const pending = await atlasStatus(workspace);
+    expect(pending.imported && pending.learning!.aliases).toBeGreaterThan(0);
+    expect(evidenceRecall(paraphrased, (await selectAtlasContext({ workspace, query: unrelated, tokenBudget: 1500 })).excerpts)).toBe(1);
+  } finally { importing.close(); }
   expect(await forgetLearning(workspace)).toEqual({ reset: true });
   const status = await atlasStatus(workspace);
   expect(status.imported && status.learning).toBeUndefined();

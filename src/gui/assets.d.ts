@@ -8,6 +8,10 @@ declare module "*/app.js" {
   const text: string;
   export default text;
 }
+declare module "*/advanced-settings.js" {
+  const text: string;
+  export default text;
+}
 declare module "*/graph-view.js" {
   const text: string;
   export default text;

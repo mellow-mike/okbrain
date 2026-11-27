@@ -167,6 +167,7 @@ export interface CodingSessionStatusResult {
     sourcePaths?: string[];
     savedPrompt?: string;
     savedSource?: SavedCodingSource;
+    savedInput?: SavedCodingRequestInput;
     taskProgress?: CodingTaskProgress;
   };
 }
@@ -181,6 +182,8 @@ export type CodingDependencies = {
   /** Where this caller keeps its repository map. A project keeps its own, apart from other projects on the same workspace. */
   atlas?: AtlasLocation;
   apiKey?: string;
+  /** Other credentials explicitly available to this local runner, keyed by their own provider. */
+  routeKeys?: Partial<Record<CodingProvider, string | undefined>>;
   allowEnvKey?: boolean;
   /** Browser submission expects a new ID. Legacy CLI calls can replay saved IDs. */
   requireNewRequest?: boolean;
@@ -462,9 +465,8 @@ export function codingCredential(provider: CodingProvider, dependencies: CodingD
   return (dependencies.apiKey ?? (dependencies.allowEnvKey !== false ? process.env[providers[provider].key] : undefined))?.trim() || undefined;
 }
 
-/** A local run may route work to another provider when that provider's own environment key is set. */
 function otherProviderKey(provider: CodingProvider, dependencies: CodingDependencies): string | undefined {
-  return dependencies.allowEnvKey !== false ? process.env[providers[provider].key]?.trim() || undefined : undefined;
+  return (dependencies.routeKeys?.[provider] ?? (dependencies.allowEnvKey !== false ? process.env[providers[provider].key] : undefined))?.trim() || undefined;
 }
 
 function hasRouteCredential(name: string, provider: CodingProvider, dependencies: CodingDependencies): boolean {
@@ -475,7 +477,7 @@ function hasRouteCredential(name: string, provider: CodingProvider, dependencies
 /**
  * Every coding provider's catalog, with credentials resolved narrowly: the
  * session's provider uses the given key, and any other provider only its own
- * environment variable, and only when environment keys are allowed at all.
+ * explicitly selected credential or, when allowed, its own environment variable.
  */
 function apiKeyModels(provider?: CodingProvider, key?: string, dependencies?: CodingDependencies): Models {
   const models = createModels({
@@ -1527,6 +1529,9 @@ async function readCodingSessionStatus(
       const identity = { session: options.session, requestId: options.requestId };
       const receipt = task?.state.status === "terminal" ? { ...identity, ...requestTaskReceipt(requestTask, task.state.outcome) } : undefined;
       const saved = options.includeEvaluationInput && !requestTask.orchestrated ? evaluatedPackages(task?.input) : undefined;
+      const savedInput = options.includeSavedSource
+        ? (requestTask.orchestrated ? savedOrchestrationSource(task?.input, options.requestId) : savedPackageSource(task?.input, options.requestId))
+        : undefined;
       const progress = task && !receipt
         ? await readCodingTaskProgress(harness, { task: taskId }, context).catch(() => undefined)
         : undefined;
@@ -1536,6 +1541,7 @@ async function readCodingSessionStatus(
         ...(receipt?.status === "unanswered" ? { reason: receipt.reason } : {}),
         ...(receipt && options.includeReceipt ? { receipt } : {}),
         ...(saved ? { evaluationInput: saved } : {}),
+        ...(savedInput ? { savedInput } : {}),
         ...(progress ? { taskProgress: progress } : {}),
       };
       return result;

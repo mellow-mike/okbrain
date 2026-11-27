@@ -75,6 +75,7 @@ import renderJs from "./core/viz/render.js" with { type: "text" };
 import safeMarkdownJs from "./core/viz/safe-markdown.js" with { type: "text" };
 import tokensCss from "./core/viz/tokens.css" with { type: "text" };
 import guiAppJs from "./gui/app.js" with { type: "text" };
+import guiAdvancedSettingsJs from "./gui/advanced-settings.js" with { type: "text" };
 import guiComputationJs from "./gui/computation.js" with { type: "text" };
 import guiMcpSettingsJs from "./gui/mcp-settings.js" with { type: "text" };
 import guiCodingJs from "./gui/coding.js" with { type: "text" };
@@ -108,6 +109,7 @@ const CSS = "text/css; charset=utf-8";
  */
 const GUI_ASSETS: Record<string, readonly [string | Blob, string]> = {
   "/gui/app.js": [guiAppJs, JS],
+  "/gui/advanced-settings.js": [guiAdvancedSettingsJs, JS],
   "/gui/computation.js": [guiComputationJs, JS],
   "/gui/mcp-settings.js": [guiMcpSettingsJs, JS],
   "/gui/coding.js": [guiCodingJs, JS],
@@ -241,6 +243,9 @@ const opDescriptors = (): unknown =>
   operations
     .filter((o) => !o.localOnly)
     .map(({ name, summary, scope, params }) => ({ name, summary, scope, params }));
+
+const localCommandDescriptors = () => operations.filter((op) => !op.localOnly)
+  .map(({ name, cliName, summary, scope, params }) => ({ name, cliName, summary, scope, params }));
 
 interface ServeState {
   mcp?: ManagedMcpHttp;
@@ -1149,8 +1154,20 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
   if (req.method === "GET") {
     if (url.pathname === "/api/ops") return json(200, { ops: opDescriptors() }, cors);
     if (url.pathname === "/api/status") return json(200, await status(scope, opts), { ...cors, "cache-control": "no-store" });
-    if (url.pathname === "/api/bookmarklet")
-      return json(200, { port: opts.port, bookmarklet: bookmarkletJs(opts.port, opts.token) }, cors);
+    if (url.pathname === "/api/local/commands" || url.pathname === "/api/bookmarklet") {
+      const headers = { ...cors, "cache-control": "no-store" };
+      if (!tokenMatches(req.headers.get("x-okb-token"), opts.token))
+        return json(401, { error: "missing or invalid local app token" }, headers);
+      if (req.headers.has("origin") && !cors)
+        return json(403, { error: "Requests must come from the local app." }, headers);
+      if (url.pathname === "/api/local/commands")
+        return json(200, { commands: localCommandDescriptors(), readonly: scope.readonly }, headers);
+      const query = url.searchParams.get("port");
+      const port = query === null ? opts.port : /^\d{1,5}$/.test(query) ? Number(query) : NaN;
+      if (!Number.isInteger(port) || port < 1 || port > 65_535)
+        return json(400, { error: "Choose a bookmarklet port from 1 to 65535." }, headers);
+      return json(200, { port, bookmarklet: bookmarkletJs(port, opts.token) }, headers);
+    }
     if (url.pathname === "/api/personal/sources/history")
       return runJsonOp(getOp("personal_source_history")!, scope, {}, { ...cors, "cache-control": "no-store" });
     if (url.pathname === "/clip") return clipNav(url, scope, outdatedBookmarklet);

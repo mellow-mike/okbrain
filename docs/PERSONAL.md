@@ -6,13 +6,13 @@ An okbrain bundle is a directory of Markdown notes with Open Knowledge Format me
 
 Open **okbrain.app** and choose **File → Open Brain Folder** if you have an existing bundle. **File → Open in Browser** opens the same brain in your browser. To start the local web server without the macOS app, run `okb serve --open` from the bundle directory. [Installation and packaging](../packaging/README.md)
 
-On **Home**, enter a **Quick note**, select **Capture**, and open the saved note. To find it again, enter your query in **Search**. On a writable brain without an index, select **Build index and search**. The app builds the index and runs the query with your selected options. **Search** uses local keywords by default and highlights matches in result excerpts. You can also build the index from **Home → Enable search and review**. **Browse** opens notes before an index exists, including in a read-only brain.
+Open **Knowledge**, enter a **Quick note**, select **Capture**, and open the saved note. To find it again, enter your query in **Search**. On a writable brain without an index, select **Build index and search**. The app builds the index and runs the query with your selected options. **Search** uses local keywords by default and highlights matches in result excerpts. You can also build the index from **Enable search and review** on the Knowledge home. **Library** opens notes before an index exists, including in a read-only brain.
 
 Open **Review** to see suggested notes and the reasons they surfaced. Overdue claims link directly to the outcome controls.
 
 In **Search**, set **Maximum results** and choose your retrieval profile before submitting. Leave semantic retrieval off to search without provider calls.
 
-In **Browse**, choose **Tag** to show notes with that exact tag. Combine it with a type or text filter. Selecting a tag on a note opens the filtered list. If you open a note from that list, use Back to return to the same tag and type.
+In **Library**, choose **Tag** to show notes with that exact tag. Combine it with a type or text filter. Selecting a tag on a note opens the filtered list. If you open a note from that list, use Back to return to the same tag and type.
 
 In an open note, expand **View Markdown source** to inspect or copy its saved Markdown and YAML, including on a read-only brain. To remove a note’s resource URL, open **Edit**, clear **Resource (URI)**, and save. Its source citations stay in the **Sources** field. Provenance entries for notes in the bundle open those notes from the reader or graph. The offline graph links to notes included in the export.
 
@@ -22,21 +22,31 @@ The terminal equivalent is `okb inbox file <inbox-id> <destination-id>`. Run it 
 
 In **Review**, you can change the queue size and the number of days to snooze notes. To ask your configured model to relate queue items to recent notes, opt in, select a retrieval profile, and choose **Update queue**. The model receives IDs, titles, and descriptions for public notes. Private drafts still appear in the local queue. Review skips the model call in the lean profile or when either the queue or recent context has no public notes. Marking a note reviewed updates the local queue and the note's review metadata.
 
-Open **Add** to give a capture its own title and tags or include a quote and comment with a web clip. Select **Choose Markdown files** to open **Sources** with Markdown selected. Pick files or a folder, preview the entries, then save the selected notes as private drafts. To import from a path on the computer running okbrain, expand **Import directly from a server path**. You can set the destination and default note type and open imported notes from the results.
-
-On the clip form, **Suggest tags with AI using public tags** shares the article title, description, and a short excerpt with your configured chat model. Its optional vocabulary comes from public notes in the current brain.
+Use **Add** to give a capture its own title and tags. Select **Choose Markdown files** to open **Sources** with Markdown selected. To import from a path on the computer running okbrain, expand **Import directly from a server path**. Set the destination and default note type, then open imported notes from the results.
 
 Open **Focused map** with a question, project, or note. Filter by source, date, or private drafts. On a writable brain without an index, choose **Build index and map** to run the map with the filters you selected. Each row explains the link direction and can move the map to the linked note.
 
-In a note's links panel, set **Neighborhood depth** and choose **Show links** to see which notes are within that many hops. In **Stats → Path between two concepts**, set **Max path hops** to bound the shortest-path search.
+In a note's links panel, set **Neighborhood depth** and choose **Show links** to see which notes are within that many hops. In **Stats**, open **Path between two concepts** and set **Max path hops** to bound the shortest-path search.
 
 Use **Sources** to import conversations, bookmarks, Markdown, Notion exports, email, and calendar events. It also links to web capture, RSS, and AI settings. The import forms show which brain receives drafts. If you have multiple brains mounted, select a writable brain before importing.
 
 In **Add → Manage saved feeds**, enter one URL per line and select **Save feed URLs**. The list is shared across brain folders on this device. In **Pull RSS feeds**, enter one URL or leave it blank to pull every saved feed into the selected brain. Set **Max new items per feed** to limit how many entries each feed can add. The terminal equivalent for viewing the saved list is `okb rss settings`.
 
+### Use advanced operations
+
+Open **Settings → Advanced operations** to run a supported `okb` operation
+from the app. Select the command by its CLI name, fill in the named options,
+and choose **Run operation**. For an optional string, **Send an empty value**
+passes an explicit blank when the command uses one to clear a setting. For
+example, choose `list` and enter `note` for `--type` and `10` for `--limit`.
+Inspect the JSON result or choose **Save JSON**. A read-only brain limits the list to
+read operations. Use the dedicated app controls for local account consent,
+file selection, and coding sessions. Use the terminal for process launchers, standard input, or output redirection.
+`okb help` shows their command syntax.
+
 ### Manage brain folders
 
-Use **Settings → Brain folders → Add a brain folder** to create a brain in a new or empty directory, or register an existing folder by its absolute path. Create writes a portable OKF index. Registering an existing folder keeps its contents. The new named brain opens immediately and appears in the sidebar picker.
+Use **Settings → Brain folders → Add a brain folder** to create a brain in a new or empty directory, or register an existing folder by its absolute path. Create writes a portable OKF index. Registering an existing folder keeps its contents. The new named brain opens immediately and appears in the brain picker.
 
 Choose **Use as default brain** in Settings to select the active writable folder for `okb` launches without a folder argument. The macOS app remembers the last folder opened from its File menu.
 
@@ -54,6 +64,8 @@ The app checks the database before saving the selection. A connection URL stays 
 
 Choose **Use SQLite** to switch back and remove the saved connection URL. Choose **Re-index** again to pick up any changes since you used SQLite. Old derived tables stay in your PostgreSQL database. Your database administrator can remove the brain’s cache schema.
 
+In the CLI, set a local environment variable containing the URL, then use `okb cache-settings postgres --connection-env OKB_CACHE_URL`. The commands `okb cache-settings` and `okb cache-settings sqlite` show the selection and switch to SQLite, respectively.
+
 ### Schedule maintenance
 
 Open **Settings → Maintenance → Schedule maintenance** in a writable brain. Choose every six hours, daily, or weekly, select the jobs, and save the schedule. The app shows the next due time and the latest run’s job outcomes. You can pause, resume, or remove the schedule for this brain. A job already running can finish when you pause or remove its schedule.
@@ -62,17 +74,15 @@ Schedules run while the Mac app or local web server is open. When it reopens aft
 
 Re-index, review, and Doctor work offline. To schedule RSS, approve the current saved feeds. To backfill embeddings, first build a matching vector store, then approve the displayed provider, model, and endpoint. The scheduled pass processes up to 100 public notes and keeps existing private vectors local. If the approved feeds or embedding settings change, review the new settings and save the schedule again.
 
-In the CLI, set a local environment variable containing the URL, then use `okb cache-settings postgres --connection-env OKB_CACHE_URL`. The commands `okb cache-settings` and `okb cache-settings sqlite` show the selection and switch to SQLite, respectively.
-
 ### AI defaults
 
 Set **Default retrieval profile** on a named brain folder to choose how Search and Ask use that brain by default. Use **Use app default** to inherit the global retrieval setting. A profile selected for a specific search or answer takes precedence.
 
 In **AI defaults for this brain**, choose a chat provider and an embedding provider independently. You can set a model for either capability. **Use app default** inherits the provider configured for the app. Leave a model blank to inherit the app's model for that provider or use the selected provider's default. Command overrides and `OKB_*` environment settings take precedence. Provider keys stay in the app's per-user settings. A custom endpoint carries over only when it belongs to the selected provider.
 
-On **Home** in an empty, writable brain, open **Start with a template** to choose **Personal knowledge** or **Projects and decisions**. Each adds one editable `start-here.md` guide with suggested types and tags. You can also begin by capturing a note or importing your own files. The terminal equivalents are `okb brain-templates` to list the starters and `okb init --template personal` or `okb init --template projects` to add one from the bundle folder. Add `--no-default-bundle` to keep your current default brain.
+On the Knowledge home in an empty, writable brain, open **Start with a template** to choose **Personal knowledge** or **Projects and decisions**. Each adds one editable `start-here.md` guide with suggested types and tags. You can also begin by capturing a note or importing your own files. The terminal equivalents are `okb brain-templates` to list the starters and `okb init --template personal` or `okb init --template projects` to add one from the bundle folder. Add `--no-default-bundle` to keep your current default brain.
 
-Expand a named mount in **Brain folders** to rename it, set its read-only status, or remove it from the picker. Removing the mount leaves the directory and its contents in place. To change a mount while viewing a read-only brain, switch the sidebar picker to a writable brain first.
+Expand a named mount in **Brain folders** to rename it, set its read-only status, or remove it from the picker. Removing the mount leaves the directory and its contents in place. To change a mount while viewing a read-only brain, switch the brain picker to a writable brain first.
 
 If you also edit notes in another app, open **Settings → Watch brain folder** and select **Start watching**. okbrain refreshes keyword search and graph links after saves, moves, and deletions. The watch runs while the macOS app or local server is open. Select **Stop watching** to end it sooner. The terminal equivalent is `okb watch`. Watching a named brain stops if its folder or write permission changes. Embeddings can be refreshed separately with **Settings → Embed**.
 
@@ -164,6 +174,54 @@ Open **Sources → Live Notion pages**. A Notion workspace owner can create an i
 Enter a shared Notion page URL or ID and select **Preview page**. This reads the page text using Notion's Markdown API. The preview indicates when the response omits or truncates blocks. Imported drafts include the source page link. Embedded media and meeting transcripts are excluded. **Save private draft** saves the reviewed snapshot locally, and a later import of changed text creates a separate draft. Select **Disconnect Notion** to remove the local token, and remove the page's shared connection in Notion to revoke its access. [Notion's page Markdown API](https://developers.notion.com/reference/retrieve-page-markdown)
 
 **Settings → Re-index** builds or repairs the local keyword and graph index. Import refreshes an existing index. Use **Settings → Embeddings** to refresh that cache separately. Set **Max notes this run** to cap how many notes are sent for embedding. The provider and model override fields apply to that run. Changing the provider or model rebuilds the vector cache. If you choose a remote embedding provider, the run can send note text to it. The regular `okb search` command can also use configured remote embedding and reranking providers when those retrieval arms are available.
+
+## Clip web pages and manage the reading inbox
+
+Use the **Clip** form in **Add** to save an article. Enter a quote or a note to record why you saved it. The **Bookmarklet** in Add or Settings can be saved to the bookmarks bar and used on a page you want to clip. It sends the page URL and selected text to the running loopback server. Its token permits clipping only and is separate from the app access token. Replace an old bookmarklet when its result window prompts you to update it. A trusted MCP client can also clip.
+
+```sh
+okb clip 'https://example.com/article' --tags research --note 'Read the section on retrieval.'
+okb index
+okb inbox
+okb inbox read references/article
+```
+
+Replace `references/article` with the ID that `okb clip` prints. Use `--quote` to save a passage or `--read` to omit the inbox tag. Marking an item read removes its `inbox` tag and preserves its content timestamp. The inbox lists tagged notes newest first. Unread items also receive a boost in the [review queue](#revisit-notes-with-the-review-queue).
+
+A clip saves a Markdown reference with the normalized URL and any title, byline, and publication date the page supplies. Re-clipping a known URL reuses its note and appends any quote or comment under **Highlights**. URL comparison ignores fragments and configured tracking parameters. Clip follows checked HTTP or HTTPS redirects within response-size and time limits. A clip updates an existing search index.
+
+**Suggest tags with AI using public tags** shares the article title, description, and a short excerpt with your configured chat model. Vocabulary comes from public notes. In the terminal, opt in with `--auto-tag`. The lean retrieval profile disables suggestions. In `config.json`, `clip.maxBodyBytes` controls the extracted text cap, `clip.defaultTags` supplies default tags, and `clip.stripParams` adds query parameters to remove. Set **Local server port** before choosing **Update bookmarklet** if your server uses a custom port. Run `okb bookmarklet` to print the bookmarklet from the terminal.
+
+## Revisit notes with the review queue
+
+The local queue shows notes worth another look and explains each recommendation. Open **Review** or preview the queue on the Knowledge home. Build the brain’s search index first.
+
+```sh
+okb review
+okb review done notes/spaced-repetition
+okb review snooze notes/evergreen-notes --days 7
+```
+
+`done` and `snooze` accept a concept ID or a one-based position in the current queue. Use IDs when working from a saved queue so later ranking changes do not change your target.
+
+The queue is computed on demand from the index and graph. It works offline. The default queue shows up to five concepts and skips deprecated notes, active snoozes, and notes reviewed within the past 30 days. Ties go to the older content timestamp and then to concept ID.
+
+| Signal | When it is added | Default weight |
+| --- | --- | --- |
+| Content age | Days since the last content change, scaled up to a year | 1.0 |
+| Orphan | No resolved links or backlinks | 2.0 |
+| Stale hub | At least three backlinks and more than 90 days since the last change | 1.5 |
+| Recent neighbor | A linked neighbor changed within seven days and the note is over 30 days old | 1.0 |
+| Inbox | The note carries the `inbox` tag | 1.5 |
+| Anniversary | Within one day of a 365-day multiple since the last content change | 0.5 |
+| Expired | `stale_after` has passed | 2.0 |
+| Draft | `status` is `draft` | 1.0 |
+
+Change queue size, cooldown, or signal weights under `review` in `config.json`. `okb review --limit 10` changes the size for one call. `okb review --garnish` optionally asks the configured model to connect items to recently changed notes. The `lean` profile disables that extra. Use `okb jobs --only review` to include the queue in a maintenance report, or the [daily-note skill](../skills/daily-note/SKILL.md) to include it in a journal note.
+
+### What survives a rebuild
+
+Marking a concept reviewed adds a `verified` event with the current actor and time to its frontmatter. The note body and content change timestamp stay as they were. The cooldown uses the latest human verification, with a fallback to the legacy `last_reviewed` key. Verification stays with the Markdown. Snoozes are local index state and `okb rebuild` clears them.
 
 ## Open and share a brain
 
@@ -258,7 +316,14 @@ The listener is bound to the selected brain and issues a fresh token each time i
 
 ### Claude Desktop and stdio clients
 
-In Claude Desktop, open **Settings → Developer → Edit Config** and add an MCP server entry. Use absolute paths to an installed `okb` executable and the bundle you want to share. Merge this entry with any existing MCP servers and restart Claude Desktop. [MCP setup guide for Claude Desktop](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
+In okbrain, open **Settings → MCP stdio client configuration** and choose
+**Copy stdio configuration**. For a writable brain, enable **Allow this
+trusted client to write to the selected brain** before copying if the client
+needs write access. In Claude Desktop, open **Settings → Developer → Edit
+Config**, merge the server entry into the current configuration, and restart
+Claude Desktop. Use an absolute path to the installed `okb` executable when
+the client does not inherit your shell’s `PATH`. An explicit bundle path also
+works: [MCP setup guide for Claude Desktop](https://modelcontextprotocol.io/docs/develop/connect-local-servers)
 
 ```json
 {

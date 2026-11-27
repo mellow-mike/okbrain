@@ -17,7 +17,7 @@ import { knowledgeSlug, lessonType } from "./knowledge.ts";
 import { Learning, resetLearning, type Outcome, type OutcomeReport, type UsedEvidence } from "./learn.ts";
 import { readAtlas, type AtlasContext, type RankedUnit, type ReadoutOptions } from "./readout.ts";
 import { createSkillSelector, listSkills } from "./skills.ts";
-import { Atlas, AtlasError, AtlasMissingError, atlasDirectory, knowledgeDirectory, type AtlasLocation } from "./store.ts";
+import { acquireAtlasLease, Atlas, AtlasBusyError, AtlasError, AtlasMissingError, atlasDirectory, knowledgeDirectory, type AtlasLocation } from "./store.ts";
 
 export { AtlasBusyError, AtlasError, AtlasMissingError } from "./store.ts";
 export type { AtlasContext, RankedUnit, ReadoutOptions } from "./readout.ts";
@@ -255,17 +255,22 @@ export function forgetLearningSession(workspace: string, location: AtlasLocation
 export async function forgetLearning(workspaceInput: string, location: AtlasLocation = {}, session?: string): Promise<{ episodes?: number; reset?: boolean }> {
   const workspace = await realpath(workspaceInput).catch(() => workspaceInput);
   if (session !== undefined) return { episodes: forgetLearningSession(workspace, location, session) };
-  const reset = resetLearning(workspace, location);
-  const path = join(atlasDirectory(workspace, location), "atlas.sqlite");
-  if (existsSync(path)) {
-    ensureExtensionCapableSqlite();
-    const db = new Database(path, { strict: true, readwrite: true, create: false });
-    try {
-      db.exec("PRAGMA busy_timeout = 2000");
-      applyAliases(db, new Map(), true);
-    } catch (error) {
-      if ((error as { code?: string }).code !== "SQLITE_BUSY") throw error;
-    } finally { db.close(true); }
-  }
-  return { reset };
+  const directory = atlasDirectory(workspace, location);
+  if (!existsSync(directory)) return { reset: false };
+  // The importer can stage a copy of the old aliases for publication. Hold its lease until both stores are clear.
+  const lease = acquireAtlasLease(workspace, location);
+  try {
+    const path = join(directory, "atlas.sqlite");
+    if (existsSync(path)) {
+      const db = new Database(path, { strict: true, readwrite: true, create: false });
+      try {
+        db.exec("PRAGMA busy_timeout = 0");
+        applyAliases(db, new Map(), true);
+      } catch (error) {
+        if ((error as { code?: string }).code === "SQLITE_BUSY") throw new AtlasBusyError(error);
+        throw error;
+      } finally { db.close(true); }
+    }
+    return { reset: resetLearning(workspace, location) };
+  } finally { lease.close(true); }
 }

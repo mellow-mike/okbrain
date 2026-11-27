@@ -1,15 +1,26 @@
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { gatewayEnvironment, providerKeyStatus } from "../ai/local-keys.ts";
+import { resolveActor } from "../config.ts";
+import { browserImportOptions, browserRepositoryFiles, RepositoryImports } from "./atlas/browser.ts";
+import { addLesson, AtlasBusyError, AtlasError, atlasStatus, forgetLearning } from "./atlas/context.ts";
+import { normalizeScopes } from "./atlas/import.ts";
+import { Learning } from "./atlas/learn.ts";
+import { listSkills } from "./atlas/skills.ts";
+import { Atlas, type AtlasLocation } from "./atlas/store.ts";
 import {
-  cancelCodingRequest, canonicalWorkspace, CodingError, CodingSessionBusyError, CodingSessionDeletingError, CodingSessionMissingError,
+  cancelCodingRequest, canonicalWorkspace, CodingError, codingProviders, CodingSessionBusyError, CodingSessionDeletingError, CodingSessionMissingError,
   compactStandaloneCodingContext, deleteStandaloneCodingSession, inspectStandaloneCodingSession,
-  listCodingModels, listStandaloneCodingRequests, listStandaloneCodingSessions, parseCodingHandoff, prepareCodingInput,
+  getStandaloneCodingIdentity, listCodingModels, listStandaloneCodingRequests, listStandaloneCodingSessions, parseCodingHandoff, prepareCodingInput,
+  previewAtlasContext, previewCodingOrchestration,
   previewCodingAttachments, previewStandaloneCodingContextCompaction, previewStandaloneCodingContextReset,
   requireNoPendingCodingContextCompaction, resetStandaloneCodingContext, runCodingSession,
   type CodingDependencies, type CodingLiveAnswer, type CodingProvider, type CodingSessionOptions, type CodingSessionResult,
 } from "./durable.ts";
+import { maxWorkers } from "./orchestrator.ts";
+import { recordCodingOutcome } from "./outcomes.ts";
 import { validateCodingProjectProfile } from "./project-profile.ts";
 import { selectRepositoryContext, type RepositoryContextOptions } from "./repository-context.ts";
+import { RoutingError, validateRoutingPolicy } from "./router.ts";
 import { codingRunReport } from "./run-report.ts";
 import { codingSourceManifest } from "./source-manifest.ts";
 import type { CodingTaskProgress } from "./task-progress.ts";
@@ -19,7 +30,9 @@ type Dependencies = Pick<CodingDependencies, "models" | "stateDir">;
 type SessionRequest = { session: string; requestId: string };
 type Selection =
   | { source: "files"; files: string[] }
-  | { source: "repository"; repository: Omit<RepositoryContextOptions, "workspace"> };
+  | { source: "repository"; repository: Omit<RepositoryContextOptions, "workspace"> }
+  | { source: "atlas"; atlas: Omit<NonNullable<CodingSessionOptions["atlas"]>, "id"> }
+  | { source: "orchestrated"; orchestration: Omit<NonNullable<CodingSessionOptions["orchestration"]>, "id"> };
 
 interface ActiveRun extends SessionRequest {
   status: "running" | "done" | "unanswered" | "failed";
@@ -56,15 +69,29 @@ function names(input: Input, key: string, limit: number): string[] {
 
 function sourceOf(input: Input): Selection {
   if (input.source === "files") return { source: "files", files: names(input, "files", 12) };
-  if (input.source !== "repository") throw new StandaloneControlError("Choose files or tracked repository excerpts for this request.");
-  const query = string(input, "query", 1024);
+  if (input.source !== "repository" && input.source !== "atlas" && input.source !== "orchestrated")
+    throw new StandaloneControlError("Choose files, repository excerpts, a repository map, or an orchestrated plan for this request.");
   const projects = names(input, "projects", 8);
+  const tokenBudget = input.contextTokens;
+  if (tokenBudget !== undefined && (typeof tokenBudget !== "number" || !Number.isInteger(tokenBudget) || tokenBudget < 1 || tokenBudget > 16384))
+    throw new StandaloneControlError("Choose a context budget between 1 and 16,384 tokens.");
+  const scope = { ...(projects.length ? { projects } : {}), ...(tokenBudget === undefined ? {} : { tokenBudget }) };
+  if (input.source === "atlas") {
+    const query = input.query === undefined || input.query === "" ? undefined : string(input, "query", 2048);
+    if (input.deferred !== undefined && typeof input.deferred !== "boolean") throw new StandaloneControlError("Choose whether to approve excerpts for lookup.");
+    return { source: "atlas", atlas: { ...scope, ...(query ? { query } : {}), exclude: names(input, "exclude", 8), ...(input.deferred === true ? { deferred: true } : {}) } };
+  }
+  if (input.source === "orchestrated") {
+    const workers = input.workers;
+    if (workers !== undefined && workers !== "auto" && (typeof workers !== "number" || !Number.isInteger(workers) || workers < 1 || workers > maxWorkers))
+      throw new StandaloneControlError(`Choose auto or between 1 and ${maxWorkers} workers.`);
+    const routing = input.routing === undefined ? undefined : validateRoutingPolicy(input.routing, codingProviders);
+    return { source: "orchestrated", orchestration: { ...scope, ...(workers === undefined ? {} : { workers }), ...(routing ? { routing } : {}) } };
+  }
+  const query = string(input, "query", 1024);
   const profile = input.profile === undefined ? undefined : validateCodingProjectProfile(input.profile);
   if (!projects.length && !profile) throw new StandaloneControlError("Choose at least one tracked project directory or provide a repository profile.");
-  const budget = input.contextTokens;
-  if (budget !== undefined && (typeof budget !== "number" || !Number.isInteger(budget) || budget < 1 || budget > 16384))
-    throw new StandaloneControlError("Choose a context budget between 1 and 16,384 tokens.");
-  return { source: "repository", repository: { query, ...(projects.length ? { projects } : {}), profile, tokenBudget: budget } };
+  return { source: "repository", repository: { ...scope, query, profile } };
 }
 
 async function workspaceOf(input: Input): Promise<string> {
@@ -89,6 +116,7 @@ function requestOf(input: Input): string {
 export class StandaloneCodingControl {
   #runs = new Map<string, { view: ActiveRun; abort: AbortController; done: Promise<void> }>();
   #gates = new Map<string, Promise<void>>();
+  #imports = new RepositoryImports();
   #closed = false;
   constructor(private readonly dependencies: Dependencies = {}) {}
 
@@ -96,11 +124,20 @@ export class StandaloneCodingControl {
     this.#closed = true;
     const current = [...this.#runs.values()];
     for (const run of current) if (run.view.status === "running") run.abort.abort();
-    await Promise.allSettled([...this.#gates.values(), ...current.map(({ done }) => done)]);
+    await Promise.allSettled([...this.#gates.values(), ...current.map(({ done }) => done), this.#imports.close()]);
     this.#runs.clear();
   }
 
   async dispatch(method: "GET" | "POST", path: string, input: Input, canWrite: () => boolean): Promise<unknown> {
+    try { return await this.#dispatch(method, path, input, canWrite); }
+    catch (error) {
+      if (error instanceof AtlasBusyError) throw new StandaloneControlError(error.message, 409);
+      if (error instanceof AtlasError || error instanceof RoutingError) throw new StandaloneControlError(error.message);
+      throw error;
+    }
+  }
+
+  async #dispatch(method: "GET" | "POST", path: string, input: Input, canWrite: () => boolean): Promise<unknown> {
     if (method === "GET" && path === "") return this.#catalog();
     if (method !== "POST") throw new StandaloneControlError("Standalone coding route not found.", 404);
     if (path === "/preview") {
@@ -110,16 +147,101 @@ export class StandaloneCodingControl {
         const preview = { source: "files" as const, ...await previewCodingAttachments(workspace, source.files) };
         return { ...preview, sourceManifest: codingSourceManifest(preview) };
       }
+      if (source.source === "atlas") {
+        const prompt = input.prompt === undefined ? source.atlas.query ?? "" : string(input, "prompt", 16_384);
+        const selected = await previewAtlasContext(workspace, prompt, source.atlas, this.#atlas());
+        const preview = { source: "atlas" as const, id: selected.manifest.id, ...selected };
+        return { ...preview, sourceManifest: codingSourceManifest(preview) };
+      }
+      if (source.source === "orchestrated") {
+        const model = this.#model(input);
+        const { plan } = await previewCodingOrchestration({
+          ...model, workspace, requestId: input.requestId === undefined ? "preview" : requestOf(input),
+          prompt: string(input, "prompt", 16_384), orchestration: source.orchestration,
+        }, this.#runner(model.provider, workspace));
+        const preview = { source: "orchestrated" as const, id: plan.id, plan };
+        return { ...preview, sourceManifest: codingSourceManifest(preview) };
+      }
       const selected = await selectRepositoryContext({ workspace, ...source.repository });
       return { source: "repository", id: selected.manifest.id, ...selected,
         sourceManifest: codingSourceManifest({ source: "repository", manifest: selected.manifest }) };
     }
+    if (path === "/repository") return this.#repository(input, canWrite);
     if (!["/inspect", "/run", "/resume", "/cancel", "/delete-session", "/reset-context-preview", "/reset-context",
       "/compact-context-preview", "/compact-context"].includes(path))
       throw new StandaloneControlError("Standalone coding route not found.", 404);
     const session = sessionOf(input);
     if (path === "/inspect") return this.#inspect(session, input.requestId === undefined ? undefined : requestOf(input));
     return this.#withSession(session, () => this.#changeSession(session, path, input, canWrite));
+  }
+
+  #model(input: Input) {
+    const choice = listCodingModels(this.dependencies.models).find(({ provider }) => provider === input.provider);
+    const model = choice?.models.find(({ id }) => id === input.model);
+    if (!choice || !model) throw new StandaloneControlError("Choose an available Pi provider and model.");
+    const thinkingLevel = model.thinkingLevels.find((level) => level === input.thinkingLevel);
+    if (input.thinkingLevel !== undefined && !thinkingLevel) throw new StandaloneControlError("Choose a supported reasoning level.");
+    return { provider: choice.provider, model: model.id, thinkingLevel };
+  }
+
+  #atlas(): AtlasLocation {
+    return this.dependencies.stateDir ? { stateDir: join(this.dependencies.stateDir, "atlas") } : {};
+  }
+
+  async #repository(input: Input, canWrite: () => boolean) {
+    const action = input.action;
+    const writing = action !== "status" && action !== "files" && !(action === "skills" && input.id === undefined && input.state === undefined);
+    if (writing) this.#checkWrite(canWrite);
+    const workspace = await workspaceOf(input);
+    const location = this.#atlas();
+    if (writing) this.#checkWrite(canWrite);
+    if (action === "files") return browserRepositoryFiles(workspace, normalizeScopes(names(input, "projects", 32)), location);
+    if (action === "status" || action === "import" || action === "cancel") {
+      if (action === "import") this.#imports.start(workspace, {
+        workspace, scopes: normalizeScopes(names(input, "projects", 32)), ...browserImportOptions(input),
+      }, location);
+      if (action === "cancel") this.#imports.cancel(workspace);
+      const status = await atlasStatus(workspace, location);
+      return { ...status, ...this.#imports.view(workspace) };
+    }
+    if (action === "lesson") return addLesson({ workspace, text: string(input, "text", 600), anchors: names(input, "anchors", 8), actor: resolveActor() }, location);
+    if (action === "skills") {
+      if (!Atlas.exists(workspace, location)) throw new StandaloneControlError("Import the repository before managing its skills.", 409);
+      const learning = Learning.open(workspace, location, writing);
+      try {
+        if (writing) {
+          const id = string(input, "id", 200);
+          const state = input.state;
+          if (!/^[\w./-]{1,200}$/u.test(id) || (state !== "trial" && state !== "disabled")) throw new StandaloneControlError("Choose a valid skill and state.");
+          learning!.setSkillState(id, state);
+        }
+        return await listSkills(workspace, learning?.skillRecords() ?? new Map(), location);
+      } finally { learning?.close(); }
+    }
+    if (action === "forget") {
+      if ([input.session !== undefined, input.rollback === true, input.everything === true].filter(Boolean).length !== 1)
+        throw new StandaloneControlError("Choose a session, a parameter rollback, or all learned state.");
+      if (input.rollback === true) {
+        const learning = Learning.open(workspace, location);
+        if (!learning) return { rollback: false };
+        try { return { rollback: true, params: learning.rollback().version }; } finally { learning.close(); }
+      }
+      if (input.everything === true && input.confirm !== true) throw new StandaloneControlError("Confirm that you want to remove all learned state.");
+      return forgetLearning(workspace, location, input.session === undefined ? undefined : sessionOf(input));
+    }
+    if (action === "learn") {
+      const session = sessionOf(input);
+      const requestId = requestOf(input);
+      const { outcome } = input;
+      if (outcome !== "accepted" && outcome !== "changes_requested") throw new StandaloneControlError("Choose Accepted or Changes requested.");
+      const identity = await getStandaloneCodingIdentity(session, this.dependencies);
+      if (identity.workspace !== workspace) throw new StandaloneControlError("This session belongs to a different workspace.", 409);
+      const { request } = await inspectStandaloneCodingSession(session, requestId, this.dependencies);
+      if (request?.receipt?.status !== "done") throw new StandaloneControlError("Only a finished request with an answer can be reviewed.", 409);
+      this.#checkWrite(canWrite);
+      return recordCodingOutcome({ workspace, session, requestId, outcome, receipt: request.receipt, appliedPaths: names(input, "used", 32) }, location);
+    }
+    throw new StandaloneControlError("Repository action not found.", 404);
   }
 
   #withSession<T>(session: string, change: () => Promise<T>): Promise<T> {
@@ -170,25 +292,25 @@ export class StandaloneCodingControl {
     }
     if (path === "/run") {
       const workspace = await workspaceOf(input);
-      const choice = listCodingModels(this.dependencies.models).find(({ provider }) => provider === input.provider);
-      const model = choice?.models.find(({ id }) => id === input.model);
-      if (!choice || !model) throw new StandaloneControlError("Choose an available Pi provider and model.");
-      const thinkingLevel = model.thinkingLevels.find((level) => level === input.thinkingLevel);
-      if (input.thinkingLevel !== undefined && !thinkingLevel) throw new StandaloneControlError("Choose a supported reasoning level.");
+      const model = this.#model(input);
       const source = sourceOf(input);
       const previewId = string(input, "previewId", 64);
       if (!/^[a-f0-9]{64}$/u.test(previewId)) throw new StandaloneControlError("Preview the source before sending.");
       const options: CodingSessionOptions = {
-        ...identity, workspace, provider: choice.provider, model: model.id, thinkingLevel,
+        ...identity, workspace, ...model,
         prompt: string(input, "prompt", 16_384),
         ...(input.approvedSourceLookup === true ? { approvedSourceLookup: true } : {}),
-        ...(source.source === "files" ? { files: source.files, filePreviewId: previewId } : { repository: { ...source.repository, id: previewId } }),
+        ...(source.source === "files" ? { files: source.files, filePreviewId: previewId } :
+          source.source === "repository" ? { repository: { ...source.repository, id: previewId } } :
+          source.source === "atlas" ? { atlas: { ...source.atlas, id: previewId } } :
+          { orchestration: { ...source.orchestration, id: previewId } }),
       };
-      const preparedInput = await prepareCodingInput(options, workspace);
+      const runner = this.#runner(model.provider, workspace);
+      const preparedInput = await prepareCodingInput(options, workspace, runner);
       await requireNoPendingCodingContextCompaction(options, { ...this.dependencies, allowEnvKey: false, workspaceBinding: workspace });
       this.#checkWrite(canWrite);
       return this.#launch(identity, (signal, updates) => runCodingSession(options, {
-        ...this.#runner(choice.provider, workspace), preparedInput, requireNewRequest: true, signal, ...updates,
+        ...runner, preparedInput, requireNewRequest: true, signal, ...updates,
       }));
     }
     const saved = await listStandaloneCodingRequests(session, this.dependencies);
@@ -223,10 +345,13 @@ export class StandaloneCodingControl {
   }
 
   #runner(provider: CodingProvider, workspace: string): CodingDependencies {
+    const env = gatewayEnvironment();
+    const routeKeys = Object.fromEntries(codingProviders.map((name) => [name, env[providerKey[name]]]));
     return {
       ...this.dependencies,
       workspaceBinding: workspace,
-      apiKey: gatewayEnvironment()[providerKey[provider]],
+      atlas: this.#atlas(),
+      apiKey: routeKeys[provider], routeKeys,
       allowEnvKey: false,
     };
   }
@@ -240,10 +365,12 @@ export class StandaloneCodingControl {
       const { identity, requests } = await listStandaloneCodingRequests(session, this.dependencies);
       const selected = requests.find((request) => request.requestId === requestId);
       const pi = await inspectStandaloneCodingSession(session, selected?.requestId, this.dependencies);
+      const savedInput = pi.request?.savedInput;
+      if (pi.request) delete pi.request.savedInput;
       const report = selected && codingRunReport(pi, { requestId: selected.requestId,
         status: relevant?.cancelled ? "cancelled" : relevant?.status ?? selected.status });
       const hasCurrentRequest = relevant && requests.some((request) => request.requestId === relevant.requestId);
-      return { identity, requests, pi, report, ...(refused || hasCurrentRequest ? { active: relevant } : {}) };
+      return { identity, requests, pi, report, ...(savedInput ? { savedInput } : {}), ...(refused || hasCurrentRequest ? { active: relevant } : {}) };
     } catch (error) {
       if (error instanceof CodingSessionDeletingError) {
         if (this.#runs.get(session)?.view === active) this.#runs.delete(session);

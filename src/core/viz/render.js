@@ -179,6 +179,29 @@
     }).join('') + '</ul>';
   }
 
+  function workspaceDrawer(content, button) {
+    var parent = content.parentElement;
+    var dialog = document.createElement('dialog');
+    dialog.className = 'workspace-drawer';
+    dialog.setAttribute('aria-label', button.textContent);
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = 'Close ' + button.textContent.toLowerCase();
+    close.addEventListener('click', function () { dialog.close(); });
+    dialog.append(close);
+    parent.append(dialog);
+    button.setAttribute('aria-haspopup', 'dialog');
+    button.addEventListener('click', function () {
+      dialog.append(content);
+      dialog.showModal();
+      close.focus();
+    });
+    dialog.addEventListener('close', function () {
+      parent.insertBefore(content, dialog);
+      if (button.isConnected) button.focus();
+    });
+  }
+
   window.okbRender = {
     esc: esc,
     renderMarkdown: renderMarkdown,
@@ -189,5 +212,6 @@
     resourceLink: resourceLink,
     sourceNoteCandidates: sourceNoteCandidates,
     sourcesList: sourcesList,
+    workspaceDrawer: workspaceDrawer,
   };
 })();

@@ -1685,13 +1685,17 @@ export const operations: readonly Operation[] = [
     handler: async (_ctx, p) => {
       const chosen = [p.session !== undefined, p.rollback === true, p.everything === true].filter(Boolean).length;
       if (chosen !== 1) throw new OpError("Choose one of --session, --rollback, or --everything.", "bad_params");
-      const [{ forgetLearning }, { Learning }, { realpath }] = await Promise.all([import("./coding/atlas/context.ts"), import("./coding/atlas/learn.ts"), import("node:fs/promises")]);
+      const [{ AtlasError, forgetLearning }, { Learning }, { realpath }] = await Promise.all([import("./coding/atlas/context.ts"), import("./coding/atlas/learn.ts"), import("node:fs/promises")]);
       if (p.rollback === true) {
         const learning = Learning.open(await realpath(p.workspace as string).catch(() => p.workspace as string));
         if (!learning) return { rollback: false };
         try { return { rollback: true, params: learning.rollback().version }; } finally { learning.close(); }
       }
-      return forgetLearning(p.workspace as string, {}, p.session as string | undefined);
+      try { return await forgetLearning(p.workspace as string, {}, p.session as string | undefined); }
+      catch (error) {
+        if (error instanceof AtlasError) throw new OpError(error.message, "refused");
+        throw error;
+      }
     },
     render: (r) => {
       const result = r as { episodes?: number; reset?: boolean; rollback?: boolean; params?: number };
@@ -3476,6 +3480,7 @@ export const operations: readonly Operation[] = [
     ],
     handler: async (_ctx, p) => {
       const port = (p.port as number | undefined) ?? DEFAULT_PORT;
+      if (port < 1 || port > 65_535) throw new OpError("Choose a bookmarklet port from 1 to 65535.", "bad_params");
       return { port, bookmarklet: bookmarkletJs(port, ensureServeToken()) };
     },
     render: (r) => {

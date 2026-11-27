@@ -3,6 +3,7 @@
   'use strict';
 
   const esc = window.okbRender.esc;
+  const workspaceDrawer = window.okbRender.workspaceDrawer;
   const codingPath = '/api/coding';
   const defaultModels = { openai: 'gpt-5-mini', anthropic: 'claude-sonnet-4-6', google: 'gemini-3.5-flash-lite' };
   let teamToken = null;
@@ -484,7 +485,7 @@
   function routeLabel(route) {
     const name = (model) => model.provider + '/' + model.model + (model.thinkingLevel ? ' (' + model.thinkingLevel + ' reasoning)' : '');
     const chosen = name(route.choice);
-    return chosen + (chosen === name(route.baseline) ? '' : ' (first choice ' + name(route.baseline) + ')') +
+    return chosen + (chosen === name(route.baseline) ? '' : ' (baseline ' + name(route.baseline) + ')') +
       (route.fallbacks.length ? ', then ' + route.fallbacks.map(name).join(', ') + ' if its provider fails' : '');
   }
 
@@ -894,6 +895,7 @@
       '<p class="muted">A profile can set project directories, permitted shared dependencies, exclusions, budgets, and short guidance.</p>' +
       '</div></details></div><div class="stack" data-files hidden>' +
       field('Files inside the permitted directories', '', 'text', 'name="files" spellcheck="false" placeholder="src/app.ts, README.md"') +
+      '<div class="row" data-attached-files></div>' +
       '<p class="muted">Separate paths with commas, or leave empty to send only the task in this session.</p></div>' +
       '<div class="stack" data-packages hidden><p class="muted">Use two or three separate package directories. Each gets its own conversation and sees only its previewed excerpts and the shared task.</p>' +
       [1, 2, 3].map((part) => '<fieldset data-package class="coding-grid"><legend>Package ' + part + (part === 3 ? ' (optional)' : '') + '</legend>' +
@@ -904,6 +906,7 @@
       '<div data-atlas-query>' + field('Map search text (optional)', '', 'search', 'name="mapQuery" maxlength="2048" placeholder="Defaults to the task"') + '</div>' +
       '<div class="coding-grid">' + field('Map directories', project.scopes.join(', '), 'text', 'name="mapProjects" spellcheck="false"') +
       field('Map token budget', '4096', 'number', 'name="mapBudget" min="1" max="16384"') + '</div>' +
+      field('Exclude map paths', '', 'text', 'name="mapExclude" spellcheck="false" placeholder="Comma-separated paths"') +
       '<label class="field" data-atlas-workers><span id="coding-map-workers-label">Workers</span><select name="mapWorkers" aria-labelledby="coding-map-workers-label"><option value="auto">Decide from the task</option><option value="1">1</option>' +
       '<option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label>' +
       '<label class="row" data-atlas-deferred><input type="checkbox" name="mapDeferred"><span>Also approve further excerpts the model may look up by path and line</span></label></div>' +
@@ -929,6 +932,8 @@
     const branchNotice = form.querySelector('[data-branch-notice]');
     const packageFields = Array.from(form.querySelectorAll('[data-package]'));
     const feedback = form.querySelector('[data-composer-feedback]');
+    const attachments = form.querySelector('[data-attached-files]');
+    const trackedFiles = new Set();
     const evaluation = window.okbCodingEvaluation.composerOptions(form.querySelector('[data-evaluation-options]'), {
       readonly, coding, prefix, detached, invalidate: clearPreview,
       loadPinnedCase: (study, task, strategy) => panel.loadEvaluationCase(
@@ -962,8 +967,10 @@
 
     function sourceInput() {
       if (source.value === 'atlas' || source.value === 'orchestrated') {
-        const { mapQuery, mapProjects, mapBudget, mapWorkers, mapDeferred } = form.elements;
+        const { mapQuery, mapProjects, mapBudget, mapWorkers, mapDeferred, mapExclude } = form.elements;
         const data = { source: source.value, projects: entries(mapProjects.value) };
+        const exclude = entries(mapExclude.value);
+        if (exclude.length) data.exclude = exclude;
         if (mapBudget.value) data.tokenBudget = Number(mapBudget.value);
         if (source.value === 'atlas') {
           if (mapQuery.value.trim()) data.query = mapQuery.value.trim();
@@ -971,7 +978,7 @@
         } else data.workers = mapWorkers.value === 'auto' ? 'auto' : Number(mapWorkers.value);
         return data;
       }
-      if (source.value === 'files') return { source: 'files', files: entries(files.value) };
+      if (source.value === 'files') return { source: 'files', files: [...new Set([...entries(files.value), ...trackedFiles])] };
       if (source.value === 'packages') {
         const packages = packageFields.map((row) => {
           const project = row.querySelector('[data-package-project]').value.trim();
@@ -1035,6 +1042,29 @@
       updateEvaluationAvailability();
     }
     source.addEventListener('change', updateSourceFields);
+    function renderAttachments() {
+      attachments.replaceChildren(...[...trackedFiles].map((path) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'small';
+        button.textContent = path + ' ×';
+        button.setAttribute('aria-label', 'Remove ' + path + ' from this request');
+        button.addEventListener('click', () => panel.toggleTrackedFile(path, button));
+        return button;
+      }));
+      panel.dispatchEvent(new Event('coding-attachments'));
+    }
+    panel.attachedTrackedFile = (path) => trackedFiles.has(path);
+    panel.toggleTrackedFile = (path, button) => {
+      if (readonly || busy || detached()) return;
+      if (trackedFiles.has(path)) trackedFiles.delete(path);
+      else trackedFiles.add(path);
+      source.value = 'files';
+      updateSourceFields();
+      clearPreview();
+      renderAttachments();
+      if (button && !button.isConnected) files.focus();
+    };
     function updateEvaluationAvailability() {
       const unavailable = onBranch() || source.value === 'orchestrated';
       enrollment.disabled = readonly || unavailable;
@@ -1168,6 +1198,8 @@
       session.value = 'eval-' + crypto.randomUUID();
       updateBranchMode();
       if (recipe) {
+        trackedFiles.clear();
+        renderAttachments();
         const { study, task, strategy } = recipe;
         source.value = strategy === 'files' ? 'files' : 'repository';
         files.value = strategy === 'files' ? task.files.join(', ') : '';
@@ -1229,6 +1261,8 @@
         ? input.checked !== input.defaultChecked : input.value !== input.defaultValue) || source.value !== 'repository';
       if (hasDraft && !confirm('Replace the current task and source selection with a new draft for issue #' + issue.number + '?')) return;
       form.reset();
+      trackedFiles.clear();
+      renderAttachments();
       evaluationPrompt = undefined;
       session.value = 'issue-' + issue.number + '-' + crypto.randomUUID();
       requestId.value = crypto.randomUUID();
@@ -1879,16 +1913,209 @@
     };
   }
 
-  function activity(parent, project, readonly, detached, { reviewPatch, ownerActions, initialRun, loadReviewFollowUp }) {
+  function repositoryTree(parent, { readFiles, composerPanel, readonly, detached, showCommands = () => {} }) {
+    const panel = document.createElement('section');
+    panel.className = 'work-tree stack';
+    panel.innerHTML = '<h3>Repository</h3><p data-branch class="muted" hidden></p><label class="field"><span>Filter tracked paths</span>' +
+      '<input type="search" placeholder="Find a path"></label><div role="status"></div><div data-file-tree></div>';
+    parent.prepend(panel);
+    const search = panel.querySelector('input');
+    const status = panel.querySelector('[role="status"]');
+    const result = panel.querySelector('[data-file-tree]');
+    const head = panel.querySelector('[data-branch]');
+    let paths = [];
+    let capped = false;
+    let generation = 0;
+
+    function draw() {
+      const query = search.value.trim().toLowerCase();
+      const matching = paths.filter((path) => path.toLowerCase().includes(query));
+      const displayed = matching.slice(0, 180);
+      const root = { files: [], dirs: new Map() };
+      for (const path of displayed) {
+        const parts = path.split('/');
+        const filename = parts.pop();
+        let node = root;
+        for (const part of parts) {
+          if (!node.dirs.has(part)) node.dirs.set(part, { files: [], dirs: new Map() });
+          node = node.dirs.get(part);
+        }
+        node.files.push({ path, filename });
+      }
+      function branch(node, level = 0) {
+        const dirs = [...node.dirs].map(([name, child]) => '<details' + (query || level === 0 ? ' open' : '') +
+          '><summary>' + esc(name) + '</summary>' + branch(child, level + 1) + '</details>');
+        const files = node.files.map(({ path, filename }) => {
+          if (readonly) return '<div class="work-file" title="' + esc(path) + '">' + esc(filename) + '</div>';
+          const attached = composerPanel.attachedTrackedFile(path);
+          return '<button class="work-file" type="button" data-path="' + esc(path) + '" aria-pressed="' + attached +
+            '" aria-label="' + (attached ? 'Remove ' : 'Attach ') + esc(path) + '" title="' + esc(path) + '">' + esc(filename) + '</button>';
+        });
+        return dirs.concat(files).join('');
+      }
+      result.innerHTML = branch(root);
+      status.textContent = matching.length ? displayed.length + ' of ' + matching.length + ' tracked paths' + (capped ? ' · Listing capped' : '')
+        : 'No tracked paths match.';
+    }
+
+    result.addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-path]');
+      if (button) composerPanel.toggleTrackedFile(button.dataset.path);
+    });
+    composerPanel.addEventListener('coding-attachments', () => {
+      for (const button of result.querySelectorAll('button[data-path]')) {
+        const attached = composerPanel.attachedTrackedFile(button.dataset.path);
+        button.setAttribute('aria-pressed', String(attached));
+        button.setAttribute('aria-label', (attached ? 'Remove ' : 'Attach ') + button.dataset.path);
+      }
+    });
+    search.addEventListener('input', draw);
+    function refresh() {
+      const current = ++generation;
+      paths = [];
+      result.replaceChildren();
+      head.hidden = true;
+      showCommands([]);
+      status.textContent = 'Listing tracked paths…';
+      return Promise.resolve().then(readFiles).then((data) => {
+        if (detached() || current !== generation) return;
+        paths = data.paths;
+        capped = data.limited;
+        head.textContent = [data.branch, data.revision].filter(Boolean).join(' · ');
+        head.hidden = !head.textContent;
+        draw();
+        showCommands(data.commands);
+      }, (error) => { if (!detached() && current === generation) report(status, error); });
+    }
+    void refresh();
+    return refresh;
+  }
+
+  function workInspector(parent, project, owner, detached) {
+    const panel = document.createElement('aside');
+    panel.className = 'work-inspector stack';
+    panel.setAttribute('aria-label', 'Request inspector');
+    const tabs = ['Changes', 'Checks', 'Context'];
+    panel.innerHTML = '<div class="work-inspector-tabs" role="tablist" aria-label="Request inspector">' + tabs.map((title, i) =>
+      '<button type="button" role="tab" id="work-tab-' + i + '" aria-controls="work-panel-' + i + '" aria-selected="' + (i === 0) +
+      '" tabindex="' + (i === 0 ? 0 : -1) + '">' + title + '</button>').join('') + '</div>' + tabs.map((_, i) =>
+      '<div class="stack" role="tabpanel" id="work-panel-' + i + '" aria-labelledby="work-tab-' + i + '" tabindex="0"' + (i ? ' hidden' : '') + '></div>').join('');
+    parent.append(panel);
+    const buttons = [...panel.querySelectorAll('[role="tab"]')];
+    const pages = [...panel.querySelectorAll('[role="tabpanel"]')];
+    const [changes, checks, context] = pages;
+    let revision = 0;
+    function activate(index, focus = false) {
+      buttons.forEach((button, i) => {
+        button.tabIndex = i === index ? 0 : -1;
+        button.setAttribute('aria-selected', String(i === index));
+        pages[i].hidden = i !== index;
+      });
+      if (focus) buttons[index].focus();
+    }
+    buttons.forEach((button, index) => {
+      button.addEventListener('click', () => activate(index));
+      button.addEventListener('keydown', (event) => {
+        const next = { ArrowLeft: (index + 2) % 3, ArrowRight: (index + 1) % 3, Home: 0, End: 2 }[event.key];
+        if (next === undefined) return;
+        event.preventDefault();
+        activate(next, true);
+      });
+    });
+    changes.textContent = 'Select a request to inspect changes.';
+    checks.textContent = 'No check results recorded.';
+    context.textContent = 'Select a request to inspect its saved source.';
+    return {
+      showCommands(commands) {
+        checks.replaceChildren('No check results recorded.');
+        if (!commands?.length) return;
+        checks.append(listBlock('Declared repository commands', commands.map((command) =>
+          command.kind + ' · ' + command.argv.join(' ') + ' · ' + command.source.path + ':' + command.source.line)));
+      },
+      showRun(row, files, hasSource = false) {
+        const current = ++revision;
+        context.textContent = files?.length ? '' : 'No saved source ranges for this request.';
+        if (files?.length) context.append(listBlock('Saved source ranges', files.map((file) =>
+          file.path + (file.startLine ? ':' + file.startLine + '–' + file.endLine : ''))));
+        if (hasSource) {
+          const button = document.createElement('button');
+          const source = document.createElement('div');
+          source.className = 'stack';
+          source.setAttribute('aria-live', 'polite');
+          button.type = 'button';
+          button.textContent = 'Read approved context';
+          context.append(button, source);
+          button.addEventListener('click', async () => {
+            button.disabled = true;
+            source.textContent = 'Reading saved source…';
+            try {
+              const saved = await coding(projectUrl(project.id) + '/source-inspect', identity(row));
+              if (current !== revision || detached()) return;
+              if (saved) savedSourceContents(source, saved);
+              else source.textContent = 'This request has no saved source.';
+            } catch (error) {
+              if (current === revision && !detached()) report(source, error);
+            } finally { if (current === revision && !detached()) button.disabled = false; }
+          });
+        }
+        changes.textContent = row?.review === 'accepted' && owner ? '' :
+          row ? 'Patch proposals are available to the local operator after accepting a result.' : 'Select a request to inspect changes.';
+        if (row?.review !== 'accepted' || !owner) return;
+        const load = document.createElement('button');
+        const proposalsPanel = document.createElement('div');
+        proposalsPanel.className = 'stack';
+        proposalsPanel.setAttribute('aria-live', 'polite');
+        load.type = 'button';
+        load.textContent = 'Load saved patches';
+        changes.append(load, proposalsPanel);
+        load.addEventListener('click', async () => {
+          load.disabled = true;
+          proposalsPanel.textContent = 'Reading saved patch proposals…';
+          try {
+            const { proposals } = await coding(projectUrl(project.id) + '/patch-proposals', identity(row));
+            if (current !== revision || detached()) return;
+            proposalsPanel.textContent = proposals.length ? '' : 'No supported patch in this response.';
+            for (const { paths, diff } of proposals) {
+              const sections = diff.split(/\n(?=diff --git )/u);
+              const files = sections.length === paths.length ? paths : [paths.join(', ')];
+              files.forEach((path, index) => {
+                const section = files.length === sections.length ? sections[index] : diff;
+                const details = document.createElement('details');
+                const summary = document.createElement('summary');
+                const code = document.createElement('pre');
+                summary.textContent = path;
+                for (const line of section.split('\n')) {
+                  const entry = document.createElement('span');
+                  if (/^\+(?!\+\+)/u.test(line)) entry.className = 'work-diff-add';
+                  if (/^-(?!--)/u.test(line)) entry.className = 'work-diff-delete';
+                  entry.textContent = line + '\n';
+                  code.append(entry);
+                }
+                details.append(summary, code);
+                proposalsPanel.append(details);
+              });
+            }
+          } catch (error) {
+            if (current === revision && !detached()) report(proposalsPanel, error);
+          } finally {
+            load.disabled = false;
+          }
+        });
+      },
+    };
+  }
+
+  function activity(parent, history, project, readonly, detached, { reviewPatch, ownerActions, initialRun, loadReviewFollowUp, inspector }) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
-    panel.className = 'coding-panel coding-activity stack';
-    panel.innerHTML = '<div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh</button></div>' +
+    panel.className = 'coding-panel coding-timeline stack';
+    history.innerHTML = '<div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh</button></div>' +
       '<details data-find-saved-run><summary>Find saved request</summary><form class="stack coding-form">' +
       field('Session name', '', 'text', 'name="session" maxlength="64" spellcheck="false" required') +
       field('Request ID', '', 'text', 'name="requestId" maxlength="128" spellcheck="false" required') +
       '<div class="row"><button type="submit">Open saved request</button></div></form></details>' +
-      '<div class="stack coding-runs" data-runs></div><div class="stack" data-inspect aria-live="polite"></div>' +
+      '<div class="stack coding-runs" data-runs></div>';
+    panel.innerHTML = '<h3>Request timeline</h3><div class="stack" data-inspect aria-live="polite">Select a saved request or compose a new one.</div>' +
       '<section class="stack" data-run-review hidden></section>' +
       '<div class="row" data-compare-branch hidden></div>' +
       '<section class="stack" data-saved-request-source hidden></section>' +
@@ -1896,10 +2123,10 @@
         '<details data-saved-branches></details><section class="stack" data-context-controls hidden></section>' : '') +
       '<div class="coding-feedback" role="status"></div>';
     parent.append(panel);
-    const list = panel.querySelector('[data-runs]');
+    const list = history.querySelector('[data-runs]');
     const inspected = panel.querySelector('[data-inspect]');
     const feedback = panel.querySelector('[role="status"]');
-    const finder = panel.querySelector('[data-find-saved-run] form');
+    const finder = history.querySelector('[data-find-saved-run] form');
     const setRunReview = mountRunReview(panel.querySelector('[data-run-review]'), {
       prefix, readonly, detached, refresh, loadFollowUp: loadReviewFollowUp,
       afterAccepted: () => inspected.querySelector('[data-review-patch]')?.focus(),
@@ -1959,6 +2186,7 @@
         showTaskProgress(inspected.querySelector('[data-task-progress]'), progress, true);
         return row;
       }
+      inspector.showRun(row, snippet.length ? snippet : result.report?.request?.files, Boolean(canViewSource));
       inspected.dataset.run = row.id;
       inspected.dataset.session = row.session;
       inspected.innerHTML = '<div class="coding-result stack"><h4>' + esc(row.id) + '</h4>' +
@@ -2049,9 +2277,10 @@
         if (detached() || current !== generation) return;
         const active = rows.some((row) => row.status === 'running');
         const recent = selected && rows.find((row) => row.session === selected.session && row.id === selected.id);
-        const target = recent || selected;
+        const target = recent || selected || rows[0];
+        if (!selected && target) selected = target;
         const markup = rows.length ? rows.map((row, index) =>
-          '<button type="button" class="coding-run" aria-pressed="' + (row === recent) + '" data-run="' + index + '">' +
+          '<button type="button" class="coding-run" aria-pressed="' + (row === target) + '" data-run="' + index + '">' +
           '<span><strong>' + esc(row.id) + '</strong><span class="muted">' + esc(row.session) + '</span></span>' +
           '<span>' + esc(labelStatus(row)) + '</span></button>').join('') : '<p class="empty">No requests in this project.</p>';
         if (list.dataset.markup !== markup) {
@@ -2097,14 +2326,16 @@
       setBranchTarget?.(null);
       setComparisonRun(null);
       setRunReview(null);
+      inspector.showRun(null);
       inspected.replaceChildren();
     }
 
     function selectRun(row) {
-      if (selected?.id !== row.id || selected.session !== row.session) clearInspection();
+      const changed = selected?.id !== row.id || selected.session !== row.session;
+      if (changed) clearInspection();
       selected = row;
       report(feedback);
-      return refresh(true);
+      return refresh(changed);
     }
 
     finder.addEventListener('submit', (event) => {
@@ -2118,7 +2349,7 @@
       }
       void selectRun({ session, id });
     });
-    panel.querySelector('[data-refresh]').addEventListener('click', () => refresh());
+    history.querySelector('[data-refresh]').addEventListener('click', () => refresh());
     refresh(Boolean(initialRun));
     return { refresh, selectRun };
   }
@@ -2310,8 +2541,10 @@
     return refresh;
   }
 
-  function mountRepositoryMap(panel, prefix, readonly, isDetached, feedback) {
+  function mountRepositoryMap(panel, prefix, readonly, isDetached, feedback, repositoryChanged) {
     const importButton = panel.querySelector('[data-import-map]');
+    const importForm = panel.querySelector('[data-map-options]');
+    const stop = panel.querySelector('[data-stop-import]');
     const progress = panel.querySelector('[data-map-progress]');
     const summary = panel.querySelector('[data-map-summary]');
     const skills = panel.querySelector('[data-map-skills]');
@@ -2321,14 +2554,17 @@
       embed: 'Encoding units', publish: 'Publishing the map', knowledge: 'Writing the knowledge bundle' };
     let timer;
     let loaded = false;
+    let importedGeneration;
 
     function show(state) {
-      const running = state.status === 'running';
+      const running = state.status === 'running' || state.status === 'cancelling';
       importButton.disabled = readonly || running;
+      stop.hidden = !running || readonly;
+      stop.disabled = readonly || state.status === 'cancelling';
       importButton.textContent = state.imported ? 'Import again' : 'Import repository map';
-      progress.textContent = running
+      progress.textContent = state.status === 'cancelling' ? 'Stopping the import…' : running
         ? (phases[state.progress?.phase] || 'Importing') + (state.progress?.total > 1 ? ' · ' + state.progress.done.toLocaleString() + ' of ' + state.progress.total.toLocaleString() : '') + '…'
-        : state.status === 'failed' ? state.error : '';
+        : state.status === 'failed' ? state.error : state.status === 'cancelled' ? 'Import stopped.' : '';
       const rows = [];
       if (state.imported) {
         rows.push(['Imported', state.map.files.toLocaleString() + ' files · ' + state.map.units.toLocaleString() + ' units · ' + state.map.packages + ' packages' +
@@ -2336,6 +2572,12 @@
         if (state.map.limited) rows.push(['Limits', 'The import reached a size limit. Narrow the project’s permitted directories.']);
         if (state.knowledge) rows.push(['Knowledge bundle', state.knowledge]);
         if (state.learning) rows.push(['Learned from', state.learning.episodes + ' reviewed requests · ' + state.learning.aliases + ' aliases · parameters v' + state.learning.params]);
+        if (state.report) rows.push(['Last import', state.report.changedFiles + ' changed · ' + state.report.unchangedFiles +
+          ' unchanged · ' + state.report.removedFiles + ' removed · ' + state.report.limitsReached.fileBytes + ' partially read']);
+        if (state.report && state.report.generation !== importedGeneration) {
+          importedGeneration = state.report.generation;
+          repositoryChanged();
+        }
       } else rows.push(['Imported', 'Not yet']);
       summary.replaceChildren(...rows.flatMap(([name, value]) => {
         const term = document.createElement('dt');
@@ -2368,13 +2610,22 @@
         if (!isDetached() && saved.policy) routing.elements.policy.value = JSON.stringify(saved.policy, null, 2);
       } catch (_) { /* Project members cannot read routing settings. */ }
     });
-    importButton.addEventListener('click', async () => {
+    importForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
       report(feedback);
       importButton.disabled = true;
       try {
-        await coding(prefix + '/import', {});
+        const projects = entries(importForm.elements.projects.value);
+        const history = importForm.elements.history.value;
+        await coding(prefix + '/import', { ...(projects.length ? { projects } : {}),
+          ...(history === '' ? {} : { historyCommits: Number(history) }), full: importForm.elements.full.checked });
         await refresh();
       } catch (error) { report(feedback, error); importButton.disabled = readonly; }
+    });
+    stop.addEventListener('click', async () => {
+      stop.disabled = true;
+      try { await coding(prefix + '/import', { cancel: true }); await refresh(); }
+      catch (error) { report(feedback, error); stop.disabled = readonly; }
     });
     lesson.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -2403,7 +2654,7 @@
     });
   }
 
-  function settings(parent, project, readonly, projectChanged, runsChanged, isDetached) {
+  function settings(parent, project, readonly, projectChanged, runsChanged, isDetached, repositoryChanged) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('details');
     panel.className = 'coding-panel';
@@ -2424,7 +2675,12 @@
       '<div class="row"><button type="submit" class="danger">Delete session and transcript</button></div></form>' +
       '<details data-repository-map><summary>Repository map</summary><div class="stack coding-form">' +
       '<p class="muted">Importing reads the tracked files in this project’s permitted directories on this computer and builds a map of packages, declarations, links, and tests. It makes no model call. Requests that use the map still show you exactly what they send.</p>' +
-      '<div class="row"><button type="button" data-import-map>Import repository map</button><span class="muted" data-map-progress role="status"></span></div>' +
+      '<form class="stack" data-map-options><div class="coding-grid">' +
+      field('Import directories', project.scopes.join(', '), 'text', 'name="projects" spellcheck="false"') +
+      field('History commits', '', 'number', 'name="history" min="0" max="20000" step="1" placeholder="2000"') + '</div>' +
+      '<label class="row"><input type="checkbox" name="full"> Full refresh</label><div class="row">' +
+      '<button type="submit" data-import-map>Import repository map</button><button type="button" data-stop-import hidden>Stop import</button></div></form>' +
+      '<span class="muted" data-map-progress role="status"></span>' +
       '<dl class="coding-facts" data-map-summary></dl><div class="stack" data-map-skills></div>' +
       '<form class="stack" data-lesson>' + field('Lesson for future requests', '', 'text', 'name="text" maxlength="600" required placeholder="Something reviewers keep having to say about this code"') +
       field('Applies to directories (optional)', '', 'text', 'name="anchors" spellcheck="false"') +
@@ -2452,7 +2708,7 @@
     panel.querySelectorAll('button').forEach((button) => button.disabled = readonly);
     saveRetention.disabled = true;
     const refreshDeployment = mountDeploymentChecks(panel.querySelector('[data-deployment-checks]'), prefix, readonly, isDetached);
-    mountRepositoryMap(panel.querySelector('[data-repository-map]'), prefix, readonly, isDetached, feedback);
+    mountRepositoryMap(panel.querySelector('[data-repository-map]'), prefix, readonly, isDetached, feedback, repositoryChanged);
 
     function setProject(current) {
       project = current;
@@ -2951,8 +3207,7 @@
 
   async function mount(view, arg, isDetached, readonly, teamMode = false) {
     view.innerHTML =
-      '<div class="stack wide coding-page"><header><h2 class="display">Coding workspace</h2>' +
-      '<p class="muted">Review repository context, run a Pi Durable request, and record your decision.</p></header>' +
+      '<div class="stack wide coding-page"><header><h2 class="display">Coding workspace</h2></header>' +
       '<div class="stack coding-projects"><p class="muted" aria-live="polite">Loading projects…</p></div></div>';
     const page = view.querySelector('.coding-page');
     const projectsEl = page.querySelector('.coding-projects');
@@ -2960,8 +3215,19 @@
       projectsEl.remove();
       await window.okbCodingStandalone.mount(page, {
         coding, readonly, detached: isDetached, defaultModels, entries, field, previewContents, mountSourceManifest, report, sessionUsage, usageText, contextSummary,
-        showTaskProgress, taskProgressPanel, mountContextControls, mountRunCopies, sourceLookupSummary,
+        showTaskProgress, taskProgressPanel, mountContextControls, mountRunCopies, sourceLookupSummary, mountTree: repositoryTree,
       });
+      if (!isDetached()) {
+        const content = page.querySelector('[data-standalone-side] .work-tree');
+        if (content) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'standalone-drawer-control';
+          button.textContent = 'Repository';
+          page.querySelector('header .row').append(button);
+          workspaceDrawer(content, button);
+        }
+      }
       return;
     }
     let projects;
@@ -2984,15 +3250,22 @@
     const projectId = actionRoute?.[1] || runRoute?.[1] || arg;
     const project = projects.find((item) => item.id === projectId || (suggestedWorkspace && item.workspace === suggestedWorkspace)) ||
       (!arg ? projects[0] : null);
-    projectsEl.innerHTML = !teamMode && projects.length ?
+    projectsEl.innerHTML = !teamMode ?
       '<div class="row coding-project-links" aria-label="Coding projects">' + projects.map((item) =>
         '<a href="' + projectHref(item.id) + '" data-project-link' + (item.id === project?.id ? ' aria-current="page"' : '') +
-        '>' + esc(item.title) + '</a>').join('') + '</div>' : '';
+        '>' + esc(item.title) + '</a>').join('') + '<a href="#coding/standalone">Standalone sessions</a></div>' : '';
     let refreshDeployment;
     if (!teamMode) {
-      projectsEl.insertAdjacentHTML('beforeend', '<div class="row coding-project-links"><a href="#coding/standalone">Standalone sessions</a></div>');
-      register(projectsEl, models, suggestedWorkspace, readonly, isDetached);
-      teamSettings(projectsEl, readonly, isDetached, () => { if (refreshDeployment) void refreshDeployment(); });
+      let management = projectsEl;
+      if (project && !suggestedWorkspace) {
+        const options = document.createElement('details');
+        options.className = 'coding-project-management';
+        options.innerHTML = '<summary>Manage projects and team access</summary><div class="stack"></div>';
+        projectsEl.append(options);
+        management = options.lastElementChild;
+      }
+      register(management, models, suggestedWorkspace, readonly, isDetached);
+      teamSettings(management, readonly, isDetached, () => { if (refreshDeployment) void refreshDeployment(); });
     }
     if (!project) {
       if (teamMode) report(projectsEl, new Error('This request link does not match the connected project.'));
@@ -3000,23 +3273,38 @@
     }
     const intro = document.createElement('header');
     intro.className = 'coding-project-header stack';
-    intro.innerHTML = '<h3>' + esc(project.title) + '</h3>' + (project.workspace
-      ? '<p><code>' + esc(project.workspace) + '</code></p>' : '') +
+    intro.innerHTML = '<div class="row"><h3>' + esc(project.title) + '</h3>' +
+      (!readonly ? '<button type="button" class="small right" data-compose>New request</button>' : '') + '</div>' +
+      '<details><summary>Workspace details</summary>' + (project.workspace ? '<p><code>' + esc(project.workspace) + '</code></p>' : '') +
       '<p class="muted">Permitted scope · ' + esc(project.scopes.join(', ')) + '</p>' +
-      '<p class="muted">' + (project.workerIsolation === 'docker' ? 'Docker worker · Only this session is mounted' : 'Local worker · Server OS account') + '</p>';
+      '<p class="muted">' + (project.workerIsolation === 'docker' ? 'Docker worker · Only this session is mounted' : 'Local worker · Server OS account') + '</p></details>' +
+      '<div class="row work-drawer-controls"><button type="button" data-show-tree>Repository and sessions</button>' +
+      '<button type="button" data-show-inspector>Inspector</button></div>';
     page.append(intro);
     const grid = document.createElement('div');
-    grid.className = 'coding-workspace-grid';
+    grid.className = 'coding-workspace-grid coding-activity';
     page.append(grid);
+    const sidebarSlot = document.createElement('div');
+    sidebarSlot.className = 'work-sidebar-slot';
+    const sidebar = document.createElement('aside');
+    sidebar.className = 'work-sidebar stack';
+    sidebar.setAttribute('aria-label', 'Repository and sessions');
+    const history = document.createElement('section');
+    history.className = 'work-history stack';
+    sidebar.append(history);
+    sidebarSlot.append(sidebar);
     const left = document.createElement('div');
     left.className = 'stack coding-left';
     const right = document.createElement('div');
     right.className = 'stack coding-right';
-    grid.append(left, right);
+    grid.append(sidebarSlot, left, right);
+    const inspector = workInspector(right, project, !teamMode, isDetached);
+    workspaceDrawer(sidebar, intro.querySelector('[data-show-tree]'));
+    workspaceDrawer(right.querySelector('.work-inspector'), intro.querySelector('[data-show-inspector]'));
     let openPatch;
     let composerPanel;
-    const runs = activity(right, project, readonly, isDetached, {
-      initialRun,
+    const runs = activity(left, history, project, readonly, isDetached, {
+      initialRun, inspector,
       reviewPatch: teamMode ? undefined : (row) => openPatch(row),
       loadReviewFollowUp: (session, note) => composerPanel.loadReviewFollowUp(session, note),
       ownerActions: teamMode || readonly ? undefined : {
@@ -3027,15 +3315,18 @@
     });
     const clearComposerConsent = composer(left, project, readonly, isDetached, runs.selectRun, !teamMode && !readonly);
     composerPanel = left.querySelector('.coding-composer');
-    window.okbCodingEvaluation.mount(right, {
+    intro.querySelector('[data-compose]')?.addEventListener('click', () => composerPanel.querySelector('textarea[name="prompt"]').focus());
+    const refreshRepository = repositoryTree(sidebar, { readFiles: () => coding(projectUrl(project.id) + '/files-preview'),
+      composerPanel, readonly, detached: isDetached, showCommands: inspector.showCommands });
+    window.okbCodingEvaluation.mount(left, {
       prefix: projectUrl(project.id), coding, readonly, detached: isDetached,
       canLoadCase: composerPanel.canLoadEvaluationCase, loadCase: composerPanel.loadEvaluationCase,
     });
     if (!teamMode) {
-      window.okbCodingEvaluation.mountRetrievalBenchmark(right, {
+      window.okbCodingEvaluation.mountRetrievalBenchmark(left, {
         prefix: projectUrl(project.id), coding, readonly, detached: isDetached,
       });
-      refreshDeployment = settings(left, project, readonly, composerPanel.updateProject, runs.refresh, isDetached);
+      refreshDeployment = settings(left, project, readonly, composerPanel.updateProject, runs.refresh, isDetached, refreshRepository);
     }
     const github = document.createElement('div');
     github.dataset.codingGithub = '';

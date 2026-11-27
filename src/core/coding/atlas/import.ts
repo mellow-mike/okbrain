@@ -5,14 +5,15 @@
 import { createHash } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { basename, posix } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { excludedPath, readRevision, readTrackedText, worktreeStamp } from "../repository-context.ts";
 import { dependencyResolver, fileStructure, type RepositoryFileStructure } from "../repository-index.ts";
 import { profilePath } from "../project-profile.ts";
 import { applyAliases } from "./aliases.ts";
 import { writeKnowledge, type KnowledgeReport } from "./knowledge.ts";
 import { Learning } from "./learn.ts";
-import { detectPackages, internalDependencies, packageOf, type CommandTool, type PackageInfo } from "./packages.ts";
-import { AtlasScanError, listTrackedPaths, mineChangeCoupling, ownersOf, parseCodeOwners } from "./scan.ts";
+import { detectPackages, internalDependencies, packageOf, packageRootMarkers, type CommandTool, type PackageInfo } from "./packages.ts";
+import { AtlasScanError, listTrackedPaths, mineChangeCoupling, ownersOf, parseCodeOwners, trackedAmong } from "./scan.ts";
 import { Atlas, AtlasError, type AtlasLocation, type AtlasMeta } from "./store.ts";
 import { analyzeSource, languageOf, roles, type SourceFile } from "./structure.ts";
 import {
@@ -301,6 +302,15 @@ function report(options: ImportOptions, phase: ImportProgress["phase"], done: nu
   options.signal?.throwIfAborted();
 }
 
+async function yieldProgress(options: ImportOptions, phase: ImportProgress["phase"], done: number, total: number): Promise<void> {
+  report(options, phase, done, total);
+  // A browser cancellation needs an event-loop turn while the import is doing synchronous SQLite and vector work.
+  if (options.signal) {
+    await setImmediate();
+    options.signal.throwIfAborted();
+  }
+}
+
 /**
  * How an import's writes become visible.
  *
@@ -344,8 +354,13 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
     const revision = await readRevision(workspace);
     report(options, "list", 0, 1);
     let listing;
+    let scopedRootMarkers: Set<string> | undefined;
     try {
       listing = await listTrackedPaths(workspace, scopes, { signal: options.signal });
+      if (!scopes.includes(".") || listing.limited) {
+        // Root marker presence configures package discovery. The contents and all other root paths remain outside the scope.
+        scopedRootMarkers = await trackedAmong(workspace, packageRootMarkers, { signal: options.signal });
+      }
     } catch (error) {
       if (error instanceof AtlasScanError) throw new AtlasError(error.message, { cause: error });
       throw error;
@@ -357,7 +372,7 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
 
     const readText = async (path: string) => (await readTrackedText(workspace, path, 256 * 1024))?.lines.join("\n");
     const packageMap = await detectPackages(visible, readText, {
-      workspaceName: basename(workspace), rootFiles: listing.paths.filter((path) => !path.includes("/")),
+      workspaceName: basename(workspace), rootFiles: scopedRootMarkers ?? listing.paths.filter((path) => !path.includes("/")),
     });
     const roots = new Set(packageMap.packages.map((pkg) => pkg.root));
 
@@ -379,7 +394,6 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
     let changedFiles = 0;
     let unchangedFiles = 0;
     let skippedFiles = 0;
-    let limitedFiles = 0;
 
     const insertFile = atlas.prepare(`INSERT INTO files(path, package, language, role, lines, sha256, stamp, gist, imports, limited, units, vectors)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
@@ -394,7 +408,7 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
     const insertUnit = atlas.prepare("INSERT INTO units(file, ord, kind, name, start_line, end_line, role, gist) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id");
     const insertText = atlas.prepare("INSERT INTO unit_text(rowid, name, path, alias, body) VALUES (?, ?, ?, '', ?)");
     const insertSymbol = atlas.prepare("INSERT INTO symbols(name, unit, file) VALUES (?, ?, ?)");
-    const touch = atlas.prepare("UPDATE files SET stamp = ? WHERE id = ?");
+    const touch = atlas.prepare("UPDATE files SET stamp = ?, limited = ? WHERE id = ?");
     const dropFile = (id: number) => {
       for (const { id: unit } of selectUnits.all(id)) deleteText.run(unit);
       deleteSymbols.run(id);
@@ -420,7 +434,7 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
       for (let offset = 0; offset < eligible.length; offset += readBatch) {
         report(options, "read", offset, eligible.length);
         const batch = eligible.slice(offset, offset + readBatch);
-        const results = await Promise.all(batch.map(async (path): Promise<Analyzed | "unchanged" | "skipped" | { touch: number; stamp: string }> => {
+        const results = await Promise.all(batch.map(async (path): Promise<Analyzed | "unchanged" | "skipped" | { touch: number; stamp: string; limited: boolean }> => {
           const stamp = await worktreeStamp(workspace, path);
           // Tracked but absent, linked, or unreadable in the worktree: nothing to index.
           if (!stamp) return "skipped";
@@ -429,7 +443,7 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
           const text = await readTrackedText(workspace, path, maxFileBytes);
           if (!text) return "skipped";
           const sha = sha256(text.lines.join("\n"));
-          if (row && !full && row.sha256 === sha) return { touch: row.id, stamp: text.stamp };
+          if (row && !full && row.sha256 === sha) return { touch: row.id, stamp: text.stamp, limited: text.limited };
           const source = analyzeSource(path, text.lines);
           return source ? { path, stamp: text.stamp, sha, limited: text.limited, source } : "skipped";
         }));
@@ -438,10 +452,9 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
           if (result === "skipped") { skippedFiles++; continue; }
           seen.add(path);
           if (result === "unchanged") { unchangedFiles++; continue; }
-          if ("touch" in result) { touch.run(result.stamp, result.touch); unchangedFiles++; continue; }
+          if ("touch" in result) { touch.run(result.stamp, Number(result.limited), result.touch); unchangedFiles++; continue; }
           writeFile(result);
           changedFiles++;
-          if (result.limited) limitedFiles++;
           if (++pending >= commitEvery) {
             steps.checkpoint();
             pending = 0;
@@ -467,6 +480,7 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
       if (learning) try { applyAliases(atlas.db, learning.admittedAliases(), true); } finally { learning.close(); }
 
       const totalUnits = atlas.get<{ count: number }>("SELECT count(*) AS count FROM units")!.count;
+      const limitedFiles = atlas.get<{ count: number }>("SELECT count(*) AS count FROM files WHERE limited = 1")!.count;
       const changedUnits = atlas.get<{ count: number }>("SELECT coalesce(sum(units), 0) AS count FROM files WHERE vectors IS NULL")!.count;
       const saved = atlas.frequencies();
       // Term statistics are refreshed when a fifth of the units changed. Every vector is then
@@ -474,10 +488,10 @@ export async function importRepository(options: ImportOptions, location: AtlasLo
       const reembedded = full || !saved || (totalUnits > 0 && changedUnits / totalUnits > 0.2);
       const frequencies = reembedded ? rebuildFrequencies(atlas, totalUnits) : saved;
       if (reembedded) atlas.run("UPDATE files SET vectors = NULL");
-      embedUnits(atlas, steps, frequencies, options);
+      await embedUnits(atlas, steps, frequencies, options);
       // The new generation and what describes it become visible in one commit.
       steps.begin();
-      const published = publish(atlas, options);
+      const published = await publish(atlas, options);
       atlas.setMeta({
         revision: revision ?? "", importedAt: new Date().toISOString(), scopes, historyCommits: coupling.commits, historyLimit,
         limited: listing.limited || indexable.length > eligible.length || packageMap.limited,
@@ -555,7 +569,7 @@ async function linkFiles(
       if (pkg !== file.package) setPackage.run(pkg, file.id);
     }
     for (const [index, file] of files.entries()) {
-      if (index % 4096 === 0) report(options, "link", index, files.length);
+      if (index % 4096 === 0) await yieldProgress(options, "link", index, files.length);
       let specifiers: unknown;
       try { specifiers = JSON.parse(file.imports); } catch { specifiers = []; }
       const targets = new Set<number>();
@@ -658,7 +672,7 @@ function rebuildFrequencies(atlas: Atlas, documents: number): DocumentFrequencie
   return frequencies;
 }
 
-function embedUnits(atlas: Atlas, steps: Steps, frequencies: DocumentFrequencies, options: ImportOptions): void {
+async function embedUnits(atlas: Atlas, steps: Steps, frequencies: DocumentFrequencies, options: ImportOptions): Promise<void> {
   const files = atlas.all<{ id: number; units: number }>("SELECT id, units FROM files WHERE vectors IS NULL ORDER BY id");
   using selectText = atlas.prepare<{ name: string; path: string; alias: string; body: string }>(
     "SELECT t.name, t.path, t.alias, t.body FROM units u JOIN unit_text t ON t.rowid = u.id WHERE u.file = ? ORDER BY u.ord");
@@ -667,7 +681,7 @@ function embedUnits(atlas: Atlas, steps: Steps, frequencies: DocumentFrequencies
   try {
     for (const [index, file] of files.entries()) {
       if (index % 512 === 0) {
-        report(options, "embed", index, files.length);
+        await yieldProgress(options, "embed", index, files.length);
         if (index) steps.checkpoint();
       }
       const rows = selectText.all(file.id);
@@ -689,8 +703,8 @@ function embedUnits(atlas: Atlas, steps: Steps, frequencies: DocumentFrequencies
  * coupling, and from its package, so structurally related code sits closer
  * than its words alone would put it.
  */
-function publish(atlas: Atlas, options: ImportOptions): { generation: number; files: number; units: number } {
-  report(options, "publish", 0, 3);
+async function publish(atlas: Atlas, options: ImportOptions): Promise<{ generation: number; files: number; units: number }> {
+  await yieldProgress(options, "publish", 0, 3);
   const files = atlas.all<{ id: number; package: number; units: number }>("SELECT id, package, units FROM files ORDER BY id");
   const fileRow = new Map<number, number>();
   const offsets = new Uint32Array(files.length + 1);
@@ -725,7 +739,7 @@ function publish(atlas: Atlas, options: ImportOptions): { generation: number; fi
     if (position >= offsets[row + 1]!) continue;
     index.set([unit.id, unit.file, files[row]!.package, roleIndex.get(unit.role) ?? 0], position * 4);
   }
-  report(options, "publish", 1, 3);
+  await yieldProgress(options, "publish", 1, 3);
 
   // Symmetric adjacency in compressed rows: a file is informed by what it uses and by what uses it.
   const edges = atlas.all<{ src: number; dst: number; kind: string; weight: number }>("SELECT src, dst, kind, weight FROM file_edges");
@@ -756,7 +770,7 @@ function publish(atlas: Atlas, options: ImportOptions): { generation: number; fi
     addRow(centroid, fileVectors, row * embeddingDim, 1);
   }
   for (const centroid of packageRows.values()) normalize(centroid);
-  report(options, "publish", 2, 3);
+  await yieldProgress(options, "publish", 2, 3);
 
   const linked = new Float32Array(embeddingDim);
   const unit = new Float32Array(embeddingDim);

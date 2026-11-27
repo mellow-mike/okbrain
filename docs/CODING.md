@@ -1,10 +1,10 @@
 # Coding sessions
 
-Use the **Coding** workspace in the Mac app or local web app to review source files, discuss an implementation, or draft a patch in a recoverable Pi Durable session. Git enables scoped source previews. For a large repository, [import it once](#work-in-a-large-repository) and let each request select its source from the repository map within a fixed budget. Coding sessions have their own storage.
+Use the **Work** workspace in the Mac app or local web app to review source files, discuss an implementation, or draft a patch in a recoverable Pi Durable session. Git enables scoped source previews. For a large repository, [import it once](#work-in-a-large-repository) and let each request select its source from the repository map within a fixed budget. Coding sessions have their own storage.
 
 ## Work in the app
 
-1. Open **Coding** and choose **Add a project**. Enter the repository's absolute path on this computer, set the permitted directories, and choose a Pi provider, model, and optional reasoning level.
+1. Open **Work** and choose **Add a project**. If a project is already open, expand **Manage projects and team access** first. Enter the repository's absolute path on this computer, set the permitted directories, and choose a Pi provider, model, and optional reasoning level.
 2. Save a provider key for that project or use an existing environment key for local runs. Projects can use OpenAI, Anthropic, Google Gemini, or [OpenRouter](#use-openrouter). The app shows which credential source the project uses.
 3. Describe the task and select tracked excerpts, explicit files, or the [repository map](#work-in-a-large-repository). Choose **Preview source**, inspect the actual text, and approve sending it with the task and active conversation history. Sending with a changed file selection requires a fresh preview.
 4. Select the request in **Run history**. Ordinary requests can show a short preview of the answer as it arrives. When the run finishes, inspect the full result and its recorded provider usage before choosing **Accept result** or **Request changes**. An interrupted run can resume with its stored input, or be cancelled. A follow-up uses the same session and a new request ID.
@@ -39,9 +39,23 @@ Load a preset from the project request form. Local operators can also use **okbr
 
 ### Open a standalone session
 
-In the Mac or local web app, open **Coding → Standalone sessions** to open an existing `okb code` session or start a new one without registering a project. The same session name opens the same private transcript from either surface. An existing session keeps its workspace, provider, and model. Standalone requests run on the local operator’s computer. Registered projects provide team access, audit and review records, and worker isolation.
+In the Mac or local web app, open **Work → Standalone sessions** to open an existing `okb code` session or start a new one without registering a project. The same session name opens the same private transcript from either surface. An existing session keeps its workspace, provider, and model. Standalone requests run on the local operator’s computer. Registered projects provide team access, audit and review records, and worker isolation.
 
-Choose a workspace, enter a task, and preview explicit files or tracked repository excerpts. Check the source and approve sending it with the task and the active history. The app uses the selected provider’s environment key or API key saved in **Settings → AI providers**. Inspect the saved task, source, response, and usage in **Run history**.
+Choose a workspace and enter a task. In the source selector, choose explicit
+files, tracked repository excerpts, **Repository map**, or **Orchestrated
+repository plan**. Preview the selection before approving the task. For a
+map-backed request, inspect the map facts and any deferred excerpts you want
+to allow for lookup. An orchestrated request also shows the work orders,
+model choices, reasoning levels, and provider preferences. The app uses
+the selected provider’s environment key or an API key saved in
+**Settings → AI providers**. Inspect the saved task, source, response, and
+usage in **Run history**.
+
+Local standalone sessions share the same workspace-bound repository map and
+learned state as `okb code`. Open **Repository map settings** to import or
+refresh a map, record a lesson, manage skill trials, or open **Manage learned
+state**. Review a completed map-backed request from its run inspector to
+record learning. Registered projects have their own independent maps.
 
 After an interruption, inspect the saved task and source before choosing **Resume request**. Pi uses the saved bytes, so you can resume even if the original workspace is absent. **Cancel request** withdraws a waiting or running request. If a session is open in another invocation, wait for that invocation to finish before refreshing the list.
 
@@ -51,7 +65,7 @@ To erase a standalone transcript, select the session and open **Delete standalon
 
 Save a project-specific provider API key and create a token for the member in **Project settings → Team access**. Copy the token when it appears. Each token grants access to a single project and expires after seven days. The operator can revoke it before then.
 
-In **Coding → Team browser access**, start a separate listener. A member opens the team workspace URL and enters their project token. They can preview and approve sources, inspect project runs and their saved task and source, cancel or resume runs, and record reviews. Project configuration, credentials, token management, and transcript deletion stay with the local operator.
+In **Work**, open **Team browser access** and start a separate listener. If a project is already open, look under **Manage projects and team access**. A member opens the team workspace URL and enters their project token. They can preview and approve sources, inspect project runs and their saved task and source, cancel or resume runs, and record reviews. Project configuration, credentials, token management, and transcript deletion stay with the local operator.
 
 The team listener binds to `127.0.0.1`. For remote access, an operator can configure a TLS reverse proxy that directs the declared HTTPS origin to the team listener and sets the upstream Host header to `127.0.0.1:<team port>`. The listener serves the coding workspace and its project-token routes. Keep the separate local operator listener private.
 
@@ -127,7 +141,7 @@ Run `bun run scripts/benchmark-coding-context.ts` to compare explicit files, lex
 
 ### Measure repository previews on Vite
 
-On a registered pinned Vite project, open **Coding → Source retrieval benchmark** in the Mac or web app. Select **Package directories** or **Subsystem directories**, set the repetitions and excerpt budget, and choose **Run retrieval benchmark**. Each repetition measures six cases with explicit files, lexical excerpts, and indexed excerpts. The panel shows progress and lets the local operator stop the run. Copy the result as JSON to keep the exact revision, per-case evidence measurements, and strategy comparisons after restarting okbrain. The benchmark makes no model calls and creates no Coding requests.
+On a registered pinned Vite project, open **Work → Source retrieval benchmark** in the Mac or web app. Select **Package directories** or **Subsystem directories**, set the repetitions and excerpt budget, and choose **Run retrieval benchmark**. Each repetition measures six cases with explicit files, lexical excerpts, and indexed excerpts. The panel shows progress and lets the local operator stop the run. Copy the result as JSON to keep the exact revision, per-case evidence measurements, and strategy comparisons after restarting okbrain. The benchmark makes no model calls and creates no Coding requests.
 
 `bun run scripts/benchmark-coding-vite.ts` clones a temporary Vite checkout and measures six development traces across 2,380 tracked files. The suite covers a failed dynamic import, scaffold template selection, legacy build targets, HMR lifecycle, split CSS in the build manifest, and dependency scan inputs. Use `--workspace /path/to/vite` to reuse a clean checkout at the pinned commit. The script checks the revision and hand-labeled evidence before timing and reads the checkout without running its install, build, or test scripts. [Vite v7.0.0 at b85f322](https://github.com/vitejs/vite/tree/b85f32275b443bf6b647572a9209f1e078b5b4dd)
 
@@ -158,7 +172,7 @@ The Vite suite makes zero provider calls. Its JSON includes an evaluation series
 ### Evaluate provider runs with independent review
 
 1. Choose a pinned checkout or a stable revision and agree on expected evidence before running the task. Use the same provider, model, prompt, and evidence targets across strategies. Use fresh sessions for independent trials and disclose when measuring repeated turns or cache reuse.
-2. In **Coding → New request → Independent evaluation**, opt the request into a measurement series. Enter the series ID, task ID, and expected workspace-relative citations one per line, such as `src/client.ts:12-18`. Choose the explicit files, lexical excerpts, indexed profile, or independent package review strategy through the usual source controls.
+2. In **Work → New request → Independent evaluation**, opt the request into a measurement series. Enter the series ID, task ID, and expected workspace-relative citations one per line, such as `src/client.ts:12-18`. Choose the explicit files, lexical excerpts, indexed profile, or independent package review strategy through the usual source controls.
 3. Preview source and approve as usual. Preview timing is recorded when you opt in before previewing. Enrollment and evidence targets stay in the evaluation catalog. The provider receives only the normal approved coding input, and evaluating the result makes no model call. Reuse the same series and task ID to compare strategies with identical prompt and evidence.
 4. A different authenticated project member opens **Evaluation results** and selects **Ready to review**. Compare the response against the task and the approved source saved in Pi Durable. Check each citation that the response supports and accept a complete response or request changes. Acceptance requires every expected citation. This assessment is separate from the human review that authorizes a patch. The queue also shows work awaiting another member and reviewed attempts.
 5. Compare strategies in **Evaluation results** and copy the aggregate metrics as JSON. The report separates injected test providers from the normal provider path and shows preview p50/p95, verified citations, average serialized approved source bytes, and recorded input, output, cache read, and cache write tokens. The tokens-per-acceptance numerator includes rejected reviewed attempts, and appears when there is at least one acceptance and recorded usage for every reviewed attempt in the group. It excludes pending reviews and provider calls that never recorded usage. The copy action includes aggregate metrics, and deleting an evaluated session also deletes its evaluation records.
@@ -169,7 +183,7 @@ An independent reviewer and approved live provider credentials are needed to col
 
 ### Load a pinned Vite benchmark case
 
-Under **Coding → Add a project**, open **Prepare Vite benchmark checkout** and review the repository, tag, and pinned commit. Select **Use this exact benchmark revision** and choose **Prepare benchmark checkout**. okbrain downloads the public Vite v7.0.0 tag and checks that it points to `b85f32275b443bf6b647572a9209f1e078b5b4dd`. The shallow checkout stores the tracked link as text, preserving the Git index entry. Preparing the checkout makes no model calls. You can also register the root of an existing clean checkout at the same revision. [Pinned Vite source](https://github.com/vitejs/vite/tree/b85f32275b443bf6b647572a9209f1e078b5b4dd)
+Under **Work → Add a project**, open **Prepare Vite benchmark checkout** and review the repository, tag, and pinned commit. Select **Use this exact benchmark revision** and choose **Prepare benchmark checkout**. okbrain downloads the public Vite v7.0.0 tag and checks that it points to `b85f32275b443bf6b647572a9209f1e078b5b4dd`. The shallow checkout stores the tracked link as text, preserving the Git index entry. Preparing the checkout makes no model calls. You can also register the root of an existing clean checkout at the same revision. [Pinned Vite source](https://github.com/vitejs/vite/tree/b85f32275b443bf6b647572a9209f1e078b5b4dd)
 
 Register the prepared workspace with permitted directories `packages, docs, playground` to cover the published cases. Select your approved provider and model before preparing a trial.
 
@@ -191,7 +205,7 @@ While a request runs, **Run history** shows the current Pi Durable tasks for tha
 
 Import a repository once and okbrain keeps a map of it: packages, declarations, imports, test links, files that change together, and the commands the project uses to check a change. Each request then reads from that map inside a fixed budget, so the source sent for a task stays the same size as the repository grows. Importing, previewing a selection, and planning make no model call.
 
-Use the repository map from the CLI, a registered project in the Mac or web app, or the team workspace. VS Code and Cursor show the progress and results of these requests.
+Use the repository map from the CLI, a registered project, or a standalone session in the Mac or web app. A team project member can preview and use their project’s published map. VS Code and Cursor can inspect the progress and saved results of these requests.
 
 ### Import a repository
 
@@ -200,17 +214,26 @@ okb code import --workspace ./my-monorepo
 okb code map --workspace ./my-monorepo
 ```
 
-In a registered project, the local owner opens **Project settings → Repository map** and chooses **Import repository map**. The panel shows progress and, when the import finishes, the number of files, units, and packages.
+In a registered project, open **Project settings → Repository map**. Use
+**Import directories** to narrow the registered scope, **History commits** to
+set the history depth, and **Full refresh** to rebuild. Choose **Import
+repository map** or **Import again**. The panel shows progress and offers
+**Stop import**. When complete, it reports files, units, and packages.
 
-The import lists tracked regular files from the Git index and reads their current working-tree contents. It applies the same exclusions as repository previews: symlinks, binary files, common generated and credential paths, and `db_only/`. It maps up to 400,000 files from up to 1,000,000 tracked paths, reads up to 512 KiB of each file, and analyzes the first 6,000 lines. `--projects` limits the import to as many as 32 directories. A project imports its permitted directories.
+For the workspace shared with `okb code`, open **Work → Standalone sessions →
+Repository map settings**. Choose the scope and history depth, then use
+**Import repository map**. **Refresh map** reads the current status, and
+**Cancel import** stops an active import.
 
-A later import reads only the files whose contents changed. `--full` reads every file again and rebuilds the term statistics. `--history-commits` sets how many commits to read for files that change together. The default is 2,000, and `0` skips history. Commits that touch more than 40 files are ignored.
+The import lists tracked regular files from the Git index and reads their current working-tree contents. It applies the same exclusions as repository previews: symlinks, binary files, common generated and credential paths, and `db_only/`. It maps up to 400,000 files from up to 1,000,000 tracked paths, reads up to 512 KiB of each file, and analyzes the first 6,000 lines. `--projects` limits the import to as many as 32 directories. A registered project imports within its permitted directories. Tracked root markers can identify the repository layout during a scoped import. Marker contents outside the chosen directories stay outside the map.
 
-A first import that is interrupted resumes where it stopped. A later import applies as a whole: until it finishes, requests keep reading the map from the last finished import, and an interrupted one changes nothing. One import runs per map at a time.
+A later import reuses unchanged file analysis. `--full` reads every file again and rebuilds the term statistics. `--history-commits` sets how many commits to read for files that change together. The default is 2,000, the scan cap is 20,000, and `0` skips history. Commits that touch more than 40 files are ignored.
+
+A cancelled or interrupted first import can reuse files already processed. During a later import, requests keep reading the last published map. A cancellation before publication preserves that generation. One import runs per map at a time.
 
 The import produces three things.
 
-- **The map.** A private SQLite index of packages, files, units, declarations, and links, with a compact vector for each unit. A unit is a function, class, section, or run of declarations, at most 120 lines. Declarations are recognized by line patterns for TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, C#, Scala, Swift, Dart, C, C++, Objective-C, Ruby, PHP, shell, SQL, Protocol Buffers, GraphQL, Prisma, Elixir, Lua, Terraform, Makefiles, and Markdown headings. The map is derived. Remove its directory and import again to rebuild it.
+- **The map.** A private SQLite index of packages, files, units, declarations, and links, with a compact vector for each unit. A unit is a function, class, section, or run of declarations, at most 120 lines. Declarations are recognized by line patterns for TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, C#, Scala, Swift, Dart, C, C++, Objective-C, Ruby, PHP, shell, SQL, Protocol Buffers, GraphQL, Prisma, Elixir, Lua, Terraform, Makefiles, and Markdown headings. The map index and vectors are derived. Rerun the import with `--full` to rebuild their contents. The knowledge bundle and `learning.sqlite` share the map’s state directory, so retain those if you reset derived files manually.
 - **A knowledge bundle.** Open Knowledge Format Markdown that you can read and edit in any editor: one card per package under `packages/`, and draft skills under `skills/` that describe where each directory's modules are registered and where the repository states its own rules. Text you add under a card's `## Notes` heading stays through later imports. To take over a card completely, change its `generated.by` field, and the importer leaves that card alone. `okb doctor --bundle <path>` checks the bundle. `okb code map` prints its path.
 - **The project's own check commands.** Package scripts, Makefile and justfile targets, and single-command CI steps, each stored as an argument list with the file and line that declares it. okbrain never runs them. They are sent as facts with a selection, so an answer can say how to check a change with the project's real commands.
 
@@ -283,7 +306,7 @@ okb code lesson --workspace ./my-monorepo --anchors packages/auth \
 okb code skills --workspace ./my-monorepo
 ```
 
-`okb code skills` lists each fact, skill, and lesson with its state and its acceptance counts when sent and when withheld. `--disable <id>` stops delivery, and `--enable <id>` clears its earlier counts and starts a new trial. An explicit `status: stable` or `status: deprecated` in a skill's file overrides its measured state. Measurements live in `learning.sqlite`, so `--everything` clears them while preserving the Markdown. In a project, the owner records lessons under **Project settings → Repository map**, which also lists the measured skills. Recording the same lesson with the same anchors again preserves the existing note.
+`okb code skills` lists each fact, skill, and lesson with its state and its acceptance counts when sent and when withheld. `--disable <id>` stops delivery, and `--enable <id>` clears its earlier counts and starts a new trial. An explicit `status: stable` or `status: deprecated` in a skill's file overrides its measured state. Measurements live in `learning.sqlite`, so `--everything` clears them while preserving the Markdown. The app’s repository map controls list measured skills and allow the local owner to record lessons. In **Standalone sessions**, they can also restart or disable a trial and forget learned state. Recording the same lesson with the same anchors again preserves the existing note.
 
 Learned state is a separate `learning.sqlite` beside the map. For each of the most recent 2,000 reviewed requests it keeps the session name, request ID, outcome, a 256-number hashed sketch of the task's words, and the paths, names, and scores of up to 96 candidate units. Vocabulary is stored as single words attached to a declaration, up to six per accepted request. It holds no source text, no prompts, and no answers. Because it contains words from your tasks and the names of your files and declarations, protect it like a transcript.
 
@@ -292,6 +315,8 @@ okb code forget --workspace ./my-monorepo --session auth   # what was recorded f
 okb code forget --workspace ./my-monorepo --rollback       # return to the best parameter snapshot
 okb code forget --workspace ./my-monorepo --everything     # all learned state for this repository
 ```
+
+Finish or cancel an active import before resetting all learned state.
 
 Deleting a project session, or letting it expire, removes what was recorded from it. Parameter changes and vocabulary already learned from that session remain until you roll back or reset.
 
@@ -304,7 +329,7 @@ okb code plan --workspace ./my-monorepo --provider openai --model gpt-5 \
   --prompt 'Add a currency field to the invoice payload and update every publisher.' --show-content
 ```
 
-The plan lists its work orders. Each has a scope, its own selection within the budget, the model it will use, and the links between its code and the other scopes. The plan lists each excerpt's path and lines, the number of map lines, and the facts by ID. `--show-content` prints each order's excerpts, map lines, and facts in full, which is everything that worker is sent. With `--workers auto`, the default, the plan uses one worker unless the task's evidence falls in at least two separate areas and a single selection could not hold it. `--workers 2` to `--workers 4` asks for that many when the evidence supports them. `--context-tokens` applies to each worker.
+The plan lists its work orders. Each has a scope, its own selection within the budget, the model and reasoning level, and the links between its code and the other scopes. Review provider preferences and the configured fallback order before approving. The plan lists each excerpt's path and lines, the number of map lines, and the facts by ID. `--show-content` prints each order's excerpts, map lines, and facts in full, which is everything that worker is sent. With `--workers auto`, the default, the plan uses one worker unless the task's evidence falls in at least two separate areas and a single selection could not hold it. `--workers 2` to `--workers 4` asks for that many when the evidence supports them. `--context-tokens` applies to each worker.
 
 ```sh
 okb code run --workspace ./my-monorepo --session invoices --request-id inv-1 \
@@ -312,7 +337,7 @@ okb code run --workspace ./my-monorepo --session invoices --request-id inv-1 \
   --prompt 'Add a currency field to the invoice payload and update every publisher.'
 ```
 
-In the app, choose **Orchestrated plan** as the source. The preview shows each work order's scope, excerpts, map, facts, and model. A work order stays inside the directories chosen for the request, even when its package is wider. **Copy source manifest** copies the plan ID, the work orders' source references and digests, and their model choices. Approving the plan approves all of its calls.
+In a registered project, choose **Orchestrated plan** as the source. In a standalone session, choose **Orchestrated repository plan**. The preview shows each work order's scope, excerpts, map, facts, and model. A work order stays inside the directories chosen for the request, even when its package is wider. **Copy source manifest** copies the plan ID, the work orders' source references and digests, and their model choices. Approving the plan approves all of its calls.
 
 Each worker runs in its own Pi Durable conversation with its work order and source. It receives no session history, no other worker's source, and no workspace tools. It proposes changes only inside its scope and lists what it needs from other scopes. Workers exchange nothing with each other while they run. One further call combines their reports and is instructed to add no findings of its own. If that call fails, the result shows the reports as the workers wrote them. With one worker there is no combining call.
 
@@ -341,7 +366,7 @@ Without a routing policy, every call uses the session's model. A policy lists up
 }
 ```
 
-Pass the policy with `--routing-json` to `okb code plan` and `okb code run --orchestrate`. In a project, the owner saves it under **Project settings → Repository map → Routing policy**.
+Pass the policy with `--routing-json` to `okb code plan` and `okb code run --orchestrate`. In a project, the owner saves it under **Project settings → Repository map → Routing policy**. In a standalone request, paste it into **Routing policy (optional JSON)** before previewing the plan.
 
 The model for each work order is chosen when the plan is built and is shown in the preview. The router estimates each candidate's cost of reaching an accepted result: Pi's listed price for the expected tokens, plus the chance of a rejected result multiplied by `reviewCost` and a retry on the baseline. `reviewCost` is what a rejected result costs you in review time, in US dollars. The default is 0.5, and higher values favour stronger models.
 
@@ -355,35 +380,51 @@ Set `OPENROUTER_API_KEY` and use `--provider openrouter` with a model ID from Pi
 
 The `openRouter` section of a routing policy sets the provider preferences for every OpenRouter call in the plan. Use `dataCollection` with `deny` to exclude upstream providers that may store or train on prompts, `zdr` for zero-data-retention endpoints, `order` for the upstream providers to try by name, `allowFallbacks` to control upstream fallback, and `sort` with `price`, `throughput`, or `latency`. Preview rejects a plan when Pi's adapter cannot carry the configured preferences for one of its models. [OpenRouter provider selection](https://openrouter.ai/docs/guides/routing/provider-selection.md)
 
-In the CLI a policy can name models from several providers, and each provider's key comes from its own environment variable. A project holds one provider's key, so every model in its policy must use the project's provider. Choose OpenRouter as the project's provider to route across vendors with one key.
+Local standalone policies can name models from several providers. Each provider must have its own credential. The CLI reads environment keys, and the app also uses keys the operator saved in Settings. A registered project's policy uses its own provider. Choose OpenRouter as the project's provider to route across vendors with one key.
 
 ### Measure the repository map
 
 `bun run scripts/benchmark-coding-atlas.ts` generates TypeScript monorepos of increasing size and reports import time, the time and size of one request's selection, and whether the selection holds each task's evidence. `--scales 400,4000,20000` sets the background file counts, `--budget` the token budget, and `--json` prints the full result. It is local and deterministic and calls no model.
 
-The fixture has eleven packages whose background modules share each package's vocabulary, and six tasks with known evidence: a named function, a cross-package contract, a function that exists in two apps, a description in ordinary words, a function with its tests, and a request that shares no words with the code that answers it. The run below used Linux x64, Bun 1.4.3, and an Intel Core i7-1260P.
+The fixture has eleven packages and six tasks with known evidence. It
+covers an exact declaration, a cross-package contract, a function shared by
+two apps, a natural-language search, a function and its tests, and a request
+whose wording shares no terms with the relevant code. The following local
+run used macOS arm64 and Bun 1.4.3 with
+`--scales 400,4000,20000,100000`. Other verification jobs were active, so
+these timings describe this run and are sensitive to system load.
 
 | Files | Units | Full import | Import with nothing changed | Import after 10 edits | On disk |
 |---:|---:|---:|---:|---:|---:|
-| 435 | 1,239 | 0.50 s | 0.07 s | 0.10 s | 2.2 MB |
-| 4,035 | 12,039 | 2.45 s | 0.29 s | 0.26 s | 18.1 MB |
-| 20,035 | 60,039 | 9.82 s | 1.60 s | 1.08 s | 89.4 MB |
-| 100,035 | 300,039 | 43.16 s | 3.29 s | 3.54 s | 450 MB |
+| 435 | 1,239 | 0.33 s | 74.3 ms | 120.1 ms | 2.2 MB |
+| 4,035 | 12,039 | 3.54 s | 239.5 ms | 263.8 ms | 18.2 MB |
+| 20,035 | 60,039 | 7.97 s | 993.6 ms | 668.3 ms | 89.9 MB |
+| 100,035 | 300,039 | 129.17 s | 5.73 s | 7.19 s | 452 MB |
 
-With a 2,000-token budget, the selection stays the same size while the repository grows 230 times. The lexical preview from [Scope context in a monorepo](#scope-context-in-a-monorepo), pointed at the whole workspace, reads 256 files per request and loses evidence as the repository outgrows that.
+The map stays within the 2,000-token budget at every size. The lexical
+preview uses the entire workspace as its scope and scans up to 256 files.
 
 | Files | Map p50 / p95 | Map tokens, mean / max | Map evidence recall | Lexical preview p50 | Lexical evidence recall |
 |---:|---:|---:|---:|---:|---:|
-| 435 | 11.0 / 17.8 ms | 791 / 1,712 | 83% | 61.8 ms | 100% |
-| 4,035 | 20.4 / 28.3 ms | 785 / 1,712 | 83% | 62.2 ms | 42% |
-| 20,035 | 32.4 / 55.5 ms | 829 / 1,712 | 83% | 104.7 ms | 42% |
-| 100,035 | 79.5 / 99.8 ms | 918 / 1,712 | 83% | 107.1 ms | 17% |
+| 435 | 35.3 / 46.8 ms | 791 / 1,712 | 83% | 63.4 ms | 100% |
+| 4,035 | 36.3 / 47.8 ms | 785 / 1,712 | 83% | 64.5 ms | 42% |
+| 20,035 | 43.4 / 52.6 ms | 829 / 1,712 | 83% | 84.4 ms | 42% |
+| 100,035 | 178.8 / 297.6 ms | 918 / 1,712 | 83% | 191.1 ms | 17% |
 
-The map finds all the evidence for five of the six tasks at every size. Of the files it selects, 54% hold task evidence at 435 files and 41% at 100,035. The rest are linked context such as a function's test or the definition it calls. For the lexical preview that share falls from 38% to 2%.
+The map finds all the evidence for five of six tasks at every size. The share
+of selected files containing task evidence goes from 54.2% at 435 files to
+41.4% at 100,035 files. The lexical preview goes from 37.6% to 2.4%. This
+measure counts linked files without labeled evidence as other context.
 
-The sixth task shares no words with its answer, and the map misses it at every size before any review. After two accepted reviews that used the right file, a third request worded differently from both finds it at every size, and the other five tasks keep full recall. Recording a review takes 12 to 51 ms.
+The map initially misses the task whose wording shares no terms with the
+answer. After two accepted reviews using the relevant file, a differently
+worded third request finds it at every size. The other five tasks retain full
+recall. Recording a review takes 14.6 to 125.5 ms in this run.
 
-These numbers describe selection on a generated fixture. They do not measure answer quality, and recall on your repository will differ. Use [independent evaluation](#evaluate-provider-runs-with-independent-review) with the **Repository map** source to measure reviewed outcomes.
+These measurements cover source selection on a generated fixture. Use
+[independent evaluation](#evaluate-provider-runs-with-independent-review)
+with **Repository map** as the source to measure reviewed outcomes on your
+repository.
 
 ## Resume or follow up
 
@@ -477,7 +518,7 @@ bun run packaging/coding-worker/smoke.ts "$OKB_CODING_WORKER_IMAGE"
 
 ### Check a deployment from the app
 
-In the Mac or local web app, open **Coding → Project settings → Deployment checks**. The local operator can review the worker mode, pinned image ID and configured network, project provider and model, credential source, transcript retention policy, and team listener status. The panel shows credential presence without revealing its value. Project member tokens cannot open this panel.
+In the Mac or local web app, open **Work → Project settings → Deployment checks**. The local operator can review the worker mode, pinned image ID and configured network, project provider and model, credential source, transcript retention policy, and team listener status. The panel shows credential presence without revealing its value. Project member tokens cannot open this panel.
 
 With a writable brain selected on a server using Linux Docker workers, choose **Run offline worker check**. The check looks up the pinned image in local Docker, inspects the configured network, and launches a disposable container with Docker's `none` network. The result lists the observed session mount, filesystem and process controls, and network isolation. Use the passing, failing, or skipped checks to see which controls ran. The probe uses synthetic files and requires no provider account. [Docker `none` network](https://docs.docker.com/engine/network/drivers/none/)
 
@@ -525,6 +566,6 @@ The preview includes a Markdown comment that links GitHub's receipt to the local
 
 ## Validation status
 
-The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, retention, review and approved patch replay. The map tests also cover narrowed directories, untracked files, interrupted imports, stale approvals, project isolation, review learning, and forgetting learned episodes during transcript deletion. Scripted orchestration tests cover provider fallback, a failed combining call, cancellation, and recovery after the process is stopped during generation and the checkout and map are removed. The Chromium smoke walks through importing a map, previewing and sending both new source modes, copying the plan manifest, and inspecting the admitted source and order reports. The compiled binary's commands and embedded app were exercised separately.
+The HTTP tests exercise admission, interruption, recovery, cancellation, project authorization, retention, review and approved patch replay. The map tests also cover narrowed directories, untracked files, interrupted imports, stale approvals, project isolation, review learning, and forgetting learned episodes during transcript deletion. Scripted orchestration tests cover provider fallback, a failed combining call, cancellation, and recovery after the process is stopped during generation and the checkout and map are removed. The Chromium smoke covers map import in the project UI, preview and send for map and plan requests, copying the plan manifest, and inspecting saved source and work reports. The packaged macOS smoke exercises the same embedded app through the native wrapper.
 
 Tests verify OpenRouter key lookup with a fixture and capture the approved provider preferences from Pi's Chat Completions and Messages serializers. Live generation still needs an approved provider account, and evaluating accepted results also needs independent human reviews. Selection quality was measured on generated repositories. A local HTTPS reverse proxy was exercised in Chromium with a project token. The Linux Docker drill exercises offline Pi admission, the worker boundary, fail-closed launch, and backup and restore with disposable state. The intended enterprise host, its provider egress, backup policy and access controls still need verification. [Roadmap](../ROADMAP.md)

@@ -155,6 +155,12 @@ async function gitText(workspace: string, args: string[], maxBytes: number, time
   }
 }
 
+export async function readBranch(workspace: string): Promise<string | undefined> {
+  const output = await gitText(workspace, ["symbolic-ref", "--quiet", "--short", "HEAD"], 1024, 5000);
+  const branch = output?.replace(/\r?\n$/u, "");
+  if (branch && !/[\x00-\x20\x7f\ufffd]/u.test(branch)) return branch;
+}
+
 export interface ChangeCoupling {
   commits: number;
   /** Symmetric pairs `[a, b, weight]` with `a < b`, strongest first. */

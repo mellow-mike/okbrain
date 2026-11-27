@@ -39,7 +39,7 @@ import { measurePinnedViteRetrieval, requirePinnedViteRetrievalScope, RetrievalB
 import type { CodingTaskProgress } from "./task-progress.ts";
 import type { TeamStartup } from "./team-listener.ts";
 import { addLesson, AtlasError, atlasStatus, forgetLearningSession } from "./atlas/context.ts";
-import { importRepository, type ImportProgress, type ImportReport } from "./atlas/import.ts";
+import { browserImportOptions, browserRepositoryFiles, RepositoryImports } from "./atlas/browser.ts";
 import type { AtlasLocation } from "./atlas/store.ts";
 import { maxWorkers } from "./orchestrator.ts";
 import { recordCodingOutcome } from "./outcomes.ts";
@@ -194,7 +194,7 @@ type SourceSelection = {
   files?: string[];
   packages?: ReturnType<typeof validatePackageReviews>;
   repository?: { profile?: CodingProjectProfile; projects?: string[]; query: string; tokenBudget?: number };
-  atlas?: { query?: string; projects: string[]; tokenBudget?: number; deferred?: true };
+  atlas?: { query?: string; projects: string[]; exclude?: string[]; tokenBudget?: number; deferred?: true };
   orchestration?: { projects: string[]; tokenBudget?: number; workers?: number | "auto" };
 };
 
@@ -205,8 +205,9 @@ function sourceOptions(project: ProjectRow, body: Json): SourceSelection {
     const tokenBudget = mapBudget(body);
     if (body.source === "atlas") {
       const query = body.query === undefined || body.query === "" ? undefined : field(body, "query", 2048);
+      const exclude = body.exclude === undefined || (Array.isArray(body.exclude) && !body.exclude.length) ? undefined : pathsInProject(project, body.exclude);
       if (body.deferred !== undefined && typeof body.deferred !== "boolean") throw new ProjectControlError("Choose whether to approve excerpts for lookup.");
-      return { atlas: { projects, ...(query ? { query } : {}), ...(tokenBudget !== undefined ? { tokenBudget } : {}), ...(body.deferred === true ? { deferred: true as const } : {}) } };
+      return { atlas: { projects, ...(exclude ? { exclude } : {}), ...(query ? { query } : {}), ...(tokenBudget !== undefined ? { tokenBudget } : {}), ...(body.deferred === true ? { deferred: true as const } : {}) } };
     }
     const workers = body.workers;
     if (workers !== undefined && workers !== "auto" && (typeof workers !== "number" || !Number.isInteger(workers) || workers < 1 || workers > maxWorkers))
@@ -256,15 +257,6 @@ type RetrievalBenchmarkState = RetrievalBenchmarkInput & {
   total: number;
   revision: string;
   report?: BenchmarkReport;
-  error?: string;
-};
-
-type ImportState = {
-  status: "running" | "completed" | "failed";
-  cancel: AbortController;
-  promise: Promise<void>;
-  progress?: ImportProgress;
-  report?: ImportReport;
   error?: string;
 };
 
@@ -327,7 +319,7 @@ export class CodingProjectControl {
   #providerCheckInFlight: AbortController | undefined;
   #checkoutInFlight: AbortController | undefined;
   readonly #benchmarkStates = new Map<string, RetrievalBenchmarkState>();
-  readonly #imports = new Map<string, ImportState>();
+  readonly #imports = new RepositoryImports();
   #activeBenchmark: { project: string; cancel: AbortController; promise: Promise<void> } | undefined;
   readonly #gates = new Map<string, Promise<void>>();
   readonly #requests = new Set<Promise<unknown>>();
@@ -492,11 +484,10 @@ export class CodingProjectControl {
     this.#checkoutInFlight?.abort();
     const benchmark = this.#activeBenchmark;
     benchmark?.cancel.abort();
-    for (const state of this.#imports.values()) state.cancel.abort();
     const active = [...this.#active.values()];
     for (const { stop } of active) stop?.();
     await Promise.allSettled([...active.map(({ promise }) => promise), ...this.#requests, this.#retentionSweep, benchmark?.promise,
-      ...[...this.#imports.values()].map(({ promise }) => promise)]);
+      this.#imports.close()]);
     try {
       this.#db.close(true);
     } finally {
@@ -745,9 +736,10 @@ export class CodingProjectControl {
         }, this.#dependencies(project, actor));
         return { source: "orchestrated" as const, plan, id: plan.id, sourceManifest: codingSourceManifest({ source: "orchestrated", plan }) };
       }
-      const { ranked: _ranked, ...context } = await previewAtlasContext(workspace, prompt, source.atlas, this.#atlas(project.id));
+      const { ranked, ...context } = await previewAtlasContext(workspace, prompt, source.atlas, this.#atlas(project.id));
       if (body.measurePreview === true) this.#evaluations.preview(project.id, actor.id, context.manifest.id, performance.now() - started, undefined);
-      return { source: "atlas" as const, ...context, sourceManifest: codingSourceManifest({ source: "atlas", manifest: context.manifest }) };
+      return { source: "atlas" as const, ...context, ...(body.explain === true ? { ranked } : {}),
+        sourceManifest: codingSourceManifest({ source: "atlas", manifest: context.manifest }) };
     }
     const result = source.packages
       ? { source: "packages" as const, ...await previewPackageReviews(workspace, source.packages) }
@@ -2163,34 +2155,27 @@ export class CodingProjectControl {
   }
 
   /** Map the project's permitted directories. Runs in the background and reports progress. */
-  async #importMap(project: ProjectRow, method: string, actor: Actor, canWrite: () => boolean) {
+  async #importMap(project: ProjectRow, method: string, body: Json, actor: Actor, canWrite: () => boolean) {
     if (method === "POST") {
       this.#requireOwner(actor);
       if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to import this repository.", 403);
+      if (body.cancel === true) return this.#importView(this.#imports.cancel(project.id));
+      if (body.cancel !== undefined) throw new ProjectControlError("Choose whether to stop the repository import.");
+      const scopes = pathsInProject(project, body.projects ?? JSON.parse(project.scopes));
+      let options;
+      try { options = browserImportOptions(body); }
+      catch (error) {
+        if (error instanceof AtlasError) throw new ProjectControlError(error.message);
+        throw error;
+      }
       const workspace = await this.#workspace(project);
       if (this.#closing || !canWrite()) throw new ProjectControlError("Open a writable brain to import this repository.", 403);
-      const current = this.#imports.get(project.id);
-      if (current?.status === "running") return this.#importView(current);
-      const cancel = new AbortController();
-      const state: ImportState = { status: "running", cancel, promise: Promise.resolve() };
-      state.promise = importRepository({
-        workspace, scopes: JSON.parse(project.scopes) as string[], signal: cancel.signal, progress: (progress) => { state.progress = progress; },
-      }, this.#atlas(project.id)).then((report) => {
-        state.status = "completed";
-        state.report = report;
-        this.#audit(project.id, "repository_imported", actor.id);
-      }, (error: unknown) => {
-        state.status = "failed";
-        state.error = error instanceof AtlasError ? error.message : "The repository import stopped before it finished. Try again.";
-        if (!(error instanceof AtlasError)) log.warn("repository import failed", { error: error instanceof Error ? error.message : "unknown" });
-      });
-      this.#imports.set(project.id, state);
-      return this.#importView(state);
+      return this.#importView(this.#imports.start(project.id, { workspace, scopes, ...options }, this.#atlas(project.id),
+        () => this.#audit(project.id, "repository_imported", actor.id)));
     }
     const status = await atlasStatus(project.workspace, this.#atlas(project.id)).catch(() => ({ imported: false as const }));
-    const current = this.#imports.get(project.id);
     return {
-      ...(current ? this.#importView(current) : { status: "idle" as const }),
+      ...this.#importView(this.#imports.view(project.id)),
       imported: status.imported,
       ...(status.imported ? {
         map: { files: status.meta.files, units: status.meta.units, packages: status.meta.packages, importedAt: status.meta.importedAt ?? null, limited: status.meta.limited },
@@ -2206,11 +2191,20 @@ export class CodingProjectControl {
     };
   }
 
-  #importView(state: ImportState) {
+  #importView(state: ReturnType<RepositoryImports["view"]>) {
     return {
       status: state.status, ...(state.progress ? { progress: state.progress } : {}), ...(state.error ? { error: state.error } : {}),
       ...(state.report ? { report: (({ workspace: _workspace, knowledge: { directory: _directory, ...knowledge }, ...report }) => ({ ...report, knowledge }))(state.report) } : {}),
     };
+  }
+
+  async #repositoryFiles(project: ProjectRow, body: Json) {
+    const scopes = pathsInProject(project, body.projects ?? JSON.parse(project.scopes));
+    try { return await browserRepositoryFiles(await this.#workspace(project), scopes, this.#atlas(project.id)); }
+    catch (error) {
+      if (error instanceof AtlasError) throw new ProjectControlError(error.message, 409);
+      throw error;
+    }
   }
 
   async #lesson(project: ProjectRow, body: Json, actor: Actor, canWrite: () => boolean) {
@@ -2298,7 +2292,8 @@ export class CodingProjectControl {
     if (action === "provider-check" && method === "POST") return this.#providerCheck(project, body, actor, canWrite);
     if (action === "retention" && (method === "GET" || method === "POST")) return this.#retention(project, method, body, actor);
     if (action === "presets" && (method === "GET" || method === "POST")) return this.#presets(project, method, body, actor);
-    if (action === "import" && (method === "GET" || method === "POST")) return this.#importMap(project, method, actor, canWrite);
+    if (action === "import" && (method === "GET" || method === "POST")) return this.#importMap(project, method, body, actor, canWrite);
+    if (action === "files-preview" && (method === "GET" || method === "POST")) return this.#repositoryFiles(project, body);
     if (action === "routing" && (method === "GET" || method === "POST")) return this.#routingSettings(project, method, body, actor, canWrite);
     if (action && method === "POST" && (githubPullActions.includes(action) || githubBranchActions.includes(action)))
       return this.#withSession(project, body, () => this.#github(project, action, method, body, actor, canWrite));

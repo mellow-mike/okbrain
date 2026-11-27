@@ -219,6 +219,47 @@ test("a second import reads only what changed and keeps a person's notes and edi
   await importRepository({ workspace });
 });
 
+test("scoped ingestion uses tracked root markers and keeps stable partial-file counts", async () => {
+  const repo = join(root, "scoped-markers");
+  const location = { stateDir: join(root, "scoped-markers-map") };
+  const packagePath = join(repo, "packages", "app");
+  await mkdir(packagePath, { recursive: true });
+  await mkdir(join(repo, "services", "kernel"), { recursive: true });
+  const source = join(packagePath, "large.ts");
+  const shortSource = "export const known = true;\n";
+  await Promise.all([
+    writeFile(join(repo, "pnpm-lock.yaml"), "lockfileVersion: 9\n"),
+    writeFile(join(repo, "MODULE.bazel"), "module(name = 'fixture')\n"),
+    writeFile(join(repo, "private.ts"), "export const outsideScope = true;\n"),
+    writeFile(join(packagePath, "package.json"), '{"name":"fixture-app","scripts":{"test":"exit 1"}}'),
+    writeFile(join(repo, "services", "kernel", "BUILD.bazel"), '# fixture\n'),
+    writeFile(source, shortSource + "x".repeat(512 * 1024)),
+  ]);
+  for (const args of [["init", "--quiet"], ["add", "--", "."]]) {
+    const result = Bun.spawnSync(["git", ...args], { cwd: repo, stderr: "pipe" });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  }
+  const workspace = await realpath(repo);
+  const options = { workspace, scopes: ["packages/app", "services/kernel"], historyCommits: 0 };
+  const first = await importRepository(options, location);
+  expect(first.limitsReached.fileBytes).toBe(1);
+  const atlas = Atlas.open(workspace, location);
+  try {
+    expect(atlas.get("SELECT argv FROM tools WHERE id = ?", "packages/app#test:test")).toMatchObject({ argv: '["pnpm","run","test"]' });
+    expect(atlas.get("SELECT ecosystem FROM packages WHERE root = ?", "services/kernel")).toMatchObject({ ecosystem: "bazel" });
+    expect(atlas.all<{ path: string }>("SELECT path FROM files").map(({ path }) => path)).not.toContain("private.ts");
+    expect(atlas.get("SELECT path FROM files WHERE path = 'MODULE.bazel'")).toBeUndefined();
+  } finally { atlas.close(); }
+  const unchanged = await importRepository(options, location);
+  expect(unchanged.changedFiles).toBe(0);
+  expect(unchanged.limitsReached.fileBytes).toBe(1);
+  // The indexed text is byte-for-byte equivalent when the previously clipped tail is removed.
+  await writeFile(source, shortSource);
+  const shortened = await importRepository(options, location);
+  expect(shortened.changedFiles).toBe(0);
+  expect(shortened.limitsReached.fileBytes).toBe(0);
+});
+
 test("the readout finds each task's evidence inside the budget and says why", async () => {
   for (const task of fixture.tasks.filter(({ kind }) => kind !== "paraphrased")) {
     const context = await selectAtlasContext({ workspace, query: task.query, tokenBudget: 2000 });
@@ -442,6 +483,12 @@ test("an interrupted import never leaves a half-updated map in use", async () =>
   } }, location)).rejects.toThrow("The repository import was cancelled.");
   const unchanged = await selectAtlasContext({ workspace: repo.workspace, query: identifier.query }, location);
   expect(unchanged.manifest.atlas?.generation).toBe(1);
+
+  const fromEventLoop = new AbortController();
+  await expect(importRepository({ workspace: repo.workspace, signal: fromEventLoop.signal, progress: ({ phase }) => {
+    if (phase === "embed") setImmediate(() => fromEventLoop.abort());
+  } }, location)).rejects.toThrow("The repository import was cancelled.");
+  expect((await selectAtlasContext({ workspace: repo.workspace, query: identifier.query }, location)).manifest.atlas?.generation).toBe(1);
 
   const afterCommit = new AbortController();
   const second = await importRepository({ workspace: repo.workspace, signal: afterCommit.signal, progress: ({ phase }) => {

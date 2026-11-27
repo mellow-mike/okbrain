@@ -161,18 +161,18 @@ describe("request guards", () => {
       expect(page).toContain(`href="${link}"`);
   });
 
-  test("the GUI JS wires every non-localOnly op in the registry to a surface", async () => {
+  test("the local GUI command form discovers every allowed CLI operation and parameter", async () => {
     const page = await (await fetch(base)).text();
-    const assets = [...page.matchAll(/<script src="(\/gui\/[^"/]+\.js)"/g)].map(([, asset]) => asset!);
-    const appJs = (await Promise.all(assets.map(async (asset) => (await fetch(new URL(asset, base))).text()))).join("\n");
-    // Derived from the registry, so a new network-facing op cannot ship without a GUI home.
-    for (const op of operations.filter((o) => !o.localOnly && o.name !== "ask"))
-      expect(appJs).toContain(`'${op.name}'`);
-    // ...except `ask`, which the GUI drives over the SSE stream endpoint.
-    expect(appJs).toContain("/api/ask/stream");
-    // Settings actions have dedicated routes outside the generic op surface.
-    for (const needle of ["/api/status", "/api/brains/mounts", "/api/bookmarklet", "/api/mcp/http"])
-      expect(appJs).toContain(needle);
+    expect(page).toContain('src="/gui/advanced-settings.js"');
+    const response = await call("api/local/commands");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ readonly: false, commands: operations.filter((op) => !op.localOnly)
+      .map(({ name, cliName, summary, scope, params }) => ({ name, cliName, summary, scope, params })) });
+    expect((await call("api/local/commands", {}, null)).status).toBe(401);
+    expect((await call("api/local/commands", { headers: { authorization: `Bearer ${TOKEN}` } }, null)).status).toBe(401);
+    expect((await call("api/local/commands", { headers: { origin: "https://clipped.example" } })).status).toBe(403);
+    expect((await call("api/local/commands", { method: "POST" })).status).toBe(404);
   });
 
   test("focused maps explain real links and filter private drafts before return", async () => {
@@ -453,9 +453,7 @@ describe("op routes", () => {
 
   test("unknown op → 404; localOnly op → 404; bad params → 400; not_found → 404", async () => {
     expect((await post("nonsense", {})).status).toBe(404);
-    expect((await post("serve", {})).status).toBe(404);
-    expect((await post("bookmarklet", {})).status).toBe(404);
-    for (const name of ["code_context", "code_run", "code_status"])
+    for (const { name } of operations.filter((op) => op.localOnly))
       expect((await post(name, {})).status).toBe(404);
     const bad = await post("search", { nope: 1 });
     expect(bad.status).toBe(400);
@@ -511,6 +509,10 @@ describe("server routes for the GUI", () => {
     expect(bm.bookmarklet).toContain(`token=${clipToken(TOKEN)}`);
     expect(bm.bookmarklet).not.toContain(TOKEN);
     expect(bm.bookmarklet).toContain(`:${api.port}/clip`);
+    const custom = await call("api/bookmarklet?port=7777");
+    expect(await custom.json()).toEqual({ port: 7777, bookmarklet: bookmarkletJs(7777, TOKEN) });
+    expect((await call("api/bookmarklet?port=65536")).status).toBe(400);
+    expect((await call("api/bookmarklet?port=8080%2Fscript")).status).toBe(400);
   });
 
   test("restoring a GitHub brain requires a writable local owner and a separate destination", async () => {
@@ -554,6 +556,7 @@ describe("server routes for the GUI", () => {
       expect(((await read.json()) as { result: { raw: string } }).result.raw).toContain("Ref body");
       const status = (await (await call("api/status", { headers: { "x-okb-brain": "ref" } })).json()) as { brain: string; readonly: boolean };
       expect(status).toMatchObject({ brain: "ref", readonly: true });
+      expect(await (await call("api/local/commands", { headers: { "x-okb-brain": "ref" } })).json()).toMatchObject({ readonly: true });
 
       const write = await call("api/op/capture", { method: "POST", body: JSON.stringify({ text: "nope" }), headers: { "x-okb-brain": "ref" } });
       expect(write.status).toBe(403); // read-only mount
@@ -820,6 +823,9 @@ describe("clip endpoint (bookmarklet)", () => {
     expect(bookmarklet).toContain("http://127.0.0.1:6522/clip");
     const custom = await okb(["bookmarklet", "--port", "7777", "--json", "--bundle", bundle]);
     expect(JSON.parse(custom.stdout).bookmarklet).toContain(":7777/clip");
+    const invalid = await okb(["bookmarklet", "--port", "65536", "--bundle", bundle]);
+    expect(invalid.code).toBe(2);
+    expect(invalid.stderr).toContain("1 to 65535");
   });
 
   test("bookmarkletJs carries the selection as the quote", () => {

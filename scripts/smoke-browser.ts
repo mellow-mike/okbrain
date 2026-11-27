@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -88,6 +88,43 @@ async function selectGraphNote(page: Page, id: string) {
     const { cy } = window as unknown as { cy: { getElementById(id: string): { emit(event: string): void } } };
     cy.getElementById(note).emit("tap");
   }, { note: id });
+}
+
+async function smokeAdvancedOperations(page: Page) {
+  const advanced = page.locator("#advanced-operations");
+  await advanced.getByText("Advanced operations", { exact: true }).click();
+  await advanced.getByRole("combobox", { name: "Operation", exact: true }).selectOption("list_concepts");
+  await advanced.getByLabel(/^--limit ·/u).fill("1");
+  await advanced.getByRole("checkbox", { name: /^--detail ·/u }).check();
+  const sent = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/list_concepts" &&
+    response.request().postDataJSON().limit === 1);
+  await advanced.getByRole("button", { name: "Run operation", exact: true }).click();
+  const response = await sent;
+  assert.ok(response.ok());
+  assert.deepEqual(response.request().postDataJSON(), { detail: true, limit: 1 });
+  await advanced.getByRole("status").getByText("Operation finished.", { exact: true }).waitFor();
+  assert.equal(JSON.parse(await advanced.locator("[data-result]").innerText()).length, 1);
+  await advanced.getByRole("combobox", { name: "Operation", exact: true }).selectOption("graph_data");
+  assert.equal(await advanced.getByRole("checkbox", { name: /including private notes/u }).isChecked(), false);
+  assert.equal(await advanced.getByRole("button", { name: "Save JSON", exact: true }).isVisible(), false);
+  await advanced.getByText("Advanced operations", { exact: true }).click();
+
+  const stdio = page.locator("#mcp-stdio");
+  await stdio.getByText("MCP stdio client configuration", { exact: true }).click();
+  const trusted = stdio.getByRole("checkbox", { name: /Allow this trusted client/u });
+  assert.doesNotMatch(await stdio.locator("pre").innerText(), /--trusted/u);
+  await trusted.check();
+  assert.match(await stdio.locator("pre").innerText(), /--trusted/u);
+  await trusted.uncheck();
+
+  const bookmarklet = page.locator("#bm-out");
+  const port = bookmarklet.getByRole("spinbutton", { name: "Local server port", exact: true });
+  await port.fill("6377");
+  await bookmarklet.getByRole("button", { name: "Update bookmarklet", exact: true }).click();
+  await bookmarklet.getByRole("status").getByText(/running on port 6377/u).waitFor();
+  const bookmark = await bookmarklet.getByRole("link", { name: "Clip to okbrain", exact: true }).getAttribute("href");
+  assert.match(bookmark ?? "", /:6377\/clip\?token=/u);
+  assert.ok(!bookmark?.includes(server.token));
 }
 
 try {
@@ -550,6 +587,7 @@ try {
     await rm(planNote, { force: true });
   }
   await nav.getByRole("link", { name: "Settings", exact: true }).click();
+  await smokeAdvancedOperations(page);
   const cacheSettings = page.locator("#cache-settings");
   await cacheSettings.getByText("SQLite", { exact: true }).waitFor();
   await cacheSettings.getByText("Change cache backend", { exact: true }).click();
@@ -1290,14 +1328,23 @@ try {
   git("commit", "-m", "Clarify the local date");
   const startRebase = Bun.spawnSync(["git", "-C", bundle, "rebase", "browser-upstream"]);
   assert.equal(startRebase.exitCode, 1, startRebase.stderr.toString());
+  const finishGitRefresh = Promise.withResolvers<void>();
+  await page.route("**/api/op/sync", async (route) => {
+    await finishGitRefresh.promise;
+    await route.continue();
+  }, { times: 1 });
   const conflictStatus = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/op/sync_recovery" &&
     response.request().postDataJSON().action === "status");
-  await gitSync.getByRole("button", { name: "Refresh Git status", exact: true }).click();
-  assert.deepEqual((await (await conflictStatus).json()).result?.conflicts, ["legacy-field-note.md"]);
-  await gitSync.getByRole("heading", { name: "Resolve sync conflicts", exact: true }).waitFor();
+  const previewConflict = gitSync.getByRole("button", { name: "Preview conflict", exact: true });
+  try {
+    await gitSync.getByRole("button", { name: "Refresh Git status", exact: true }).click();
+    assert.deepEqual((await (await conflictStatus).json()).result?.conflicts, ["legacy-field-note.md"]);
+    await gitSync.getByRole("heading", { name: "Resolve sync conflicts", exact: true }).waitFor();
+    assert.equal(await previewConflict.isEnabled(), false);
+  } finally { finishGitRefresh.resolve(); }
   assert.equal(await gitSync.getByRole("button", { name: "Sync now", exact: true }).isEnabled(), false);
   assert.equal(await gitSync.getByLabel("Conflicting file", { exact: true }).inputValue(), "legacy-field-note.md");
-  await gitSync.getByRole("button", { name: "Preview conflict", exact: true }).click();
+  await previewConflict.click();
   const conflictPreview = gitSync.locator("[data-conflict-preview]");
   await conflictPreview.getByText("Upstream changes", { exact: true }).waitFor();
   assert.equal(await conflictPreview.locator("details[open] pre").nth(0).textContent(), localText);
@@ -1702,7 +1749,9 @@ try {
       await page.unroute(checkoutRoute);
     }
   }
-  const teamAccess = page.locator(".coding-projects details").filter({
+  const management = page.getByText("Manage projects and team access", { exact: true });
+  if (await management.isVisible()) await management.click();
+  const teamAccess = page.locator(".coding-projects details.coding-panel").filter({
     has: page.getByText("Team browser access", { exact: true }),
   });
   await teamAccess.getByText("Team browser access", { exact: true }).click();
@@ -2130,6 +2179,49 @@ try {
   assert.deepEqual(manifest.files.map(({ path, startLine, endLine }) =>
     ({ path, startLine, endLine })), [{ path: "browser.ts", startLine: 1, endLine: 1 }]);
   assert.match(manifest.files[0]?.sha256 ?? "", /^[a-f0-9]{64}$/u);
+
+  const standaloneMap = page.locator("[data-standalone-map]");
+  await standaloneMap.getByText("Repository map settings", { exact: true }).click();
+  await standaloneMap.getByLabel("History commits", { exact: true }).fill("0");
+  const importedMap = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/coding/standalone/repository" &&
+    response.request().postDataJSON().action === "import");
+  await standaloneMap.getByRole("button", { name: "Import repository map", exact: true }).click();
+  assert.deepEqual((await importedMap).request().postDataJSON(), { workspace: await realpath(workspace), action: "import", historyCommits: 0 });
+  await standaloneMap.getByRole("status").getByText("Repository map imported.", { exact: true }).waitFor();
+  const attachBrowserSource = page.getByRole("button", { name: "Attach browser.ts", exact: true });
+  await attachBrowserSource.click();
+  assert.equal(await page.getByRole("button", { name: "Remove browser.ts", exact: true }).getAttribute("aria-pressed"), "true");
+  assert.equal(await page.getByRole("combobox", { name: "Source", exact: true }).inputValue(), "files");
+  await page.getByRole("combobox", { name: "Source", exact: true }).selectOption("atlas");
+  await page.getByLabel("Task", { exact: true }).fill("");
+  await page.getByLabel("Map search text", { exact: true }).fill("sourceMarker");
+  await previewStandalone.click();
+  await page.getByText("Ranked source candidates", { exact: true }).click();
+  await page.getByText(/lexical /u).first().waitFor();
+  assert.equal(await sendStandalone.isEnabled(), false);
+  assert.equal(standaloneFaux.state.callCount, 3);
+
+  await page.getByRole("combobox", { name: "Source", exact: true }).selectOption("orchestrated");
+  await page.getByLabel("Task", { exact: true }).fill("Review sourceMarker in browser.ts.");
+  await page.getByRole("combobox", { name: "Workers", exact: true }).selectOption("1");
+  await page.getByRole("button", { name: "Preview plan", exact: true }).click();
+  const approvePlan = page.getByRole("checkbox", { name: /Approve sending the task and selected source under this plan/u });
+  await approvePlan.waitFor();
+  assert.equal(standaloneFaux.state.callCount, 3);
+  await approvePlan.check();
+  standaloneFaux.setResponses([async (input) => {
+    assert.match(JSON.stringify(input.messages), /approved browser source/u);
+    return fauxAssistantMessage("Reviewed browser.ts with the repository plan.");
+  }]);
+  await sendStandalone.click();
+  await page.getByText("Reviewed browser.ts with the repository plan.", { exact: true }).waitFor();
+  await page.getByText("Saved task and source", { exact: true }).click();
+  await page.getByText("Review sourceMarker in browser.ts.", { exact: true }).waitFor();
+  await page.getByText("Teach the repository map from this review", { exact: true }).click();
+  await page.getByLabel("Additional files used (optional)", { exact: true }).fill("browser.ts");
+  await page.getByRole("button", { name: "Record review for the repository map", exact: true }).click();
+  await page.getByRole("status").getByText(/recorded · lane weights/u).waitFor();
+
   await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
   await page.getByRole("combobox", { name: "Saved session" }).selectOption("existing-cli");
   await page.getByRole("combobox", { name: "Saved request" }).selectOption("cli-complete");
@@ -2205,6 +2297,49 @@ try {
     prompt: projectPrompt,
   });
   await page.evaluate((id) => { location.hash = "#coding/" + id; }, project.id);
+
+  const workLayout = await browser.newPage({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
+  const workOutbound: string[] = [];
+  await workLayout.route("**/*", async (route) => {
+    if (new URL(route.request().url()).origin === origin) await route.continue();
+    else { workOutbound.push(route.request().url()); await route.abort(); }
+  });
+  try {
+    await workLayout.goto(new URL("#coding/" + project.id, server.url).toString());
+    const workRail = workLayout.getByRole("navigation", { name: "Workspaces" });
+    const repository = workLayout.getByRole("complementary", { name: "Repository and sessions", exact: true });
+    const inspector = workLayout.getByRole("complementary", { name: "Request inspector", exact: true });
+    await workRail.getByRole("link", { name: "Work", exact: true }).waitFor();
+    assert.equal(await workRail.getByRole("link", { name: "Work", exact: true }).getAttribute("aria-current"), "true");
+    await repository.getByRole("button", { name: "Attach browser.ts", exact: true }).click();
+    assert.equal(await workLayout.locator(".coding-composer select[name=source]").inputValue(), "files");
+    assert.equal(await repository.getByRole("button", { name: "Remove browser.ts", exact: true }).getAttribute("aria-pressed"), "true");
+    await workLayout.getByRole("button", { name: "Remove browser.ts from this request", exact: true }).click();
+    const context = inspector.getByRole("tab", { name: "Context", exact: true });
+    await inspector.getByRole("tab", { name: "Changes", exact: true }).focus();
+    await workLayout.keyboard.press("End");
+    assert.equal(await context.getAttribute("aria-selected"), "true");
+    await inspector.getByText("No saved source ranges for this request.", { exact: true }).waitFor();
+    for (const width of [1000, 375]) {
+      await workLayout.setViewportSize({ width, height: 760 });
+      const open = workLayout.getByRole("button", { name: "Inspector", exact: true });
+      await open.focus();
+      await workLayout.keyboard.press("Enter");
+      const drawer = workLayout.getByRole("dialog", { name: "Inspector", exact: true });
+      await drawer.getByRole("tab", { name: "Context", exact: true }).waitFor();
+      await workLayout.keyboard.press("Escape");
+      await drawer.waitFor({ state: "hidden" });
+      assert.equal(await open.evaluate((button) => document.activeElement === button), true);
+      assert.equal(await workLayout.evaluate(() => document.documentElement.scrollWidth), width);
+    }
+    assert.equal(await workLayout.getByRole("navigation", { name: "okbrain", exact: true }).isVisible(), false);
+    const navigation = workRail.getByRole("button", { name: "Expand navigation", exact: true });
+    await navigation.press("Enter");
+    await workLayout.getByRole("navigation", { name: "okbrain", exact: true }).waitFor();
+    await workLayout.keyboard.press("Escape");
+    assert.equal(await navigation.evaluate((button) => document.activeElement === button), true);
+    assert.deepEqual(workOutbound, []);
+  } finally { await workLayout.close(); }
 
   const deploymentPath = "/api/coding" + projectPath + "/deployment-check";
   const providerCheckPath = "/api/coding" + projectPath + "/provider-check";

@@ -260,11 +260,27 @@ document.getElementById('qs').addEventListener('submit', function (e) {
   var q = document.getElementById('qs-in').value.trim();
   if (q) location.hash = '#search/' + encodeURIComponent(q);
 });
+var workspaceMenu = document.getElementById('workspace-menu');
+function setWorkspaceMenu(open) {
+  document.body.classList.toggle('navigation-expanded', open);
+  workspaceMenu.setAttribute('aria-expanded', String(open));
+  workspaceMenu.setAttribute('aria-label', open ? 'Collapse navigation' : 'Expand navigation');
+}
+workspaceMenu.addEventListener('click', function () {
+  var open = workspaceMenu.getAttribute('aria-expanded') !== 'true';
+  setWorkspaceMenu(open);
+  if (open) (document.querySelector('#workspace-links .active') || document.querySelector('#workspace-links a')).focus();
+});
 document.addEventListener('keydown', function (e) {
   var tag = (document.activeElement && document.activeElement.tagName) || '';
-  if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(tag)) {
+  if (e.key === 'Escape' && workspaceMenu.getAttribute('aria-expanded') === 'true' && !document.querySelector('dialog[open]')) {
+    setWorkspaceMenu(false);
+    workspaceMenu.focus();
+  }
+  if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(tag) && !document.activeElement?.isContentEditable && !document.querySelector('dialog[open]')) {
     e.preventDefault();
     var qs = document.getElementById('qs-in');
+    if (!qs.getClientRects().length) setWorkspaceMenu(true);
     qs.focus();
     qs.select();
   }
@@ -357,6 +373,13 @@ function route() {
   return Okb.go(function () {
     activeGraph?.destroy();
     activeGraph = null;
+    setWorkspaceMenu(false);
+    document.body.dataset.workspace = name === 'coding' ? 'work' : 'knowledge';
+    var workspace = name === 'coding' ? 'work' : name === 'settings' || name === 'accounts' ? 'settings' : name === 'stats' ? 'activity' : 'knowledge';
+    document.querySelectorAll('.workspace-rail [data-workspace]').forEach(function (item) {
+      if (item.dataset.workspace === workspace) item.setAttribute('aria-current', 'true');
+      else item.removeAttribute('aria-current');
+    });
     document.querySelectorAll('#nav .links > a').forEach(function (a) { // not the wordmark's link
       var target = a.getAttribute('data-nav') || a.getAttribute('href').slice(1);
       var active = target === name || (name === 'editor' && target === 'edit') || (name === 'ask-plan' && target === 'ask') ||
@@ -373,7 +396,7 @@ function route() {
       } else a.removeAttribute('aria-current');
     });
     document.title = VIEW_TITLES[name] ? VIEW_TITLES[name] + ' · okbrain' : 'okbrain';
-    view.className = name === 'graph' ? 'bare' : '';
+    view.className = name === 'graph' ? 'bare' : name === 'coding' ? 'workspace-view' : '';
     view.scrollTop = 0;
     return fn(arg, seq);
   }, shared);
@@ -674,12 +697,14 @@ async function renderBrowse(filters, seq) {
   var initialType = filters instanceof URLSearchParams ? filters.get('type') : filters;
   var initialTag = filters instanceof URLSearchParams ? filters.get('tag') : null;
   view.innerHTML =
-    '<div class="stack wide"><h2>Browse</h2>' +
+    '<div class="stack wide"><h2>Library</h2>' +
     '<div class="toolbar"><input id="b-q" type="search" aria-label="Filter title, ID, or tags" placeholder="Filter title / id / tags…">' +
     '<select id="b-type" aria-label="Type"><option value="">all types</option></select>' +
     '<select id="b-tag" aria-label="Tag"><option value="">Any tag</option></select>' +
     '<select id="b-status" aria-label="Status"><option value="">any status</option><option>draft</option><option>stable</option><option>deprecated</option></select>' +
     '<select id="b-sort" aria-label="Sort by"><option value="updated">newest first</option><option value="title">title</option><option value="type">type</option></select>' +
+    '<label class="row">Maximum rows <input id="b-limit" type="number" min="1" step="1" placeholder="All"></label>' +
+    '<label class="row"><input id="b-ids" type="checkbox"> IDs only</label>' +
     '<span id="b-count" class="muted right"></span></div><div id="b-out" data-via="browse"></div></div>';
   var out = document.getElementById('b-out');
   Okb.working(out, 'loading');
@@ -704,6 +729,8 @@ async function renderBrowse(filters, seq) {
   var tagSel = document.getElementById('b-tag');
   var statusSel = document.getElementById('b-status');
   var sortSel = document.getElementById('b-sort');
+  var limit = document.getElementById('b-limit');
+  var idsOnly = document.getElementById('b-ids');
   var tags = Array.from(new Set(rows.flatMap(function (r) { return r.tags; })));
   if (initialTag !== null && !tags.includes(initialTag)) tags.push(initialTag);
   tags.sort(function (a, b) { return a.localeCompare(b); });
@@ -727,7 +754,15 @@ async function renderBrowse(filters, seq) {
       if (sort === 'type') return a.type.localeCompare(b.type) || a.id.localeCompare(b.id);
       return (b.updated || '') < (a.updated || '') ? -1 : (b.updated || '') > (a.updated || '') ? 1 : a.id.localeCompare(b.id);
     });
+    var max = limit.valueAsNumber;
+    if (Number.isSafeInteger(max) && max > 0) list = list.slice(0, max);
     document.getElementById('b-count').textContent = list.length + ' of ' + rows.length;
+    if (idsOnly.checked && list.length) {
+      out.innerHTML = '<ul class="plain">' + list.map(function (r, i) {
+        return '<li data-rank="' + (i + 1) + '"><code>' + conceptLink(r.id) + '</code></li>';
+      }).join('') + '</ul>';
+      return;
+    }
     out.innerHTML = list.length
       ? '<table class="tbl"><thead><tr><th>Concept</th><th>Type</th><th>Signals</th><th>Updated</th><th>Tags</th></tr></thead><tbody>' +
         list.map(function (r, i) {
@@ -741,6 +776,8 @@ async function renderBrowse(filters, seq) {
   query.addEventListener('input', draw);
   statusSel.addEventListener('change', draw);
   sortSel.addEventListener('change', draw);
+  limit.addEventListener('input', draw);
+  idsOnly.addEventListener('change', draw);
   function changeFilters() {
     var href = browseHref(typeSel.value, selectedTag());
     if (location.hash !== href) history.replaceState(null, '', href);
@@ -1289,6 +1326,44 @@ function citationLinks(citations) {
   }).join(' ');
 }
 
+function answerInspector(id) {
+  return '<div class="answer-inspector-slot"><aside class="answer-inspector" aria-label="Answer sources"><details open><summary>Sources</summary>' +
+    '<div id="' + id + '" class="stack"><p class="muted">Sources appear here when an answer cites a note.</p></div></details></aside></div>';
+}
+
+function showAnswerSources(parent, citations, current) {
+  parent.replaceChildren();
+  if (!citations.length) {
+    parent.textContent = 'No notes were cited.';
+    return;
+  }
+  for (const citation of citations) {
+    var item = document.createElement('div');
+    item.className = 'answer-source';
+    item.innerHTML = '<div class="row">' + conceptLink(citation.id, citation.title) +
+      '<a href="' + graphHref(citation.id) + '">Graph</a></div>';
+    var card = document.createElement('details');
+    card.innerHTML = '<summary>Preview note</summary><p data-source-text class="muted"></p>';
+    card.addEventListener('toggle', async function (sourceCard, id) {
+      if (!sourceCard.open || sourceCard.dataset.loaded || !current()) return;
+      sourceCard.dataset.loaded = 'true';
+      var text = sourceCard.querySelector('[data-source-text]');
+      text.textContent = 'Loading note…';
+      try {
+        var note = await api('read_concept', { id: id });
+        if (!sourceCard.isConnected || !current()) return;
+        var excerpt = String(note.body || '').trim();
+        text.textContent = excerpt ? excerpt.slice(0, 650) + (excerpt.length > 650 ? '…' : '') : 'This note has no body text.';
+      } catch (error) {
+        delete sourceCard.dataset.loaded;
+        if (sourceCard.isConnected && current()) text.textContent = error.message;
+      }
+    }.bind(null, card, citation.id));
+    item.append(card);
+    parent.append(item);
+  }
+}
+
 function answerViewCurrent(seq) {
   var brain = BRAIN, bundle = STATUS?.bundle, hash = location.hash;
   return function () { return !stale(seq) && brain === BRAIN && bundle === STATUS?.bundle && hash === location.hash; };
@@ -1431,16 +1506,19 @@ async function readAnswerEvents(response, receive) {
 function renderAsk(_arg, seq) {
   var current = answerViewCurrent(seq);
   view.innerHTML =
-    '<div class="stack"><h2>Ask your brain</h2>' +
+    '<div class="answer-workspace"><div class="stack answer-main"><div class="row"><h2>Ask your brain</h2>' +
+    '<button class="small right" type="button" data-answer-drawer>Answer sources</button></div>' +
     '<p><a href="#ask-plan">Ask with a ChatGPT plan</a></p>' +
+    '<div id="askstatus" role="status"></div><div id="askctx"></div><div id="askout" class="md"></div>' +
+    '<div id="ask-copy" hidden></div>' +
     '<form id="askf" class="row">' +
     '<input id="askq" style="flex:1" aria-label="Question" placeholder="What do my notes say about…" maxlength="8000" required autofocus>' +
     '<select id="askp" aria-label="Retrieval profile"><option value="">Configured default</option><option>lean</option><option>balanced</option><option>max</option></select>' +
     '<label class="row"><input id="ask-private" type="checkbox"> Include private notes</label>' +
-    '<button id="asksend" class="primary">Ask</button><button id="askstop" type="button" hidden>Stop</button></form>' +
-    '<p id="askstatus" role="status"></p><div id="askctx"></div><div id="askout" class="md"></div><div id="asksrc"></div>' +
-    '<div id="ask-copy" hidden></div></div>';
+    '<button id="asksend" class="primary">Ask</button><button id="askstop" type="button" hidden>Stop</button></form></div>' +
+    answerInspector('asksrc') + '</div>';
   var ctxEl = document.getElementById('askctx');
+  R.workspaceDrawer(view.querySelector('.answer-inspector'), view.querySelector('[data-answer-drawer]'));
   var outEl = document.getElementById('askout');
   var srcEl = document.getElementById('asksrc');
   var copyEl = document.getElementById('ask-copy');
@@ -1494,7 +1572,7 @@ function renderAsk(_arg, seq) {
           statusEl.textContent = 'Answer ready.';
           outEl.classList.remove('ask-partial');
           outEl.innerHTML = R.renderMarkdown(result.answer);
-          if (result.citations.length) srcEl.innerHTML = '<h3>Sources</h3>' + citationLinks(result.citations);
+          showAnswerSources(srcEl, result.citations, current);
           invalidateDraft = mountAnswerActions(copyEl, q, result, function () { return current() && version === inputRevision; });
           Okb.settle(outEl);
         }
@@ -1668,18 +1746,36 @@ async function renderInbox() {
 
 /** The clip bookmarklet as a chip to drag to the bookmarks bar (Add, Settings). */
 function showBookmarklet() {
-  working('bm-out', 'loading');
-  get('/api/bookmarklet').then(function (r) {
-    var el = document.getElementById('bm-out');
-    if (!el) return;
-    var a = document.createElement('a');
-    a.href = r.bookmarklet;
-    a.textContent = 'Clip to okbrain';
-    a.className = 'chip';
-    a.title = 'Drag to your bookmarks bar';
-    el.replaceChildren(a);
-    el.insertAdjacentHTML('beforeend', ' <span class="muted">Drag this to your bookmarks bar. Selecting it on a page clips that page while okbrain is running on port ' + esc(r.port) + '.</span>');
-  }).catch(function (e) { setHtml('bm-out', errorBox(e)); });
+  var el = document.getElementById('bm-out');
+  el.innerHTML = '<div class="stack"><div data-bookmarklet-link></div><form class="row">' +
+    '<label class="field"><span>Local server port</span><input name="port" type="number" min="1" max="65535" required></label>' +
+    '<button type="submit">Update bookmarklet</button></form><p class="muted" role="status"></p></div>';
+  var form = el.querySelector('form');
+  var controls = Array.from(form.querySelectorAll('input, button'));
+  var output = el.querySelector('[data-bookmarklet-link]');
+  var status = el.querySelector('[role="status"]');
+  async function load(port) {
+    controls.forEach(function (control) { control.disabled = true; });
+    status.textContent = 'Loading bookmarklet…';
+    try {
+      var result = await get('/api/bookmarklet' + (port === undefined ? '' : '?port=' + encodeURIComponent(port)));
+      if (!el.isConnected) return;
+      var link = document.createElement('a');
+      link.href = result.bookmarklet;
+      link.textContent = 'Clip to okbrain';
+      link.className = 'chip';
+      link.title = 'Drag to your bookmarks bar';
+      output.replaceChildren(link);
+      form.elements.port.value = result.port;
+      status.textContent = 'Drag the link to your bookmarks bar. It clips the current page while okbrain is running on port ' + result.port + '.';
+    } catch (error) { if (el.isConnected) status.textContent = error.message; }
+    finally { controls.forEach(function (control) { control.disabled = false; }); }
+  }
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (form.reportValidity()) void load(form.elements.port.valueAsNumber);
+  });
+  void load();
 }
 
 function mountRssSettings(panel) {
@@ -3210,6 +3306,7 @@ function mountGitSync(panel, seq) {
       for (var action of ['continue', 'abort']) wireRebaseAction(action);
       if (selected) mountResolution(preview, selected);
     }
+    updateButtons();
   }
   function wireRebaseAction(action) {
     var abort = action === 'abort';
@@ -3551,7 +3648,9 @@ function mountMaintenanceSchedule(panel, readonly, seq) {
 async function renderSettings(section, seq) {
   var st = STATUS || {};
   var mcpArgs = st.brain ? ['--brain', st.brain, 'mcp'] : ['--bundle', st.bundle || '<bundle>', 'mcp'];
-  var mcpJson = JSON.stringify({ mcpServers: { okbrain: { command: 'okb', args: mcpArgs } } }, null, 2);
+  function mcpJson(trusted) {
+    return JSON.stringify({ mcpServers: { okbrain: { command: 'okb', args: trusted ? mcpArgs.concat('--trusted') : mcpArgs } } }, null, 2);
+  }
   view.innerHTML =
     '<div class="stack"><h2>Settings</h2>' +
     '<h3>This server</h3><dl class="kv">' +
@@ -3725,11 +3824,16 @@ async function renderSettings(section, seq) {
       '<div class="row"><button id="mx-upgrade-dry" type="submit">Preview upgrade</button>' +
       '<button id="mx-upgrade" type="submit">Upgrade bundle</button></div></form>') + '<div id="mx-out"></div>' +
     '<section id="mcp-settings" class="stack"></section>' +
-    '<details><summary>MCP stdio client configuration</summary>' +
-    '<p class="muted">A stdio client launches okbrain using an executable path on this computer.</p><pre>' + esc(mcpJson) + '</pre></details>' +
-    '<h3>Bookmarklet</h3><div id="bm-out"></div></div>';
+    '<details id="mcp-stdio"><summary>MCP stdio client configuration</summary><div class="stack brain-mount-body">' +
+    '<p class="muted">Paste this configuration into a local MCP client so it can launch okbrain over stdio.</p>' +
+    (st.readonly ? '' : '<label class="row"><input type="checkbox" data-trusted-stdio> Allow this trusted client to write to the selected brain</label>') +
+    '<pre>' + esc(mcpJson(false)) + '</pre><div class="row"><button type="button">Copy stdio configuration</button></div><p role="status"></p></div></details>' +
+    '<h3>Bookmarklet</h3><div id="bm-out"></div><details id="advanced-operations"></details></div>';
 
   var show = setHtml;
+  window.okbAdvancedSettings?.mount(document.getElementById('advanced-operations'), {
+    api, headers, readonly: Boolean(st.readonly), saveFile, readAnswerEvents, detached: () => stale(seq),
+  });
   var usagePanel = document.getElementById('note-usage-settings');
   if (usagePanel) mountNoteUsageSettings(usagePanel);
   if (!st.readonly) mountUsabilitySession(document.getElementById('usability-session'), seq);
@@ -3737,6 +3841,20 @@ async function renderSettings(section, seq) {
   if (section === 'usability') document.getElementById('usability-title').focus();
   mountCacheSettings(document.getElementById('cache-settings'));
   showBookmarklet();
+  var stdio = document.getElementById('mcp-stdio');
+  var trustedStdio = stdio.querySelector('[data-trusted-stdio]');
+  var stdioOutput = stdio.querySelector('pre');
+  var stdioStatus = stdio.querySelector('[role="status"]');
+  trustedStdio?.addEventListener('change', function () {
+    stdioOutput.textContent = mcpJson(trustedStdio.checked);
+    stdioStatus.textContent = '';
+  });
+  stdio.querySelector('button').addEventListener('click', async function () {
+    try {
+      await navigator.clipboard.writeText(stdioOutput.textContent);
+      stdioStatus.textContent = 'Stdio configuration copied.';
+    } catch (_) { stdioStatus.textContent = 'Select and copy the configuration above.'; }
+  });
   mountBundleWatch(document.getElementById('bundle-watch'), Boolean(st.readonly), seq);
   mountMaintenanceSchedule(document.getElementById('maintenance-schedule'), Boolean(st.readonly), seq);
   renderBrainMounts(document.getElementById('brain-mount-settings'), Boolean(st.readonly), seq);

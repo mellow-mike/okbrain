@@ -153,18 +153,22 @@ function renderAccounts() {
 
 async function renderPlanAsk(_arg, seq) {
   var sameView = answerViewCurrent(seq);
-  view.innerHTML = '<div class="stack"><h2>Ask with ChatGPT</h2><p><a href="#accounts">Manage ChatGPT accounts</a> · ' +
+  view.innerHTML = '<div class="answer-workspace"><div class="stack answer-main"><div class="row"><h2>Ask with ChatGPT</h2>' +
+    '<button class="small right" type="button" data-answer-drawer>Answer sources</button></div><p><a href="#accounts">Manage ChatGPT accounts</a> · ' +
     '<a href="#ask">Ask with your configured provider</a></p><div id="plan-ask-setup" role="status">Checking account…</div>' +
     '<form id="plan-question" class="stack" hidden><label class="field"><span>Question</span><textarea name="question" maxlength="8000" required></textarea></label>' +
     '<label class="field"><span>ChatGPT model</span><select name="model" required></select></label>' +
     '<label><input type="checkbox" name="includePrivate"> Include private drafts in source search</label>' +
     '<div><button class="primary">Preview sources</button></div></form><div class="stack" id="plan-preview" aria-live="polite"></div>' +
-    '<div class="stack" id="plan-answer" aria-live="polite"></div><div id="plan-answer-copy" hidden></div></div>';
+    '<div class="stack" id="plan-answer" aria-live="polite"></div><div id="plan-answer-copy" hidden></div></div>' +
+    answerInspector('plan-citations') + '</div>';
   var setup = document.getElementById('plan-ask-setup');
+  R.workspaceDrawer(view.querySelector('.answer-inspector'), view.querySelector('[data-answer-drawer]'));
   var form = document.getElementById('plan-question');
   var preview = document.getElementById('plan-preview');
   var answer = document.getElementById('plan-answer');
   var copy = document.getElementById('plan-answer-copy');
+  var citations = document.getElementById('plan-citations');
   var account;
   var generation = 0;
   try {
@@ -186,6 +190,7 @@ async function renderPlanAsk(_arg, seq) {
   } catch (error) { if (sameView()) setup.innerHTML = errorBox(error); return; }
   function clearAnswer() {
     answer.replaceChildren();
+    citations.textContent = 'Sources appear here when an answer cites a note.';
     copy.hidden = true;
     copy.replaceChildren();
   }
@@ -217,8 +222,8 @@ async function renderPlanAsk(_arg, seq) {
         try {
           var response = await planApi('answer', { id: result.id });
           if (!sameView() || current !== generation) return;
-          answer.innerHTML = '<div class="md">' + R.renderMarkdown(response.answer) + '</div>' +
-            (response.citations.length ? '<h3>Citations</h3><div>' + citationLinks(response.citations) + '</div>' : '');
+          answer.innerHTML = '<div class="md">' + R.renderMarkdown(response.answer) + '</div>';
+          showAnswerSources(citations, response.citations, function () { return sameView() && current === generation; });
           mountAnswerActions(copy, String(fields.get('question')).trim(), response,
             function () { return sameView() && current === generation; });
         } catch (error) {

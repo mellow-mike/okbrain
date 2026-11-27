@@ -50,6 +50,8 @@ const manifestNames = new Set([
 const lockManagers: [string, string][] = [
   ["bun.lock", "bun"], ["bun.lockb", "bun"], ["pnpm-lock.yaml", "pnpm"], ["yarn.lock", "yarn"], ["package-lock.json", "npm"],
 ];
+const bazelMarkers = ["WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel"];
+export const packageRootMarkers = [...lockManagers.map(([path]) => path), ...bazelMarkers];
 
 type Read = (path: string) => Promise<string | undefined>;
 
@@ -365,7 +367,7 @@ export async function detectPackages(
     if (/^\.github\/workflows\/[^/]+\.ya?ml$/u.test(path)) workflows.push(path);
   }
   const manager = lockManagers.find(([file]) => rootFiles.has(file))?.[1] ?? "npm";
-  const bazel = ["workspace", "workspace.bazel", "module.bazel"].some((file) => rootFiles.has(file));
+  const bazel = bazelMarkers.some((file) => rootFiles.has(file.toLowerCase()));
   // Shallow manifests first, so a cap keeps the packages that structure the repository.
   manifests.sort((a, b) => a.split("/").length - b.split("/").length || (a < b ? -1 : a > b ? 1 : 0));
 
