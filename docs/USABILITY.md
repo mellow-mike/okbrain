@@ -40,7 +40,7 @@ A task label is 1 to 16 letters, digits, hyphens, or underscores. Use codes such
 
 ### Start recording
 
-Open **Settings → Usability session** in the participant's brain and choose **Start session**. The workspace status shows **Recording usability session** on every view until the session stops. Selecting it returns to these controls.
+Open **Settings → Privacy and usage → Usability session** in the participant's brain and choose **Start session**. The workspace status shows **Recording usability session** on every view until the session stops. Selecting it returns to these controls.
 
 From a terminal, `okb usability start` does the same. Pass `--brain <name>` or `--bundle <path>` to choose the participant's brain.
 

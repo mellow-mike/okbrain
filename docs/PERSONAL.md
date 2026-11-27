@@ -32,6 +32,13 @@ Use **Sources** to import conversations, bookmarks, Markdown, Notion exports, em
 
 In **Add → Manage saved feeds**, enter one URL per line and select **Save feed URLs**. The list is shared across brain folders on this device. In **Pull RSS feeds**, enter one URL or leave it blank to pull every saved feed into the selected brain. Set **Max new items per feed** to limit how many entries each feed can add. The terminal equivalent for viewing the saved list is `okb rss settings`.
 
+### Navigate settings
+
+**Settings** opens a server overview with the active brain, cache status,
+retrieval profile, actor, and local port. Use **Settings sections** to open
+one group of controls at a time. On a phone, scroll the section links
+sideways. Each section can be bookmarked.
+
 ### Use advanced operations
 
 Open **Settings → Advanced operations** to run a supported `okb` operation
@@ -48,19 +55,19 @@ file selection, and coding sessions. Use the terminal for process launchers, sta
 
 Use **Settings → Brain folders → Add a brain folder** to create a brain in a new or empty directory, or register an existing folder by its absolute path. Create writes a portable OKF index. Registering an existing folder keeps its contents. The new named brain opens immediately and appears in the brain picker.
 
-Choose **Use as default brain** in Settings to select the active writable folder for `okb` launches without a folder argument. The macOS app remembers the last folder opened from its File menu.
+Choose **Use as default brain** in **Settings → Brain folders** to select the active writable folder for `okb` launches without a folder argument. The macOS app remembers the last folder opened from its File menu.
 
-In **Settings → Folder change log**, enter a public folder path such as `notes/projects` to create its `log.md`. It records subsequent changes in that folder and its descendants. The root log records changes across the brain. Private drafts are excluded from both logs. The CLI equivalent is `okb log create notes/projects`.
+In **Settings → Brain folders → Folder change log**, enter a public folder path such as `notes/projects` to create its `log.md`. It records subsequent changes in that folder and its descendants. The root log records changes across the brain. Private drafts are excluded from both logs. The CLI equivalent is `okb log create notes/projects`.
 
-In **Settings → Markdown indexes**, choose **OKF reference headings and relative links** for a brain you share with reference tooling. The layout choice travels in the root `index.md`. You can restore the grouped layout at any time, including with `okb manifests style grouped`.
+In **Settings → Brain folders → Markdown indexes**, choose **OKF reference headings and relative links** for a brain you share with reference tooling. The layout choice travels in the root `index.md`. You can restore the grouped layout at any time, including with `okb manifests style grouped`.
 
-In **Settings → Local note usage**, choose **Turn on local counts** for the current brain. Notes show the last 30 days of explicit opens and citations verified by Ask. A note’s internal sources also show their own local counts when recorded. These aggregate counts stay in per-user application data on this device. They survive an index rebuild and exclude MCP activity. **Turn off and clear counts** deletes the current brain’s counts. In the CLI, use `okb usage settings on` and read the `localUsage` field from `okb read <id> --json`.
+In **Settings → Privacy and usage → Local note usage**, choose **Turn on local counts** for the current brain. Notes show the last 30 days of explicit opens and citations verified by Ask. A note’s internal sources also show their own local counts when recorded. These aggregate counts stay in per-user application data on this device. They survive an index rebuild and exclude MCP activity. **Turn off and clear counts** deletes the current brain’s counts. In the CLI, use `okb usage settings on` and read the `localUsage` field from `okb read <id> --json`.
 
 ### Choose a search cache
 
-SQLite is ready to use with the app. To use a local PostgreSQL database, install pgvector in the database and give your database user permission to create its own schema. In **Settings → Search and graph cache → Change cache backend**, enter the connection URL and choose **Connect and use PostgreSQL**. Use a loopback address such as `127.0.0.1` or `[::1]` so searches and ChatGPT source previews stay on this computer. The database stores searchable note text, including private drafts, and graph data. It also stores any embeddings you choose to build. Use a database you trust.
+SQLite is ready to use with the app. To use a local PostgreSQL database, install pgvector in the database and give your database user permission to create its own schema. In **Settings → Search and cache**, open **Change cache backend** and enter the connection URL and choose **Connect and use PostgreSQL**. Use a loopback address such as `127.0.0.1` or `[::1]` so searches and ChatGPT source previews stay on this computer. The database stores searchable note text, including private drafts, and graph data. It also stores any embeddings you choose to build. Use a database you trust.
 
-The app checks the database before saving the selection. A connection URL stays in private per-user application data. Each brain uses a separate schema. Under **Settings → Maintenance**, choose **Re-index** to populate search and graph. Run **Embed** if you use vector search. PostgreSQL and SQLite use different keyword indexes, so the order of search hits can differ. Markdown and YAML remain the source for either cache.
+The app checks the database before saving the selection. A connection URL stays in private per-user application data. Each brain uses a separate schema. Under **Settings → Maintenance**, choose **Re-index** to populate search and graph. If you use vector search, run **Embed** under **Settings → Search and cache**. PostgreSQL and SQLite use different keyword indexes, so the order of search hits can differ. Markdown and YAML remain the source for either cache.
 
 Choose **Use SQLite** to switch back and remove the saved connection URL. Choose **Re-index** again to pick up any changes since you used SQLite. Old derived tables stay in your PostgreSQL database. Your database administrator can remove the brain’s cache schema.
 
@@ -84,7 +91,24 @@ On the Knowledge home in an empty, writable brain, open **Start with a template*
 
 Expand a named mount in **Brain folders** to rename it, set its read-only status, or remove it from the picker. Removing the mount leaves the directory and its contents in place. To change a mount while viewing a read-only brain, switch the brain picker to a writable brain first.
 
-If you also edit notes in another app, open **Settings → Watch brain folder** and select **Start watching**. okbrain refreshes keyword search and graph links after saves, moves, and deletions. The watch runs while the macOS app or local server is open. Select **Stop watching** to end it sooner. The terminal equivalent is `okb watch`. Watching a named brain stops if its folder or write permission changes. Embeddings can be refreshed separately with **Settings → Embed**.
+If you also edit notes in another app, open **Settings → Search and cache → Watch brain folder** and select **Start watching**. okbrain refreshes keyword search and graph links after saves, moves, and deletions. The watch runs while the macOS app or local server is open. Select **Stop watching** to end it sooner. The terminal equivalent is `okb watch`. Watching a named brain stops if its folder or write permission changes. Embeddings can be refreshed separately with **Settings → Search and cache → Embeddings**.
+
+## Ask and revisit conversations
+
+In **Knowledge → Ask**, use **Spaces** to switch brains and **Conversations**
+to reopen or filter saved threads. On a phone, use the **Conversations**
+button to open the drawer. Choose **New conversation** to start a separate
+thread, then enter a question or edit one of the suggested questions.
+**Ask** uses the configured provider. Choose **Ask with ChatGPT** to use an
+eligible ChatGPT plan and preview sources before sending.
+
+The local app saves completed exchanges for writable brains in per-user
+application data. When following up, open **Previous exchange** and select
+**Include this exchange in the follow-up** only if you want the exact shown
+excerpt to accompany the question. Each new turn retrieves sources again.
+Choose **Inspect citations** to see the verified source references for an
+answer. **Conversation options** lets you rename or delete a saved thread.
+Notes saved separately as private drafts remain in the bundle.
 
 ## Ask questions with your ChatGPT plan
 
@@ -111,7 +135,7 @@ okb ask-plan 'What did I conclude about spacing my reviews?'
 
 Model calls use the selected account's ChatGPT plan allowance or available credits. If permission, usage, or the connection is unavailable when okbrain needs a model, the command returns an error on that route. An empty retrieval result ends before inference. Account credentials are stored per user outside the bundle. `okb chatgpt disconnect` clears the selected connection's local credentials and attempts remote revocation. If revocation fails, remove the connection from ChatGPT. [ChatGPT usage and connection controls](https://chatgpt.com/settings/usage)
 
-`okb ask` and the app's **Ask** screen use the configured AI provider. Choose the provider, model, and optional endpoint in **Settings**. For an API-backed provider, save its key under **Provider API keys**, or supply its environment variable. Saved keys stay in per-user application data. A local model runs without an API key.
+`okb ask` and the app's **Ask** screen use the configured AI provider. Choose the provider, model, and optional endpoint in **Settings → AI providers**. For an API-backed provider, save its key under **Provider API keys**, or supply its environment variable. Saved keys stay in per-user application data. A local model runs without an API key.
 
 Select **Restore default chat endpoint** or **Restore default embedding endpoint**, then save to remove a custom endpoint from your settings.
 
@@ -121,11 +145,11 @@ In **Ask** or **Ask with ChatGPT**, choose **Copy answer with citations** after 
 
 To keep a completed answer in a writable brain, choose **Save as private draft**, review the destination, and select **Save private draft**. Open it from **Open saved draft** or **Inbox**. The Markdown note under `db_only/answers/` contains the question and answer, records the provider and model that generated it, and lists verified citations as sources. Saving updates local search using the completed answer. The approval is valid for 30 minutes in the same running okbrain server. Retrying the save opens the same draft and preserves any edits to it.
 
-In **Settings → Enrichment**, enter comma-separated **Allowed hosts**, **Allowed path prefixes**, and **Denied path prefixes** to set the crawler’s scope. The crawler checks these settings before each request, including redirects. Denied path prefixes take precedence.
+In **Settings → Advanced operations → Enrichment**, enter comma-separated **Allowed hosts**, **Allowed path prefixes**, and **Denied path prefixes** to set the crawler’s scope. The crawler checks these settings before each request, including redirects. Denied path prefixes take precedence.
 
 Clip, RSS, and enrichment connect to a checked address at each redirect. HTTPS still verifies the original hostname. If you configure an environment proxy with `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`, use HTTPS source URLs for hostname-based sites routed through it. The app matches `NO_PROXY` against the original source address.
 
-In **Settings → OKF v0.2 migration**, enter **Actor to credit** to attribute legacy timestamps and reviews during migration. Preview the changes before choosing **Upgrade bundle**.
+In **Settings → Maintenance → OKF v0.2 migration**, enter **Actor to credit** to attribute legacy timestamps and reviews during migration. Preview the changes before choosing **Upgrade bundle**.
 
 ## Import conversations
 
@@ -173,11 +197,32 @@ Open **Sources → Live Notion pages**. A Notion workspace owner can create an i
 
 Enter a shared Notion page URL or ID and select **Preview page**. This reads the page text using Notion's Markdown API. The preview indicates when the response omits or truncates blocks. Imported drafts include the source page link. Embedded media and meeting transcripts are excluded. **Save private draft** saves the reviewed snapshot locally, and a later import of changed text creates a separate draft. Select **Disconnect Notion** to remove the local token, and remove the page's shared connection in Notion to revoke its access. [Notion's page Markdown API](https://developers.notion.com/reference/retrieve-page-markdown)
 
-**Settings → Re-index** builds or repairs the local keyword and graph index. Import refreshes an existing index. Use **Settings → Embeddings** to refresh that cache separately. Set **Max notes this run** to cap how many notes are sent for embedding. The provider and model override fields apply to that run. Changing the provider or model rebuilds the vector cache. If you choose a remote embedding provider, the run can send note text to it. The regular `okb search` command can also use configured remote embedding and reranking providers when those retrieval arms are available.
+**Settings → Maintenance → Re-index** builds or repairs the local keyword and graph index. Import refreshes an existing index. Use **Settings → Search and cache → Embeddings** to refresh that cache separately. Set **Max notes this run** to cap how many notes are sent for embedding. The provider and model override fields apply to that run. Changing the provider or model rebuilds the vector cache. If you choose a remote embedding provider, the run can send note text to it. The regular `okb search` command can also use configured remote embedding and reranking providers when those retrieval arms are available.
+
+### Preview an item from Drive, Slack, or Linear
+
+Open **Sources → Connections** and choose the service. Authorize reading a
+selected item and save its credential. Saving stores the credential on this
+device. The app checks access when you choose **Preview item**.
+
+| Source | Credential | Item to preview |
+| --- | --- | --- |
+| Google Drive | Short-lived OAuth access token with `https://www.googleapis.com/auth/drive.readonly` | A Google Doc, Markdown file, or UTF-8 text file by link or ID |
+| Slack | Bot or user token with `channels:history` or `groups:history` and access to the channel | One message from its copied Slack link |
+| Linear | Personal API key with read permission | An issue title and description by link, key, or UUID |
+
+Inspect the returned text before choosing **Save private draft**. If the
+item changed, choose **Save as a new private draft** to preserve prior edits.
+The saved note uses the approved snapshot and includes its source provenance.
+Use **Disconnect** to remove the saved credential while keeping the notes
+you imported. Manage remote grants in the provider’s account settings.
+[Google OAuth Playground](https://developers.google.com/oauthplayground/) ·
+[Slack token scopes](https://docs.slack.dev/reference/methods/conversations.history/) ·
+[Linear API keys](https://linear.app/docs/api-and-webhooks)
 
 ## Clip web pages and manage the reading inbox
 
-Use the **Clip** form in **Add** to save an article. Enter a quote or a note to record why you saved it. The **Bookmarklet** in Add or Settings can be saved to the bookmarks bar and used on a page you want to clip. It sends the page URL and selected text to the running loopback server. Its token permits clipping only and is separate from the app access token. Replace an old bookmarklet when its result window prompts you to update it. A trusted MCP client can also clip.
+Use the **Clip** form in **Add** to save an article. Enter a quote or a note to record why you saved it. The **Bookmarklet** in **Add** or **Settings → Connections** can be saved to the bookmarks bar and used on a page you want to clip. It sends the page URL and selected text to the running loopback server. Its token permits clipping only and is separate from the app access token. Replace an old bookmarklet when its result window prompts you to update it. A trusted MCP client can also clip.
 
 ```sh
 okb clip 'https://example.com/article' --tags research --note 'Read the section on retrieval.'
@@ -231,9 +276,9 @@ okb export-viz
 okb export-graph --json > graph.json
 ```
 
-The local app can browse, search, and edit conversation drafts in its selected bundle. **Settings → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`. Select **Embed app fonts in graph export** or pass `--fonts` to include the app's typefaces for offline viewing.
+The local app can browse, search, and edit conversation drafts in its selected bundle. **Settings → Exports → Export viz.html** omits private drafts by default. To embed them in the HTML, explicitly select **Include private drafts in graph export** and confirm. The CLI equivalent is `okb export-viz --include-private`. Select **Embed app fonts in graph export** or pass `--fonts` to include the static viewer’s typefaces for offline viewing.
 
-To use the graph in another tool, open **Settings → Graph JSON export** in the Mac or web app and choose **Export graph JSON**. The file holds the same `nodes` and `edges` as `okb graph-data --json`, including each note's Markdown body, tags, status, trust, and sources. The Mac app opens a save panel for `okbrain-graph.json`, and a browser saves it with its other downloads. Private drafts are left out by default. To include them, select **Include private drafts in graph JSON** and confirm that export. The complete file is named `okbrain-graph-private.json`. A read-only brain can export its shared notes. The CLI equivalent is `okb export-graph --json`, with `--include-private` for the complete graph.
+To use the graph in another tool, open **Settings → Exports → Graph JSON export** in the Mac or web app and choose **Export graph JSON**. The file holds the same `nodes` and `edges` as `okb graph-data --json`, including each note's Markdown body, tags, status, trust, and sources. The Mac app opens a save panel for `okbrain-graph.json`, and a browser saves it with its other downloads. Private drafts are left out by default. To include them, select **Include private drafts in graph JSON** and confirm that export. The complete file is named `okbrain-graph-private.json`. A read-only brain can export its shared notes. The CLI equivalent is `okb export-graph --json`, with `--include-private` for the complete graph.
 
 ### Set up Git sync
 
@@ -261,7 +306,7 @@ Select **Open restored brain** when the checkout is ready. The app rebuilds loca
 
 ### Export notes to Markdown or Obsidian
 
-From a writable brain, open **Settings → Markdown and Obsidian export**. Enter the absolute path to a new folder outside the brain. The new folder's parent must already exist. Choose **Export Markdown**, then use Obsidian's **Open folder as vault** or open the files in any Markdown editor.
+From a writable brain, open **Settings → Exports → Markdown and Obsidian export**. Enter the absolute path to a new folder outside the brain. The new folder's parent must already exist. Choose **Export Markdown**, then use Obsidian's **Open folder as vault** or open the files in any Markdown editor.
 
 The export copies the note folders and YAML frontmatter, including custom fields. Markdown body links between exported notes use relative paths. Generated indexes, logs, attachments, app caches, and private notes are omitted by default. Text and metadata already present in exported notes remain visible, including references to notes or attachments outside the export. Review the folder before sharing it.
 
@@ -279,7 +324,7 @@ Ask, ChatGPT previews, focused maps, embeddings, and both export workflows have 
 
 A usability session measures how long a first saved note takes and how often notes are found again. It is for facilitated studies, and it stays off until you start it. The [facilitator protocol](USABILITY.md) has the consent wording, the tasks, an observation sheet, and the export format.
 
-In the Mac or web app, open **Settings → Usability session** in a writable brain and choose **Start session**. The footer shows **Recording usability session** on every view while it runs, and selecting it returns to the controls. To mark a task, enter a short label such as `T3`, choose **Start task**, and end it with **End as found**, **End as not found**, or **End as abandoned**. Choose **Stop session**, then **Export JSON** to save `okbrain-usability.json`. **Clear sessions** deletes this brain's stored sessions at once.
+In the Mac or web app, open **Settings → Privacy and usage → Usability session** in a writable brain and choose **Start session**. The footer shows **Recording usability session** on every view while it runs, and selecting it returns to the controls. To mark a task, enter a short label such as `T3`, choose **Start task**, and end it with **End as found**, **End as not found**, or **End as abandoned**. Choose **Stop session**, then **Export JSON** to save `okbrain-usability.json`. **Clear sessions** deletes this brain's stored sessions at once.
 
 The session keeps the kind of each action, its timing, result counts, the position of an opened result, and your task labels. It never keeps note text, titles, IDs, paths, tags, search or question text, answers, or error messages. The record lives in per-user application data on this device, covers the current brain only, and is deleted 30 days after the session starts, the next time you use okbrain. Activity from MCP clients is left out, and a read-only brain cannot record.
 
@@ -304,19 +349,19 @@ Use `operation: "sum"` with a `column` for integer sums. Use whole units such as
 
 Enter the parameter values and choose **Preview computation** to review the exact contract and source text. Approve the selection, then choose **Run approved computation**. The receipt includes the result, parameter values, and hashes of the plan and source. You can copy the receipt for another review.
 
-Choose **Verify receipt** to recompute against the original contract and current CSV. A change to the contract, source bytes, or claimed result requires a new matching receipt. To record a passing verification on the concept, separately approve and choose **Record process verification**. okbrain saves a `process:okbrain-csv-aggregate-v1` event and scoped receipt hashes. The event applies to the hashed inputs and result. **Settings → Doctor** reports syntax and conformance.
+Choose **Verify receipt** to recompute against the original contract and current CSV. A change to the contract, source bytes, or claimed result requires a new matching receipt. To record a passing verification on the concept, separately approve and choose **Record process verification**. okbrain saves a `process:okbrain-csv-aggregate-v1` event and scoped receipt hashes. The event applies to the hashed inputs and result. **Settings → Maintenance → Doctor** reports syntax and conformance.
 
 The CLI equivalents are `okb computation configure`, `okb computation preview`, `okb computation run`, `okb computation verify`, and `okb computation attest`. Run requires the preview's `--approval` digest. Attest requires the verification digest and `--confirm`. The built-in CSV runtime runs locally from the Mac app, local web app, and CLI. External contracts, including the Acme examples, remain available for reference.
 
 ## Connect an MCP client
 
-Select the brain you want to share and open **Settings → MCP agent access**. Choose **Start MCP HTTP**, open **Connection details**, and copy the loopback URL and Authorization header into a client that supports Streamable HTTP with custom headers. The default is read-only. Enable **Allow trusted clients to write to this brain** before starting if the client should edit a writable brain.
+Select the brain you want to share and open **Settings → Connections → MCP agent access**. Choose **Start MCP HTTP**, open **Connection details**, and copy the loopback URL and Authorization header into a client that supports Streamable HTTP with custom headers. The default is read-only. Enable **Allow trusted clients to write to this brain** before starting if the client should edit a writable brain.
 
 The listener is bound to the selected brain and issues a fresh token each time it starts. Keep the token private. Choose **Stop MCP HTTP** to disconnect it. If you change the bound brain's path or remove its write permission while trusted access is active, stop and start the listener with the updated mount.
 
 ### Claude Desktop and stdio clients
 
-In okbrain, open **Settings → MCP stdio client configuration** and choose
+In okbrain, open **Settings → Connections → MCP stdio client configuration** and choose
 **Copy stdio configuration**. For a writable brain, enable **Allow this
 trusted client to write to the selected brain** before copying if the client
 needs write access. In Claude Desktop, open **Settings → Developer → Edit

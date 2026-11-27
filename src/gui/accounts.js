@@ -73,7 +73,7 @@ function renderAccounts() {
     '<p>Connect an eligible ChatGPT account to answer questions using your plan. ' +
     '<a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">Manage plan usage</a></p>' +
     '<div id="plan-account-state"></div><div id="plan-account-actions"></div><div id="plan-account-message" role="status"></div>' +
-    '<p><a href="#ask-plan">Ask with ChatGPT</a> · <a href="#settings">API and local model settings</a></p></section></div>';
+    '<p><a href="#ask-plan">Ask with ChatGPT</a> · <a href="#settings/ai">API and local model settings</a></p></section></div>';
   var section = document.getElementById('plan-account');
   var state = document.getElementById('plan-account-state');
   var actions = document.getElementById('plan-account-actions');
@@ -151,16 +151,23 @@ function renderAccounts() {
   void refresh();
 }
 
-async function renderPlanAsk(_arg, seq) {
+async function renderPlanAsk(arg, seq) {
   var sameView = answerViewCurrent(seq);
-  view.innerHTML = '<div class="answer-workspace"><div class="stack answer-main"><div class="row"><h2>Ask with ChatGPT</h2>' +
-    '<button class="small right" type="button" data-answer-drawer>Answer sources</button></div><p><a href="#accounts">Manage ChatGPT accounts</a> · ' +
-    '<a href="#ask">Ask with your configured provider</a></p><div id="plan-ask-setup" role="status">Checking account…</div>' +
-    '<form id="plan-question" class="stack" hidden><label class="field"><span>Question</span><textarea name="question" maxlength="8000" required></textarea></label>' +
+  var K = window.okbKnowledge;
+  view.innerHTML = '<div class="answer-workspace"><div class="knowledge-main answer-main">' +
+    K.conversationHeader('Ask with ChatGPT', '<a href="#accounts">Manage ChatGPT accounts</a>' +
+      '<a data-knowledge-provider-link href="#ask">Ask with your configured provider</a>') +
+    '<div id="plan-ask-setup" class="knowledge-plan-status" role="status">Checking account…</div>' +
+    '<div class="knowledge-conversation-scroll"><div class="knowledge-conversation">' + K.conversationEmpty() +
+    '<div data-knowledge-turns></div><div class="stack" id="plan-preview" aria-live="polite"></div>' +
+    '<div data-knowledge-live class="knowledge-exchange" hidden><div data-knowledge-question></div>' +
+    '<article class="knowledge-answer">' + K.answerHeading() + '<div class="stack" id="plan-answer" aria-live="polite"></div>' +
+    '<div data-knowledge-answer-footer></div><div id="plan-answer-copy" hidden></div></article></div></div></div>' +
+    '<form id="plan-question" class="knowledge-composer" hidden><textarea aria-label="Question" name="question" rows="2" maxlength="8000" ' +
+    'placeholder="Ask across your notes…" required></textarea>' + K.historyFields() + '<div class="row knowledge-composer-controls">' +
     '<label class="field"><span>ChatGPT model</span><select name="model" required></select></label>' +
     '<label><input type="checkbox" name="includePrivate"> Include private drafts in source search</label>' +
-    '<div><button class="primary">Preview sources</button></div></form><div class="stack" id="plan-preview" aria-live="polite"></div>' +
-    '<div class="stack" id="plan-answer" aria-live="polite"></div><div id="plan-answer-copy" hidden></div></div>' +
+    '<button class="primary right">Preview sources</button></div></form></div>' +
     answerInspector('plan-citations') + '</div>';
   var setup = document.getElementById('plan-ask-setup');
   R.workspaceDrawer(view.querySelector('.answer-inspector'), view.querySelector('[data-answer-drawer]'));
@@ -169,6 +176,7 @@ async function renderPlanAsk(_arg, seq) {
   var answer = document.getElementById('plan-answer');
   var copy = document.getElementById('plan-answer-copy');
   var citations = document.getElementById('plan-citations');
+  var conversation = K.mountConversation({ root: view.firstElementChild, mode: 'ask-plan', arg, current: sameView, sourcePanel: citations, form });
   var account;
   var generation = 0;
   try {
@@ -189,6 +197,7 @@ async function renderPlanAsk(_arg, seq) {
     form.hidden = false;
   } catch (error) { if (sameView()) setup.innerHTML = errorBox(error); return; }
   function clearAnswer() {
+    conversation.showHistory();
     answer.replaceChildren();
     citations.textContent = 'Sources appear here when an answer cites a note.';
     copy.hidden = true;
@@ -197,18 +206,22 @@ async function renderPlanAsk(_arg, seq) {
   form.addEventListener('input', function () { generation++; preview.replaceChildren(); clearAnswer(); });
   form.addEventListener('submit', async function (event) {
     event.preventDefault();
-    if (!sameView()) return;
+    if (!sameView() || !conversation.ready()) return;
     var current = ++generation;
     clearAnswer();
     preview.textContent = 'Searching the local index…';
     var fields = new FormData(form);
+    var question = String(fields.get('question')).trim();
+    var next = conversation.next();
     try {
       var result = await planApi('preview', { account: account, model: fields.get('model'),
-        question: fields.get('question'), includePrivate: fields.has('includePrivate') });
+        question: question, includePrivate: fields.has('includePrivate'), ...(next ? { conversation: next } : {}) });
       if (!sameView() || current !== generation) return;
       if (!result.sources.length) { preview.textContent = 'No matching sources. Try another question or add notes.'; return; }
       preview.innerHTML = '<h3>Sources to send</h3><p>OpenAI will receive your question and the excerpts below through ' +
         esc(result.account) + ' using ' + esc(result.model) + '.</p>' +
+        (result.history ? '<details class="card"><summary>Previous exchange included</summary><pre>' +
+          esc('You\n' + result.history.question + '\n\nAnswer\n' + result.history.answer) + '</pre></details>' : '') +
         result.sources.map(function (source) {
           return '<details class="card"><summary>' + esc(source.title) +
             (source.private ? ' (private)' : '') + '</summary><pre>' + esc(source.text) + '</pre><p>' +
@@ -218,17 +231,24 @@ async function renderPlanAsk(_arg, seq) {
       send.addEventListener('click', async function () {
         if (!sameView() || current !== generation) return;
         send.disabled = true;
+        form.inert = true;
+        conversation.start(question);
+        copy.parentElement.querySelector('[data-knowledge-answer-footer]').replaceChildren();
         answer.textContent = 'Waiting for ChatGPT…';
         try {
           var response = await planApi('answer', { id: result.id });
           if (!sameView() || current !== generation) return;
-          answer.innerHTML = '<div class="md">' + R.renderMarkdown(response.answer) + '</div>';
-          showAnswerSources(citations, response.citations, function () { return sameView() && current === generation; });
-          mountAnswerActions(copy, String(fields.get('question')).trim(), response,
+          var body = document.createElement('div');
+          body.className = 'md';
+          K.renderAnswer(body, response, citations, sameView, view.querySelector('[data-answer-drawer]'));
+          answer.replaceChildren(body);
+          conversation.finish(question, response);
+          mountAnswerActions(copy, question, response,
             function () { return sameView() && current === generation; });
+          form.elements.question.value = '';
         } catch (error) {
-          if (sameView() && current === generation) answer.innerHTML = errorBox(error);
-        }
+          if (sameView() && current === generation) { conversation.fail(); answer.innerHTML = errorBox(error); send.disabled = false; }
+        } finally { form.inert = false; }
       });
     } catch (error) { if (sameView() && current === generation) preview.innerHTML = errorBox(error); }
   });

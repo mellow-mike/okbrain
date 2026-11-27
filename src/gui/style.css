@@ -15,6 +15,8 @@
 html { color-scheme: dark; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 [data-theme="light"] { color-scheme: light; }
 body {
+  --font-sans: Inter, "Recursive Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Recursive Mono", ui-monospace, monospace;
   font-family: var(--font-sans); font-size: 14px; line-height: 20px; font-weight: var(--wght-text);
   color: var(--ink); background: var(--surface);
   -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; font-synthesis: none;
@@ -478,4 +480,31 @@ html.flooding::view-transition-old(root), html.flooding::view-transition-new(roo
   #nav .links { display: flex; flex-wrap: nowrap; gap: var(--space-1); width: 100%; padding: 3px 1px; overflow-x: auto;
                 overscroll-behavior-x: contain; scrollbar-width: thin; }
   #nav .links a { flex: none; white-space: nowrap; }
+}
+
+/* Settings routes share the workspace navigation and mount only their own tools. */
+.settings-workspace { max-width: 1080px; margin: 0 auto; }
+.settings-workspace > h2 { margin-bottom: var(--space-5); }
+.settings-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); align-items: start; gap: var(--space-6); }
+.settings-nav { display: grid; gap: var(--space-1); position: sticky; top: 0; min-width: 0; padding: 2px var(--space-3) 2px 2px; border-right: 1px solid var(--line); }
+.settings-nav a { display: block; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); color: var(--ink-2); text-decoration: none; }
+.settings-nav a:hover { background: var(--chip-bg); color: var(--ink); }
+.settings-nav a[aria-current] { background: var(--workspace-selection); color: var(--accent); font-weight: 640; }
+.settings-layout .settings-content { min-width: 0; max-width: none; gap: var(--space-4); }
+.settings-content > header { gap: var(--space-1); padding-bottom: var(--space-3); border-bottom: 1px solid var(--line); }
+.settings-content > header h3 { margin: 0; color: var(--ink); font-size: 18px; line-height: 24px; letter-spacing: 0; text-transform: none; }
+.settings-content > header h3:focus { outline: none; animation: none; }
+.settings-content > section:not(.card) > h3:first-child { margin: 0; }
+.settings-content > h3 { margin: var(--space-2) 0 0; }
+.settings-panel { padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--plane); }
+.settings-panel h3 { margin: 0; }
+.settings-content [data-settings-brain] { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.settings-server { min-width: 0; }
+.settings-server dd, .settings-content .notice { overflow-wrap: anywhere; }
+.settings-related { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+@media (max-width: 1080px) {
+  .settings-layout { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-4); }
+  .settings-nav { position: static; display: flex; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin;
+                  max-width: 100%; padding: 2px 2px var(--space-2); border-right: 0; border-bottom: 1px solid var(--line); }
+  .settings-nav a { flex: none; white-space: nowrap; }
 }

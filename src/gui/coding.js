@@ -31,6 +31,16 @@
   const runSessionName = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
   const runRequestId = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
   const entries = (text) => text.split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+  const workspaceIcons = {
+    plus: '<path d="M12 5v14M5 12h14"/>', folder: '<path d="M3 7h7l2 2h9v10H3z"/>',
+    repo: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M5 17h14M9 8h6"/>',
+    branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10m12-8a7 7 0 0 1-7 7H6"/>',
+    search: '<circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/>',
+    task: '<circle cx="12" cy="7" r="3"/><path d="M5 20v-2a7 7 0 0 1 14 0v2"/>',
+    pi: '<path d="m8 6-6 6 6 6m8-12 6 6-6 6M14 4l-4 16"/>',
+    check: '<path d="m5 12 4 4L19 6"/>', arrow: '<path d="m10 6 6 6-6 6"/>',
+  };
+  const workspaceIcon = (name) => '<svg class="work-icon" viewBox="0 0 24 24" aria-hidden="true">' + workspaceIcons[name] + '</svg>';
   const statuses = {
     running: 'Running', interrupted: 'Interrupted', done: 'Ready for review', unanswered: 'Unanswered',
     failed: 'Could not start', cancelled: 'Cancelled', accepted: 'Accepted', changes_requested: 'Changes requested',
@@ -876,10 +886,10 @@
   function composer(parent, project, readonly, detached, selectRun, ownerWritable) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
-    panel.className = 'coding-panel coding-composer stack';
+    panel.className = 'coding-panel coding-composer stack work-composer';
     panel.innerHTML =
-      '<h3>New request</h3><form class="stack">' +
-      '<label class="field"><span>Task</span><textarea name="prompt" rows="4" required placeholder="Describe the change or review you want"></textarea></label>' +
+      '<form class="stack">' +
+      '<label class="field work-task-input"><span class="sr-only">Task</span><textarea name="prompt" rows="2" required placeholder="Ask for a change, investigation, or review…"></textarea></label>' +
       '<div class="coding-grid">' + field('Session', 'main', 'text', 'name="session" required pattern="[a-z0-9][a-z0-9_\\-]{0,63}"') +
       field('Request ID', crypto.randomUUID(), 'text', 'name="requestId" required maxlength="128" spellcheck="false"') + '</div>' +
       '<label class="field"><span id="coding-source-label">Source</span><select name="source" aria-labelledby="coding-source-label"><option value="repository">Tracked repository excerpts</option>' +
@@ -933,6 +943,44 @@
     const packageFields = Array.from(form.querySelectorAll('[data-package]'));
     const feedback = form.querySelector('[data-composer-feedback]');
     const attachments = form.querySelector('[data-attached-files]');
+    const options = document.createElement('div');
+    options.className = 'stack work-composer-options';
+    options.id = 'work-composer-options';
+    options.hidden = true;
+    const toolbar = document.createElement('div');
+    toolbar.className = 'work-composer-toolbar row';
+    toolbar.innerHTML = '<button type="button" data-add-context aria-controls="work-composer-options" aria-expanded="false">' +
+      workspaceIcon('plus') + ' Add context</button><select name="taskMode" aria-label="Task mode"><option value="agent">Agent</option>' +
+      '<option value="plan">Plan</option><option value="ask">Ask</option></select><span data-composer-model></span>';
+    const toggle = toolbar.querySelector('[data-add-context]');
+    const modelLabel = toolbar.querySelector('[data-composer-model]');
+    const taskMode = toolbar.querySelector('[name="taskMode"]');
+    const previewRow = previewButton.parentElement;
+    const sendRow = send.parentElement;
+    const editor = prompt.closest('label');
+    const preflight = document.createElement('div');
+    preflight.className = 'stack work-preflight';
+    preflight.hidden = true;
+    preflight.append(previewEl, approve);
+    for (const node of [...form.children]) {
+      if (![editor, previewRow, sendRow, compactionNotice, branchNotice, feedback].includes(node)) options.append(node);
+    }
+    toolbar.append(previewButton, send);
+    previewRow.remove();
+    sendRow.remove();
+    attachments.classList.add('work-attachments');
+    form.prepend(attachments, editor, toolbar, options, preflight);
+    function toggleOptions(open) {
+      options.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+    }
+    toggle.addEventListener('click', () => toggleOptions(options.hidden));
+    prompt.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return;
+      event.preventDefault();
+      if (!send.disabled) form.requestSubmit(send);
+      else if (!previewButton.disabled && prompt.value.trim()) previewButton.click();
+    });
     const trackedFiles = new Set();
     const evaluation = window.okbCodingEvaluation.composerOptions(form.querySelector('[data-evaluation-options]'), {
       readonly, coding, prefix, detached, invalidate: clearPreview,
@@ -944,7 +992,14 @@
     let busy = false;
     let evaluationPrompt;
     const pendingCompactions = new Set();
-    const draftPrompt = () => evaluationPrompt?.displayed === prompt.value ? evaluationPrompt.saved : prompt.value;
+    const modeDirections = {
+      plan: 'Return an implementation plan based on the approved context. Explain verification and open questions. Keep the response at the planning stage.',
+      ask: 'Answer the question from the approved repository evidence. Cite relevant paths and line ranges.',
+    };
+    const draftPrompt = () => {
+      const task = evaluationPrompt?.displayed === prompt.value ? evaluationPrompt.saved : prompt.value;
+      return task.trim() && modeDirections[taskMode.value] ? task + '\n\n' + modeDirections[taskMode.value] : task;
+    };
     const onBranch = () => alternativeSessionName.test(session.value.trim());
     const enrollment = form.querySelector('[data-enroll]');
 
@@ -958,6 +1013,7 @@
       revision++;
       preview = null;
       previewEl.replaceChildren();
+      preflight.hidden = true;
       approved.checked = false;
       approve.hidden = true;
       previewButton.disabled = onBranch() && !ownerWritable;
@@ -988,7 +1044,8 @@
         }).filter((part) => part.project || part.query || part.tokenBudget);
         return { source: 'packages', packages };
       }
-      const data = { source: 'repository', query: form.elements.query.value };
+      const query = form.elements.query.value.trim() || [...prompt.value.trim()].slice(0, 256).join('');
+      const data = { source: 'repository', query };
       if (profile.value.trim()) {
         try { data.profile = JSON.parse(profile.value); }
         catch (_) { throw new Error('Enter valid JSON for the project profile.'); }
@@ -1023,6 +1080,7 @@
     });
 
     prompt.addEventListener('input', () => { evaluationPrompt = undefined; });
+    taskMode.addEventListener('change', clearPreview);
     for (const input of [source, projects, tokenBudget, profile, files, requestId, prompt, approvedSourceLookup,
       form.elements.query, ...form.querySelectorAll('[data-package] input'), ...form.querySelectorAll('[data-atlas] input, [data-atlas] select')])
       input.addEventListener('input', clearPreview);
@@ -1030,6 +1088,7 @@
       const mapped = source.value === 'atlas' || source.value === 'orchestrated';
       form.querySelector('[data-repository]').hidden = source.value !== 'repository';
       form.querySelector('[data-files]').hidden = source.value !== 'files';
+      attachments.hidden = source.value !== 'files';
       form.querySelector('[data-packages]').hidden = source.value !== 'packages';
       form.querySelector('[data-atlas]').hidden = !mapped;
       form.querySelector('[data-atlas-query]').hidden = source.value !== 'atlas';
@@ -1040,8 +1099,9 @@
       if (source.value === 'packages' || mapped) approvedSourceLookup.checked = false;
       previewButton.textContent = source.value === 'orchestrated' ? 'Preview plan' : 'Preview source';
       updateEvaluationAvailability();
+      panel.dispatchEvent(new Event('coding-attachments'));
     }
-    source.addEventListener('change', updateSourceFields);
+    source.addEventListener('change', () => { updateSourceFields(); if (source.value !== 'repository') toggleOptions(true); });
     function renderAttachments() {
       attachments.replaceChildren(...[...trackedFiles].map((path) => {
         const button = document.createElement('button');
@@ -1054,6 +1114,8 @@
       }));
       panel.dispatchEvent(new Event('coding-attachments'));
     }
+    panel.attachedPaths = () => source.value === 'files' ? [...new Set([...entries(files.value), ...trackedFiles])] : [];
+    files.addEventListener('input', () => panel.dispatchEvent(new Event('coding-attachments')));
     panel.attachedTrackedFile = (path) => trackedFiles.has(path);
     panel.toggleTrackedFile = (path, button) => {
       if (readonly || busy || detached()) return;
@@ -1063,7 +1125,7 @@
       updateSourceFields();
       clearPreview();
       renderAttachments();
-      if (button && !button.isConnected) files.focus();
+      if (button && !button.isConnected) prompt.focus();
     };
     function updateEvaluationAvailability() {
       const unavailable = onBranch() || source.value === 'orchestrated';
@@ -1115,11 +1177,13 @@
           ...(pinned ? { evaluation: evaluationCase, prompt: draftPrompt(), ...(lookup ? { approvedSourceLookup: true } : {}) } : {}),
         });
         if (!isCurrent()) return;
+        preflight.hidden = false;
         const branchContext = branchSession ? result.branchContext : undefined;
         if (branchSession && (!validBranchHistory(branchContext) || !branchVersionId.test(branchContext.id))) {
           throw new Error('Could not review this branch’s current context. Preview source again.');
         }
         previewContents(previewEl, result);
+        if (modeDirections[taskMode.value]) previewEl.prepend(disclosure('Task mode instructions', modeDirections[taskMode.value]));
         mountSourceManifest(previewEl, result, feedback);
         if (branchContext) previewEl.append(branchHistory(branchContext, 'Context already in this branch'));
         if ((result.source === 'repository' || result.source === 'atlas') && !result.excerpts.length) return;
@@ -1168,6 +1232,7 @@
           requestId.value = crypto.randomUUID();
           approvedSourceLookup.checked = false;
           clearPreview();
+          toggleOptions(false);
           feedback.textContent = 'Request ' + run.id + ' is tracked in Run history.';
         }
       } catch (error) {
@@ -1180,9 +1245,20 @@
 
     panel.updateProject = (current) => {
       project = current;
+      modelLabel.textContent = project.model;
+      modelLabel.title = project.providerLabel + ' / ' + project.model + (project.thinking ? ' · ' + project.thinking : '');
       updateSend();
       if (project.credential === 'missing') feedback.textContent = 'Add a provider API key in Project settings to send a request.';
       else if (feedback.textContent.startsWith('Add a provider API key')) report(feedback);
+    };
+    panel.useSession = (name) => {
+      if (readonly || busy || detached() || (alternativeSessionName.test(name) && !ownerWritable)) return;
+      if (name && session.value !== name || !name) {
+        session.value = name || 'session-' + crypto.randomUUID().slice(0, 8);
+        requestId.value = crypto.randomUUID();
+        updateBranchMode();
+      }
+      prompt.focus();
     };
     panel.setCompactionPending = (name, pending) => {
       if (pendingCompactions.has(name) === pending) return;
@@ -1195,6 +1271,7 @@
     panel.canLoadEvaluationCase = () => !readonly && panel.isConnected && !detached();
     panel.loadEvaluationCase = (saved, recipe) => {
       if (busy || !panel.canLoadEvaluationCase()) return false;
+      taskMode.value = 'agent';
       session.value = 'eval-' + crypto.randomUUID();
       updateBranchMode();
       if (recipe) {
@@ -1276,6 +1353,7 @@
       return true;
     };
     panel.updateProject(project);
+    updateSourceFields();
     return (targetSession) => {
       if (session.value !== targetSession) return;
       approvedSourceLookup.checked = false;
@@ -1916,8 +1994,10 @@
   function repositoryTree(parent, { readFiles, composerPanel, readonly, detached, showCommands = () => {} }) {
     const panel = document.createElement('section');
     panel.className = 'work-tree stack';
-    panel.innerHTML = '<h3>Repository</h3><p data-branch class="muted" hidden></p><label class="field"><span>Filter tracked paths</span>' +
-      '<input type="search" placeholder="Find a path"></label><div role="status"></div><div data-file-tree></div>';
+    panel.innerHTML = '<p data-branch class="work-branch" hidden></p><label class="field work-file-filter"><span class="sr-only">Filter tracked paths</span>' +
+      workspaceIcon('search') + '<input type="search" placeholder="Filter files"><kbd title="Control or Command + P">⌘P</kbd></label>' +
+      '<div class="row work-section-heading"><h3>Repository</h3><button type="button" data-refresh-tree class="small right" title="Refresh tracked files" aria-label="Refresh tracked files">↻</button></div>' +
+      '<div data-file-tree></div><div role="status"></div>';
     parent.prepend(panel);
     const search = panel.querySelector('input');
     const status = panel.querySelector('[role="status"]');
@@ -1944,7 +2024,7 @@
       }
       function branch(node, level = 0) {
         const dirs = [...node.dirs].map(([name, child]) => '<details' + (query || level === 0 ? ' open' : '') +
-          '><summary>' + esc(name) + '</summary>' + branch(child, level + 1) + '</details>');
+          '><summary>' + workspaceIcon('folder') + ' ' + esc(name) + '</summary>' + branch(child, level + 1) + '</details>');
         const files = node.files.map(({ path, filename }) => {
           if (readonly) return '<div class="work-file" title="' + esc(path) + '">' + esc(filename) + '</div>';
           const attached = composerPanel.attachedTrackedFile(path);
@@ -1981,30 +2061,62 @@
         if (detached() || current !== generation) return;
         paths = data.paths;
         capped = data.limited;
-        head.textContent = [data.branch, data.revision].filter(Boolean).join(' · ');
-        head.hidden = !head.textContent;
+        head.innerHTML = workspaceIcon('branch') + '<span title="' + esc(data.revision || '') + '">' + esc(data.branch || data.revision || '') + '</span>';
+        head.hidden = !data.branch && !data.revision;
         draw();
         showCommands(data.commands);
       }, (error) => { if (!detached() && current === generation) report(status, error); });
     }
+    panel.querySelector('[data-refresh-tree]').addEventListener('click', refresh);
     void refresh();
     return refresh;
   }
 
-  function workInspector(parent, project, owner, detached) {
+  function diffFiles(proposals) {
+    return proposals.flatMap(({ paths, diff }) => {
+      const sections = diff.split(/\n(?=diff --git )/u);
+      return (paths.length === sections.length ? paths : [paths.join(', ')]).map((path, index) => {
+        const text = paths.length === sections.length ? sections[index] : diff;
+        const lines = text.trimEnd().split('\n');
+        const addition = /^\+(?!\+\+)/u;
+        const deletion = /^-(?!--)/u;
+        return { path, lines, added: lines.filter((line) => addition.test(line)).length,
+          removed: lines.filter((line) => deletion.test(line)).length, isNew: lines.includes('--- /dev/null') };
+      });
+    });
+  }
+
+  function workInspector(parent, project, canRecord, detached, review) {
     const panel = document.createElement('aside');
     panel.className = 'work-inspector stack';
     panel.setAttribute('aria-label', 'Request inspector');
     const tabs = ['Changes', 'Checks', 'Context'];
     panel.innerHTML = '<div class="work-inspector-tabs" role="tablist" aria-label="Request inspector">' + tabs.map((title, i) =>
       '<button type="button" role="tab" id="work-tab-' + i + '" aria-controls="work-panel-' + i + '" aria-selected="' + (i === 0) +
-      '" tabindex="' + (i === 0 ? 0 : -1) + '">' + title + '</button>').join('') + '</div>' + tabs.map((_, i) =>
-      '<div class="stack" role="tabpanel" id="work-panel-' + i + '" aria-labelledby="work-tab-' + i + '" tabindex="0"' + (i ? ' hidden' : '') + '></div>').join('');
+      '" tabindex="' + (i === 0 ? 0 : -1) + '">' + title + '<span class="work-count" aria-hidden="true" hidden></span></button>').join('') +
+      '</div><div class="work-inspector-body">' + tabs.map((_, i) =>
+      '<div class="stack" role="tabpanel" id="work-panel-' + i + '" aria-labelledby="work-tab-' + i + '" tabindex="0"' + (i ? ' hidden' : '') +
+      '></div>').join('') + '</div><footer class="work-review-footer"><div data-change-total></div>' +
+      '<button type="button" class="primary" data-focus-review disabled>Review changes</button></footer>';
     parent.append(panel);
     const buttons = [...panel.querySelectorAll('[role="tab"]')];
     const pages = [...panel.querySelectorAll('[role="tabpanel"]')];
     const [changes, checks, context] = pages;
+    const reviewButton = panel.querySelector('[data-focus-review]');
+    const totals = panel.querySelector('[data-change-total]');
     let revision = 0;
+    let declared = [];
+    let currentRun = null;
+    let recorded = [];
+    let savedFiles = [];
+    let draftFiles = [];
+    reviewButton.addEventListener('click', review);
+
+    function count(index, value) {
+      const label = buttons[index].querySelector('.work-count');
+      label.hidden = !value;
+      label.textContent = String(value);
+    }
     function activate(index, focus = false) {
       buttons.forEach((button, i) => {
         button.tabIndex = i === index ? 0 : -1;
@@ -2022,21 +2134,152 @@
         activate(next, true);
       });
     });
+
+    function renderChecks() {
+      checks.replaceChildren();
+      count(1, recorded.length);
+      if (!recorded.length) checks.append(Object.assign(document.createElement('p'), { className: 'muted', textContent: 'No check results recorded.' }));
+      for (const check of recorded) {
+        const row = document.createElement('div');
+        row.className = 'work-check-row';
+        row.innerHTML = '<span class="work-check-status" data-outcome="' + esc(check.status) + '">' +
+          esc({ passed: '✓ Passed', failed: '× Failed', skipped: '– Skipped' }[check.status] || check.status) + '</span><div><strong>' +
+          esc(check.title) + '</strong><small>' + esc(check.actor) + (check.durationMs === null ? '' : ' · ' + esc(check.durationMs / 1000) + ' s') +
+          '</small>' + (check.note ? '<p>' + esc(check.note) + '</p>' : '') + '</div>';
+        checks.append(row);
+      }
+      if (canRecord && currentRun?.status === 'done') {
+        const target = currentRun;
+        const form = document.createElement('form');
+        form.className = 'stack work-check-form';
+        form.innerHTML = field('Check name', '', 'text', 'name="title" required maxlength="120" placeholder="Typecheck"') +
+          '<label class="field"><span>Outcome</span><select name="status"><option value="passed">Passed</option>' +
+          '<option value="failed">Failed</option><option value="skipped">Skipped</option></select></label>' +
+          field('Duration in seconds (optional)', '', 'number', 'name="duration" min="0" max="86400" step="0.001"') +
+          '<label class="field"><span>Evidence note (optional)</span><textarea name="note" rows="2" maxlength="1000"></textarea></label>' +
+          '<div class="row"><button type="submit" class="primary">Save check result</button></div><p role="status"></p>';
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'Record check result';
+        details.append(summary, form);
+        checks.append(details);
+        form.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          const submit = form.querySelector('button');
+          const status = form.querySelector('[role="status"]');
+          const duration = form.elements.duration.value;
+          submit.disabled = true;
+          try {
+            const result = await coding(projectUrl(project.id) + '/record-check', { ...identity(target), title: form.elements.title.value,
+              status: form.elements.status.value, note: form.elements.note.value,
+              ...(duration === '' ? {} : { durationMs: Math.round(Number(duration) * 1000) }) });
+            if (currentRun !== target || detached()) return;
+            recorded = result;
+            renderChecks();
+            checks.querySelector('summary')?.focus();
+          } catch (error) { if (currentRun === target && !detached()) report(status, error); }
+          finally { submit.disabled = false; }
+        });
+      }
+      if (declared.length) checks.append(listBlock('Repository-declared commands', declared.map((command) =>
+        command.kind + ' · ' + command.argv.join(' ') + ' · ' + command.source.path + ':' + command.source.line)));
+    }
+
+    function showChanges(proposals) {
+      changes.replaceChildren();
+      const files = diffFiles(proposals);
+      count(0, files.length);
+      totals.innerHTML = files.length ? esc(files.length + (files.length === 1 ? ' changed file' : ' changed files')) +
+        ' <span class="work-diff-add">+' + files.reduce((sum, file) => sum + file.added, 0) + '</span> <span class="work-diff-delete">−' +
+        files.reduce((sum, file) => sum + file.removed, 0) + '</span>' : '';
+      if (!files.length) { changes.textContent = 'No patch was proposed in this response.'; return; }
+      const fileList = document.createElement('div');
+      fileList.className = 'work-changes-list';
+      const diff = document.createElement('section');
+      diff.className = 'work-diff';
+      const groups = new Map();
+      files.forEach((file, index) => {
+        const slash = file.path.lastIndexOf('/');
+        const directory = slash === -1 ? 'Repository root' : file.path.slice(0, slash);
+        if (!groups.has(directory)) groups.set(directory, []);
+        groups.get(directory).push({ file, index });
+      });
+      for (const [directory, items] of groups) {
+        const group = document.createElement('div');
+        group.innerHTML = '<h4>' + esc(directory) + '</h4>' + items.map(({ file, index }) =>
+          '<button type="button" data-diff-index="' + index + '" aria-pressed="false" title="' + esc(file.path) +
+          '"><span class="work-file-status ' + (file.isNew ? 'work-diff-add' : '') + '" aria-label="' + (file.isNew ? 'Added' : 'Modified') + '">' +
+          (file.isNew ? 'A' : 'M') + '</span><span>' + esc(file.path.split('/').at(-1)) + '</span><span class="work-diff-add">+' + file.added +
+          '</span><span class="work-diff-delete">−' + file.removed + '</span></button>').join('');
+        fileList.append(group);
+      }
+      function display(index) {
+        const file = files[index];
+        for (const button of fileList.querySelectorAll('button')) button.setAttribute('aria-pressed', String(Number(button.dataset.diffIndex) === index));
+        const title = document.createElement('h4');
+        title.textContent = file.path;
+        const code = document.createElement('pre');
+        let oldLine = 0;
+        let newLine = 0;
+        for (const line of file.lines) {
+          if (/^(diff --git |--- |\+\+\+ |index |new file mode )/u.test(line)) continue;
+          const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(line);
+          if (hunk) {
+            oldLine = Number(hunk[1]);
+            newLine = Number(hunk[2]);
+            const header = document.createElement('span');
+            header.className = 'work-diff-hunk';
+            header.textContent = line;
+            code.append(header);
+            continue;
+          }
+          const plus = line.startsWith('+');
+          const minus = line.startsWith('-');
+          const row = document.createElement('span');
+          row.className = 'work-diff-line' + (plus ? ' work-diff-add' : minus ? ' work-diff-delete' : '');
+          row.innerHTML = '<span aria-hidden="true">' + (plus ? '' : oldLine++) + '</span><span aria-hidden="true">' +
+            (minus ? '' : newLine++) + '</span><code>' + esc(line || ' ') + '</code>';
+          code.append(row);
+        }
+        diff.replaceChildren(title, code);
+      }
+      fileList.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-diff-index]');
+        if (button) display(Number(button.dataset.diffIndex));
+      });
+      changes.append(fileList, diff);
+      display(0);
+    }
+
+    function renderDraft() {
+      context.querySelector('[data-context-draft]')?.remove();
+      count(2, savedFiles.length + draftFiles.length);
+      if (!draftFiles.length) return;
+      const draft = listBlock('Files attached to the next request', draftFiles);
+      draft.open = true;
+      draft.dataset.contextDraft = '';
+      context.prepend(draft);
+    }
+
     changes.textContent = 'Select a request to inspect changes.';
-    checks.textContent = 'No check results recorded.';
     context.textContent = 'Select a request to inspect its saved source.';
+    renderChecks();
     return {
-      showCommands(commands) {
-        checks.replaceChildren('No check results recorded.');
-        if (!commands?.length) return;
-        checks.append(listBlock('Declared repository commands', commands.map((command) =>
-          command.kind + ' · ' + command.argv.join(' ') + ' · ' + command.source.path + ':' + command.source.line)));
-      },
-      showRun(row, files, hasSource = false) {
+      showCommands(commands) { declared = commands || []; renderChecks(); },
+      showDraft(paths) { draftFiles = paths; renderDraft(); },
+      showRun(row, files, hasSource = false, resultChecks) {
         const current = ++revision;
-        context.textContent = files?.length ? '' : 'No saved source ranges for this request.';
-        if (files?.length) context.append(listBlock('Saved source ranges', files.map((file) =>
+        currentRun = row;
+        recorded = resultChecks || [];
+        savedFiles = files || [];
+        renderChecks();
+        reviewButton.disabled = row?.status !== 'done';
+        count(0, 0);
+        totals.replaceChildren();
+        context.textContent = savedFiles.length ? '' : 'No saved source ranges for this request.';
+        if (savedFiles.length) context.append(listBlock('Saved source ranges', savedFiles.map((file) =>
           file.path + (file.startLine ? ':' + file.startLine + '–' + file.endLine : ''))));
+        renderDraft();
         if (hasSource) {
           const button = document.createElement('button');
           const source = document.createElement('div');
@@ -2058,64 +2301,29 @@
             } finally { if (current === revision && !detached()) button.disabled = false; }
           });
         }
-        changes.textContent = row?.review === 'accepted' && owner ? '' :
-          row ? 'Patch proposals are available to the local operator after accepting a result.' : 'Select a request to inspect changes.';
-        if (row?.review !== 'accepted' || !owner) return;
-        const load = document.createElement('button');
-        const proposalsPanel = document.createElement('div');
-        proposalsPanel.className = 'stack';
-        proposalsPanel.setAttribute('aria-live', 'polite');
-        load.type = 'button';
-        load.textContent = 'Load saved patches';
-        changes.append(load, proposalsPanel);
-        load.addEventListener('click', async () => {
-          load.disabled = true;
-          proposalsPanel.textContent = 'Reading saved patch proposals…';
-          try {
-            const { proposals } = await coding(projectUrl(project.id) + '/patch-proposals', identity(row));
-            if (current !== revision || detached()) return;
-            proposalsPanel.textContent = proposals.length ? '' : 'No supported patch in this response.';
-            for (const { paths, diff } of proposals) {
-              const sections = diff.split(/\n(?=diff --git )/u);
-              const files = sections.length === paths.length ? paths : [paths.join(', ')];
-              files.forEach((path, index) => {
-                const section = files.length === sections.length ? sections[index] : diff;
-                const details = document.createElement('details');
-                const summary = document.createElement('summary');
-                const code = document.createElement('pre');
-                summary.textContent = path;
-                for (const line of section.split('\n')) {
-                  const entry = document.createElement('span');
-                  if (/^\+(?!\+\+)/u.test(line)) entry.className = 'work-diff-add';
-                  if (/^-(?!--)/u.test(line)) entry.className = 'work-diff-delete';
-                  entry.textContent = line + '\n';
-                  code.append(entry);
-                }
-                details.append(summary, code);
-                proposalsPanel.append(details);
-              });
-            }
-          } catch (error) {
-            if (current === revision && !detached()) report(proposalsPanel, error);
-          } finally {
-            load.disabled = false;
-          }
-        });
+        changes.textContent = row?.status === 'done' ? 'Loading proposed changes…' :
+          row ? 'Proposed changes appear after the request finishes.' : 'Select a request to inspect changes.';
+        if (row?.status !== 'done') return;
+        coding(projectUrl(project.id) + '/review-diff', identity(row)).then(({ proposals }) => {
+          if (current === revision && !detached()) showChanges(proposals);
+        }, (error) => { if (current === revision && !detached()) report(changes, error); });
       },
     };
   }
 
-  function activity(parent, history, project, readonly, detached, { reviewPatch, ownerActions, initialRun, loadReviewFollowUp, inspector }) {
+  function activity(parent, history, project, readonly, detached, { reviewPatch, ownerActions, initialRun, loadReviewFollowUp, inspector, sessionBar, useSession }) {
     const prefix = projectUrl(project.id);
     const panel = document.createElement('section');
     panel.className = 'coding-panel coding-timeline stack';
-    history.innerHTML = '<div class="row"><h3>Run history</h3><button type="button" class="small right" data-refresh>Refresh</button></div>' +
+    history.innerHTML = '<div class="row work-section-heading"><h3>Recent sessions</h3><button type="button" class="small right" data-refresh>Refresh</button>' +
+      (!readonly ? '<button type="button" class="small work-icon-button" title="New session" aria-label="New session" data-new-session>' + workspaceIcon('plus') + '</button>' : '') + '</div>' +
       '<details data-find-saved-run><summary>Find saved request</summary><form class="stack coding-form">' +
       field('Session name', '', 'text', 'name="session" maxlength="64" spellcheck="false" required') +
       field('Request ID', '', 'text', 'name="requestId" maxlength="128" spellcheck="false" required') +
       '<div class="row"><button type="submit">Open saved request</button></div></form></details>' +
       '<div class="stack coding-runs" data-runs></div>';
-    panel.innerHTML = '<h3>Request timeline</h3><div class="stack" data-inspect aria-live="polite">Select a saved request or compose a new one.</div>' +
+    panel.innerHTML = '<div class="stack work-timeline" data-inspect aria-live="polite"><div class="work-timeline-empty">' +
+      workspaceIcon('pi') + '<h3>Start a request</h3><p>Choose files from the repository or let Pi find context for your task.</p></div></div>' +
       '<section class="stack" data-run-review hidden></section>' +
       '<div class="row" data-compare-branch hidden></div>' +
       '<section class="stack" data-saved-request-source hidden></section>' +
@@ -2127,6 +2335,13 @@
     const inspected = panel.querySelector('[data-inspect]');
     const feedback = panel.querySelector('[role="status"]');
     const finder = history.querySelector('[data-find-saved-run] form');
+    const title = sessionBar.querySelector('[data-session-title]');
+    const state = sessionBar.querySelector('[data-session-state]');
+    const meta = sessionBar.querySelector('[data-session-meta]');
+    const controls = sessionBar.querySelector('[data-session-actions]');
+    const followUp = sessionBar.querySelector('[data-follow-up]');
+    history.querySelector('[data-new-session]')?.addEventListener('click', () => useSession(''));
+    followUp?.addEventListener('click', () => useSession(selected?.session || ''));
     const setRunReview = mountRunReview(panel.querySelector('[data-run-review]'), {
       prefix, readonly, detached, refresh, loadFollowUp: loadReviewFollowUp,
       afterAccepted: () => inspected.querySelector('[data-review-patch]')?.focus(),
@@ -2180,17 +2395,30 @@
       const branchReason = ownerActions && typeof result.alternativeBranchReason === 'string' ? result.alternativeBranchReason : '';
       const snippet = receipt?.repositoryContext?.files || pi?.request?.repositoryContext?.files || [];
       const progress = result.taskProgress ?? pi?.request?.taskProgress;
+      const titleText = result.prompt?.trim().split('\n', 1)[0] || row.session;
+      const heading = titleText.length > 82 ? titleText.slice(0, 81) + '…' : titleText;
+      if (title.textContent !== heading) title.textContent = heading;
+      title.title = titleText;
+      state.dataset.state = row.status;
+      state.textContent = labelStatus(row);
+      state.hidden = false;
+      meta.textContent = 'Session ' + row.session + ' · ' + time(row.created);
+      if (followUp) followUp.hidden = !idle || Boolean(branch && !ownerActions);
       const live = inspected.querySelector('[data-live-answer]');
       if (row.status === 'running' && inspected.dataset.run === row.id && inspected.dataset.session === row.session && live) {
         showLiveAnswer(live, result.liveAnswer);
         showTaskProgress(inspected.querySelector('[data-task-progress]'), progress, true);
         return row;
       }
-      inspector.showRun(row, snippet.length ? snippet : result.report?.request?.files, Boolean(canViewSource));
+      inspector.showRun(row, snippet.length ? snippet : result.report?.request?.files, Boolean(canViewSource), result.checks);
+      controls.replaceChildren();
       inspected.dataset.run = row.id;
       inspected.dataset.session = row.session;
-      inspected.innerHTML = '<div class="coding-result stack"><h4>' + esc(row.id) + '</h4>' +
-        '<p>' + esc(labelStatus(row)) + ' · ' + esc(row.session) + ' · ' + esc(row.actor) + '</p>' +
+      inspected.innerHTML = (result.prompt ? '<article class="work-entry"><div class="work-timeline-node">' + workspaceIcon('task') + '</div>' +
+        '<div><p class="work-entry-meta">Request · ' + esc(row.actor) + '</p><p class="work-task-text">' + esc(result.prompt) + '</p></div></article>' : '') +
+        '<article class="work-entry"><div class="work-timeline-node">' + workspaceIcon(row.status === 'done' ? 'check' : 'pi') + '</div>' +
+        '<div class="coding-result stack"><p class="work-entry-meta">Pi Durable · ' + esc(project.providerLabel) + '</p>' +
+        '<h4>' + esc(row.id) + '</h4>' +
         (row.branch ? '<p class="muted">Alternative to ' + esc(row.branch.session) + ' · ' + esc(row.branch.requestId) + '</p>' : '') +
         (row.reviewer && !result.reviewHistory?.entries?.length ? '<p class="muted">Reviewed by ' + esc(row.reviewer) + ' · ' + esc(time(row.reviewed)) + '</p>' : '') +
         (branchReason ? '<p class="muted">' + esc(branchReason) + '</p>' : '') +
@@ -2205,7 +2433,7 @@
         (pi ? sessionUsage(pi) : '') +
         (snippet.length ? '<details><summary>Source references</summary><ul>' + snippet.map((file) =>
           '<li><code>' + esc(file.path + ':' + file.startLine + '–' + file.endLine) + '</code></li>').join('') + '</ul></details>' : '') +
-        '<div class="row" data-actions></div></div>';
+        '<div class="row" data-actions></div></div></article>';
       showTaskProgress(inspected.querySelector('[data-task-progress]'), progress, row.status === 'running');
       if (row.status === 'running') showLiveAnswer(inspected.querySelector('[data-live-answer]'), result.liveAnswer);
       if (receipt?.text) inspected.querySelector('[data-answer]').textContent = receipt.text;
@@ -2235,10 +2463,10 @@
         if (plan.outOfScope.length) bar.before(listBlock('Changes outside a work order’s scope', plan.outOfScope.map(({ order, path }) => order + ' · ' + path)));
       }
       if (readonly) return row;
-      if ((!branch || ownerActions) && row.status === 'running') appendAction(bar, 'Cancel run', '/cancel', row);
+      if ((!branch || ownerActions) && row.status === 'running') appendAction(controls, 'Cancel run', '/cancel', row);
       if ((!branch || ownerActions) && row.status === 'interrupted') {
-        appendAction(bar, 'Resume', '/resume', row);
-        appendAction(bar, 'Cancel run', '/cancel', row);
+        appendAction(controls, 'Resume', '/resume', row);
+        appendAction(controls, 'Cancel run', '/cancel', row);
       }
       if (row.status === 'done') {
         if (row.review === 'accepted' && reviewPatch) {
@@ -2281,8 +2509,9 @@
         if (!selected && target) selected = target;
         const markup = rows.length ? rows.map((row, index) =>
           '<button type="button" class="coding-run" aria-pressed="' + (row === target) + '" data-run="' + index + '">' +
-          '<span><strong>' + esc(row.id) + '</strong><span class="muted">' + esc(row.session) + '</span></span>' +
-          '<span>' + esc(labelStatus(row)) + '</span></button>').join('') : '<p class="empty">No requests in this project.</p>';
+          '<span class="work-run-dot" data-state="' + esc(row.status) + '" aria-hidden="true"></span><span><strong>' + esc(row.id) +
+          '</strong><span class="muted">' + esc(row.session) + ' · ' + esc(labelStatus(row)) + '</span></span></button>').join('') :
+          '<p class="muted work-empty-sessions">No requests in this project.</p>';
         if (list.dataset.markup !== markup) {
           const focused = list.contains(document.activeElement);
           list.innerHTML = markup;
@@ -2327,6 +2556,8 @@
       setComparisonRun(null);
       setRunReview(null);
       inspector.showRun(null);
+      controls.replaceChildren();
+      state.hidden = true;
       inspected.replaceChildren();
     }
 
@@ -2351,7 +2582,13 @@
     });
     history.querySelector('[data-refresh]').addEventListener('click', () => refresh());
     refresh(Boolean(initialRun));
-    return { refresh, selectRun };
+    return { refresh, selectRun, focusReview() {
+      const review = panel.querySelector('[data-run-review]:not([hidden])');
+      const target = review?.querySelector('button, textarea, summary') || panel.querySelector('[data-answer]');
+      if (!target) return;
+      if (!target.matches('button, textarea, summary')) target.tabIndex = -1;
+      target.focus();
+    } };
   }
 
   function mountProviderCheck(panel, { prefix, readonly, current, opened }) {
@@ -3271,40 +3508,77 @@
       if (teamMode) report(projectsEl, new Error('This request link does not match the connected project.'));
       return;
     }
-    const intro = document.createElement('header');
-    intro.className = 'coding-project-header stack';
-    intro.innerHTML = '<div class="row"><h3>' + esc(project.title) + '</h3>' +
-      (!readonly ? '<button type="button" class="small right" data-compose>New request</button>' : '') + '</div>' +
-      '<details><summary>Workspace details</summary>' + (project.workspace ? '<p><code>' + esc(project.workspace) + '</code></p>' : '') +
-      '<p class="muted">Permitted scope · ' + esc(project.scopes.join(', ')) + '</p>' +
-      '<p class="muted">' + (project.workerIsolation === 'docker' ? 'Docker worker · Only this session is mounted' : 'Local worker · Server OS account') + '</p></details>' +
-      '<div class="row work-drawer-controls"><button type="button" data-show-tree>Repository and sessions</button>' +
-      '<button type="button" data-show-inspector>Inspector</button></div>';
-    page.append(intro);
+    page.classList.add('coding-focused');
+    page.querySelector('header').remove();
     const grid = document.createElement('div');
-    grid.className = 'coding-workspace-grid coding-activity';
+    grid.className = 'coding-workspace-grid coding-activity work-grid';
     page.append(grid);
     const sidebarSlot = document.createElement('div');
     sidebarSlot.className = 'work-sidebar-slot';
     const sidebar = document.createElement('aside');
     sidebar.className = 'work-sidebar stack';
     sidebar.setAttribute('aria-label', 'Repository and sessions');
+    const workspaceHeader = document.createElement('header');
+    workspaceHeader.className = 'work-repo-header';
+    workspaceHeader.innerHTML = '<span class="work-heading">Workspace</span><div class="work-repo-title"><span>' + workspaceIcon('repo') +
+      '</span><strong>' + esc(project.title) + '</strong>' + (!teamMode ? '<button type="button" class="small work-icon-button" data-projects title="Switch or manage projects" aria-label="Switch or manage projects">' +
+        workspaceIcon('arrow') + '</button>' : '') + '</div><details><summary>Workspace details</summary>' +
+      (project.workspace ? '<p><code>' + esc(project.workspace) + '</code></p>' : '') + '<p>Scope · ' + esc(project.scopes.join(', ')) + '</p><p>' +
+      (project.workerIsolation === 'docker' ? 'Docker worker · Only this session is mounted' : 'Local worker · Server OS account') + '</p></details>';
+    sidebar.append(workspaceHeader);
     const history = document.createElement('section');
     history.className = 'work-history stack';
     sidebar.append(history);
     sidebarSlot.append(sidebar);
     const left = document.createElement('div');
-    left.className = 'stack coding-left';
+    left.className = 'work-center';
+    const intro = document.createElement('header');
+    intro.className = 'work-session-bar';
+    intro.innerHTML = '<div class="work-session-info"><div class="row"><h2 data-session-title>New request</h2>' +
+      '<span class="work-run-state" data-session-state hidden></span></div><p data-session-meta>' + esc(project.title) + '</p></div>' +
+      '<div class="row work-session-controls"><span class="row" data-session-actions></span>' +
+      (!readonly ? '<button type="button" class="small" data-follow-up hidden>Follow up</button>' : '') +
+      '<button type="button" class="small" data-project-tools>Project tools</button></div>' +
+      '<div class="row work-drawer-controls"><button type="button" class="small" data-show-tree>Repository and sessions</button>' +
+      '<button type="button" class="small" data-show-inspector>Inspector</button></div>';
+    const flow = document.createElement('div');
+    flow.className = 'work-flow';
+    left.append(intro, flow);
     const right = document.createElement('div');
     right.className = 'stack coding-right';
     grid.append(sidebarSlot, left, right);
-    const inspector = workInspector(right, project, !teamMode, isDetached);
+    const inspector = workInspector(right, project, !teamMode && !readonly, isDetached, () => {
+      const dialog = right.querySelector('dialog[open]');
+      if (dialog) {
+        dialog.addEventListener('close', () => runs.focusReview(), { once: true });
+        dialog.close();
+      } else runs.focusReview();
+    });
     workspaceDrawer(sidebar, intro.querySelector('[data-show-tree]'));
     workspaceDrawer(right.querySelector('.work-inspector'), intro.querySelector('[data-show-inspector]'));
+    if (!teamMode) {
+      const menu = workspaceHeader.querySelector('[data-projects]');
+      const dialog = document.createElement('dialog');
+      dialog.className = 'work-project-dialog';
+      dialog.setAttribute('aria-label', 'Projects and team access');
+      dialog.innerHTML = '<div class="row"><h2>Projects</h2><button type="button" class="small right">Close</button></div>';
+      const close = dialog.querySelector('button');
+      close.addEventListener('click', () => dialog.close());
+      dialog.addEventListener('close', () => { if (menu.isConnected) menu.focus(); });
+      menu.addEventListener('click', () => { dialog.showModal(); close.focus(); });
+      dialog.append(projectsEl);
+      page.append(dialog);
+    } else projectsEl.remove();
     let openPatch;
     let composerPanel;
-    const runs = activity(left, history, project, readonly, isDetached, {
-      initialRun, inspector,
+    const runs = activity(flow, history, project, readonly, isDetached, {
+      initialRun, inspector, sessionBar: intro, useSession: (name) => {
+        const dialog = sidebarSlot.querySelector('dialog[open]');
+        if (dialog) {
+          dialog.addEventListener('close', () => composerPanel.useSession(name), { once: true });
+          dialog.close();
+        } else composerPanel.useSession(name);
+      },
       reviewPatch: teamMode ? undefined : (row) => openPatch(row),
       loadReviewFollowUp: (session, note) => composerPanel.loadReviewFollowUp(session, note),
       ownerActions: teamMode || readonly ? undefined : {
@@ -3315,32 +3589,47 @@
     });
     const clearComposerConsent = composer(left, project, readonly, isDetached, runs.selectRun, !teamMode && !readonly);
     composerPanel = left.querySelector('.coding-composer');
-    intro.querySelector('[data-compose]')?.addEventListener('click', () => composerPanel.querySelector('textarea[name="prompt"]').focus());
     const refreshRepository = repositoryTree(sidebar, { readFiles: () => coding(projectUrl(project.id) + '/files-preview'),
       composerPanel, readonly, detached: isDetached, showCommands: inspector.showCommands });
-    window.okbCodingEvaluation.mount(left, {
+    sidebar.prepend(workspaceHeader);
+    composerPanel.addEventListener('coding-attachments', () => inspector.showDraft(composerPanel.attachedPaths()));
+    const tools = document.createElement('section');
+    tools.className = 'work-project-tools stack';
+    tools.innerHTML = '<h3 tabindex="-1">Project tools</h3>';
+    flow.append(tools);
+    intro.querySelector('[data-project-tools]').addEventListener('click', () => tools.querySelector('h3').focus());
+    window.okbCodingEvaluation.mount(tools, {
       prefix: projectUrl(project.id), coding, readonly, detached: isDetached,
       canLoadCase: composerPanel.canLoadEvaluationCase, loadCase: composerPanel.loadEvaluationCase,
     });
     if (!teamMode) {
-      window.okbCodingEvaluation.mountRetrievalBenchmark(left, {
+      window.okbCodingEvaluation.mountRetrievalBenchmark(tools, {
         prefix: projectUrl(project.id), coding, readonly, detached: isDetached,
       });
-      refreshDeployment = settings(left, project, readonly, composerPanel.updateProject, runs.refresh, isDetached, refreshRepository);
+      refreshDeployment = settings(tools, project, readonly, composerPanel.updateProject, runs.refresh, isDetached, refreshRepository);
     }
     const github = document.createElement('div');
     github.dataset.codingGithub = '';
-    left.append(github);
+    tools.append(github);
     const target = actionRoute ? { session: actionRoute[3], id: actionRoute[4] } : undefined;
     window.okbGitHub?.mount(github, { project, coding, readonly, detached: isDetached, loadIssue: composerPanel.loadGitHubIssue,
       target: actionRoute?.[2] === 'github' ? target : undefined });
     if (!teamMode) {
-      openPatch = patchReview(left, project, readonly, isDetached);
+      openPatch = patchReview(tools, project, readonly, isDetached);
       if (actionRoute?.[2] === 'patch') void openPatch(target);
     }
   }
 
   window.okbCoding = { mount };
+  document.addEventListener('keydown', (event) => {
+    if (event.key.toLowerCase() !== 'p' || !(event.metaKey || event.ctrlKey) || document.querySelector('dialog[open]')) return;
+    const workspace = document.querySelector('.coding-focused');
+    const search = workspace?.querySelector('.work-file-filter input');
+    if (!search) return;
+    event.preventDefault();
+    if (!search.getClientRects().length) workspace.querySelector('[data-show-tree]')?.click();
+    search.focus();
+  });
 
   const entrance = document.querySelector('#team-entrance');
   if (entrance) {

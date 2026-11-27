@@ -64,6 +64,10 @@ type RunReviewRow = {
   id: string; decision: ReviewDecision; reviewer: string; reviewed: string; note: string | null;
   session: string; request_id: string; expected_id: string | null; member_id: string | null;
 };
+type RunCheck = {
+  title: string; status: "passed" | "failed" | "skipped"; durationMs: number | null; note: string | null;
+  actor: string; recorded: string;
+};
 type BranchRow = {
   session: string; parent_session: string; parent_request: string; version: string;
   status: "pending" | "ready"; created: string;
@@ -86,7 +90,7 @@ type Running = {
   cancel: AbortController;
   promise: Promise<void>;
   stop?: () => void;
-  progress?: { session: string; requestId: string; answer?: CodingLiveAnswer; tasks?: CodingTaskProgress };
+  progress?: { session: string; requestId: string; prompt?: string; answer?: CodingLiveAnswer; tasks?: CodingTaskProgress };
 };
 
 export class ProjectControlError extends Error {
@@ -383,6 +387,13 @@ export class CodingProjectControl {
           PRIMARY KEY (project, session, id)
         );
         CREATE INDEX IF NOT EXISTS runs_project_updated ON runs(project, updated DESC);
+        CREATE TABLE IF NOT EXISTS run_checks(
+          project TEXT NOT NULL, session TEXT NOT NULL, request_id TEXT NOT NULL, title TEXT NOT NULL COLLATE NOCASE,
+          status TEXT NOT NULL CHECK(status IN ('passed','failed','skipped')), duration_ms INTEGER, note TEXT,
+          actor TEXT NOT NULL, recorded TEXT NOT NULL,
+          PRIMARY KEY(project, session, request_id, title),
+          FOREIGN KEY(project, session, request_id) REFERENCES runs(project, session, id) ON DELETE CASCADE
+        );
         CREATE TABLE IF NOT EXISTS run_reviews(
           seq INTEGER PRIMARY KEY,
           project TEXT NOT NULL, session TEXT NOT NULL, request_id TEXT NOT NULL, id TEXT NOT NULL,
@@ -921,7 +932,7 @@ export class CodingProjectControl {
     const key = this.#sessionKey(project.id, run.session);
     const cancel = new AbortController();
     const dependencies = this.#dependencies(project, actor);
-    const progress: NonNullable<Running["progress"]> = { session: run.session, requestId: run.requestId };
+    const progress: NonNullable<Running["progress"]> = { session: run.session, requestId: run.requestId, prompt: run.prompt };
     const admitted = () => this.#auditAdmitted(project.id, run, actor);
     const liveAnswer = (answer: CodingLiveAnswer | undefined) => { progress.answer = answer; };
     const taskProgress = (tasks: CodingTaskProgress | undefined) => { progress.tasks = tasks; };
@@ -1064,13 +1075,14 @@ export class CodingProjectControl {
         && !active.cancel.signal.aborted ? active.progress : undefined;
       return {
         run: value,
+        ...(progress?.prompt && { prompt: progress.prompt }),
         ...(progress?.answer && { liveAnswer: progress.answer }),
         ...(progress?.tasks && { taskProgress: progress.tasks }),
       };
     }
     try {
       const pi = await getCodingSessionStatus(
-        { ...this.#session(project, run), includeReceipt: true, includeSourcePaths: true },
+        { ...this.#session(project, run), includeReceipt: true, includeSourcePaths: true, includeSavedPrompt: true },
         this.#dependencies(project, actor),
       );
       let inspected = value;
@@ -1094,7 +1106,9 @@ export class CodingProjectControl {
           alternativeBranchReason = error.message;
         }
       }
-      return { run: inspected, pi, report, ...(alternativeBranchEligible ? { alternativeBranchEligible } : {}),
+      const prompt = pi.request?.savedPrompt;
+      if (pi.request) delete pi.request.savedPrompt;
+      return { run: inspected, pi, report, ...(prompt ? { prompt } : {}), ...(alternativeBranchEligible ? { alternativeBranchEligible } : {}),
         ...(alternativeBranchReason ? { alternativeBranchReason } : {}),
       };
     } catch (error) {
@@ -1114,6 +1128,51 @@ export class CodingProjectControl {
     // Pi can save its admission before the catalog receives the worker event.
     if (!row.admitted && row.status !== "interrupted") return null;
     return getSavedCodingRequestInput(this.#session(project, run), this.#dependencies(project, actor));
+  }
+
+  #runChecks(project: string, session: string, requestId: string): RunCheck[] {
+    return this.#all<RunCheck>(`SELECT title, status, duration_ms AS durationMs, note, actor, recorded FROM run_checks
+      WHERE project = ? AND session = ? AND request_id = ? ORDER BY recorded DESC, title`, project, session, requestId);
+  }
+
+  #recordCheck(project: ProjectRow, body: Json, actor: Actor, canWrite: () => boolean): RunCheck[] {
+    this.#requireOwner(actor);
+    if (!canWrite() || this.#closing) throw new ProjectControlError("Open a writable brain to record checks.", 403);
+    const run = this.#runParts(body);
+    const row = this.#readRun(project.id, run.session, run.requestId);
+    if (row.status !== "done" || this.#sessionDeleting(project.id, run.session))
+      throw new ProjectControlError("Choose a completed request to record a check.", 409);
+    const title = field(body, "title", 120);
+    const { status, durationMs, note } = body;
+    if (/\p{Cc}/u.test(title) || !title.isWellFormed() || (status !== "passed" && status !== "failed" && status !== "skipped"))
+      throw new ProjectControlError("Enter a check name and choose its outcome.");
+    if (durationMs !== undefined && (typeof durationMs !== "number" || !Number.isSafeInteger(durationMs) || durationMs < 0 || durationMs > 86_400_000))
+      throw new ProjectControlError("Enter a check duration up to 24 hours.");
+    if (note !== undefined && (typeof note !== "string" || Buffer.byteLength(note) > 1000 || !note.isWellFormed() || /[\x00-\x08\x0b-\x1f\x7f-\x9f]/u.test(note)))
+      throw new ProjectControlError("Use plain text up to 1,000 UTF-8 bytes for the check note.");
+    return this.#db.transaction(() => {
+      const saved = this.#get<{ title: string }>(`SELECT title FROM run_checks WHERE project = ? AND session = ? AND request_id = ? AND title = ?`,
+        project.id, run.session, run.requestId, title);
+      if (!saved && this.#runChecks(project.id, run.session, run.requestId).length >= 24)
+        throw new ProjectControlError("A request can hold up to 24 recorded checks.");
+      this.#write(`INSERT INTO run_checks(project, session, request_id, title, status, duration_ms, note, actor, recorded) VALUES(?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(project, session, request_id, title) DO UPDATE SET status = excluded.status, duration_ms = excluded.duration_ms,
+          note = excluded.note, actor = excluded.actor, recorded = excluded.recorded`,
+        project.id, run.session, run.requestId, title, status, (durationMs as number | undefined) ?? null,
+        typeof note === "string" ? note.trim() || null : null, actor.id, now());
+      this.#audit(project.id, "check_recorded", actor.id, run.session, run.requestId);
+      return this.#runChecks(project.id, run.session, run.requestId);
+    })();
+  }
+
+  async #reviewDiff(project: ProjectRow, body: Json, actor: Actor) {
+    const run = this.#runParts(body);
+    const row = this.#readRun(project.id, run.session, run.requestId);
+    if (row.status !== "done" || this.#sessionDeleting(project.id, run.session) || this.#active.has(this.#sessionKey(project.id, run.session)))
+      return { proposals: [] };
+    const saved = await getCodingSessionStatus({ ...this.#session(project, run), includeReceipt: true }, this.#dependencies(project, actor));
+    const receipt = saved.request?.receipt;
+    return { proposals: receipt?.status === "done" ? codingPatchProposals(receipt.text, JSON.parse(project.scopes) as string[]) : [] };
   }
 
   async #compareBranch(project: ProjectRow, body: Json, actor: Actor) {
@@ -2272,7 +2331,7 @@ export class CodingProjectControl {
     }
     if (method === "POST" && readonly && !path.endsWith("/preview") && !path.endsWith("/inspect") &&
         !path.endsWith("/evaluation-inspect") && !path.endsWith("/source-inspect") && !path.endsWith("/branch-comparison-inspect") &&
-        !path.endsWith("/github-issue"))
+        !path.endsWith("/github-issue") && !path.endsWith("/review-diff"))
       throw new ProjectControlError("This server is attached to a read-only brain mount.", 403);
     if (path === "/projects" && method === "POST") return this.#addProject(body, actor, canWrite);
     if (path === "/github-checkouts" && method === "POST") return this.#checkout(body, actor, canWrite);
@@ -2320,8 +2379,11 @@ export class CodingProjectControl {
       if (action === "run") return this.#withSession(project, body, () => this.#start(project, body, actor, canWrite));
       if (action === "inspect") return this.#withSession(project, body, async () => {
         const inspected = await this.#inspect(project, body, actor, canWrite);
-        return { ...inspected, reviewHistory: this.#reviewHistory(project.id, inspected.run.session, inspected.run.id) };
+        return { ...inspected, reviewHistory: this.#reviewHistory(project.id, inspected.run.session, inspected.run.id),
+          checks: this.#runChecks(project.id, inspected.run.session, inspected.run.id) };
       });
+      if (action === "record-check") return this.#withSession(project, body, async () => this.#recordCheck(project, body, actor, canWrite));
+      if (action === "review-diff") return this.#withSession(project, body, () => this.#reviewDiff(project, body, actor));
       if (action === "source-inspect") return this.#withSession(project, body, () => this.#sourceInspect(project, body, actor));
       if (action === "branch-comparison-inspect") return this.#withSession(project, body, () => this.#compareBranch(project, body, actor));
       if (action === "reset-context-preview" || action === "reset-context" || action === "compact-context-preview" || action === "compact-context") {

@@ -550,7 +550,7 @@
       if (options.some((option) => option.value === preferred)) controls.model.value = preferred;
       const status = selectedProvider()?.credential;
       credential.innerHTML = status === 'missing'
-        ? 'Add this provider’s API key in <a href="#settings">Settings</a> to send a request.'
+        ? 'Add this provider’s API key in <a href="#settings/ai">Settings</a> to send a request.'
         : status === 'saved' ? 'Using a key saved in Settings.' : status === 'environment' ? 'Using a local environment key.' : '';
       syncThinking(controls.model.value === prior ? controls.thinkingLevel.value : '');
       updateControls();

@@ -4,10 +4,13 @@ Use the **Work** workspace in the Mac app or local web app to review source file
 
 ## Work in the app
 
-1. Open **Work** and choose **Add a project**. If a project is already open, expand **Manage projects and team access** first. Enter the repository's absolute path on this computer, set the permitted directories, and choose a Pi provider, model, and optional reasoning level.
-2. Save a provider key for that project or use an existing environment key for local runs. Projects can use OpenAI, Anthropic, Google Gemini, or [OpenRouter](#use-openrouter). The app shows which credential source the project uses.
-3. Describe the task and select tracked excerpts, explicit files, or the [repository map](#work-in-a-large-repository). Choose **Preview source**, inspect the actual text, and approve sending it with the task and active conversation history. Sending with a changed file selection requires a fresh preview.
-4. Select the request in **Run history**. Ordinary requests can show a short preview of the answer as it arrives. When the run finishes, inspect the full result and its recorded provider usage before choosing **Accept result** or **Request changes**. An interrupted run can resume with its stored input, or be cancelled. A follow-up uses the same session and a new request ID.
+1. Open **Work** and choose **Add a project**. When a project is already open, use **Switch or manage projects** in the repository sidebar to open registration. Enter the repository's absolute path, permitted directories, Pi provider, model, and any reasoning preference.
+2. Save a project provider key or use its available environment key for local runs. Projects can use OpenAI, Anthropic, Google Gemini, or [OpenRouter](#use-openrouter). The app shows the current credential source.
+3. Describe the task in the composer. Choose **Add context** to select explicit files, tracked excerpts, or a [repository map](#work-in-a-large-repository) request. Select **Preview source** or **Preview plan**. Review the exact input and approve it before choosing **Send request**. Changes to the task or selection require a fresh preview.
+4. Select a request from **Recent sessions**. The timeline shows progress, response, and recorded usage. Choose **New session** for a separate conversation or **Follow up** to stay in the current session with a new request ID. Resume an interrupted request with its saved input, or cancel it.
+5. Open the inspector’s **Changes**, **Checks**, or **Context** tab. Inspect the proposed diff before accepting. **Review changes** takes you to the review actions. Applying the patch and publishing it each have their own approval.
+
+The composer offers **Agent**, **Plan**, and **Ask**. Plan requests guidance and verification steps. Ask requests an answer grounded in paths and line ranges. Preview shows the extra instructions for these modes. Use `Cmd+Enter` or `Ctrl+Enter` in the task field to preview, then to send after approval. In Work, `Cmd+P` or `Ctrl+P` focuses the repository file filter.
 
 If you are starting from a GitHub link, expand **Prepare GitHub checkout** under **Add a project**. Enter the GitHub.com HTTPS repository and exact branch, then approve preparing a shallow checkout in private app data. For a private repository, supply your GitHub login and a fine-grained token restricted to that repository with **Contents** read access. The checkout uses the token for its fetch and keeps only the worktree and import receipt. Repeating the selected repository and branch reopens the saved copy and preserves local edits. The form fills the workspace path so you can set its permitted directories, model, and credentials before choosing **Add project**. [Git fetch](https://git-scm.com/docs/git-fetch), [Git checkout](https://git-scm.com/docs/git-checkout), [GitHub checkout setup](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository)
 
@@ -17,19 +20,27 @@ Before approving a send, choose **Copy source manifest** under the preview to ke
 
 Choose **View saved request source** in the app or editor to review a selected run’s task and approved files or excerpts. For an independent package review, the source is grouped by package. The preview reads from the saved Pi admission, so it includes the evidence the run used even if the checkout changes.
 
-**Run history** shows the most recent requests. In the Mac or web app, open **Find saved request**, enter the session name and request ID, and choose **Open saved request**. In VS Code or Cursor, choose **Find saved request by ID…** from the run picker. A retained request opens even after it falls off the recent list. Exact run and GitHub review links can reopen retained results under the same project access rules.
+**Recent sessions** shows the most recent project requests. In the Mac or web app, open **Find saved request**, enter the session name and request ID, and choose **Open saved request**. In VS Code or Cursor, choose **Find saved request by ID…** from the run picker. A retained request opens even after it falls off the recent list. Exact run and GitHub review links can reopen retained results under the same project access rules.
 
-For explicit files and repository excerpts, you can let the model look up line numbers inside the current request’s approved source. Select the option before previewing, then review the selection and approve it. Each lookup reads at most 24 consecutive lines from a single saved file or excerpt. The provider may make an extra request to turn the lookup results into an answer. Completed requests report usage from both turns. Open **Approved source lookups** in Run history to see the ranges Pi returned and the counts of refused or incomplete calls. The run report and editor inspection include the same bounded receipt. A later request starts with its own choice.
+For explicit files and repository excerpts, you can let the model look up line numbers inside the current request’s approved source. Select the option before previewing, then review the selection and approve it. Each lookup reads at most 24 consecutive lines from a single saved file or excerpt. The provider may make an extra request to turn the lookup results into an answer. Completed requests report usage from both turns. Open **Approved source lookups** in the selected request to see the ranges Pi returned and the counts of refused or incomplete calls. The run report and editor inspection include the same bounded receipt. A later request starts with its own choice.
 
 Use **Project settings** to rotate or remove an API key, inspect the audit log, or set transcript retention. Project audit events include the action, actor, timestamp, and session or request ID when applicable. The audit log remains after transcript deletion.
 
 ### Record review feedback
 
-In **Run history**, select a finished project run, add an optional **Review note**, then choose **Accept result** or **Request changes**. Open **Review history** for the latest 20 decisions, reviewers, timestamps, and notes. VS Code and Cursor show the same history when you inspect a project run and ask for optional feedback when you record a decision. If someone reviews the run while you are preparing your feedback, reopen it and review their decision before submitting yours.
+In **Recent sessions**, select a finished project run. Choose **Review changes**, add an optional **Review note**, then choose **Accept result** or **Request changes**. Open **Review history** for the latest 20 decisions, reviewers, timestamps, and notes. VS Code and Cursor show the same history when you inspect a project run and ask for optional feedback when you record a decision. If someone reviews the run while you are preparing your feedback, reopen it and review their decision before submitting yours.
 
 If the latest decision requests changes and has a note, choose **Use review note in follow-up** in the Mac or web app. The note fills the editable task for a new request in the same session. Review your task and sources before approving the send. The normal session history accompanies the request.
 
 Review notes are visible to authorized project reviewers and expire with the run's transcript. Existing runs start their history with the last saved decision. The audit log keeps review action and identity metadata. The run report includes the current decision.
+
+### Record checks on a completed request
+
+As the local operator, select a completed request, open the inspector’s
+**Checks** tab, and choose **Record check result**. Enter the check name, outcome, and optional duration and note,
+then choose **Save check result**. The inspector shows who recorded each
+result. Repository-declared commands are references from the imported map.
+Run checks in your own environment before recording their outcomes.
 
 ### Reuse a request preset
 
@@ -65,7 +76,7 @@ To erase a standalone transcript, select the session and open **Delete standalon
 
 Save a project-specific provider API key and create a token for the member in **Project settings → Team access**. Copy the token when it appears. Each token grants access to a single project and expires after seven days. The operator can revoke it before then.
 
-In **Work**, open **Team browser access** and start a separate listener. If a project is already open, look under **Manage projects and team access**. A member opens the team workspace URL and enters their project token. They can preview and approve sources, inspect project runs and their saved task and source, cancel or resume runs, and record reviews. Project configuration, credentials, token management, and transcript deletion stay with the local operator.
+In **Work**, open **Team browser access** and start a separate listener. If a project is already open, use **Switch or manage projects** in the repository sidebar, then expand **Manage projects and team access**. A member opens the team workspace URL and enters their project token. They can preview and approve sources, inspect project runs and their saved task and source, cancel or resume runs, and record reviews. Project configuration, credentials, token management, and transcript deletion stay with the local operator.
 
 The team listener binds to `127.0.0.1`. For remote access, an operator can configure a TLS reverse proxy that directs the declared HTTPS origin to the team listener and sets the upstream Host header to `127.0.0.1:<team port>`. The listener serves the coding workspace and its project-token routes. Keep the separate local operator listener private.
 
@@ -199,7 +210,7 @@ In the Coding workspace, choose **Independent package review** for a task spanni
 
 Each Pi Durable child conversation receives the task and only its own package's selected excerpts. It starts without the parent session history and has no workspace tools. The run shows a bounded summary, source references, stable request ID, and recorded usage for each package. Review the combined result and record your decision. A resumed review uses the saved source selection and recovers any unfinished package conversations. Aborting the run cancels its outstanding package reviews.
 
-While a request runs, **Run history** shows the current Pi Durable tasks for that request. It counts tasks per stage, including package coordination and child work. The app also shows saved pending tasks when inspecting an interrupted request. These counts reflect the work Pi has recorded, and can change as tasks start or finish. [Pi Durable task graph](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md)
+While a request runs, its timeline shows the current Pi Durable tasks for that request. It counts tasks per stage, including package coordination and child work. The app also shows saved pending tasks when inspecting an interrupted request. These counts reflect the work Pi has recorded, and can change as tasks start or finish. [Pi Durable task graph](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md)
 
 ## Work in a large repository
 
@@ -275,7 +286,7 @@ Pass the same selection options to both commands. Without `--query`, the selecti
 
 In the app, choose **Repository map** as the request's source, set the directories and budget, and choose **Preview source**. The preview shows the excerpts, the map lines, and the facts that accompany them. Approve it to send.
 
-The provider receives the task, the excerpts, the map lines, and the facts. The transcript saves those bytes, and a resumed request uses the saved copy. In **Run history**, choose **View saved request source** to see the admitted map, facts, and excerpts approved for lookup.
+The provider receives the task, the excerpts, the map lines, and the facts. The transcript saves those bytes, and a resumed request uses the saved copy. Select the request and choose **View saved request source** to see the admitted map, facts, and excerpts approved for lookup.
 
 Add `--deferred`, or select **Also approve further excerpts the model may look up by path and line**, to approve up to 16 more excerpts that did not fit. They are saved with the request. The provider first receives only their paths and line ranges, and the model can read them through [approved source lookup](#work-in-the-app). The preview shows their text, because approving the request approves sending them.
 
@@ -343,7 +354,7 @@ Each worker runs in its own Pi Durable conversation with its work order and sour
 
 The result names every file that more than one worker proposed to change and every proposed change outside its worker's scope. Resolve those in review. The reviewer decides on the combined result, and patches are applied by the operator as for any other request.
 
-Work orders use request IDs derived from yours, such as `inv-1-work-2` and `inv-1-synthesis`. The plan, including every model choice, is saved before the first call. A resumed request continues from the saved plan and reuses finished work orders. Cancelling stops the outstanding work orders. **Run history** shows work orders by stage during the run and lists their models, reports, and usage after completion. A copied run report includes their status, usage, and source references.
+Work orders use request IDs derived from yours, such as `inv-1-work-2` and `inv-1-synthesis`. The plan, including every model choice, is saved before the first call. A resumed request continues from the saved plan and reuses finished work orders. Cancelling stops the outstanding work orders. The request timeline shows work orders by stage during the run and lists their models, reports, and usage after completion. A copied run report includes their status, usage, and source references.
 
 The work orders and the combined result are saved with the request. They are kept apart from the session's conversation, so a follow-up request in the same session does not carry them. A request that fans out uses more tokens in total than a single request, in exchange for smaller individual contexts. Use it when the task really spans packages.
 
@@ -380,7 +391,7 @@ Set `OPENROUTER_API_KEY` and use `--provider openrouter` with a model ID from Pi
 
 The `openRouter` section of a routing policy sets the provider preferences for every OpenRouter call in the plan. Use `dataCollection` with `deny` to exclude upstream providers that may store or train on prompts, `zdr` for zero-data-retention endpoints, `order` for the upstream providers to try by name, `allowFallbacks` to control upstream fallback, and `sort` with `price`, `throughput`, or `latency`. Preview rejects a plan when Pi's adapter cannot carry the configured preferences for one of its models. [OpenRouter provider selection](https://openrouter.ai/docs/guides/routing/provider-selection.md)
 
-Local standalone policies can name models from several providers. Each provider must have its own credential. The CLI reads environment keys, and the app also uses keys the operator saved in Settings. A registered project's policy uses its own provider. Choose OpenRouter as the project's provider to route across vendors with one key.
+Local standalone policies can name models from several providers. Each provider must have its own credential. The CLI reads environment keys, and the app also uses keys the operator saved under **Settings → AI providers**. A registered project's policy uses its own provider. Choose OpenRouter as the project's provider to route across vendors with one key.
 
 ### Measure the repository map
 
@@ -441,7 +452,7 @@ Use `--json` to capture a machine-readable result. A `done` result carries the a
 
 ### Start fresh context
 
-In **Run history** for a project, or in a saved **Standalone session**, select an idle session. To carry forward a decision or next step, open **Add a handoff note** and enter up to 2,048 UTF-8 bytes. Choose **Start fresh context**, review the session and the exact note, and confirm **Reset context**. To start with an empty conversation, leave the note blank.
+In **Recent sessions** for a project, or in a saved **Standalone session**, select an idle session. To carry forward a decision or next step, open **Add a handoff note** and enter up to 2,048 UTF-8 bytes. Choose **Start fresh context**, review the session and the exact note, and confirm **Reset context**. To start with an empty conversation, leave the note blank.
 
 In VS Code or Cursor, open a finished run from **okbrain: Inspect and Review Coding Runs** and choose **Start fresh context**. Enter an optional single-line handoff, then review the session and note before choosing **Start Fresh Context**. These controls are available to the local owner in a writable workspace.
 
@@ -449,7 +460,7 @@ Pi excludes earlier turns from subsequent model requests in this session. An app
 
 ### Compact context locally
 
-To keep recent turns in a long session, select a saved request from an idle session in **Run history** or **Standalone sessions**, then choose **Compact context locally**. Verify the session name, check **Compact older context and keep saved run history**, and choose **Compact context**. In VS Code or Cursor, choose **Compact context locally** from the saved run’s actions and confirm **Compact Context**.
+To keep recent turns in a long session, select a saved request from an idle session in **Recent sessions** or **Standalone sessions**, then choose **Compact context locally**. Verify the session name, check **Compact older context and keep saved run history**, and choose **Compact context**. In VS Code or Cursor, choose **Compact context locally** from the saved run’s actions and confirm **Compact Context**.
 
 Pi uses a short recap of older active turns and keeps recent turns verbatim. The recap is generated on this device without a provider call. Saved requests, sources, answers, reviews, and usage remain available. If there is too little context, the action reports that and leaves the history as it was. The recap can omit details from older turns, so reattach important source before relying on it again.
 
@@ -459,14 +470,14 @@ If local compaction was interrupted, reopen the saved run and choose **Compact c
 
 On a writable mount, the local owner can branch from the latest saved answer in an idle project session after accepting that ordinary run. This gives you a separate conversation for comparing an alternative while retaining the original result and review.
 
-1. Open the accepted result in **Run history** and choose **Preview alternative branch**. In VS Code or Cursor, choose **Preview alternative branch in okbrain** to open that exact run in the local Coding workspace.
+1. Open the accepted result in **Recent sessions** and choose **Preview alternative branch**. In VS Code or Cursor, choose **Preview alternative branch in okbrain** to open that exact run in the local Coding workspace.
 2. Check the provider and model and read **Inherited context**. The preview shows the visible text that can accompany the next provider request, including instructions, prior tasks and approved source, answers, and tool calls and results. When the app indicates provider-managed reasoning or signatures, those records can accompany the visible history. Check **Create a separate session with this inherited context**, then choose **Create alternative branch**. Creation takes place locally without a provider request.
 3. Choose **Use branch session**, enter a new task, and choose **Preview source**. Review the new scoped selection and **Context already in this branch**, then approve sending both with the task. Every new send requires a fresh source preview and approval bound to the current branch context. Later work in the parent stays in its own conversation.
-4. Select the finished alternative in **Run history** and choose **Compare with original**. The Mac and web apps show the saved answers, tasks, source references, request usage, and review decisions together. The same action opens a read-only comparison in VS Code and Cursor. Authorized project members can compare and review. The comparison reads the exact original answer that the branch started from and uses the saved transcript, so it works without a model call or access to the checkout.
+4. Select the finished alternative in **Recent sessions** and choose **Compare with original**. The Mac and web apps show the saved answers, tasks, source references, request usage, and review decisions together. The same action opens a read-only comparison in VS Code and Cursor. Authorized project members can compare and review. The comparison reads the exact original answer that the branch started from and uses the saved transcript, so it works without a model call or access to the checkout.
 
 To use an accepted alternative's changes, choose **Review proposed patch** on that result and approve the patch preview. In **Prepare GitHub review**, select the same alternative, publish its applied patch as a new branch, then preview and approve the pull request. **Review the published patch on GitHub** compares the two recorded commits. The pull request targets the recorded branch names, and okbrain checks the recorded head commit at preview, before creation, and when accepting a returned or recovered receipt. [Compare GitHub commits](https://docs.github.com/en/pull-requests/how-tos/commit-changes/comparing-commits#comparing-commits) · [GitHub pull request API](https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request)
 
-Return to **Alternative review branches** in **Run history** to reopen a branch. If creation was interrupted, choose **Finish creating branch** to recover the saved approval or finish creating the same branch while the approved parent context is current. Branch request recovery uses the saved Pi admission.
+Return to **Alternative review branches** under the project request timeline to reopen a branch. If creation was interrupted, choose **Finish creating branch** to recover the saved approval or finish creating the same branch while the approved parent context is current. Branch request recovery uses the saved Pi admission.
 
 The parent and its branches share one transcript, so work in any of them can occupy the same session lease. Retention and deletion apply to the whole transcript. Branches support ordinary file and repository reviews. Use a regular project session for independent package reviews, evaluations, and manual context reset or compaction. [Pi Durable conversation forks](https://github.com/earendil-works/pi/blob/v1.0.0/packages/durable/README.md#more-conversations-and-forks)
 
@@ -477,11 +488,11 @@ okb code status --workspace ./my-project --session auth-review --request-id auth
   --provider openai --model gpt-5-mini --json
 ```
 
-**Run history** in the Mac and web apps and run inspection in VS Code and Cursor show the session’s estimated active context, input limit, output allowance, and model window. These figures describe what can fit in a request. Open **Session usage** in the apps to see provider-reported totals for the session and for its main and child conversations. The panel shows input, output, and cache tokens, reasoning within output, estimated USD cost when available, and any tracked tool usage. It includes failed and cancelled attempts when Pi saved their usage. An interrupted provider attempt may incur usage that the local process never recorded.
+The selected request in the Mac and web apps and run inspection in VS Code and Cursor show the session’s estimated active context, input limit, output allowance, and model window. These figures describe what can fit in a request. Open **Session usage** in the apps to see provider-reported totals for the session and for its main and child conversations. The panel shows input, output, and cache tokens, reasoning within output, estimated USD cost when available, and any tracked tool usage. It includes failed and cancelled attempts when Pi saved their usage. An interrupted provider attempt may incur usage that the local process never recorded.
 
 `code status` reads the same session data without calling a provider. With a request ID it also reports that request's state, saved source manifest, and any recorded response usage.
 
-In the Mac or web app, open a saved request in **Run history** and choose **Copy run report**. The same action appears in VS Code and Cursor run inspection, including for project members. It copies versioned JSON with run and review status, session and request IDs, model, active context estimates, recorded usage, and relative source references. Repository manifests include their saved line ranges and content hashes. Task text, answers, and source contents stay in their separate inspection controls. If the browser cannot write to the clipboard, copy the selected text from **Run report JSON**.
+In the Mac or web app, open a saved request and choose **Copy run report**. The same action appears in VS Code and Cursor run inspection, including for project members. It copies versioned JSON with run and review status, session and request IDs, model, active context estimates, recorded usage, and relative source references. Repository manifests include their saved line ranges and content hashes. Task text, answers, and source contents stay in their separate inspection controls. If the browser cannot write to the clipboard, copy the selected text from **Run report JSON**.
 
 Pi receives an opaque session ID so providers can reuse a stable prefix across follow-ups. Provider support, cache lifetime, and history compaction affect the observed counts.
 
@@ -534,7 +545,7 @@ Expiry removes the parent session and its alternative branches through the same 
 
 ## Apply a reviewed patch locally
 
-After accepting a finished request, choose **Review proposed patch** in **Run history**. If the saved Pi response contains multiple eligible Git diffs, choose the one you want to review. In VS Code and Cursor, choose **Review proposed patch in okbrain** to open the same run in the app. You can also open **Apply a reviewed patch**, select the result, and paste a Git unified diff.
+After accepting a finished request, choose **Review proposed patch** on the selected request. If the saved Pi response contains multiple eligible Git diffs, choose the one you want to review. In VS Code and Cursor, choose **Review proposed patch in okbrain** to open the same run in the app. You can also open **Apply a reviewed patch**, select the result, and paste a Git unified diff.
 
 **Preview patch** checks the exact changes in a temporary Git checkout and marks new files in the affected paths. Confirm the preview and choose **Apply to worktree**. The patch can edit existing tracked files and create new regular UTF-8 files within the project scope, up to eight files and a 48 KiB Git unified diff. Use portable unquoted paths. New files remain untracked, and the staging area, commits, and remote stay unchanged. A change to the previewed worktree state or diff requires a fresh preview.
 

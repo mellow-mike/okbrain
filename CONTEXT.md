@@ -14,6 +14,12 @@ configurable retrieval, and inspectable links.
 Both Ask routes can copy a completed answer as Markdown with the submitted
 question and a separate list of verified bundle-root citation links.
 Clipboard fallback keeps the copy visible and selectable in the current app.
+The Knowledge sidebar lists saved Ask conversations for the active brain.
+Completed exchanges for writable brains live in `knowledge/conversations.sqlite`
+under per-user application data. The browser can include a bounded previous
+exchange only after showing its contents and receiving explicit approval.
+The plan route binds that choice into its source preview. Stable conversation
+and turn IDs support retry and keep concurrent edits from replacing history.
 The local app can explicitly save a completed result as a canonical private
 Markdown draft. A short-lived server signature binds the exact question,
 answer, provider, model, verified citations, and mounted brain. Successful
@@ -634,8 +640,8 @@ ring, and hovering a node dims everything outside its neighbourhood.
   and marked are vendored minified builds (`core/viz/vendor/`), inlined into
   the page together with okbrain's own `safe-markdown.js` + `render.js` +
   `tokens.css` + `okb.js` and embedded in the compiled binary via Bun text
-  imports. The web fonts stay out of `viz.html` (they would roughly double
-  it); its families fall back through their stacks. Internal
+  imports. By default the viewer uses local system font fallbacks. Pass
+  `--fonts` to embed its Recursive and Literata faces. Internal
   `.md` links in bodies are rewired to `#concept:<encoded-id>` anchors the
   viewer intercepts to focus the target node; external/broken links pass
   through untouched (external ones open in a new tab). The op is scope `read`
@@ -1086,23 +1092,28 @@ with a project-scoped token.
 
 - **Knowledge** opens the brain and its capture, search, and review entry
   points. The workspace navigation opens Ask, Library, Sources, Search,
-  Graph, Focused map, Review, Inbox, Add, and Claims. Library and links in
-  answers or maps open the shared note reader. Notes show saved Markdown,
+  Graph, Focused map, Review, Inbox, Add, and Claims. Ask includes saved
+  conversations and a citations inspector. Library and links in answers or
+  maps open the shared note reader. Notes show saved Markdown,
   provenance, status, graph links, and the permitted edit and review actions.
 - **Work** opens registered projects and standalone Pi Durable sessions. It
   ties the task and source composer to repository and session navigation and
-  run inspection. A selected run shows its saved source, answer, task status,
-  usage, and review actions. Project settings hold credentials, repository map
-  controls, deployment, retention, and team access.
-- **Activity and Settings** retain stats, diagnostics, brain mounts, AI and
-  source accounts, cache choices, maintenance, usability, and MCP setup.
-  Advanced settings expose CLI operation options in typed forms. The app
-  submits those forms to the same operations API using owner-authenticated command descriptors.
-  Host-only workflows use their dedicated controls. Terminal process and output controls belong to
-  the CLI adapter.
+  run inspection. The docked composer opens context selection and approval
+  before sending. The inspector shows proposed diffs, author-attributed check
+  results, and approved context. Repository commands are references. Project
+  tools hold credentials, repository map controls, deployment, retention,
+  and team access.
+- **Activity** opens the brain’s statistics and path checks. **Settings**
+  opens local status and routes to brain folders, AI providers, Git sync,
+  search and cache, maintenance, exports, connections, privacy and usage,
+  and advanced operations. Only the active section mounts its forms and
+  subscriptions. Advanced operations uses owner-authenticated command
+  descriptors and the existing operations API. Dedicated host controls
+  keep their existing authorization and approvals. Terminal process and
+  output controls belong to the CLI adapter.
 
-Hash routes retain existing note, project, run, and review deep links. On a
-narrow window the compact rail gives access to navigation and the work panels
+Hash routes retain existing note, project, run, review, and usability deep
+links. On a narrow window the compact rail gives access to navigation and the work panels
 can be opened from the selected workspace. The active route sets the title and
 remains keyboard-reachable. The graph fills the available app area.
 
@@ -1117,10 +1128,11 @@ usability store.
 
 The maintainer-supplied Figma Make export (R30) defines the live app’s
 workspace rail, compact panels, graphite surfaces, blue selection and focus,
-and context inspector. The app keeps the offline Recursive and Literata
-font stacks and a light theme. Use text or an icon with color for meaningful state,
-keep data and keyboard focus visible as panels change, and respect reduced
-motion. App assets and fonts are served locally. See the [reference registry](docs/context/REFERENCES.md).
+and context inspector. Inter and JetBrains Mono are served locally for the
+interface. Notes retain Literata, with Recursive and system fallbacks
+available where specified. The app also offers a light theme. Use text or an
+icon with color for meaningful state, preserve keyboard focus as panels
+change, and respect reduced motion. See the [reference registry](docs/context/REFERENCES.md).
 
 The original ink-based system (R5) remains the design reference for static
 HTML exports. Its shared `core/viz/tokens.css`, `core/viz/okb.js`, and graph

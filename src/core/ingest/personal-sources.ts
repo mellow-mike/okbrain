@@ -14,7 +14,9 @@ import { readCalendar, readMail, type OfflineItem } from "./mail-calendar.ts";
 
 const IMPORT_ROOT = "db_only/imports";
 const OFFLINE_KINDS = ["email", "calendar"] as const;
-const KINDS = ["bookmarks", "markdown", "notion", "notion-live", ...OFFLINE_KINDS] as const;
+export const connectedSourceProviders = ["drive", "slack", "linear"] as const;
+export type ConnectedSourceProvider = typeof connectedSourceProviders[number];
+const KINDS = ["bookmarks", "markdown", "notion", "notion-live", ...OFFLINE_KINDS, ...connectedSourceProviders] as const;
 export const MAX_SOURCE_UPLOAD_BYTES = 24 * 1024 * 1024;
 export const MAX_SOURCE_FILES = 500;
 export const MAX_SOURCE_ROWS = 2000;
@@ -29,7 +31,7 @@ export interface SourceUploadFile {
   path: string;
   text: string;
   bytes?: Uint8Array;
-  origin?: { resource: string; id: string };
+  origin?: { resource: string; id: string; title?: string };
 }
 
 interface SourceRow {
@@ -85,6 +87,10 @@ export function isSourceKind(value: unknown): value is SourceKind {
 
 export function isOfflineSourceKind(value: unknown): value is OfflineSourceKind {
   return value === "email" || value === "calendar";
+}
+
+export function isConnectedSourceProvider(value: unknown): value is ConnectedSourceProvider {
+  return typeof value === "string" && (connectedSourceProviders as readonly string[]).includes(value);
 }
 
 const digest = (value: string | Uint8Array): string => createHash("sha256").update(value).digest("hex");
@@ -230,14 +236,31 @@ function offlineEntry(kind: OfflineSourceKind, path: string, row: number, item: 
     return { row: { row, path, title: item.title, status: "skipped", reason: "Readable text exceeds 128 KiB." } };
   // Imported mail and calendar descriptions are plain text, even when their
   // source includes Markdown syntax that could render an external image.
-  let fenceLength = 3;
-  for (const [run] of text.matchAll(/~{3,}/g)) fenceLength = Math.max(fenceLength, run.length + 1);
-  const fence = "~".repeat(fenceLength);
-  const body = text ? `${fence}text\n${text}\n${fence}\n` : "";
+  const body = sourceTextMarkdown(text);
   return {
     row, path, key: item.key, identity: digest(JSON.stringify(item)), excerpt: display(item.text || text, 240),
     note: { title: item.title, type: kind === "email" ? "email" : "event", description: display(item.text || text || item.title, 160), body,
       tags: [kind, "imported"], sources: [{ id: "export", resource: `file-export:${kind}`, path }] },
+  };
+}
+
+export function sourceTextMarkdown(text: string): string {
+  if (!text) return "";
+  let fenceLength = 3;
+  for (const [run] of text.matchAll(/~{3,}/g)) fenceLength = Math.max(fenceLength, run.length + 1);
+  const fence = "~".repeat(fenceLength);
+  return `${fence}text\n${text}\n${fence}\n`;
+}
+
+function connectedEntry(kind: ConnectedSourceProvider, file: SourceUploadFile, row: number): Entry {
+  const { origin, path, text } = file;
+  if (!origin?.title || !origin.id || !origin.resource) throw new OkfWriteError("Preview the connected source again.");
+  const title = display(origin.title) || "Untitled note";
+  const normalized = text.replace(/\r\n?/gu, "\n").trim();
+  return {
+    row, path, key: origin.id, identity: digest(JSON.stringify([origin.resource, title, normalized])), excerpt: display(normalized, 240),
+    note: { title, type: "note", description: display(normalized || title, 160), body: sourceTextMarkdown(normalized),
+      tags: [kind, "imported"], resource: origin.resource, sources: [{ id: kind, resource: origin.resource, item_id: origin.id }] },
   };
 }
 
@@ -367,7 +390,8 @@ export async function importPersonalSource(
   const dir = `${IMPORT_ROOT}/${kind}-${digest(source).slice(0, 16)}`;
   const names = await directoryEntries(root, dir);
   const entries = kind === "bookmarks" ? bookmarkEntries(files[0]!) : isOfflineSourceKind(kind) ? await offlineEntries(kind, files) :
-    files.map((file, index) => markdownEntry(kind, file, index + 1));
+    isConnectedSourceProvider(kind) ? files.map((file, index) => connectedEntry(kind, file, index + 1)) :
+      files.map((file, index) => markdownEntry(kind, file, index + 1));
   const candidates = mapCandidates(dir, entries, names);
   const rows = candidates.map((candidate) => candidate.row);
   const preview = digest(JSON.stringify([
@@ -396,7 +420,7 @@ export async function importPersonalSource(
       const id = row.id!;
       const written = await writeConcept(root, {
         ...note, id, status: "draft", actor: TOOL_ACTOR,
-        body: kind === "bookmarks" || isOfflineSourceKind(kind) ? note.body : sourceMarkdown(note.body ?? "", entry!.path, targets),
+        body: kind === "bookmarks" || isOfflineSourceKind(kind) || isConnectedSourceProvider(kind) ? note.body : sourceMarkdown(note.body ?? "", entry!.path, targets),
         extra: { ...note.extra, source_import: { ...stamp, key: entry!.key } },
       }, { createOnly: true, deferIndex: true });
       row.status = written.created ? "imported" : "unchanged";
@@ -426,7 +450,8 @@ export async function sourceHistory(root: string): Promise<SourceHistoryItem[]> 
     throw error;
   });
   for (const child of children) {
-    if (!child.isDirectory() || !/^(bookmarks|markdown|notion|notion-live|email|calendar)-[a-f0-9]{16}$/.test(child.name)) continue;
+    const kind = /^([a-z]+(?:-live)?)-[a-f0-9]{16}$/u.exec(child.name)?.[1];
+    if (!child.isDirectory() || !isSourceKind(kind)) continue;
     const dir = `${IMPORT_ROOT}/${child.name}`;
     for (const name of await directoryEntries(root, dir)) {
       const id = `${dir}/${name}`;

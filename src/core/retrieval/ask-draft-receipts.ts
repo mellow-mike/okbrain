@@ -5,9 +5,10 @@ const receiptLifetime = 30 * 60_000;
 const maxDraftBytes = 512 * 1024;
 export const maxAskDraftRequestBytes = maxDraftBytes + 4096;
 const receiptPattern = /^v1\.([a-f0-9]{32})\.(\d{13})\.([a-zA-Z0-9_-]{43})$/u;
+const savedReceiptPattern = /^v2\.([a-f0-9]{32})\.(\d{13})\.(\d{13})\.([a-zA-Z0-9_-]{43})$/u;
 
 type DraftContent = { question: string; answer: string; provider: string; model: string; citations: Citation[] };
-type Receipt = { id: string; issued: number };
+type Receipt = { id: string; issued: number; generated?: number };
 type SavedDraft = { id: string; created: boolean };
 
 export class AskDraftReceiptError extends Error {
@@ -44,13 +45,19 @@ export class AskDraftReceipts {
   readonly #saved = new Map<string, number>();
   readonly #writing = new Map<string, Promise<SavedDraft>>();
 
-  #signature({ id, issued }: Receipt, brain: string, content: DraftContent): string {
-    return createHmac("sha256", this.#key).update(JSON.stringify(["v1", id, issued, brain, content])).digest("base64url");
+  #signature({ id, issued, generated }: Receipt, brain: string, content: DraftContent): string {
+    const binding = generated === undefined ? ["v1", id, issued, brain, content] : ["v2", id, issued, generated, brain, content];
+    return createHmac("sha256", this.#key).update(JSON.stringify(binding)).digest("base64url");
   }
 
-  issue(brain: string, question: string, result: AskResult): string | undefined {
+  issue(brain: string, question: string, result: AskResult, saved?: { id: string; at: string }): string | undefined {
     const content = contentOf({ ...result, question });
     if (!content) return;
+    if (saved) {
+      const receipt = { id: saved.id.replaceAll("-", ""), issued: Date.now(), generated: Date.parse(saved.at) };
+      if (!/^[a-f0-9]{32}$/u.test(receipt.id) || !Number.isSafeInteger(receipt.generated) || receipt.generated > receipt.issued) return;
+      return `v2.${receipt.id}.${receipt.issued}.${receipt.generated}.${this.#signature(receipt, brain, content)}`;
+    }
     let receipt = this.#issued.get(result);
     if (!receipt) {
       receipt = { id: randomBytes(16).toString("hex"), issued: Date.now() };
@@ -66,23 +73,25 @@ export class AskDraftReceipts {
   ): Promise<SavedDraft> {
     if (!record(body) || Object.keys(body).length !== 6 || typeof body.receipt !== "string")
       throw new AskDraftReceiptError("Send the completed answer with its draft approval.", 400);
-    const match = receiptPattern.exec(body.receipt);
+    const saved = savedReceiptPattern.exec(body.receipt);
+    const match = saved ?? receiptPattern.exec(body.receipt);
     const content = contentOf(body);
     if (!match || !content) throw expired();
-    const receipt = { id: match[1]!, issued: Number(match[2]) };
+    const receipt: Receipt = { id: match[1]!, issued: Number(match[2]), ...(saved ? { generated: Number(saved[3]) } : {}) };
     const now = Date.now();
     if (receipt.issued > now || now >= receipt.issued + receiptLifetime ||
-        !timingSafeEqual(Buffer.from(match[3]!), Buffer.from(this.#signature(receipt, brain, content)))) throw expired();
+      !timingSafeEqual(Buffer.from(match[match.length - 1]!), Buffer.from(this.#signature(receipt, brain, content)))) throw expired();
+    const key = brain + "\0" + receipt.id;
     for (const [id, until] of this.#saved) if (now >= until) this.#saved.delete(id);
-    const pending = this.#writing.get(receipt.id);
+    const pending = this.#writing.get(key);
     if (pending) return { id: (await pending).id, created: false };
-    const saving = write({ ...content, receiptId: receipt.id, generatedAt: new Date(receipt.issued).toISOString(),
-      mustExist: this.#saved.has(receipt.id) });
-    this.#writing.set(receipt.id, saving);
+    const saving = write({ ...content, receiptId: receipt.id, generatedAt: new Date(receipt.generated ?? receipt.issued).toISOString(),
+      mustExist: this.#saved.has(key) });
+    this.#writing.set(key, saving);
     try {
       const saved = await saving;
-      this.#saved.set(receipt.id, receipt.issued + receiptLifetime);
+      this.#saved.set(key, receipt.issued + receiptLifetime);
       return saved;
-    } finally { this.#writing.delete(receipt.id); }
+    } finally { this.#writing.delete(key); }
   }
 }

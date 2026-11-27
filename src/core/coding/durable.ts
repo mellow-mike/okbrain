@@ -126,6 +126,7 @@ export type CodingSessionStatusOptions = CodingSessionIdentity & {
   includeReceipt?: boolean;
   includeEvaluationInput?: boolean;
   includeSavedSource?: boolean;
+  includeSavedPrompt?: boolean;
   includeSourcePaths?: boolean;
 };
 
@@ -1529,7 +1530,7 @@ async function readCodingSessionStatus(
       const identity = { session: options.session, requestId: options.requestId };
       const receipt = task?.state.status === "terminal" ? { ...identity, ...requestTaskReceipt(requestTask, task.state.outcome) } : undefined;
       const saved = options.includeEvaluationInput && !requestTask.orchestrated ? evaluatedPackages(task?.input) : undefined;
-      const savedInput = options.includeSavedSource
+      const savedInput = options.includeSavedSource || options.includeSavedPrompt
         ? (requestTask.orchestrated ? savedOrchestrationSource(task?.input, options.requestId) : savedPackageSource(task?.input, options.requestId))
         : undefined;
       const progress = task && !receipt
@@ -1541,7 +1542,8 @@ async function readCodingSessionStatus(
         ...(receipt?.status === "unanswered" ? { reason: receipt.reason } : {}),
         ...(receipt && options.includeReceipt ? { receipt } : {}),
         ...(saved ? { evaluationInput: saved } : {}),
-        ...(savedInput ? { savedInput } : {}),
+        ...(savedInput && options.includeSavedSource ? { savedInput } : {}),
+        ...(savedInput && options.includeSavedPrompt ? { savedPrompt: savedInput.prompt } : {}),
         ...(progress ? { taskProgress: progress } : {}),
       };
       return result;
@@ -1568,7 +1570,7 @@ async function readCodingSessionStatus(
       usage: await requestUsage(storage, submission, answer.usage, lookup),
       stopReason: answer.stopReason,
     } : {};
-    const input = comparison || options.includeSavedSource || (options.includeSourcePaths && !repositoryContext)
+    const input = comparison || options.includeSavedSource || options.includeSavedPrompt || (options.includeSourcePaths && !repositoryContext)
       ? savedSource(content) : undefined;
     if (comparison && (receipt?.status !== "done" || input?.savedPrompt === undefined || input.savedSource === undefined))
       throw new CodingError("The saved task, source, or result could not be loaded for comparison.");
@@ -1584,7 +1586,7 @@ async function readCodingSessionStatus(
       ...(saved ? { evaluationInput: saved } : {}),
       ...(receipt ? { receipt } : {}),
       ...(options.includeSavedSource ? input : {}),
-      ...(comparison ? { savedPrompt: input?.savedPrompt } : {}),
+      ...(comparison || options.includeSavedPrompt ? { savedPrompt: input?.savedPrompt } : {}),
       ...(options.includeSourcePaths && files ? { sourcePaths: files.map(({ path }) => path) } : {}),
       ...(progress ? { taskProgress: progress } : {}),
     };

@@ -299,7 +299,7 @@ var routes = {
 
 // The tab and window title for each route. The reader replaces it with the note's own title.
 var VIEW_TITLES = {
-  home: 'Home', browse: 'Browse', concept: 'Note', edit: 'Edit concept', editor: 'New concept', graph: 'Graph', search: 'Search',
+  home: 'Home', browse: 'Library', concept: 'Note', edit: 'Edit concept', editor: 'New concept', graph: 'Graph', search: 'Search',
   ask: 'Ask', 'ask-plan': 'Ask with ChatGPT', accounts: 'Accounts', map: 'Focused map', add: 'Add', sources: 'Sources',
   review: 'Review', inbox: 'Inbox', 'inbox-file': 'File inbox note', claims: 'Claims', coding: 'Coding', stats: 'Stats', settings: 'Settings',
 };
@@ -396,8 +396,10 @@ function route() {
       } else a.removeAttribute('aria-current');
     });
     document.title = VIEW_TITLES[name] ? VIEW_TITLES[name] + ' · okbrain' : 'okbrain';
-    view.className = name === 'graph' ? 'bare' : name === 'coding' ? 'workspace-view' : '';
+    view.className = name === 'graph' ? 'bare' : name === 'coding' ? 'workspace-view'
+      : ['ask', 'ask-plan', 'browse'].includes(name) ? 'knowledge-view' : '';
     view.scrollTop = 0;
+    window.okbKnowledge.mountSidebar(name, () => !stale(seq));
     return fn(arg, seq);
   }, shared);
 }
@@ -688,7 +690,7 @@ function doctorSummary(r) {
   });
   if (r.findings.length > 60) lines.push('… ' + (r.findings.length - 60) + ' more');
   return '<div class="notice">' + esc(head + (lines.length ? '\n\n' + lines.join('\n') : '')) + '</div>' +
-    (sig.legacy ? '<p class="muted">v0.1 leftovers can be migrated in <a href="#settings">Settings → Maintenance → Upgrade</a>.</p>' : '');
+    (sig.legacy ? '<p class="muted">v0.1 leftovers can be migrated in <a href="#settings/maintenance">Settings → Maintenance → Upgrade</a>.</p>' : '');
 }
 
 // ---- browse --------------------------------------------------------------
@@ -697,7 +699,9 @@ async function renderBrowse(filters, seq) {
   var initialType = filters instanceof URLSearchParams ? filters.get('type') : filters;
   var initialTag = filters instanceof URLSearchParams ? filters.get('tag') : null;
   view.innerHTML =
-    '<div class="stack wide"><h2>Library</h2>' +
+    '<div class="stack library-workspace"><header class="knowledge-main-header"><div><h2>Library</h2>' +
+    '<p class="muted">' + esc(STATUS?.brain || basename(STATUS?.bundle) || 'Current brain') + '</p></div><div class="row">' +
+    '<button class="small" type="button" data-knowledge-drawer>Conversations</button><a href="#add">Add notes</a></div></header>' +
     '<div class="toolbar"><input id="b-q" type="search" aria-label="Filter title, ID, or tags" placeholder="Filter title / id / tags…">' +
     '<select id="b-type" aria-label="Type"><option value="">all types</option></select>' +
     '<select id="b-tag" aria-label="Tag"><option value="">Any tag</option></select>' +
@@ -706,6 +710,7 @@ async function renderBrowse(filters, seq) {
     '<label class="row">Maximum rows <input id="b-limit" type="number" min="1" step="1" placeholder="All"></label>' +
     '<label class="row"><input id="b-ids" type="checkbox"> IDs only</label>' +
     '<span id="b-count" class="muted right"></span></div><div id="b-out" data-via="browse"></div></div>';
+  window.okbKnowledge.attachSidebarDrawer(view.querySelector('[data-knowledge-drawer]'));
   var out = document.getElementById('b-out');
   Okb.working(out, 'loading');
   var rows;
@@ -1327,20 +1332,25 @@ function citationLinks(citations) {
 }
 
 function answerInspector(id) {
-  return '<div class="answer-inspector-slot"><aside class="answer-inspector" aria-label="Answer sources"><details open><summary>Sources</summary>' +
+  return '<div class="answer-inspector-slot"><aside class="answer-inspector" aria-label="Answer sources"><details open>' +
+    '<summary>Sources <small data-source-count></small></summary>' +
     '<div id="' + id + '" class="stack"><p class="muted">Sources appear here when an answer cites a note.</p></div></details></aside></div>';
 }
 
 function showAnswerSources(parent, citations, current) {
+  var total = parent.closest('.answer-inspector')?.querySelector('[data-source-count]');
+  if (total) total.textContent = citations.length ? citations.length + ' cited' : '';
   parent.replaceChildren();
   if (!citations.length) {
     parent.textContent = 'No notes were cited.';
     return;
   }
-  for (const citation of citations) {
+  for (const [index, citation] of citations.entries()) {
     var item = document.createElement('div');
     item.className = 'answer-source';
-    item.innerHTML = '<div class="row">' + conceptLink(citation.id, citation.title) +
+    item.dataset.knowledgeSource = citation.id;
+    item.innerHTML = '<div class="row"><span class="knowledge-source-number" aria-hidden="true">' + (index + 1) + '</span>' +
+      conceptLink(citation.id, citation.title) +
       '<a href="' + graphHref(citation.id) + '">Graph</a></div>';
     var card = document.createElement('details');
     card.innerHTML = '<summary>Preview note</summary><p data-source-text class="muted"></p>';
@@ -1366,7 +1376,13 @@ function showAnswerSources(parent, citations, current) {
 
 function answerViewCurrent(seq) {
   var brain = BRAIN, bundle = STATUS?.bundle, hash = location.hash;
-  return function () { return !stale(seq) && brain === BRAIN && bundle === STATUS?.bundle && hash === location.hash; };
+  var current = function () { return !stale(seq) && brain === BRAIN && bundle === STATUS?.bundle && hash === location.hash; };
+  current.replaceHash = function (next) {
+    if (!current()) return;
+    history.replaceState(null, '', next);
+    hash = next;
+  };
+  return current;
 }
 
 function mountAnswerActions(parent, question, result, current) {
@@ -1503,19 +1519,22 @@ async function readAnswerEvents(response, receive) {
   }
 }
 
-function renderAsk(_arg, seq) {
+function renderAsk(arg, seq) {
   var current = answerViewCurrent(seq);
+  var K = window.okbKnowledge;
   view.innerHTML =
-    '<div class="answer-workspace"><div class="stack answer-main"><div class="row"><h2>Ask your brain</h2>' +
-    '<button class="small right" type="button" data-answer-drawer>Answer sources</button></div>' +
-    '<p><a href="#ask-plan">Ask with a ChatGPT plan</a></p>' +
-    '<div id="askstatus" role="status"></div><div id="askctx"></div><div id="askout" class="md"></div>' +
-    '<div id="ask-copy" hidden></div>' +
-    '<form id="askf" class="row">' +
-    '<input id="askq" style="flex:1" aria-label="Question" placeholder="What do my notes say about…" maxlength="8000" required autofocus>' +
+    '<div class="answer-workspace"><div class="answer-main knowledge-main">' +
+    K.conversationHeader('Ask your brain', '<a data-knowledge-provider-link href="#ask-plan">Ask with a ChatGPT plan</a>') +
+    '<div class="knowledge-conversation-scroll"><div class="knowledge-conversation">' + K.conversationEmpty() +
+    '<div data-knowledge-turns></div><div data-knowledge-live class="knowledge-exchange" hidden><div data-knowledge-question></div>' +
+    '<article class="knowledge-answer">' + K.answerHeading() + '<div id="askstatus" role="status"></div><div id="askctx"></div>' +
+    '<div id="askout" class="md"></div><div data-knowledge-answer-footer></div><div id="ask-copy" hidden></div></article></div></div></div>' +
+    '<form id="askf" class="knowledge-composer">' +
+    '<textarea id="askq" name="question" rows="2" aria-label="Question" placeholder="Ask across your notes…" maxlength="8000" required></textarea>' +
+    K.historyFields() + '<div class="row knowledge-composer-controls">' +
     '<select id="askp" aria-label="Retrieval profile"><option value="">Configured default</option><option>lean</option><option>balanced</option><option>max</option></select>' +
     '<label class="row"><input id="ask-private" type="checkbox"> Include private notes</label>' +
-    '<button id="asksend" class="primary">Ask</button><button id="askstop" type="button" hidden>Stop</button></form></div>' +
+    '<button id="asksend" class="primary right">Ask</button><button id="askstop" type="button" hidden>Stop</button></div></form></div>' +
     answerInspector('asksrc') + '</div>';
   var ctxEl = document.getElementById('askctx');
   R.workspaceDrawer(view.querySelector('.answer-inspector'), view.querySelector('[data-answer-drawer]'));
@@ -1526,6 +1545,7 @@ function renderAsk(_arg, seq) {
   var submit = document.getElementById('asksend');
   var form = document.getElementById('askf');
   var stop = document.getElementById('askstop');
+  var conversation = K.mountConversation({ root: view.firstElementChild, mode: 'ask', arg, current, sourcePanel: srcEl, form });
   var inputRevision = 0;
   var invalidateDraft;
   stop.addEventListener('click', function () { activeAsk?.abort(); });
@@ -1537,12 +1557,14 @@ function renderAsk(_arg, seq) {
   form.addEventListener('submit', async function (e) {
     e.preventDefault();
     var q = document.getElementById('askq').value.trim();
-    if (!q || activeAsk || !current()) return;
+    if (!q || activeAsk || !current() || !conversation.ready()) return;
     var version = inputRevision;
+    var next = conversation.next();
     var request = new AbortController();
     activeAsk = request;
     submit.disabled = true;
     stop.hidden = false;
+    conversation.start(q);
     statusEl.textContent = 'Finding sources…';
     var draft = document.createTextNode('');
     outEl.classList.add('ask-partial');
@@ -1551,6 +1573,7 @@ function renderAsk(_arg, seq) {
     srcEl.replaceChildren();
     copyEl.hidden = true;
     copyEl.replaceChildren();
+    copyEl.parentElement.querySelector('[data-knowledge-answer-footer]').replaceChildren();
     invalidateDraft = undefined;
     var profile = document.getElementById('askp').value;
     Okb.busy(true);
@@ -1558,7 +1581,7 @@ function renderAsk(_arg, seq) {
       var response = await fetch('/api/ask/stream', {
         method: 'POST', headers: headers({ 'content-type': 'application/json' }),
         body: JSON.stringify({ question: q, profile: profile || undefined,
-          'include-private': document.getElementById('ask-private').checked }), signal: request.signal,
+          'include-private': document.getElementById('ask-private').checked, ...(next ? { conversation: next } : {}) }), signal: request.signal,
       });
       await readAnswerEvents(response, function (event, data) {
         if (!current()) return;
@@ -1571,14 +1594,15 @@ function renderAsk(_arg, seq) {
           var result = data.result;
           statusEl.textContent = 'Answer ready.';
           outEl.classList.remove('ask-partial');
-          outEl.innerHTML = R.renderMarkdown(result.answer);
-          showAnswerSources(srcEl, result.citations, current);
+          K.renderAnswer(outEl, result, srcEl, current, view.querySelector('[data-answer-drawer]'));
+          conversation.finish(q, result);
           invalidateDraft = mountAnswerActions(copyEl, q, result, function () { return current() && version === inputRevision; });
+          if (version === inputRevision) form.elements.question.value = '';
           Okb.settle(outEl);
         }
       });
     } catch (error) {
-      if (current()) statusEl.textContent = request.signal.aborted ? 'Answer stopped.' : error.message;
+      if (current()) { conversation.fail(); statusEl.textContent = request.signal.aborted ? 'Answer stopped.' : error.message; }
     } finally {
       if (activeAsk === request) activeAsk = null;
       submit.disabled = false;
@@ -2214,15 +2238,18 @@ function renderSources(arg, seq) {
     '<a href="#browse/conversation">Browse conversation drafts</a></section>';
   view.innerHTML = '<div class="stack source-page"><h2>Sources</h2>' +
     (markdown ? filesPanel + conversationsPanel : conversationsPanel + filesPanel) +
-    '<section class="card source-panel" id="source-notion"></section>' +
+    '<section class="card source-panel" aria-labelledby="source-connections-title"><h3 id="source-connections-title">Connections</h3>' +
+    '<div class="grid" id="source-connections"><section class="card source-panel" id="source-notion"></section></div></section>' +
     '<section class="card source-panel" aria-labelledby="source-history-title"><h3 id="source-history-title">Import history</h3>' +
     '<div class="source-panel" id="source-history" aria-live="polite">Loading import history…</div></section>' +
     '<section class="card source-panel" aria-labelledby="source-web"><h3 id="source-web">Web pages and feeds</h3>' +
     '<p>Save a page to your inbox, install the browser bookmarklet, or pull an RSS feed.</p><a href="#add">Open capture tools</a></section>' +
     '<section class="card source-panel" aria-labelledby="source-ai"><h3 id="source-ai">AI accounts</h3>' +
     '<p>Connect an eligible ChatGPT plan for hosted answers, or configure an API provider or local model.</p>' +
-    '<div class="source-links"><a href="#accounts">Manage ChatGPT accounts</a><a href="#settings">Open AI settings</a></div></section></div>';
-  var repeatNotion = window.okbNotion.mount(document.getElementById('source-notion'), { readonly: readonly, headers: headers, onImport: refreshHistory });
+    '<div class="source-links"><a href="#accounts">Manage ChatGPT accounts</a><a href="#settings/ai">Open AI settings</a></div></section></div>';
+  var connectionOptions = { readonly: readonly, headers: headers, onImport: refreshHistory };
+  var repeatNotion = window.okbNotion.mount(document.getElementById('source-notion'), connectionOptions);
+  var repeatConnected = window.okbLiveSources.mount(document.getElementById('source-connections'), connectionOptions);
   if (readonly) {
     showSourceHistory(seq, brain);
     return;
@@ -2248,6 +2275,7 @@ function renderSources(arg, seq) {
         clearPreview();
         fileInput.focus();
       } else if (item.kind === 'notion-live') repeatNotion(item.source);
+      else if (window.okbLiveSources.has(item.kind)) repeatConnected(item.kind, item.source);
       else repeatFiles(item);
     });
   }
@@ -2605,7 +2633,7 @@ async function renderBrainMounts(parent, readonly, seq) {
     if (stale(seq)) return;
     if (showHome) { location.hash = '#home'; return; }
     await route();
-    if (location.hash === '#settings' && BRAIN === next) {
+    if (location.hash === '#settings/brains' && BRAIN === next) {
       var notice = document.getElementById('brain-mount-feedback');
       if (notice) {
         if (typeof message === 'string') notice.textContent = message;
@@ -3645,222 +3673,297 @@ function mountMaintenanceSchedule(panel, readonly, seq) {
   syncControls();
 }
 
+var SETTINGS_SECTIONS = {
+  overview: { label: 'Overview', heading: 'This server', description: 'Active brain, local service and cache status.' },
+  brains: { label: 'Brain folders', heading: 'Brain setup', description: 'Manage mounted folders, write attribution and portable Markdown conventions.' },
+  ai: { label: 'AI providers', heading: 'AI and models', description: 'Set model defaults, endpoints and per-user provider keys.' },
+  sync: { label: 'Git sync', heading: 'Sync with Git', description: 'Review the destination, set credentials and manage synchronization.' },
+  search: { label: 'Search and cache', heading: 'Search and cache', description: 'Choose where search data lives, update embeddings and watch for external changes.' },
+  maintenance: { label: 'Maintenance', heading: 'Maintenance', description: 'Check or rebuild the index, run jobs and schedule recurring maintenance.' },
+  exports: { label: 'Exports', heading: 'Exports', description: 'Save a graph viewer, graph data or portable Markdown.' },
+  connections: { label: 'Connections', heading: 'Connections', description: 'Configure MCP access or install the web clip bookmarklet.' },
+  privacy: { label: 'Privacy and usage', heading: 'Privacy and usage', description: 'Manage local counts and opt-in usability recording.' },
+  advanced: { label: 'Advanced operations', heading: 'Advanced tools', description: 'Run command options or a bounded web enrichment pass.' },
+};
+
 async function renderSettings(section, seq) {
   var st = STATUS || {};
   var mcpArgs = st.brain ? ['--brain', st.brain, 'mcp'] : ['--bundle', st.bundle || '<bundle>', 'mcp'];
   function mcpJson(trusted) {
     return JSON.stringify({ mcpServers: { okbrain: { command: 'okb', args: trusted ? mcpArgs.concat('--trusted') : mcpArgs } } }, null, 2);
   }
-  view.innerHTML =
-    '<div class="stack"><h2>Settings</h2>' +
-    '<h3>This server</h3><dl class="kv">' +
-    '<dt>okbrain</dt><dd>' + esc(st.version || '?') + ' · writes OKF ' + esc(st.okfVersion || '?') + '</dd>' +
-    '<dt>Bundle</dt><dd><code>' + esc(st.bundle || '?') + '</code>' + (st.brain ? ' (brain <strong>' + esc(st.brain) + '</strong>)' : '') +
-    (st.readonly ? ' <span class="chip warn">read-only</span>' : '') + '</dd>' +
-    '<dt>Caches</dt><dd>' + (st.cacheError ? 'unavailable' :
-      (st.hasIndex ? 'index ✓' : 'no index') + ' · ' + (st.hasVectors ? 'vectors ✓' : 'no vectors')) + '</dd>' +
-    '<dt>Retrieval profile</dt><dd>' + esc(st.retrievalProfile || 'balanced') + '</dd>' +
-    '<dt>Port</dt><dd>' + esc(st.port || '?') + ' (127.0.0.1 only)</dd></dl>' +
-    '<section id="brain-mount-settings" class="stack"></section>' +
-    (st.readonly ? '' : '<div class="row"><button id="set-default-brain" type="button"' + (st.isDefaultBundle ? ' disabled' : '') +
-      '>Use as default brain</button><span id="default-brain-status" role="status">' +
-      (st.isDefaultBundle ? 'This folder is the default.' : 'Used when okb starts without a folder argument.') + '</span></div>') +
-    (st.readonly ? '' : '<section id="note-usage-settings" class="stack"><h3>Local note usage</h3>' +
-      '<p class="muted">Count opens and verified Ask citations for this brain on this device. The last 30 days of counts appear on notes.</p>' +
-      '<div class="row"><button data-usage-enable type="button" hidden>Turn on local counts</button>' +
-      '<button data-usage-disable type="button" hidden>Turn off and clear counts</button></div><div role="status"></div></section>') +
-    '<section id="usability-session" class="stack" aria-labelledby="usability-title">' +
-    '<h3 id="usability-title" tabindex="-1">Usability session</h3>' +
-    (st.readonly ? '<p>Open a writable brain to run a usability session.</p>' :
-      '<p class="muted">Measure the time to a first saved note and how well notes are found again in a facilitated session. ' +
-      'Recording is off until you start it. It covers this brain only and stays on this device.</p>' +
-      '<p><strong>Recorded.</strong> The kind of each action (save, search, open, browse, map, ask, review, or error), ' +
-      'when it happened after the session started, how long it took, result counts, the position of an opened result, ' +
-      'and the task labels you enter.</p>' +
-      '<p><strong>Never recorded.</strong> Note text, titles, IDs, paths, or tags. Search and question text. Answers. Error messages.</p>' +
-      '<p data-usability-state role="status" tabindex="-1">Checking for a session…</p>' +
-      '<div class="row" data-usability-idle hidden><button type="button" data-usability-start>Start session</button></div>' +
-      '<div class="stack" data-usability-active hidden>' +
-      '<form class="stack" data-usability-next hidden><div class="row"><label class="field"><span>Task label</span>' +
-      '<input name="label" maxlength="16" pattern="[A-Za-z0-9_\\-]{1,16}" required autocomplete="off" spellcheck="false" ' +
-      'placeholder="T3" aria-describedby="usability-label-help"></label><button type="submit">Start task</button></div>' +
-      '<p class="muted" id="usability-label-help">Use up to 16 letters, digits, hyphens, or underscores.</p></form>' +
-      '<div class="stack" data-usability-open role="group" aria-labelledby="usability-open-task" hidden>' +
-      '<p id="usability-open-task"></p><div class="row">' +
-      '<button type="button" data-outcome="found">End as found</button>' +
-      '<button type="button" data-outcome="not_found">End as not found</button>' +
-      '<button type="button" data-outcome="abandoned">End as abandoned</button></div></div>' +
-      '<div class="row"><button type="button" data-usability-stop>Stop session</button></div></div>' +
-      '<div class="row" data-usability-stored hidden><button type="button" data-usability-export>Export JSON</button>' +
-      '<button type="button" class="danger" data-usability-clear>Clear sessions</button></div>' +
-      '<div data-usability-feedback role="status"></div>') + '</section>' +
-    '<section id="cache-settings" class="stack"><h3>Search and graph cache</h3>' +
-    '<p>Active backend <strong data-cache-backend></strong></p>' + (st.readonly ? '' :
-      '<details><summary>Change cache backend</summary><p class="muted">Connect to PostgreSQL with pgvector on this computer. The database stores searchable note text, including private drafts, along with graph data and any embeddings you build. Use a database you trust.</p>' +
-      '<form class="stack"><label class="field"><span>Local PostgreSQL connection URL</span>' +
-      '<input type="password" name="connection" maxlength="4096" autocomplete="off" spellcheck="false" required></label>' +
-      '<div class="row"><button type="submit">Connect and use PostgreSQL</button>' +
-      '<button data-cache-sqlite type="button" hidden>Use SQLite</button></div></form></details>') +
-    '<p role="status">' + esc(st.cacheError || '') + '</p></section>' +
-    '<h3>Identity</h3><form id="actf" class="row">' +
-    '<label class="field" style="flex:1"><span>Actor (generated.by / verified.by on your writes)</span>' +
-    '<input id="act-in" value="' + esc(st.actor || '') + '" placeholder="human:alice"></label>' +
-    '<button>Save</button></form><div id="act-out"></div>' +
-    '<h3>AI providers</h3>' +
-    '<form id="setf" class="stack"><div class="grid">' +
-    field('provider', 'Chat provider', '', 'anthropic | openai | gemini | openrouter | local') +
-    field('model', 'Chat model', '', 'provider default') +
-    field('base-url', 'Chat endpoint (optional)', '', 'provider default') +
-    field('embed-provider', 'Embed provider', '', 'openai | voyage | gemini | local') +
-    field('embed-model', 'Embed model', '', 'provider default') +
-    field('embed-base-url', 'Embedding endpoint (optional)', '', 'provider default') +
-    '</div><div class="row">' +
-    '<label><input id="reset-chat-endpoint" type="checkbox" aria-controls="ed-base-url"> Restore default chat endpoint</label>' +
-    '<label><input id="reset-embed-endpoint" type="checkbox" aria-controls="ed-embed-base-url"> Restore default embedding endpoint</label></div>' +
-    '<div class="row"><label class="field"><span>Retrieval profile</span>' +
-    '<select id="ed-retrieval-profile"><option value="">(keep)</option>' +
-    '<option>lean</option><option>balanced</option><option>max</option></select></label>' +
-    '<button>Save</button></div></form>' +
-    '<div id="set-out"></div><p class="muted">A local provider needs no API key.</p><section id="provider-keys" class="stack"></section>' +
-    '<section id="sync-settings" class="stack" aria-labelledby="sync-title"><h3 id="sync-title">Git sync</h3>' +
-    (st.readonly ? '<p>Open a writable brain to set up or run Git sync.</p>' :
-      '<p data-sync-state></p><details data-sync-setup hidden><summary>Repository setup</summary><div class="stack">' +
-      '<form class="stack" data-sync-identity><div class="grid">' +
-      '<label class="field"><span>Git name</span><input name="name" autocomplete="name" maxlength="256" required></label>' +
-      '<label class="field"><span>Git email</span><input name="email" type="email" autocomplete="email" maxlength="256" required></label></div>' +
-      '<p class="muted">Git records this name and email on commits.</p><div class="row"><button>Save Git identity</button></div></form>' +
-      '<div hidden><form class="stack" data-sync-origin>' +
-      '<label class="field"><span>Origin HTTPS URL</span><input type="url" name="url" maxlength="2048" autocomplete="off" required></label>' +
-      '<p class="muted">Choose an empty HTTPS repository. Connecting saves its URL.</p>' +
-      '<div class="row"><button>Connect origin</button></div></form></div></div></details>' +
-      '<div data-sync-destinations hidden><div class="stack"><dl class="kv"><dt>Fetch from</dt><dd><code data-sync-fetch></code></dd>' +
-      '<dt>Push to</dt><dd><code data-sync-push></code></dd></dl>' +
-      '<details data-sync-origin-manage><summary>Manage origin</summary><div class="stack brain-mount-body">' +
-      '<form class="stack"><label class="field"><span>New origin HTTPS URL</span>' +
-      '<input type="url" name="url" maxlength="2048" autocomplete="off" required></label>' +
-      '<div class="row"><button type="submit">Preview origin change</button></div></form>' +
-      '<div class="row"><button type="button" data-preview-origin-disconnect>Preview disconnection</button></div>' +
-      '<div data-sync-origin-preview hidden><div class="card stack"><h4 tabindex="-1">Review origin change</h4>' +
-      ['current', 'proposed'].map(function (key) {
-        return '<div data-origin-destination="' + key + '"><h5>' +
-          (key === 'current' ? 'Current destination' : 'New destination') + '</h5><dl class="kv">' +
-          '<dt>Configured origin</dt><dd><code data-origin-url="origin"></code></dd>' +
-          '<dt>Fetch from</dt><dd><code data-origin-url="fetch"></code></dd>' +
-          '<dt>Push to</dt><dd><code data-origin-url="push"></code></dd></dl></div>';
-      }).join('') + '<p data-origin-effect></p><div class="row"><button type="button" data-confirm-origin-change disabled></button></div>' +
-      '<div class="row"><button type="button" data-cancel-origin-change>Cancel origin change</button></div></div></div>' +
-      '<p data-origin-feedback role="status" hidden></p></div></details></div></div>' +
-      '<details data-sync-github hidden><summary>GitHub credentials</summary><div class="stack">' +
-      '<p class="muted" data-sync-github-status></p><div hidden>' +
-      '<p>For a private repository, use a fine-grained token for <code data-sync-github-repo></code> with Contents read and write access.</p>' +
-      '<form class="stack" autocomplete="off">' +
-      '<label class="field"><span>GitHub login</span><input name="login" maxlength="39" spellcheck="false" required></label>' +
-      '<label class="field"><span>GitHub personal access token</span><input name="token" type="password" maxlength="267" autocomplete="new-password" spellcheck="false" required></label>' +
-      '<div class="row"><button type="submit">Save GitHub credential</button></div></form></div>' +
-      '<div hidden><button type="button" data-remove-sync-credential>Remove GitHub credential</button></div><p role="status"></p></div></details>' +
-      '<form class="stack" data-sync-run><label class="field"><span>Commit message (optional)</span>' +
-      '<input name="message" placeholder="Automatic timestamped message"></label><div class="row">' +
-      '<button type="button" data-sync-refresh>Refresh Git status</button><button type="submit" disabled>Sync now</button></div></form>' +
-      '<div data-sync-feedback role="status"></div><div data-sync-recovery hidden></div>') + '</section>' +
-    '<h3>Enrichment (guardrailed web pass)</h3>' +
-    '<form id="enrf" class="stack"><div class="grid">' +
-    field('web-seed', 'Seed URLs', '', 'comma-separated http(s) URLs') +
-    field('task', 'Task', '', 'what to improve (optional)') +
-    field('concept', 'Focus concept', '', 'existing concept id (optional)') +
-    field('web-max-pages', 'Max pages', '', '5') +
-    field('web-max-depth', 'Max depth', '', '1') +
-    field('allow-host', 'Allowed hosts', '', 'default: the seeds’ hosts') +
-    field('allow-path', 'Allowed path prefixes', '', 'e.g. /guide,/reference') +
-    field('deny-path', 'Denied path prefixes', '', 'e.g. /admin,/login') +
-    '<label class="field"><span>Web</span><select id="ed-no-web"><option value="">on</option><option value="1">off (--no-web)</option></select></label>' +
-    '</div><div class="row"><button>Run enrich</button></div></form>' +
-    '<div id="enr-out"></div>' +
-    '<h3>Maintenance</h3><div class="row">' +
-    '<button id="mx-index">Re-index</button>' +
-    '<button id="mx-doctor">Doctor</button>' +
-    '<button id="mx-rebuild" class="danger">Rebuild (wipe + reindex)</button></div>' +
-    '<details id="maintenance-schedule"></details>' +
-    (st.readonly ? '' : '<form id="folder-log-form" class="stack"><h4>Folder change log</h4>' +
-      '<p class="muted">Record future changes to a folder and its subfolders in a separate log.md.</p>' +
-      '<label class="field"><span>Folder path in this brain</span><input name="folder" placeholder="notes/projects" required></label>' +
-      '<div class="row"><button type="submit">Enable folder log</button></div><div role="status"></div></form>') +
-    (st.readonly ? '' : '<form id="manifest-style-form" class="stack"><h4>Markdown indexes</h4>' +
-      '<div class="row"><label class="field"><span id="manifest-style-label">Index format</span><select name="style" aria-labelledby="manifest-style-label" required>' +
-      '<option value="">Choose a format</option><option value="grouped">Grouped headings</option>' +
-      '<option value="reference">OKF reference headings and relative links</option></select></label>' +
-      '<button type="submit">Update index files</button></div><div role="status"></div></form>') +
-    '<form id="embedf" class="stack"><h4>Embeddings</h4><div class="grid">' +
-    field('run-embed-provider', 'Provider override', '', 'Configured provider') +
-    field('run-embed-model', 'Model override', '', 'Configured model') +
-    '<label class="field"><span>Max notes this run</span><input id="embed-limit" type="number" min="0" placeholder="All pending notes"></label>' +
-    '</div><p class="muted">Changing the provider or model rebuilds the vector cache.</p>' +
-    '<label class="row"><input type="checkbox" id="embed-private"> Include private notes in embeddings</label>' +
-    '<div class="row"><button>Embed</button></div><div id="embed-out" aria-live="polite"></div></form>' +
-    '<section id="bundle-watch" class="stack"><h4>Watch brain folder</h4>' +
-    '<p class="muted">Keep keyword search and graph links current when you edit Markdown in another app.</p>' +
-    '<div class="row"><button data-start-watch disabled>Start watching</button><button data-stop-watch disabled>Stop watching</button></div>' +
-    '<p role="status">Checking watch status…</p></section>' +
-    '<div class="row"><button id="mx-viz">Export viz.html</button>' +
-    '<label><input id="mx-viz-fonts" type="checkbox"> Embed app fonts in graph export</label>' +
-    (st.readonly ? '' : '<label><input id="mx-viz-private" type="checkbox"> Include private drafts in graph export</label>') + '</div>' +
-    '<section class="stack" aria-labelledby="graph-json-export-heading"><h4 id="graph-json-export-heading">Graph JSON export</h4>' +
-    '<form id="graph-json-export" class="stack">' +
-    '<p class="muted">Save this brain’s notes and links as a JSON file for other tools. Private drafts are left out by default.</p>' +
-    (st.readonly ? '' : '<label class="row"><input type="checkbox" name="private"> Include private drafts in graph JSON</label>') +
-    '<div class="row"><button type="submit">Export graph JSON</button><span role="status"></span></div></form></section>' +
-    '<section class="stack" aria-labelledby="markdown-export-heading"><h4 id="markdown-export-heading">Markdown and Obsidian export</h4>' +
-    (st.readonly ? '<p>Open a writable brain to export its notes.</p>' :
-      '<form id="markdown-export" class="stack"><label class="field"><span>New export folder (absolute path)</span>' +
-      '<input name="destination" autocomplete="off" spellcheck="false" maxlength="4096" required aria-describedby="markdown-export-help"></label>' +
-      '<p class="muted" id="markdown-export-help">Choose a new folder outside this brain. Open it as an Obsidian vault or browse the Markdown in any editor.</p>' +
-      '<label class="row"><input type="checkbox" name="private"> Include private drafts in Markdown export</label>' +
-      '<div class="row"><button type="submit">Export Markdown</button><span role="status"></span></div></form>') + '</section>' +
-    '<div class="row"><span class="muted">Jobs:</span>' +
-    ['index', 'embed', 'rss', 'review', 'doctor'].map(function (j) {
-      return '<label class="row"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
-    }).join('') + '<button id="mx-jobs">Run jobs</button></div>' +
-    (st.readonly ? '' : '<form id="mx-upgrade-form" class="stack"><h4>OKF v0.2 migration</h4>' +
-      field('upgrade-by', 'Actor to credit (optional)', '', 'Current actor') +
-      '<div class="row"><button id="mx-upgrade-dry" type="submit">Preview upgrade</button>' +
-      '<button id="mx-upgrade" type="submit">Upgrade bundle</button></div></form>') + '<div id="mx-out"></div>' +
-    '<section id="mcp-settings" class="stack"></section>' +
-    '<details id="mcp-stdio"><summary>MCP stdio client configuration</summary><div class="stack brain-mount-body">' +
-    '<p class="muted">Paste this configuration into a local MCP client so it can launch okbrain over stdio.</p>' +
-    (st.readonly ? '' : '<label class="row"><input type="checkbox" data-trusted-stdio> Allow this trusted client to write to the selected brain</label>') +
-    '<pre>' + esc(mcpJson(false)) + '</pre><div class="row"><button type="button">Copy stdio configuration</button></div><p role="status"></p></div></details>' +
-    '<h3>Bookmarklet</h3><div id="bm-out"></div><details id="advanced-operations"></details></div>';
+  var selected = section === 'usability' ? 'privacy' : section || 'overview';
+  if (!Object.hasOwn(SETTINGS_SECTIONS, selected)) selected = 'overview';
+  var category = SETTINGS_SECTIONS[selected];
+  var panels = {
+    overview:
+      '<section class="settings-panel stack" aria-label="This server"><dl class="kv settings-server">' +
+      '<dt>okbrain</dt><dd>' + esc(st.version || '?') + ' · writes OKF ' + esc(st.okfVersion || '?') + '</dd>' +
+      '<dt>Bundle</dt><dd><code>' + esc(st.bundle || '?') + '</code>' + (st.brain ? ' (brain <strong>' + esc(st.brain) + '</strong>)' : '') +
+      (st.readonly ? ' <span class="chip warn">read-only</span>' : '') + '</dd>' +
+      '<dt>Caches</dt><dd>' + (st.cacheError ? 'unavailable' :
+        (st.hasIndex ? 'index ✓' : 'no index') + ' · ' + (st.hasVectors ? 'vectors ✓' : 'no vectors')) + '</dd>' +
+      '<dt>Retrieval profile</dt><dd>' + esc(st.retrievalProfile || 'balanced') + '</dd>' +
+      '<dt>Actor</dt><dd>' + esc(st.actor || '?') + '</dd>' +
+      '<dt>Port</dt><dd>' + esc(st.port || '?') + ' (127.0.0.1 only)</dd></dl></section>',
+    brains:
+      '<section id="brain-mount-settings" class="stack"></section>' +
+      (st.readonly ? '' : '<div class="row"><button id="set-default-brain" type="button"' + (st.isDefaultBundle ? ' disabled' : '') +
+        '>Use as default brain</button><span id="default-brain-status" role="status">' +
+        (st.isDefaultBundle ? 'This folder is the default.' : 'Used when okb starts without a folder argument.') + '</span></div>') +
+      '<h3>Identity</h3><form id="actf" class="row">' +
+      '<label class="field" style="flex:1"><span>Actor (generated.by / verified.by on your writes)</span>' +
+      '<input id="act-in" value="' + esc(st.actor || '') + '" placeholder="human:alice"></label>' +
+      '<button>Save</button></form><div id="act-out"></div>' +
+      (st.readonly ? '' : '<form id="folder-log-form" class="stack"><h4>Folder change log</h4>' +
+        '<p class="muted">Record future changes to a folder and its subfolders in a separate log.md.</p>' +
+        '<label class="field"><span>Folder path in this brain</span><input name="folder" placeholder="notes/projects" required></label>' +
+        '<div class="row"><button type="submit">Enable folder log</button></div><div role="status"></div></form>') +
+      (st.readonly ? '' : '<form id="manifest-style-form" class="stack"><h4>Markdown indexes</h4>' +
+        '<div class="row"><label class="field"><span id="manifest-style-label">Index format</span><select name="style" aria-labelledby="manifest-style-label" required>' +
+        '<option value="">Choose a format</option><option value="grouped">Grouped headings</option>' +
+        '<option value="reference">OKF reference headings and relative links</option></select></label>' +
+        '<button type="submit">Update index files</button></div><div role="status"></div></form>'),
+    ai:
+      '<h3>AI providers</h3>' +
+      '<form id="setf" class="stack"><div class="grid">' +
+      field('provider', 'Chat provider', '', 'anthropic | openai | gemini | openrouter | local') +
+      field('model', 'Chat model', '', 'provider default') +
+      field('base-url', 'Chat endpoint (optional)', '', 'provider default') +
+      field('embed-provider', 'Embed provider', '', 'openai | voyage | gemini | local') +
+      field('embed-model', 'Embed model', '', 'provider default') +
+      field('embed-base-url', 'Embedding endpoint (optional)', '', 'provider default') +
+      '</div><div class="row">' +
+      '<label><input id="reset-chat-endpoint" type="checkbox" aria-controls="ed-base-url"> Restore default chat endpoint</label>' +
+      '<label><input id="reset-embed-endpoint" type="checkbox" aria-controls="ed-embed-base-url"> Restore default embedding endpoint</label></div>' +
+      '<div class="row"><label class="field"><span>Retrieval profile</span>' +
+      '<select id="ed-retrieval-profile"><option value="">(keep)</option>' +
+      '<option>lean</option><option>balanced</option><option>max</option></select></label>' +
+      '<button>Save</button></div></form>' +
+      '<div id="set-out"></div><p class="muted">A local provider needs no API key.</p><section id="provider-keys" class="stack"></section>' +
+      '<div class="settings-related"><a href="#accounts">Manage ChatGPT accounts</a> · <a href="#ask">Open Ask</a></div>',
+    sync:
+      '<section id="sync-settings" class="stack" aria-labelledby="sync-title"><h3 id="sync-title">Git sync</h3>' +
+      (st.readonly ? '<p>Open a writable brain to set up or run Git sync.</p>' :
+        '<p data-sync-state></p><details data-sync-setup hidden><summary>Repository setup</summary><div class="stack">' +
+        '<form class="stack" data-sync-identity><div class="grid">' +
+        '<label class="field"><span>Git name</span><input name="name" autocomplete="name" maxlength="256" required></label>' +
+        '<label class="field"><span>Git email</span><input name="email" type="email" autocomplete="email" maxlength="256" required></label></div>' +
+        '<p class="muted">Git records this name and email on commits.</p><div class="row"><button>Save Git identity</button></div></form>' +
+        '<div hidden><form class="stack" data-sync-origin>' +
+        '<label class="field"><span>Origin HTTPS URL</span><input type="url" name="url" maxlength="2048" autocomplete="off" required></label>' +
+        '<p class="muted">Choose an empty HTTPS repository. Connecting saves its URL.</p>' +
+        '<div class="row"><button>Connect origin</button></div></form></div></div></details>' +
+        '<div data-sync-destinations hidden><div class="stack"><dl class="kv"><dt>Fetch from</dt><dd><code data-sync-fetch></code></dd>' +
+        '<dt>Push to</dt><dd><code data-sync-push></code></dd></dl>' +
+        '<details data-sync-origin-manage><summary>Manage origin</summary><div class="stack brain-mount-body">' +
+        '<form class="stack"><label class="field"><span>New origin HTTPS URL</span>' +
+        '<input type="url" name="url" maxlength="2048" autocomplete="off" required></label>' +
+        '<div class="row"><button type="submit">Preview origin change</button></div></form>' +
+        '<div class="row"><button type="button" data-preview-origin-disconnect>Preview disconnection</button></div>' +
+        '<div data-sync-origin-preview hidden><div class="card stack"><h4 tabindex="-1">Review origin change</h4>' +
+        ['current', 'proposed'].map(function (key) {
+          return '<div data-origin-destination="' + key + '"><h5>' +
+            (key === 'current' ? 'Current destination' : 'New destination') + '</h5><dl class="kv">' +
+            '<dt>Configured origin</dt><dd><code data-origin-url="origin"></code></dd>' +
+            '<dt>Fetch from</dt><dd><code data-origin-url="fetch"></code></dd>' +
+            '<dt>Push to</dt><dd><code data-origin-url="push"></code></dd></dl></div>';
+        }).join('') + '<p data-origin-effect></p><div class="row"><button type="button" data-confirm-origin-change disabled></button></div>' +
+        '<div class="row"><button type="button" data-cancel-origin-change>Cancel origin change</button></div></div></div>' +
+        '<p data-origin-feedback role="status" hidden></p></div></details></div></div>' +
+        '<details data-sync-github hidden><summary>GitHub credentials</summary><div class="stack">' +
+        '<p class="muted" data-sync-github-status></p><div hidden>' +
+        '<p>For a private repository, use a fine-grained token for <code data-sync-github-repo></code> with Contents read and write access.</p>' +
+        '<form class="stack" autocomplete="off">' +
+        '<label class="field"><span>GitHub login</span><input name="login" maxlength="39" spellcheck="false" required></label>' +
+        '<label class="field"><span>GitHub personal access token</span><input name="token" type="password" maxlength="267" autocomplete="new-password" spellcheck="false" required></label>' +
+        '<div class="row"><button type="submit">Save GitHub credential</button></div></form></div>' +
+        '<div hidden><button type="button" data-remove-sync-credential>Remove GitHub credential</button></div><p role="status"></p></div></details>' +
+        '<form class="stack" data-sync-run><label class="field"><span>Commit message (optional)</span>' +
+        '<input name="message" placeholder="Automatic timestamped message"></label><div class="row">' +
+        '<button type="button" data-sync-refresh>Refresh Git status</button><button type="submit" disabled>Sync now</button></div></form>' +
+        '<div data-sync-feedback role="status"></div><div data-sync-recovery hidden></div>') + '</section>',
+    search:
+      '<section id="cache-settings" class="stack"><h3>Search and graph cache</h3>' +
+      '<p>Active backend <strong data-cache-backend></strong></p>' + (st.readonly ? '' :
+        '<details><summary>Change cache backend</summary><p class="muted">Connect to PostgreSQL with pgvector on this computer. The database stores searchable note text, including private drafts, along with graph data and any embeddings you build. Use a database you trust.</p>' +
+        '<form class="stack"><label class="field"><span>Local PostgreSQL connection URL</span>' +
+        '<input type="password" name="connection" maxlength="4096" autocomplete="off" spellcheck="false" required></label>' +
+        '<div class="row"><button type="submit">Connect and use PostgreSQL</button>' +
+        '<button data-cache-sqlite type="button" hidden>Use SQLite</button></div></form></details>') +
+      '<p role="status">' + esc(st.cacheError || '') + '</p></section>' +
+      '<form id="embedf" class="stack"><h4>Embeddings</h4><div class="grid">' +
+      field('run-embed-provider', 'Provider override', '', 'Configured provider') +
+      field('run-embed-model', 'Model override', '', 'Configured model') +
+      '<label class="field"><span>Max notes this run</span><input id="embed-limit" type="number" min="0" placeholder="All pending notes"></label>' +
+      '</div><p class="muted">Changing the provider or model rebuilds the vector cache.</p>' +
+      '<label class="row"><input type="checkbox" id="embed-private"> Include private notes in embeddings</label>' +
+      '<div class="row"><button>Embed</button></div><div id="embed-out" aria-live="polite"></div></form>' +
+      '<section id="bundle-watch" class="stack"><h4>Watch brain folder</h4>' +
+      '<p class="muted">Keep keyword search and graph links current when you edit Markdown in another app.</p>' +
+      '<div class="row"><button data-start-watch disabled>Start watching</button><button data-stop-watch disabled>Stop watching</button></div>' +
+      '<p role="status">Checking watch status…</p></section>',
+    maintenance:
+      '<h3>Index and diagnostics</h3><div class="row">' +
+      '<button id="mx-index">Re-index</button>' +
+      '<button id="mx-doctor">Doctor</button>' +
+      '<button id="mx-rebuild" class="danger">Rebuild (wipe + reindex)</button></div>' +
+      '<details id="maintenance-schedule"></details>' +
+      '<div class="row"><span class="muted">Jobs:</span>' +
+      ['index', 'embed', 'rss', 'review', 'doctor'].map(function (j) {
+        return '<label class="row"><input type="checkbox" class="jobcb" value="' + j + '" checked> ' + j + '</label>';
+      }).join('') + '<button id="mx-jobs">Run jobs</button></div>' +
+      (st.readonly ? '' : '<form id="mx-upgrade-form" class="stack"><h4>OKF v0.2 migration</h4>' +
+        field('upgrade-by', 'Actor to credit (optional)', '', 'Current actor') +
+        '<div class="row"><button id="mx-upgrade-dry" type="submit">Preview upgrade</button>' +
+        '<button id="mx-upgrade" type="submit">Upgrade bundle</button></div></form>') + '<div id="mx-out"></div>',
+    exports:
+      '<section class="settings-panel stack"><h3>Offline graph viewer</h3><div class="row"><button id="mx-viz">Export viz.html</button>' +
+      '<label><input id="mx-viz-fonts" type="checkbox"> Embed app fonts in graph export</label>' +
+      (st.readonly ? '' : '<label><input id="mx-viz-private" type="checkbox"> Include private drafts in graph export</label>') + '</div><div id="viz-out" aria-live="polite"></div></section>' +
+      '<section class="stack" aria-labelledby="graph-json-export-heading"><h4 id="graph-json-export-heading">Graph JSON export</h4>' +
+      '<form id="graph-json-export" class="stack">' +
+      '<p class="muted">Save this brain’s notes and links as a JSON file for other tools. Private drafts are left out by default.</p>' +
+      (st.readonly ? '' : '<label class="row"><input type="checkbox" name="private"> Include private drafts in graph JSON</label>') +
+      '<div class="row"><button type="submit">Export graph JSON</button><span role="status"></span></div></form></section>' +
+      '<section class="stack" aria-labelledby="markdown-export-heading"><h4 id="markdown-export-heading">Markdown and Obsidian export</h4>' +
+      (st.readonly ? '<p>Open a writable brain to export its notes.</p>' :
+        '<form id="markdown-export" class="stack"><label class="field"><span>New export folder (absolute path)</span>' +
+        '<input name="destination" autocomplete="off" spellcheck="false" maxlength="4096" required aria-describedby="markdown-export-help"></label>' +
+        '<p class="muted" id="markdown-export-help">Choose a new folder outside this brain. Open it as an Obsidian vault or browse the Markdown in any editor.</p>' +
+        '<label class="row"><input type="checkbox" name="private"> Include private drafts in Markdown export</label>' +
+        '<div class="row"><button type="submit">Export Markdown</button><span role="status"></span></div></form>') + '</section>',
+    connections:
+      '<section id="mcp-settings" class="stack"></section>' +
+      '<details id="mcp-stdio"><summary>MCP stdio client configuration</summary><div class="stack brain-mount-body">' +
+      '<p class="muted">Paste this configuration into a local MCP client so it can launch okbrain over stdio.</p>' +
+      (st.readonly ? '' : '<label class="row"><input type="checkbox" data-trusted-stdio> Allow this trusted client to write to the selected brain</label>') +
+      '<pre>' + esc(mcpJson(false)) + '</pre><div class="row"><button type="button">Copy stdio configuration</button></div><p role="status"></p></div></details>' +
+      '<h3>Bookmarklet</h3><div id="bm-out"></div>',
+    privacy:
+      (st.readonly ? '' : '<section id="note-usage-settings" class="stack"><h3>Local note usage</h3>' +
+        '<p class="muted">Count opens and verified Ask citations for this brain on this device. The last 30 days of counts appear on notes.</p>' +
+        '<div class="row"><button data-usage-enable type="button" hidden>Turn on local counts</button>' +
+        '<button data-usage-disable type="button" hidden>Turn off and clear counts</button></div><div role="status"></div></section>') +
+      '<section id="usability-session" class="stack" aria-labelledby="usability-title">' +
+      '<h3 id="usability-title" tabindex="-1">Usability session</h3>' +
+      (st.readonly ? '<p>Open a writable brain to run a usability session.</p>' :
+        '<p class="muted">Measure the time to a first saved note and how well notes are found again in a facilitated session. ' +
+        'Recording is off until you start it. It covers this brain only and stays on this device.</p>' +
+        '<p><strong>Recorded.</strong> The kind of each action (save, search, open, browse, map, ask, review, or error), ' +
+        'when it happened after the session started, how long it took, result counts, the position of an opened result, ' +
+        'and the task labels you enter.</p>' +
+        '<p><strong>Never recorded.</strong> Note text, titles, IDs, paths, or tags. Search and question text. Answers. Error messages.</p>' +
+        '<p data-usability-state role="status" tabindex="-1">Checking for a session…</p>' +
+        '<div class="row" data-usability-idle hidden><button type="button" data-usability-start>Start session</button></div>' +
+        '<div class="stack" data-usability-active hidden>' +
+        '<form class="stack" data-usability-next hidden><div class="row"><label class="field"><span>Task label</span>' +
+        '<input name="label" maxlength="16" pattern="[A-Za-z0-9_\\-]{1,16}" required autocomplete="off" spellcheck="false" ' +
+        'placeholder="T3" aria-describedby="usability-label-help"></label><button type="submit">Start task</button></div>' +
+        '<p class="muted" id="usability-label-help">Use up to 16 letters, digits, hyphens, or underscores.</p></form>' +
+        '<div class="stack" data-usability-open role="group" aria-labelledby="usability-open-task" hidden>' +
+        '<p id="usability-open-task"></p><div class="row">' +
+        '<button type="button" data-outcome="found">End as found</button>' +
+        '<button type="button" data-outcome="not_found">End as not found</button>' +
+        '<button type="button" data-outcome="abandoned">End as abandoned</button></div></div>' +
+        '<div class="row"><button type="button" data-usability-stop>Stop session</button></div></div>' +
+        '<div class="row" data-usability-stored hidden><button type="button" data-usability-export>Export JSON</button>' +
+        '<button type="button" class="danger" data-usability-clear>Clear sessions</button></div>' +
+        '<div data-usability-feedback role="status"></div>') + '</section>',
+    advanced:
+      '<details id="advanced-operations" open></details>' +
+      '<details><summary>Enrichment (guardrailed web pass)</summary><div class="stack brain-mount-body">' +
+      '<form id="enrf" class="stack"><div class="grid">' +
+      field('web-seed', 'Seed URLs', '', 'comma-separated http(s) URLs') +
+      field('task', 'Task', '', 'what to improve (optional)') +
+      field('concept', 'Focus concept', '', 'existing concept id (optional)') +
+      field('web-max-pages', 'Max pages', '', '5') +
+      field('web-max-depth', 'Max depth', '', '1') +
+      field('allow-host', 'Allowed hosts', '', 'default: the seeds’ hosts') +
+      field('allow-path', 'Allowed path prefixes', '', 'e.g. /guide,/reference') +
+      field('deny-path', 'Denied path prefixes', '', 'e.g. /admin,/login') +
+      '<label class="field"><span>Web</span><select id="ed-no-web"><option value="">on</option><option value="1">off (--no-web)</option></select></label>' +
+      '</div><div class="row"><button>Run enrich</button></div></form>' +
+      '<div id="enr-out" aria-live="polite"></div></div></details>',
+  };
+  var items = Object.entries(SETTINGS_SECTIONS).map(function (entry) {
+    var name = entry[0];
+    var descriptor = entry[1];
+    var href = name === 'overview' ? '#settings' : '#settings/' + name;
+    return '<a href="' + href + '"' + (name === selected ? ' aria-current="page"' : '') + '>' + descriptor.label + '</a>';
+  }).join('');
+  view.innerHTML = '<div class="settings-workspace"><h2>Settings</h2>' +
+    '<div class="settings-layout"><nav class="settings-nav" aria-label="Settings sections">' + items + '</nav>' +
+    '<section class="settings-content stack" aria-labelledby="settings-heading"><header class="stack">' +
+    '<div class="row"><h3 id="settings-heading" tabindex="-1">' + category.heading + '</h3>' +
+    (selected === 'overview' ? '' : '<span class="chip" title="Active brain" data-settings-brain>' +
+      esc(st.brain || (st.bundle || '').split(/[\\/]/u).filter(Boolean).pop() || 'Default folder') + '</span>') + '</div>' +
+    '<p class="muted">' + category.description + '</p></header>' +
+    (st.readonly && selected !== 'overview' ? '<p class="notice">This brain is mounted read-only.</p>' : '') +
+    panels[selected] + '</section></div></div>';
+  var settingsNav = view.querySelector('.settings-nav');
+  var currentLink = settingsNav.querySelector('[aria-current="page"]');
+  if (settingsNav.scrollWidth > settingsNav.clientWidth) {
+    settingsNav.scrollLeft += currentLink.getBoundingClientRect().left - settingsNav.getBoundingClientRect().left -
+      (settingsNav.clientWidth - currentLink.offsetWidth) / 2;
+  }
+  if (section === 'usability') document.getElementById('usability-title').focus();
+  else document.getElementById('settings-heading').focus({ preventScroll: true });
 
   var show = setHtml;
-  window.okbAdvancedSettings?.mount(document.getElementById('advanced-operations'), {
-    api, headers, readonly: Boolean(st.readonly), saveFile, readAnswerEvents, detached: () => stale(seq),
-  });
-  var usagePanel = document.getElementById('note-usage-settings');
-  if (usagePanel) mountNoteUsageSettings(usagePanel);
-  if (!st.readonly) mountUsabilitySession(document.getElementById('usability-session'), seq);
-  // The footer's recording indicator links here.
-  if (section === 'usability') document.getElementById('usability-title').focus();
-  mountCacheSettings(document.getElementById('cache-settings'));
-  showBookmarklet();
+  var readonly = Boolean(st.readonly);
+  if (readonly) view.querySelectorAll('#actf button, #setf button, #enrf button, #embedf button, #mx-index, #mx-rebuild, #mx-jobs')
+    .forEach(function (button) { button.disabled = true; });
+  switch (selected) {
+    case 'brains':
+      renderBrainMounts(document.getElementById('brain-mount-settings'), readonly, seq);
+      break;
+    case 'ai':
+      renderProviderKeys(document.getElementById('provider-keys'), readonly);
+      break;
+    case 'sync':
+      if (!readonly) mountGitSync(document.getElementById('sync-settings'), seq);
+      break;
+    case 'search':
+      mountCacheSettings(document.getElementById('cache-settings'));
+      mountBundleWatch(document.getElementById('bundle-watch'), readonly, seq);
+      break;
+    case 'maintenance':
+      mountMaintenanceSchedule(document.getElementById('maintenance-schedule'), readonly, seq);
+      break;
+    case 'connections':
+      showBookmarklet();
+      window.okbMcpSettings.mount(document.getElementById('mcp-settings'), { readonly: readonly, requestHeaders: headers });
+      break;
+    case 'privacy':
+      if (!readonly) {
+        mountNoteUsageSettings(document.getElementById('note-usage-settings'));
+        mountUsabilitySession(document.getElementById('usability-session'), seq);
+      }
+      break;
+    case 'advanced':
+      window.okbAdvancedSettings?.mount(document.getElementById('advanced-operations'), {
+        api, headers, readonly: readonly, saveFile, readAnswerEvents, detached: () => stale(seq),
+      });
+      break;
+  }
+
   var stdio = document.getElementById('mcp-stdio');
-  var trustedStdio = stdio.querySelector('[data-trusted-stdio]');
-  var stdioOutput = stdio.querySelector('pre');
-  var stdioStatus = stdio.querySelector('[role="status"]');
-  trustedStdio?.addEventListener('change', function () {
-    stdioOutput.textContent = mcpJson(trustedStdio.checked);
-    stdioStatus.textContent = '';
-  });
-  stdio.querySelector('button').addEventListener('click', async function () {
-    try {
-      await navigator.clipboard.writeText(stdioOutput.textContent);
-      stdioStatus.textContent = 'Stdio configuration copied.';
-    } catch (_) { stdioStatus.textContent = 'Select and copy the configuration above.'; }
-  });
-  mountBundleWatch(document.getElementById('bundle-watch'), Boolean(st.readonly), seq);
-  mountMaintenanceSchedule(document.getElementById('maintenance-schedule'), Boolean(st.readonly), seq);
-  renderBrainMounts(document.getElementById('brain-mount-settings'), Boolean(st.readonly), seq);
-  renderProviderKeys(document.getElementById('provider-keys'), Boolean(st.readonly));
-  window.okbMcpSettings.mount(document.getElementById('mcp-settings'), { readonly: Boolean(st.readonly), requestHeaders: headers });
-  if (!st.readonly) mountGitSync(document.getElementById('sync-settings'), seq);
+  if (stdio) {
+    var trustedStdio = stdio.querySelector('[data-trusted-stdio]');
+    var stdioOutput = stdio.querySelector('pre');
+    var stdioStatus = stdio.querySelector('[role="status"]');
+    trustedStdio?.addEventListener('change', function () {
+      stdioOutput.textContent = mcpJson(trustedStdio.checked);
+      stdioStatus.textContent = '';
+    });
+    stdio.querySelector('button').addEventListener('click', async function () {
+      try {
+        await navigator.clipboard.writeText(stdioOutput.textContent);
+        stdioStatus.textContent = 'Stdio configuration copied.';
+      } catch (_) { stdioStatus.textContent = 'Select and copy the configuration above.'; }
+    });
+  }
 
   var folderLog = document.getElementById('folder-log-form');
   folderLog?.addEventListener('submit', async function (event) {
@@ -3902,7 +4005,7 @@ async function renderSettings(section, seq) {
     }
   });
 
-  document.getElementById('actf').addEventListener('submit', async function (e) {
+  document.getElementById('actf')?.addEventListener('submit', async function (e) {
     e.preventDefault();
     var actor = document.getElementById('act-in').value.trim();
     if (!actor) return;
@@ -3913,13 +4016,13 @@ async function renderSettings(section, seq) {
       refreshStatus();
     } catch (err) { show('act-out', errorBox(err)); }
   });
-  var endpointResets = [['reset-chat-endpoint', 'base-url'], ['reset-embed-endpoint', 'embed-base-url']].map(function (pair) {
+  var endpointResets = (selected === 'ai' ? [['reset-chat-endpoint', 'base-url'], ['reset-embed-endpoint', 'embed-base-url']] : []).map(function (pair) {
     var checkbox = document.getElementById(pair[0]);
     var input = document.getElementById('ed-' + pair[1]);
     checkbox.addEventListener('change', function () { input.disabled = checkbox.checked; });
     return { checkbox: checkbox, input: input, param: pair[1] };
   });
-  document.getElementById('setf').addEventListener('submit', async function (e) {
+  document.getElementById('setf')?.addEventListener('submit', async function (e) {
     e.preventDefault();
     var params = { 'no-default-bundle': true };
     ['provider', 'model', 'base-url', 'embed-provider', 'embed-model', 'embed-base-url', 'retrieval-profile'].forEach(function (n) {
@@ -3941,7 +4044,7 @@ async function renderSettings(section, seq) {
         ' (' + r.embed.keyStatus + ')') + '</div>');
     } catch (err) { show('set-out', errorBox(err)); }
   });
-  document.getElementById('enrf').addEventListener('submit', async function (e) {
+  document.getElementById('enrf')?.addEventListener('submit', async function (e) {
     e.preventDefault();
     var params = {};
     ['web-seed', 'task', 'concept', 'allow-host', 'allow-path', 'deny-path'].forEach(function (n) {
@@ -3965,11 +4068,14 @@ async function renderSettings(section, seq) {
   async function maint(op, verb, params, render, output) {
     var target = output || 'mx-out';
     working(target, verb);
-    try { show(target, (render || jsonNotice)(await appWork(api(op, params || {})))); await refreshStatus(); }
-    catch (e) { show(target, errorBox(e)); }
+    try {
+      var result = await appWork(api(op, params || {}));
+      if (!stale(seq)) show(target, (render || jsonNotice)(result));
+      await refreshStatus();
+    } catch (e) { if (!stale(seq)) show(target, errorBox(e)); }
   }
-  document.getElementById('mx-index').addEventListener('click', function () { maint('index', 'indexing'); });
-  document.getElementById('embedf').addEventListener('submit', function (e) {
+  document.getElementById('mx-index')?.addEventListener('click', function () { maint('index', 'indexing'); });
+  document.getElementById('embedf')?.addEventListener('submit', function (e) {
     e.preventDefault();
     var params = {};
     var provider = document.getElementById('ed-run-embed-provider').value.trim();
@@ -3981,17 +4087,17 @@ async function renderSettings(section, seq) {
     if (document.getElementById('embed-private').checked) params['include-private'] = true;
     maint('embed', 'embedding', params, null, 'embed-out');
   });
-  document.getElementById('mx-doctor').addEventListener('click', function () { maint('doctor', 'checking', {}, doctorSummary); });
-  document.getElementById('mx-viz').addEventListener('click', function () {
+  document.getElementById('mx-doctor')?.addEventListener('click', function () { maint('doctor', 'checking', {}, doctorSummary); });
+  document.getElementById('mx-viz')?.addEventListener('click', function () {
     var includePrivate = Boolean(document.getElementById('mx-viz-private')?.checked);
     if (includePrivate && !confirm('The exported HTML will contain private draft text. Export it?')) return;
     var fonts = document.getElementById('mx-viz-fonts').checked;
     maint('export_viz', 'exporting', { 'include-private': includePrivate, fonts: fonts }, function (r) {
       return '<div class="notice">wrote ' + esc(r.path) + ' (' + r.nodes + ' concepts, ' + r.edges + ' links)</div>';
-    });
+    }, 'viz-out');
   });
   var graphJson = document.getElementById('graph-json-export');
-  graphJson.addEventListener('submit', async function (event) {
+  graphJson?.addEventListener('submit', async function (event) {
     event.preventDefault();
     var includePrivate = Boolean(graphJson.elements.private?.checked);
     var button = graphJson.querySelector('button');
@@ -4030,11 +4136,11 @@ async function renderSettings(section, seq) {
       if (!stale(seq)) status.innerHTML = errorBox(error);
     } finally { button.disabled = false; }
   });
-  document.getElementById('mx-rebuild').addEventListener('click', function () {
+  document.getElementById('mx-rebuild')?.addEventListener('click', function () {
     if (!confirm('Rebuild wipes the derived index and rebuilds it from the bundle. Continue?')) return;
     maint('rebuild', 'rebuilding', { 'confirm-destructive': true });
   });
-  document.getElementById('mx-jobs').addEventListener('click', function () {
+  document.getElementById('mx-jobs')?.addEventListener('click', function () {
     var only = Array.prototype.map.call(document.querySelectorAll('.jobcb:checked'), function (cb) { return cb.value; });
     if (!only.length) return;
     maint('jobs', 'running jobs', { only: only.join(',') }, function (rs) {

@@ -12,7 +12,7 @@
 // touch an operations.ts binding at module top level (ESM cycle).
 
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { BrowserPlanInputError, createBrowserPlan, type BrowserPlan } from "./core/ai/browser-plan.ts";
+import { BrowserPlanInputError, createBrowserPlan, type BrowserPlan, type PlanConversation } from "./core/ai/browser-plan.ts";
 import type { PlanOptions } from "./core/ai/chatgpt-plan.ts";
 import { providerKeyStatus, setProviderKey } from "./core/ai/local-keys.ts";
 import { AiError, providersFor } from "./core/ai/gateway.ts";
@@ -30,11 +30,14 @@ import { EngineError } from "./core/engine/sqlite.ts";
 import { MaintenanceScheduleError, MaintenanceScheduler, maintenanceJobNames, type MaintenanceJobName, type MaintenanceSchedulerOptions, type MaintenanceTarget } from "./core/jobs/schedule.ts";
 import { SyncError, SyncOriginChangeError, syncGitHubCredential } from "./core/sync.ts";
 import { MAX_CONVERSATION_EXPORT_BYTES } from "./core/ingest/conversations.ts";
+import { createLiveSources, LiveSourceError, type LiveSources, type LiveSourcesOptions } from "./core/ingest/live-sources.ts";
 import { createNotionSource, NotionSourceError, type NotionSource, type NotionSourceOptions } from "./core/ingest/notion-source.ts";
-import { isOfflineSourceKind, MAX_OFFLINE_FILE_BYTES, MAX_SOURCE_FILES, MAX_SOURCE_ROWS, MAX_SOURCE_UPLOAD_BYTES } from "./core/ingest/personal-sources.ts";
+import { isConnectedSourceProvider, isOfflineSourceKind, MAX_OFFLINE_FILE_BYTES, MAX_SOURCE_FILES, MAX_SOURCE_ROWS, MAX_SOURCE_UPLOAD_BYTES } from "./core/ingest/personal-sources.ts";
 import { OKF_VERSION } from "./core/okf/indexmd.ts";
 import { AskDraftError } from "./core/retrieval/ask-draft.ts";
 import { AskDraftReceiptError, AskDraftReceipts, maxAskDraftRequestBytes } from "./core/retrieval/ask-draft-receipts.ts";
+import { appendAskTurn, askConversationBinding, askConversationId, askConversationRequest, AskConversationError,
+  changeAskConversation, getAskConversation, listAskConversations, prepareAskConversation } from "./core/retrieval/ask-conversations.ts";
 import type { AskResult } from "./core/retrieval/ask.ts";
 import {
   checkOpCall,
@@ -47,7 +50,7 @@ import {
   runBrainMountChange,
   runBrainRestore,
   runConversationUpload,
-  runNotionSource,
+  runLiveSource,
   runOp,
   runOpStream,
   runPersonalSourceUpload,
@@ -82,11 +85,14 @@ import guiCodingJs from "./gui/coding.js" with { type: "text" };
 import guiCodingStandaloneJs from "./gui/coding-standalone.js" with { type: "text" };
 import guiCodingEvaluationJs from "./gui/coding-evaluation.js" with { type: "text" };
 import guiGithubJs from "./gui/github.js" with { type: "text" };
+import guiLiveSourcesJs from "./gui/live-sources.js" with { type: "text" };
 import guiNotionJs from "./gui/notion.js" with { type: "text" };
 import guiCodingCss from "./gui/coding.css" with { type: "text" };
 import codingTeamHtmlAsset from "./gui/coding-team.html" with { type: "text" };
 import guiAccountsJs from "./gui/accounts.js" with { type: "text" };
 import guiFocusedMapJs from "./gui/focused-map.js" with { type: "text" };
+import guiKnowledgeJs from "./gui/knowledge.js" with { type: "text" };
+import guiKnowledgeCss from "./gui/knowledge.css" with { type: "text" };
 import indexHtmlAsset from "./gui/index.html" with { type: "text" };
 import guiStyleCss from "./gui/style.css" with { type: "text" };
 
@@ -116,10 +122,13 @@ const GUI_ASSETS: Record<string, readonly [string | Blob, string]> = {
   "/gui/coding-standalone.js": [guiCodingStandaloneJs, JS],
   "/gui/coding-evaluation.js": [guiCodingEvaluationJs, JS],
   "/gui/github.js": [guiGithubJs, JS],
+  "/gui/live-sources.js": [guiLiveSourcesJs, JS],
   "/gui/notion.js": [guiNotionJs, JS],
   "/gui/coding.css": [guiCodingCss, CSS],
   "/gui/accounts.js": [guiAccountsJs, JS],
   "/gui/focused-map.js": [guiFocusedMapJs, JS],
+  "/gui/knowledge.js": [guiKnowledgeJs, JS],
+  "/gui/knowledge.css": [guiKnowledgeCss, CSS],
   "/gui/style.css": [`${hostedFontCss}\n${guiStyleCss}`, CSS],
   "/gui/tokens.css": [tokensCss, CSS],
   "/gui/okb.js": [okbJs, JS],
@@ -145,6 +154,7 @@ export interface ApiOptions {
   coding?: ProjectControlOptions;
   standaloneCoding?: ConstructorParameters<typeof StandaloneCodingControl>[0];
   notion?: NotionSourceOptions;
+  liveSources?: LiveSourcesOptions;
   maintenance?: Pick<MaintenanceSchedulerOptions, "now" | "path" | "intervalMs">;
 }
 
@@ -252,6 +262,7 @@ interface ServeState {
   coding?: () => CodingProjectControl;
   standalone?: StandaloneCodingControl;
   notion?: NotionSource;
+  liveSources?: LiveSources;
   team?: CodingTeamListener;
   projectTokensOnly?: boolean;
   bundle: string;
@@ -582,17 +593,81 @@ async function rssSettings(req: Request, url: URL, opts: ServeState, cors?: Hdrs
   }
 }
 
-function askDraftBrain(scope: Scope): { bundle: string; binding: string } | undefined {
+function askDraftBrain(scope: Scope): { bundle: string; binding: string; conversations: string } | undefined {
   try {
     const bundle = realpathSync.native(scope.bundle);
     const info = statSync(bundle, { bigint: true });
     if (info.isDirectory()) return { bundle, binding: JSON.stringify([
       scope.brain ?? scope.servedBrain ?? null, bundle, String(info.dev), String(info.ino),
-    ]) };
+    ]), conversations: askConversationBinding(bundle, info.dev, info.ino) };
   } catch { /* An unavailable brain cannot receive an answer draft approval. */ }
 }
 
-async function browserPlan(req: Request, path: string, plan: BrowserPlan, scope: Scope, cors: Hdrs, drafts?: AskDraftReceipts): Promise<Response> {
+function authorizeAskConversation(scope: Scope, binding?: string): string {
+  if (scope.readonly) throw new AskConversationError("Open a writable brain to change conversations.", 403);
+  const brain = askDraftBrain(scope)?.conversations;
+  if (!brain || (binding !== undefined && binding !== brain)) throw new AskConversationError("The selected brain changed. Reopen the conversation.", 409);
+  return brain;
+}
+
+function openAskConversation(initialScope: Scope, currentScope: () => Scope, input: unknown, question: string) {
+  if (!question.trim() || question.length > 8000) throw new AskConversationError("Enter a question of 1–8000 characters.", 400);
+  const binding = authorizeAskConversation(currentScope(), authorizeAskConversation(initialScope));
+  const request = askConversationRequest(input);
+  return { binding, request, ...prepareAskConversation(binding, request, question) };
+}
+
+function completedAsk(result: AskResult, question: string, draftBrain: string | undefined, drafts: AskDraftReceipts | undefined,
+  conversation: PlanConversation | undefined, currentScope: () => Scope) {
+  let draftReceipt: string | undefined;
+  let visible = result;
+  let record: { conversation?: { id: string; turn: string; at: string }; conversationError?: string } = {};
+  if (conversation) {
+    try {
+      const saved = appendAskTurn(authorizeAskConversation(currentScope(), conversation.binding), conversation.request, question, result);
+      visible = saved.result;
+      record = { conversation: { id: conversation.request.id, turn: saved.id, at: saved.at } };
+      if (draftBrain) draftReceipt = drafts?.issue(draftBrain, question, saved.result, saved);
+    } catch (error) {
+      record = { conversationError: error instanceof AskConversationError ? error.message : "Could not save the conversation on this device." };
+    }
+  }
+  if (!record.conversation && draftBrain) draftReceipt = drafts?.issue(draftBrain, question, result);
+  return { ...visible, ...(draftReceipt ? { draftReceipt } : {}), ...record };
+}
+
+async function askConversationRoute(req: Request, url: URL, opts: ServeState, scope: Scope, cors: Hdrs | undefined): Promise<Response> {
+  const headers = { ...cors, "cache-control": "no-store" };
+  if (!tokenMatches(req.headers.get("x-okb-token"), opts.token)) return json(401, { error: "missing or invalid local app token" }, headers);
+  if (req.headers.has("origin") && !cors) return json(403, { error: "Conversations are available in the local app." }, headers);
+  try {
+    if (req.method === "GET") {
+      const brain = askDraftBrain(scope);
+      if (!brain) throw new AskConversationError("The selected brain is unavailable.", 409);
+      const id = url.searchParams.get("id");
+      if (id === null) return json(200, { result: listAskConversations(brain.conversations) }, headers);
+      const saved = getAskConversation(brain.conversations, askConversationId(id));
+      return json(200, { result: { ...saved, turns: saved.turns.map((turn) => {
+        const draftReceipt = scope.readonly ? undefined : opts.askDrafts?.issue(brain.binding, turn.question, turn.result, turn);
+        return draftReceipt ? { ...turn, result: { ...turn.result, draftReceipt } } : turn;
+      }) } }, headers);
+    }
+    if (req.method !== "POST") return json(405, { error: "Method not allowed." }, headers);
+    if (req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") return json(415, { error: "Send a JSON object." }, headers);
+    const binding = authorizeAskConversation(scope);
+    const text = await readUpload(req, 4096, "Conversation request exceeds 4 KiB.");
+    let body: unknown;
+    try { body = JSON.parse(text.toString("utf8")); } catch { body = null; }
+    if (!body || typeof body !== "object" || Array.isArray(body)) return json(400, { error: "Send a JSON object." }, headers);
+    return json(200, { result: changeAskConversation(authorizeAskConversation(scopeOf(req, url, opts), binding), body as Record<string, unknown>) }, headers);
+  } catch (error) {
+    const status = error instanceof AskConversationError ? error.status : error instanceof UploadTooLarge ? 413 : errStatus(error);
+    return json(status, status === 500 ? { error: "Could not open conversations on this device." } : errBody(error), headers);
+  }
+}
+
+async function browserPlan(req: Request, path: string, plan: BrowserPlan, scope: Scope, cors: Hdrs, drafts: AskDraftReceipts | undefined,
+  currentScope: () => Scope): Promise<Response> {
   const headers = { ...cors, "cache-control": "no-store" };
   try {
     if (req.method === "GET" && path === "status") return json(200, { result: await plan.status() }, headers);
@@ -615,17 +690,24 @@ async function browserPlan(req: Request, path: string, plan: BrowserPlan, scope:
         const binding = drafts && !scope.readonly ? askDraftBrain(scope)?.binding : undefined;
         const local = open(scope);
         try {
-          if (path === "preview") return json(200, { result: await plan.preview(local.ctx, body, binding) }, headers);
-          const { result, question, draftBrain } = await observeActivity(local.ctx, "ask", () => plan.answer(local.ctx, body.id),
+          if (path === "preview") {
+            const conversation = body.conversation === undefined ? undefined : openAskConversation(scope, currentScope, body.conversation,
+              typeof body.question === "string" ? body.question.trim() : "");
+            return json(200, { result: await plan.preview(local.ctx, body, binding, conversation) }, headers);
+          }
+          const { result, question, draftBrain, conversation } = await observeActivity(local.ctx, "ask", () => plan.answer(local.ctx, body.id, (selection, question) => {
+            const { saved } = prepareAskConversation(authorizeAskConversation(currentScope(), selection.binding), selection.request, question);
+            if (saved) throw new AskConversationError("This question is already in the conversation.", 409);
+          }),
             (answered) => ({ count: answered.result.citations.length }));
-          const draftReceipt = binding && binding === draftBrain ? drafts?.issue(binding, question, result) : undefined;
-          return json(200, { result: draftReceipt ? { ...result, draftReceipt } : result }, headers);
+          return json(200, { result: completedAsk(result, question, binding === draftBrain ? binding : undefined, drafts, conversation, currentScope) }, headers);
         } finally { await local.close(); }
       }
       default: return json(404, { error: "not found" }, headers);
     }
   } catch (error) {
-    return json(error instanceof UploadTooLarge ? 413 : error instanceof BrowserPlanInputError ? 400 : errStatus(error), errBody(error), headers);
+    return json(error instanceof UploadTooLarge ? 413 : error instanceof BrowserPlanInputError ? 400 :
+      error instanceof AskConversationError ? error.status : errStatus(error), errBody(error), headers);
   }
 }
 
@@ -678,7 +760,8 @@ function sse(local: LocalContext, request: Request,
   });
 }
 
-async function askStream(req: Request, url: URL, scope: Scope, cors: Hdrs, drafts?: AskDraftReceipts): Promise<Response> {
+async function askStream(req: Request, url: URL, scope: Scope, cors: Hdrs, drafts: AskDraftReceipts | undefined,
+  currentScope: () => Scope): Promise<Response> {
   const op = getOp("ask")!;
   let raw: Record<string, unknown> = {};
   const binding = drafts && !scope.readonly && req.method === "POST" ? askDraftBrain(scope)?.binding : undefined;
@@ -701,15 +784,19 @@ async function askStream(req: Request, url: URL, scope: Scope, cors: Hdrs, draft
         if (value !== null) raw[key] = value;
       }
     }
-    const params = checkOpCall(op, local.ctx, raw);
+    const { conversation: input, ...operationInput } = raw;
+    const params = checkOpCall(op, local.ctx, operationInput);
+    const question = params.question as string;
+    const conversation = input === undefined ? undefined : openAskConversation(scope, currentScope, input, question);
+    local.ctx.askExchange = conversation?.history;
     return sse(local, req, async (send, signal) => {
-      const result = await runOpStream(op, local.ctx, params, send, signal) as AskResult;
-      const draftReceipt = binding ? drafts?.issue(binding, params.question as string, result) : undefined;
-      return draftReceipt ? { ...result, draftReceipt } : result;
+      const result = conversation?.saved?.result ?? await runOpStream(op, local.ctx, params, send, signal) as AskResult;
+      signal.throwIfAborted();
+      return completedAsk(result, question, binding, drafts, conversation, currentScope);
     }, cors);
   } catch (e) {
     await local.close();
-    return json(e instanceof UploadTooLarge ? 413 : errStatus(e), errBody(e), cors);
+    return json(e instanceof UploadTooLarge ? 413 : e instanceof AskConversationError ? e.status : errStatus(e), errBody(e), cors);
   }
 }
 
@@ -867,7 +954,7 @@ async function sourceUpload(req: Request, url: URL, scope: Scope, opts: ServeSta
   }
 }
 
-async function notionRequest(req: Request, action: string, scope: Scope, connector: NotionSource, cors: Hdrs): Promise<Response> {
+async function liveSourceRequest(req: Request, action: string, scope: Scope, connector: Parameters<typeof runLiveSource>[1], cors: Hdrs, authorize: () => void): Promise<Response> {
   const headers = { ...cors, "cache-control": "no-store" };
   if (req.method !== (action === "status" ? "GET" : "POST"))
     return json(405, { error: "Method not allowed." }, headers);
@@ -877,7 +964,7 @@ async function notionRequest(req: Request, action: string, scope: Scope, connect
     if (req.method === "POST") {
       if (req.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json")
         return json(415, { error: "Send a JSON object." }, headers);
-      const raw = await readUpload(req, 16 * 1024, "Notion request exceeds 16 KiB.");
+      const raw = await readUpload(req, 16 * 1024, "Source request exceeds 16 KiB.");
       try {
         const value: unknown = JSON.parse(raw.toString("utf8"));
         if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
@@ -886,10 +973,10 @@ async function notionRequest(req: Request, action: string, scope: Scope, connect
         return json(400, { error: "Send a JSON object." }, headers);
       }
     }
-    return json(200, { result: await runNotionSource(local.ctx, connector, action, body) }, headers);
+    return json(200, { result: await runLiveSource(local.ctx, connector, action, body, authorize) }, headers);
   } catch (error) {
-    const status = error instanceof NotionSourceError ? error.status : error instanceof UploadTooLarge ? 413 : errStatus(error);
-    return json(status, errBody(error), headers);
+    const status = error instanceof NotionSourceError || error instanceof LiveSourceError ? error.status : error instanceof UploadTooLarge ? 413 : errStatus(error);
+    return json(status, status === 500 ? { error: "Could not complete this source action." } : errBody(error), headers);
   } finally {
     await local.close();
   }
@@ -1004,6 +1091,7 @@ const teamAssets = new Set([
   "/gui/coding.js", "/gui/coding-evaluation.js", "/gui/github.js", "/gui/coding.css", "/gui/tokens.css", "/gui/style.css", "/gui/render.js",
   "/gui/fonts/RecursiveSans-VF.woff2", "/gui/fonts/RecursiveMono-VF.woff2",
   "/gui/fonts/Literata-VF.woff2", "/gui/fonts/Literata-Italic-VF.woff2",
+  "/gui/fonts/Inter-Latin.woff2", "/gui/fonts/JetBrainsMono-Latin.woff2",
 ]);
 
 function teamControlWritable(local: Pick<ServeState, "bundle" | "servedBrain" | "readonly">): boolean {
@@ -1131,16 +1219,24 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
     return json(400, errBody(e), cors);
   }
 
-  const notion = /^\/api\/personal\/sources\/notion\/(status|connect|disconnect|preview|import)$/.exec(url.pathname);
-  if (notion && opts.notion) return notionRequest(req, notion[1]!, scope, opts.notion, cors ?? {});
+  const source = /^\/api\/personal\/sources\/(notion|drive|slack|linear)\/(status|connect|disconnect|preview|import)$/.exec(url.pathname);
+  if (source) {
+    const provider = source[1];
+    const connector = provider === "notion" ? opts.notion : isConnectedSourceProvider(provider) ? opts.liveSources?.connector(provider) : undefined;
+    if (connector) return liveSourceRequest(req, source[2]!, scope, connector, cors ?? {}, () => {
+      const current = scopeOf(req, url, opts);
+      if (current.bundle !== scope.bundle || current.readonly) throw new OpError("Open the same writable brain before changing this source.", "untrusted");
+    });
+  }
   if (url.pathname === "/api/mcp/http" && opts.mcp) return managedMcpRequest(req, opts, scope, cors);
 
+  if (url.pathname === "/api/ask/conversations") return askConversationRoute(req, url, opts, scope, cors);
   if (url.pathname === "/api/ask/private-draft" && opts.askDrafts) return saveAskDraft(req, url, opts, scope, cors);
 
   if (url.pathname === "/api/ask/stream" && (req.method === "GET" || req.method === "POST")) {
     if (req.method === "POST" && (!tokenMatches(req.headers.get("x-okb-token"), opts.token) || (req.headers.has("origin") && !cors)))
       return json(403, { error: "Open Ask from the local app." });
-    return askStream(req, url, scope, cors ?? {}, opts.askDrafts);
+    return askStream(req, url, scope, cors ?? {}, opts.askDrafts, () => scopeOf(req, url, opts));
   }
 
   if ((url.pathname.startsWith("/api/plan/") && opts.plan) || url.pathname === "/api/provider-keys") {
@@ -1148,7 +1244,7 @@ export async function handleRequest(req: Request, opts: ServeState): Promise<Res
       return json(401, { error: "missing or invalid local app token" }, cors);
     if (req.headers.has("origin") && !cors) return json(403, { error: "Requests must come from the local app." });
     if (url.pathname === "/api/provider-keys") return providerKeys(req, scope, cors ?? {});
-    return browserPlan(req, url.pathname.slice("/api/plan/".length), opts.plan!, scope, cors ?? {}, opts.askDrafts);
+    return browserPlan(req, url.pathname.slice("/api/plan/".length), opts.plan!, scope, cors ?? {}, opts.askDrafts, () => scopeOf(req, url, opts));
   }
 
   if (req.method === "GET") {
@@ -1235,6 +1331,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
   const plan = createBrowserPlan(opts.chatgpt);
   const askDrafts = new AskDraftReceipts();
   const notion = createNotionSource(opts.notion);
+  const liveSources = createLiveSources(opts.liveSources);
   const mcp = new ManagedMcpHttp();
   const watches = new Map<string | null, BundleWatcher>();
   const standalone = new StandaloneCodingControl(opts.standaloneCoding);
@@ -1316,7 +1413,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
   }
   const port = server.port!;
   state = { bundle, servedBrain: opts.servedBrain, watches, maintenance, maintenanceAllowed,
-    port, token, readonly, plan, askDrafts, coding, standalone, team, notion, mcp };
+    port, token, readonly, plan, askDrafts, coding, standalone, team, notion, liveSources, mcp };
   if (!readonly) maintenance.start();
   if (!readonly && existsSync(codingProjectCatalogPath(opts.coding?.stateDir))) {
     try { coding(); } catch { /* Leave personal routes available. The Coding API reports catalog errors. */ }
@@ -1331,6 +1428,7 @@ export function createApiServer(opts: ApiOptions): ApiServer {
     async stop() {
       plan.close();
       notion.close();
+      liveSources.close();
       const teamStopped = team.stop();
       const closeCoding = () => controller?.close();
       const stopped = await Promise.allSettled([

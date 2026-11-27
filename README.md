@@ -7,7 +7,9 @@ okbrain is a local-first second brain and a review workspace for recoverable
 coding requests. Use the macOS app, the local web app, or the `okb` CLI.
 
 - **Knowledge** captures notes and imports conversations, bookmarks, Markdown,
-  Notion pages, email, and calendar files. Browse, search, map, and review notes
+  Notion pages, email, and calendar files. Preview individual items from
+  Google Drive, Slack, and Linear before importing private drafts. Browse,
+  search, map, and review notes
   offline. Ask questions with citations using a local model, a provider API key,
   or an eligible ChatGPT plan. [Personal guide](docs/PERSONAL.md)
 - **Work** previews source from explicit files or tracked repository excerpts,
@@ -49,7 +51,8 @@ SQLite setup, native builds, release assets, and signature status.
 ## Save and find a note
 
 Open **Knowledge** and capture a note. Use **Library** to browse the bundle,
-**Sources** to preview an import, and **Ask** to choose an answer route. To
+**Sources** to preview an import, and **Ask** to start or reopen a
+conversation. To
 launch the browser app from your terminal, run `okb serve --open` from your
 brain directory. The server binds to loopback.
 
@@ -81,8 +84,9 @@ okb --bundle bundles/acme_retail doctor
 ## Preview and review a coding request
 
 Open **Work** in the Mac app or local browser. Register a project or open a
-standalone session. Choose the model, describe the task, and inspect the exact
-source preview before approving the send. Reopen an interrupted run with its
+standalone session. Choose the model, describe the task, and use **Add
+context** to prepare a project request. Inspect the exact source preview
+before approving the send. Reopen an interrupted run with its
 saved request ID. A finished result can be inspected alongside its admitted
 source, usage, and project review history.
 
@@ -102,9 +106,10 @@ handoff. [Coding guide](docs/CODING.md)
 ## Configure and connect
 
 - Use **Settings** for AI defaults, provider keys, brain folders, cache
-  backend, and maintenance. **Advanced operations** provides typed forms and
-  JSON output for shared CLI commands. Choose SQLite or local PostgreSQL with
-  pgvector for the derived cache. Export Markdown or synchronize the bundle through Git.
+  backend, and maintenance. Its overview shows the active brain and local
+  status. **Settings sections** opens each group of controls. **Advanced
+  operations** provides typed forms and JSON output for shared CLI commands.
+  Choose SQLite or local PostgreSQL with pgvector for the derived cache. Export Markdown or synchronize the bundle through Git.
   [Personal guide](docs/PERSONAL.md)
 - Personal provider keys can come from the environment or be saved explicitly
   in the per-user provider store through the app. `config.json` holds app

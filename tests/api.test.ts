@@ -319,7 +319,7 @@ describe("request guards", () => {
     ];
     expect(refs).toContain("gui/tokens.css");
     const fonts = refs.filter((r) => r.endsWith(".woff2"));
-    expect(fonts).toHaveLength(4);
+    expect(fonts).toHaveLength(6);
     for (const ref of refs) expect((await fetch(base + ref)).status).toBe(200);
     for (const font of fonts) {
       const r = await fetch(base + font);
@@ -836,12 +836,14 @@ describe("clip endpoint (bookmarklet)", () => {
 describe("SSE ask stream (stub chat server)", () => {
   let chat: ReturnType<typeof Bun.serve>;
   let chatCalls = 0;
+  const chatInput: unknown[] = [];
+  type CompletedAsk = AskResult & { draftReceipt?: string; conversation?: { id: string; turn: string; at: string } };
 
-  async function completedAnswer(response: Response): Promise<AskResult & { draftReceipt?: string }> {
+  async function completedAnswer(response: Response): Promise<CompletedAsk> {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     const reader = response.body!.pipeThrough(new TextDecoderStream()).pipeThrough(new EventSourceParserStream()).getReader();
-    let result: (AskResult & { draftReceipt?: string }) | undefined;
+    let result: CompletedAsk | undefined;
     try {
       for (;;) {
         const { value, done } = await reader.read();
@@ -860,8 +862,9 @@ describe("SSE ask stream (stub chat server)", () => {
     chat = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch: () => {
+      fetch: async (request) => {
         chatCalls++;
+        chatInput.push(await request.json());
         return Response.json({
           choices: [{ message: { content: "Databases are in [notes/alpha]." } }],
         });
@@ -896,6 +899,60 @@ describe("SSE ask stream (stub chat server)", () => {
     const r = await call("api/ask/stream");
     expect(r.status).toBe(400);
     expect(((await r.json()) as { error: string }).error).toContain("question");
+  });
+
+  test("saved conversations reopen on the same brain and send only an explicitly selected exchange", async () => {
+    const before = loadConfig();
+    const other = await mkdtemp(join(tmpdir(), "okb-separated-ask-conversation-"));
+    const id = crypto.randomUUID();
+    const first = crypto.randomUUID();
+    const second = crypto.randomUUID();
+    const ask = (question: string, turn: string, previous: string | null, includePrevious: boolean) => call("api/ask/stream", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ question, profile: "lean", conversation: { id, turn, previous, includePrevious } }),
+    });
+    const open = `api/ask/conversations?id=${id}`;
+    const change = (patch: Record<string, unknown>, headers?: Record<string, string>) => call("api/ask/conversations", {
+      method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ id, ...patch }),
+    });
+    try {
+      saveConfig({ ...before, brains: { read: { path: bundle, readonly: true }, other: { path: other } } });
+      const started = await completedAnswer(await ask("databases", first, null, false));
+      expect(started.conversation).toEqual({ id, turn: first, at: expect.any(String) });
+      expect(started.draftReceipt).toStartWith("v2.");
+      expect(JSON.stringify(chatInput.at(-1))).not.toContain("Previous exchange");
+      const callsAfterFirst = chatCalls;
+      expect((await completedAnswer(await ask("databases", first, null, false))).conversation).toEqual(started.conversation);
+      expect(chatCalls).toBe(callsAfterFirst);
+      expect((await call(open, { headers: { origin: "https://remote.example" } })).status).toBe(403);
+      expect((await call(open, { headers: { "x-okb-brain": "other" } })).status).toBe(404);
+      expect((await change({ action: "rename", title: "No write" }, { "x-okb-brain": "read" })).status).toBe(403);
+      const listed = await (await call("api/ask/conversations")).json() as { result: unknown[] };
+      expect(listed.result).toContainEqual({ id, title: "databases", turns: 1, updated: started.conversation!.at });
+      const details = await (await call(open)).json() as { result: unknown };
+      expect(details.result).toMatchObject({ id, previous: { question: "databases", answer: started.answer } });
+
+      const next = await completedAnswer(await ask("What about them?", second, first, true));
+      expect(next.conversation).toMatchObject({ id, turn: second });
+      expect(JSON.stringify(chatInput.at(-1))).toMatch(/Previous exchange.*Databases are in/u);
+      expect((await ask("Another question", crypto.randomUUID(), first, true)).status).toBe(409);
+      expect(chatCalls).toBe(callsAfterFirst + 1);
+      expect((await change({ action: "rename", title: "Saved database research" })).status).toBe(200);
+      const restarted = createApiServer({ bundle, port: 0, token: TOKEN });
+      try {
+        const reopened = await fetch(restarted.url + open, { headers: { "x-okb-token": TOKEN } });
+        expect((await reopened.json() as { result: unknown }).result).toMatchObject({ id, title: "Saved database research", turns: [
+          { id: first, result: { answer: started.answer, draftReceipt: expect.any(String) } },
+          { id: second, result: { answer: next.answer } },
+        ] });
+      } finally { await restarted.stop(); }
+      expect((await change({ action: "delete" })).status).toBe(400);
+      expect((await change({ action: "delete", confirm: true })).status).toBe(200);
+      expect((await call(open)).status).toBe(404);
+    } finally {
+      saveConfig(before);
+      await rm(other, { recursive: true, force: true });
+    }
   });
 
   test("saves only the exact completed Ask answer to its writable brain and preserves edits on retry", async () => {

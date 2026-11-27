@@ -26,7 +26,11 @@ export interface AskDeps {
   rerank?(query: string, hits: HybridHit[]): Promise<HybridHit[]>;
   /** Called with the packed context before synthesis (streaming surfaces). */
   onContext?(context: Citation[]): void;
+  /** Previous exchange explicitly selected by the local app. */
+  history?: AskExchange;
 }
+
+export interface AskExchange { question: string; answer: string }
 
 export interface Citation {
   id: string;
@@ -132,6 +136,7 @@ export async function askBrain(
   deps.signal?.throwIfAborted();
   const queries = [
     question,
+    ...(deps.history ? [deps.history.question] : []),
     ...(profile.multiQuery > 0 ? await queryVariants(question, profile.multiQuery, deps.chat) : []),
   ];
   deps.signal?.throwIfAborted();
@@ -163,8 +168,9 @@ export async function prepareLocalContext(
   arms: Pick<HybridArms, "engine">,
   profile: RetrievalProfile,
   includePrivate: boolean,
+  history?: AskExchange,
 ): Promise<PreparedContext> {
-  const { hits, vectorSkipped } = await hybridRetrieve([question], arms, profile, profile.vecK);
+  const { hits, vectorSkipped } = await hybridRetrieve(history ? [question, history.question] : [question], arms, profile, profile.vecK);
   const { blocks, packed } = await packContext(bundle, hits, profile.budgetChars, { includePrivate });
   return { blocks, context: packed.map(citationOf), profile: profile.name, vectorSkipped };
 }
@@ -172,7 +178,7 @@ export async function prepareLocalContext(
 export async function answerFromContext(
   question: string,
   prepared: PreparedContext,
-  deps: Pick<AskDeps, "chat" | "onContext" | "synthesize" | "signal">,
+  deps: Pick<AskDeps, "chat" | "onContext" | "synthesize" | "signal" | "history">,
 ): Promise<AskResult> {
   const { blocks, context, profile, vectorSkipped } = prepared;
   deps.signal?.throwIfAborted();
@@ -190,7 +196,8 @@ export async function answerFromContext(
   deps.onContext?.(context);
   const { text, provider, model } = await (deps.synthesize ?? deps.chat)([
     { role: "system", content: SYNTH_SYSTEM },
-    { role: "user", content: `Concepts:\n\n${blocks.join("\n\n")}\n\nQuestion: ${question}` },
+    { role: "user", content: (deps.history ? "Previous exchange for orientation. Use the concepts below as evidence.\n" +
+      JSON.stringify(deps.history) + "\n\n" : "") + `Concepts:\n\n${blocks.join("\n\n")}\n\nQuestion: ${question}` },
   ]);
   return {
     ...base,

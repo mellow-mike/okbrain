@@ -31,8 +31,13 @@ are in [the open items handoff](docs/plans/2026-11-23-open-items.md).
 
 - [x] Bring the Figma workspace navigation to the local app, with Knowledge,
   Library, Sources, Ask, and access to existing note and brain controls.
-- [x] Expose operation parameters in Settings → Advanced operations. Keep
-  dedicated host-only controls under local owner authorization.
+- [x] Group Settings into bookmarkable sections with local status on the
+  overview. Advanced operations exposes CLI parameters, and dedicated host
+  actions retain owner authorization and their existing approval steps.
+- [x] Keep Ask conversations per brain and reveal the exact optional previous
+  exchange before sending a follow-up. Add a source inspector for citations.
+- [x] Preview selected Google Drive, Slack, and Linear items locally before
+  saving exact snapshots as private drafts.
 
 - [x] Import ChatGPT and Claude conversation text as private drafts with
   provenance, preview, and create-only deduplication.
@@ -90,7 +95,10 @@ are in [the open items handoff](docs/plans/2026-11-23-open-items.md).
 ### Stage 8 — Enterprise coding
 
 - [x] Use the Figma Work shell for project and standalone requests, and for
-  the project-scoped team workspace.
+  the project-scoped team workspace. Keep the composer and request timeline
+  in view and open project switching and registration in a dialog. Inspect
+  proposed diffs before accepting and record author-attributed check results
+  on completed requests.
 - [x] Add repository map import, cancellation and refresh controls, map-backed
   requests, orchestration, learning controls, and routing to standalone sessions.
 
